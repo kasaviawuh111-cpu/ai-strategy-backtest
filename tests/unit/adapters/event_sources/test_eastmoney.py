@@ -324,6 +324,7 @@ def test_real_seconds_sample_uses_announcement_service_and_preserves_provenance(
     assert str(observation.attributes["source_url"]).startswith(ANNOUNCEMENT_CONTENT_URL)
     assert observation.attributes["ingested_at"] == RETRIEVED_AT.isoformat()
     assert observation.attributes["validation_status"] == "validated"
+    assert observation.attributes["timestamp_precision"] == "second"
     assert observation.attributes["raw_display_time"] == "2026-08-27 18:34:11:530"
     assert observation.attributes["raw_ei_time"] == "2026-08-27 18:35:16:000"
     assert str(observation.document_url).startswith(ANNOUNCEMENT_CONTENT_URL)
@@ -421,6 +422,7 @@ def test_pre_2017_or_abnormal_year_eitime_is_rejected_and_date_only(
     assert observation.vendor_first_available_at is None
     assert observation.time_quality is TimeQuality.DATE_ONLY_CONSERVATIVE
     assert observation.validation_status == "rejected"
+    assert observation.attributes["timestamp_precision"] == "date"
     assert observation.attributes["raw_ei_time"] == ei_time
 
 
@@ -437,6 +439,7 @@ def test_missing_eitime_is_unverified_and_cannot_be_promoted_as_demo_canonical()
     assert observation.vendor_first_available_at is None
     assert observation.time_quality is TimeQuality.DATE_ONLY_CONSERVATIVE
     assert observation.validation_status == "unverified"
+    assert observation.attributes["timestamp_precision"] == "date"
     assert observation.validation_status != "validated"
 
 

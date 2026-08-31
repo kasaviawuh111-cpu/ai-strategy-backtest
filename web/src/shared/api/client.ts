@@ -119,6 +119,13 @@ export const MOCK_CAPABILITIES = {
     preparation_available: false,
     availability_scope: 'unavailable',
     unavailable_reason: 'snapshot_coverage_unavailable',
+    document_text: {
+      catalog_available: true,
+      backtest_available: false,
+      preparation_available: false,
+      availability_scope: 'unavailable',
+      unavailable_reason: 'snapshot_coverage_unavailable',
+    },
     triggers: ['published'],
   }],
   execution_policies: ['next_tradable_session_open'],
@@ -172,25 +179,61 @@ const eventCodesFromStrategy = (strategy: StrategySpec): string[] => [
       : eventCodesFromCondition(condition)),
 ]
 
+const documentTextEventCodesFromCondition = (condition: StrategySpecCondition): string[] => {
+  if (condition.type === 'event_condition') {
+    return condition.document_text ? [condition.event_code] : []
+  }
+  if (condition.type === 'indicator_condition') return []
+  if (condition.type === 'not') return documentTextEventCodesFromCondition(condition.child)
+  return condition.children.flatMap(documentTextEventCodesFromCondition)
+}
+
+const documentTextEventCodesFromStrategy = (strategy: StrategySpec): string[] => [
+  ...documentTextEventCodesFromCondition(strategy.entry),
+  ...strategy.exit.children.flatMap((condition) =>
+    condition.type === 'holding_period_exit'
+      || condition.type === 'position_return_exit'
+      || condition.type === 'trailing_drawdown_exit'
+      ? []
+      : documentTextEventCodesFromCondition(condition)),
+]
+
 export const requireStrategyCapability = (
   strategy: StrategySpec,
   capabilities: CapabilitiesResponse,
 ): void => {
   requireExecutionCapability(capabilities)
   const byCode = new Map(capabilities.events.map((item) => [item.event_code, item]))
+  const documentTextCodes = new Set(documentTextEventCodesFromStrategy(strategy))
   for (const eventCode of new Set(eventCodesFromStrategy(strategy))) {
     const capability = byCode.get(eventCode)
     const snapshotBacked = capability?.backtest_available === true
       && capability.availability_scope === 'pinned_snapshot'
     const requestPreparable = capability?.preparation_available === true
       && capability.availability_scope === 'request_preparation'
-    if (snapshotBacked || requestPreparable) continue
+    if (!snapshotBacked && !requestPreparable) {
+      throw new ApiError({
+        type: 'about:blank',
+        title: '这类事件暂不可回测',
+        status: 422,
+        detail: '当前快照没有这类事件，后端也没有声明可按本次股票和区间准备数据。',
+        code: 'event_not_available_for_backtest',
+      })
+    }
+    if (!documentTextCodes.has(eventCode)) continue
+    const documentText = capability?.document_text
+    const documentSnapshotBacked = documentText?.backtest_available === true
+      && documentText.availability_scope === 'pinned_snapshot'
+    const documentRequestPreparable = documentText?.preparation_available === true
+      && documentText.availability_scope === 'request_preparation'
+    if (documentText?.catalog_available === true
+      && (documentSnapshotBacked || documentRequestPreparable)) continue
     throw new ApiError({
       type: 'about:blank',
-      title: '这类事件暂不可回测',
+      title: '公告正文暂不可用于回测',
       status: 422,
-      detail: '当前快照没有这类事件，后端也没有声明可按本次股票和区间准备数据。',
-      code: 'event_not_available_for_backtest',
+      detail: '这条规则需要公告完整正文与词频数据，但当前快照没有覆盖，后端也没有声明可按本次请求准备。',
+      code: 'event_document_text_not_available_for_backtest',
     })
   }
 }

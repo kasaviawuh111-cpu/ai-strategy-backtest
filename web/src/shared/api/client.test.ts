@@ -72,6 +72,27 @@ const eventStrategy: StrategySpec = {
   backtest: { start: '2021-08-06', end: '2026-08-06', initial_cash_cny: 1_000_000 },
 }
 
+const documentTextStrategy: StrategySpec = {
+  ...eventStrategy,
+  entry: {
+    type: 'event_condition',
+    event_code: 'event.financial_results.annual_report',
+    definition_version: '1.0.0',
+    trigger: 'published',
+    attributes: {},
+    document_text: {
+      metric_id: 'document.literal_mention_count',
+      metric_version: '1.0.0',
+      term: 'AI',
+      normalization: 'nfkc',
+      match_mode: 'ascii_token',
+      case_sensitive: false,
+      comparator: 'gt',
+      value: 5,
+    },
+  },
+}
+
 const readyResponse = (strategy: StrategySpec = eventStrategy): LiveDraftResponse => ({
   draft_id: '8c91eb84-ab49-4b0c-890a-682e9cc6fe21',
   revision: 1,
@@ -260,6 +281,86 @@ describe('live strategy client', () => {
 
     expect(() => requireStrategyCapability(eventStrategy, onDemand)).not.toThrow()
     expect(onDemand.events[0]?.backtest_available).toBe(false)
+  })
+
+  it('fails closed when the event is snapshot-backed but required document text is unavailable', async () => {
+    const { requireStrategyCapability } = await import('./client')
+    const eventOnly = capabilities({
+      events: [{
+        event_code: 'event.financial_results.annual_report',
+        definition_version: '1.0.0',
+        catalog_status: 'stable',
+        status: 'available',
+        backtest_available: true,
+        preparation_available: false,
+        availability_scope: 'pinned_snapshot',
+        unavailable_reason: null,
+        document_text: {
+          catalog_available: true,
+          backtest_available: false,
+          preparation_available: false,
+          availability_scope: 'unavailable',
+          unavailable_reason: 'snapshot_coverage_unavailable',
+        },
+        triggers: ['published'],
+      }],
+    })
+
+    expect(() => requireStrategyCapability(documentTextStrategy, eventOnly)).toThrow(
+      '需要公告完整正文与词频数据',
+    )
+  })
+
+  it('accepts document text only when its own capability is request-preparable', async () => {
+    const { requireStrategyCapability } = await import('./client')
+    const preparableDocument = capabilities({
+      events: [{
+        event_code: 'event.financial_results.annual_report',
+        definition_version: '1.0.0',
+        catalog_status: 'stable',
+        status: 'available',
+        backtest_available: true,
+        preparation_available: false,
+        availability_scope: 'pinned_snapshot',
+        unavailable_reason: null,
+        document_text: {
+          catalog_available: true,
+          backtest_available: false,
+          preparation_available: true,
+          availability_scope: 'request_preparation',
+          unavailable_reason: 'preparation_required',
+        },
+        triggers: ['published'],
+      }],
+    })
+
+    expect(() => requireStrategyCapability(documentTextStrategy, preparableDocument)).not.toThrow()
+  })
+
+  it('does not require document text for an ordinary event-only strategy', async () => {
+    const { requireStrategyCapability } = await import('./client')
+    const eventOnly = capabilities({
+      events: [{
+        event_code: 'event.financial_results.annual_report',
+        definition_version: '1.0.0',
+        catalog_status: 'stable',
+        status: 'available',
+        backtest_available: true,
+        preparation_available: false,
+        availability_scope: 'pinned_snapshot',
+        unavailable_reason: null,
+        document_text: {
+          catalog_available: true,
+          backtest_available: false,
+          preparation_available: false,
+          availability_scope: 'unavailable',
+          unavailable_reason: 'snapshot_coverage_unavailable',
+        },
+        triggers: ['published'],
+      }],
+    })
+
+    expect(() => requireStrategyCapability(eventStrategy, eventOnly)).not.toThrow()
   })
 
   it('calls the configured public HTTPS API without falling back to Mock', async () => {

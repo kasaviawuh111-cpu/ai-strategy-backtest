@@ -197,7 +197,8 @@ def test_missing_frozen_report_text_uses_a_dedicated_non_leaky_422(
     app = create_app(
         backtest_submission=submitter,
         run_store=store,
-        event_backtest_codes_probe=lambda: frozenset({annual_report}),
+        event_preparable_codes_probe=lambda: frozenset({annual_report}),
+        event_document_text_preparable_codes_probe=lambda: frozenset({annual_report}),
     )
 
     with TestClient(app) as client:
@@ -220,6 +221,35 @@ def test_missing_frozen_report_text_uses_a_dedicated_non_leaky_422(
     assert store.records == {}
 
 
+def test_document_text_capability_gap_is_rejected_before_submitter(
+    document_text_strategy_payload: dict[str, Any],
+) -> None:
+    store = FakeRunStore()
+    submitter = RaisingSubmitter(AssertionError("submitter must not be called"))
+    annual_report = "event.financial_results.annual_report"
+    app = create_app(
+        backtest_submission=submitter,
+        run_store=store,
+        event_backtest_codes_probe=lambda: frozenset({annual_report}),
+        event_document_text_backtest_codes_probe=frozenset,
+        event_document_text_preparable_codes_probe=frozenset,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/backtest-runs",
+            json={"strategy": document_text_strategy_payload},
+        )
+
+    _assert_error(
+        response,
+        status_code=422,
+        code="event_document_text_data_unavailable",
+    )
+    assert submitter.calls == 0
+    assert store.records == {}
+
+
 def test_document_text_incomplete_preparation_uses_dedicated_non_leaky_422(
     document_text_strategy_payload: dict[str, Any],
 ) -> None:
@@ -235,7 +265,8 @@ def test_document_text_incomplete_preparation_uses_dedicated_non_leaky_422(
     app = create_app(
         backtest_submission=submitter,
         run_store=store,
-        event_backtest_codes_probe=lambda: frozenset({annual_report}),
+        event_preparable_codes_probe=lambda: frozenset({annual_report}),
+        event_document_text_preparable_codes_probe=lambda: frozenset({annual_report}),
     )
 
     with TestClient(app) as client:
@@ -295,7 +326,8 @@ def test_document_text_provider_failure_remains_temporary_503(
     app = create_app(
         backtest_submission=submitter,
         run_store=store,
-        event_backtest_codes_probe=lambda: frozenset({annual_report}),
+        event_preparable_codes_probe=lambda: frozenset({annual_report}),
+        event_document_text_preparable_codes_probe=lambda: frozenset({annual_report}),
     )
 
     with TestClient(app) as client:
@@ -326,6 +358,7 @@ def test_document_text_generic_incomplete_without_quality_type_remains_503(
         backtest_submission=submitter,
         run_store=store,
         event_backtest_codes_probe=lambda: frozenset({annual_report}),
+        event_document_text_backtest_codes_probe=lambda: frozenset({annual_report}),
     )
 
     with TestClient(app) as client:

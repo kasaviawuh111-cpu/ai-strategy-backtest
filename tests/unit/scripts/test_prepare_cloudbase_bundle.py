@@ -2,13 +2,41 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+from datetime import date, datetime
 from pathlib import Path
+from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import pytest
 
+from ashare_lab.adapters.event_sources import (
+    EventCollectionRequest,
+    EventCollectionResult,
+    EventSourceCollection,
+    build_event_acquisition_coverage,
+)
+from ashare_lab.adapters.market_data import compose_choice_event_snapshot
+from ashare_lab.adapters.market_data.event_snapshot import build_event_snapshot
+from ashare_lab.domain.shared import InstrumentId
 from scripts.prepare_cloudbase_bundle import BundleError, prepare_bundle
+from tests.unit.adapters.event_sources.query_evidence import eastmoney_query_evidence
+from tests.unit.adapters.session_reference_fixture import choice_snapshot_fixture
 
 REPOSITORY = Path(__file__).resolve().parents[3]
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+EVENT_CODE = "event.financial_results.annual_report"
+
+
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _repository(tmp_path: Path) -> tuple[Path, str]:
@@ -37,28 +65,81 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
         encoding="utf-8",
     )
 
-    payload = b"real parquet bytes"
-    body: dict[str, object] = {
-        "schemaVersion": "ashare-lab.composite-research-snapshot.v2",
-        "files": {
-            "daily_ohlcv.parquet": {
-                "bytes": len(payload),
-                "sha256": hashlib.sha256(payload).hexdigest(),
-            }
-        },
-    }
-    digest = hashlib.sha256(
-        json.dumps(body, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
-    ).hexdigest()
-    manifest = {**body, "snapshotId": f"composite:{digest}"}
-    snapshot = repository / "var" / "snapshots" / "composite" / digest
-    snapshot.mkdir(parents=True)
-    (snapshot / "daily_ohlcv.parquet").write_bytes(payload)
-    (snapshot / "snapshot_manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True),
+    instrument = InstrumentId("300059.SZ")
+    start = date(2025, 1, 2)
+    end = date(2025, 1, 3)
+    choice = choice_snapshot_fixture(repository / "source-fixtures" / "choice")
+    source = EventSourceCollection(
+        provider="eastmoney",
+        status="empty",
+        observations=(),
+        acquisition_evidence=eastmoney_query_evidence(
+            instrument_id=instrument,
+            start=start,
+            end=end,
+            event_codes=(EVENT_CODE,),
+            total_hits=0,
+        ),
+    )
+    request = EventCollectionRequest(
+        instrument_id=instrument,
+        start=start,
+        end=end,
+        retrieved_at=datetime(2025, 1, 4, 8, 0, tzinfo=SHANGHAI),
+    )
+    coverage = build_event_acquisition_coverage(
+        request,
+        EventCollectionResult(observations=(), sources=(source,)),
+        requested_event_codes=(EVENT_CODE,),
+    )
+    events = build_event_snapshot(
+        observations=(),
+        acquisition_coverage=coverage,
+        output_root=repository / "source-fixtures" / "events",
+        captured_at=datetime(2025, 1, 4, 9, 0, tzinfo=SHANGHAI),
+    )
+    composite = compose_choice_event_snapshot(
+        choice_snapshot_path=choice.path,
+        event_snapshot_path=events.path,
+        output_root=repository / "var" / "snapshots" / "composite",
+        composed_at=datetime(2025, 1, 4, 10, 0, tzinfo=SHANGHAI),
+    )
+    return repository, composite.path.name
+
+
+def _republish_with_semantically_invalid_source_evidence(
+    repository: Path,
+    digest: str,
+) -> str:
+    source = repository / "var" / "snapshots" / "composite" / digest
+    manifest = cast(
+        dict[str, Any],
+        json.loads((source / "snapshot_manifest.json").read_text(encoding="utf-8")),
+    )
+    coverage = cast(dict[str, Any], manifest["eventAcquisitionCoverage"])
+    providers = cast(dict[str, Any], coverage["providerQueryEvidence"])
+    eastmoney = cast(dict[str, Any], providers["eastmoney"])
+    lanes = cast(dict[str, Any], eastmoney["eventCodeCoverage"])
+    annual = cast(dict[str, Any], lanes[EVENT_CODE])
+    annual.update(
+        {
+            "querySucceeded": False,
+            "coverageBasis": "deterministic_title_rule_no_semantic_recall_proof",
+            "providerColumnCodes": [],
+        }
+    )
+    eastmoney.pop("evidenceSha256", None)
+    eastmoney["evidenceSha256"] = _canonical_sha256(eastmoney)
+    manifest.pop("snapshotId", None)
+    invalid_digest = _canonical_sha256(manifest)
+    manifest["snapshotId"] = f"composite:{invalid_digest}"
+    destination = source.parent / invalid_digest
+    shutil.copytree(source, destination)
+    (destination / "snapshot_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    return repository, digest
+    return invalid_digest
 
 
 def test_bundle_contains_only_allowlisted_sources_and_selected_snapshot(tmp_path: Path) -> None:
@@ -81,8 +162,8 @@ def test_bundle_contains_only_allowlisted_sources_and_selected_snapshot(tmp_path
     assert f"ARG SNAPSHOT_DIGEST={digest}" in dockerfile
     assert "ARG SNAPSHOT_DIGEST\n" not in dockerfile
     assert (output / "deploy-snapshot" / digest / "daily_ohlcv.parquet").read_bytes() == (
-        b"real parquet bytes"
-    )
+        repository / "var" / "snapshots" / "composite" / digest / "daily_ohlcv.parquet"
+    ).read_bytes()
     assert not (output / ".env").exists()
     assert not (output / "ashare_lab" / "__pycache__").exists()
 
@@ -146,6 +227,28 @@ def test_bundle_rejects_snapshot_tampering_and_nonempty_output(tmp_path: Path) -
             repository=repository,
             output=output,
             snapshot_digest=digest,
+            code_revision="a" * 40,
+            verify_git=False,
+        )
+
+
+def test_bundle_rejects_resealed_semantically_invalid_external_source_evidence(
+    tmp_path: Path,
+) -> None:
+    repository, digest = _repository(tmp_path)
+    invalid_digest = _republish_with_semantically_invalid_source_evidence(
+        repository,
+        digest,
+    )
+
+    with pytest.raises(
+        BundleError,
+        match="selected composite snapshot failed strict runtime validation",
+    ):
+        prepare_bundle(
+            repository=repository,
+            output=tmp_path / "bundle",
+            snapshot_digest=invalid_digest,
             code_revision="a" * 40,
             verify_git=False,
         )

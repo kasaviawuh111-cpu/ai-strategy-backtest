@@ -25,9 +25,11 @@ from ashare_lab.domain.shared import DomainValidationError, InstrumentId
 from ashare_lab.ports.market_data import DataRequirements, DateRange
 
 from .choice_snapshot import (
-    SNAPSHOT_SCHEMA_VERSION as CHOICE_SNAPSHOT_SCHEMA_VERSION,
+    MIXED_CORPORATE_ACTION_COVERAGE_SCOPE,
+    STRICT_CORPORATE_ACTION_COVERAGE_SCOPE,
+    TECHNICAL_SNAPSHOT_SCHEMA_VERSION,
 )
-from .choice_snapshot import TECHNICAL_SNAPSHOT_SCHEMA_VERSION
+from .choice_snapshot import SNAPSHOT_SCHEMA_VERSION as CHOICE_SNAPSHOT_SCHEMA_VERSION
 from .composite_snapshot import COMPOSITE_SNAPSHOT_SCHEMA_VERSION
 from .event_snapshot import EVENT_SNAPSHOT_SCHEMA_VERSION, NO_EVENT_REQUIRED_MODE
 from .local_parquet import (
@@ -783,7 +785,7 @@ def _load_composite_registry_entry(root: Path) -> _RegistryEntry:
         raise SnapshotRegistryIntegrityError("technical source manifest symbol is invalid") from exc
     technical_period = _choice_period(choice_manifest)
 
-    corporate_coverage = _complete_coverage(
+    corporate_coverage = _complete_corporate_action_coverage(
         manifest,
         key="corporateActionCoverage",
         label="corporate-action",
@@ -918,7 +920,7 @@ def _load_daily_registry_entry(
     except MarketDataAdapterError as exc:
         raise SnapshotRegistryIntegrityError(f"{label} snapshot symbol is invalid") from exc
     technical_period = _choice_period(manifest)
-    corporate_coverage = _complete_coverage(
+    corporate_coverage = _complete_corporate_action_coverage(
         manifest,
         key="corporateActionCoverage",
         label="corporate-action",
@@ -1112,7 +1114,7 @@ def _choice_period(manifest: Mapping[str, object]) -> DateRange:
     return _parse_period(cast(str, values[0]), cast(str, values[1]), "Choice requestedRange")
 
 
-def _complete_coverage(
+def _complete_corporate_action_coverage(
     manifest: Mapping[str, object],
     *,
     key: str,
@@ -1122,7 +1124,18 @@ def _complete_coverage(
     if not isinstance(raw, Mapping):
         raise SnapshotRegistryIntegrityError(f"{label} coverage is missing")
     coverage = cast(Mapping[object, object], raw)
-    if coverage.get("status") != "complete" or coverage.get("querySucceeded") is not True:
+    scope = coverage.get("coverageScope")
+    if not isinstance(scope, str):
+        raise SnapshotRegistryIntegrityError(f"{label} coverage is incomplete")
+    expected_status = {
+        STRICT_CORPORATE_ACTION_COVERAGE_SCOPE: "complete",
+        MIXED_CORPORATE_ACTION_COVERAGE_SCOPE: "complete_mixed_mode",
+    }.get(scope)
+    if (
+        expected_status is None
+        or coverage.get("status") != expected_status
+        or coverage.get("querySucceeded") is not True
+    ):
         raise SnapshotRegistryIntegrityError(f"{label} coverage is incomplete")
     return coverage
 

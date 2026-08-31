@@ -21,6 +21,7 @@ from ashare_lab.application.result_views import (
     RESULT_HASH_SCHEMA_VERSION,
     calculate_result_bundle_hash,
 )
+from ashare_lab.domain.market_data import AshareInstrumentCodeError, normalize_a_share_instrument
 from ashare_lab.domain.shared import DomainValidationError, RunId
 from ashare_lab.domain.strategy import (
     StrategyCatalogError,
@@ -80,9 +81,20 @@ def create_backtest_run(
     validate_idempotency_key(idempotency_key)
     submitter, _store = _require_runtime(container)
     event_conditions = tuple(iter_event_conditions(body.strategy))
-    needs_document_text = any(condition.document_text is not None for condition in event_conditions)
+    document_text_event_codes = frozenset(
+        condition.event_code
+        for condition in event_conditions
+        if condition.document_text is not None
+    )
+    needs_document_text = bool(document_text_event_codes)
     try:
+        normalize_a_share_instrument(body.strategy.instrument.symbol)
         validate_strategy_against_catalog(body.strategy, container.catalog)
+        if document_text_event_codes and not (
+            document_text_event_codes.issubset(container.event_document_text_backtest_codes)
+            or document_text_event_codes.issubset(container.event_document_text_preparable_codes)
+        ):
+            raise _event_document_text_data_unavailable()
         if strategy_requires_events(body.strategy):
             required_event_codes = frozenset(condition.event_code for condition in event_conditions)
             if not (
@@ -112,7 +124,7 @@ def create_backtest_run(
         if needs_document_text:
             raise _event_document_text_data_unavailable() from exc
         raise _backtest_data_request_unsupported() from exc
-    except (DomainValidationError, StrategyCatalogError) as exc:
+    except (AshareInstrumentCodeError, DomainValidationError, StrategyCatalogError) as exc:
         raise ApiProblem(
             status_code=422,
             code="backtest_submission_invalid",

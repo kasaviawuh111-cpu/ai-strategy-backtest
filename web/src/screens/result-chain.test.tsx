@@ -50,6 +50,7 @@ const trades: TradeRow[] = [{
     sourceEventId: 'AN202403141626765931', provider: 'eastmoney',
     sourceUrl: 'https://data.eastmoney.com/notices/detail/300059/AN202403141626765931.html',
     availableAt: '2024-03-14T20:57:33+08:00', timeQuality: 'vendor_observed',
+    timestampPrecision: 'second',
     validationStatus: 'validated',
     rawResponseSha256: '5afd37736349f7adcf8104dc4e0c9e33339e680e371cef9dd2be2bb38cebcb43',
   }],
@@ -114,7 +115,8 @@ describe('current report screen', () => {
     expect(screen.getByRole('link', { name: /东方财富公告/ })).toHaveAttribute(
       'href', 'https://data.eastmoney.com/notices/detail/300059/AN202403141626765931.html',
     )
-    expect(screen.getByText(/供应商秒级首次可得/)).toBeInTheDocument()
+    expect(screen.getByText(/供应商记录的首次可得时间/)).toBeInTheDocument()
+    expect(screen.getByText(/时间精度：秒级/)).toBeInTheDocument()
     expect(screen.getByText(/5afd37736349f7…8cebcb43/)).toBeInTheDocument()
     expect(screen.getByText(/composite:v2/)).toBeInTheDocument()
     expect(screen.getByText(`composite:${'e'.repeat(64)}`)).toBeInTheDocument()

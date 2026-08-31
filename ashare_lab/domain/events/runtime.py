@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -17,6 +18,9 @@ from .catalog import resolve_executable_event
 from .document_metrics import DocumentMetricError, evaluate_document_text_predicate
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+_EASTMONEY_SECOND_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?::\d{3}|\.\d{1,6})?$"
+)
 
 
 class EventRuntimeError(ValueError):
@@ -147,9 +151,55 @@ def _signal_evidence(envelope: EventEnvelope) -> SignalEvidence:
         provider=envelope.provider,
         source_url=envelope.source_url,
         time_quality=envelope.time_quality.value,
+        timestamp_precision=_timestamp_precision(envelope),
         validation_status=envelope.validation_status,
         raw_response_sha256=envelope.raw_response_sha256,
     )
+
+
+def _timestamp_precision(envelope: EventEnvelope) -> str | None:
+    """Return only precision that is frozen and auditable in event evidence.
+
+    New event sources persist the precision explicitly.  The current immutable
+    Eastmoney snapshot predates that field, so its seconds precision is
+    accepted only when the validated provider timing contract, raw seconds
+    timestamp and replay timestamp all agree.  TimeQuality alone is never
+    promoted to seconds precision.
+    """
+
+    attributes = envelope.event.attributes
+    explicit = attributes.get("timestamp_precision")
+    if explicit in {"second", "minute", "hour", "date"}:
+        return str(explicit)
+    if (
+        envelope.provider != "eastmoney"
+        or envelope.validation_status != "validated"
+        or attributes.get("provider") != "eastmoney"
+        or attributes.get("validation_status") != "validated"
+        or attributes.get("time_quality") != envelope.time_quality.value
+        or attributes.get("timing_policy") != "max(ceil(display_time), credible_eitime)"
+    ):
+        return None
+    raw_times = (
+        attributes.get("raw_ei_time"),
+        attributes.get("raw_content_ei_time"),
+    )
+    if not any(
+        isinstance(value, str) and _EASTMONEY_SECOND_TIMESTAMP_RE.fullmatch(value)
+        for value in raw_times
+    ):
+        return None
+    frozen_available = attributes.get("conservative_available_at")
+    available_at = envelope.available_at
+    if not isinstance(frozen_available, str) or available_at is None:
+        return None
+    try:
+        recorded = datetime.fromisoformat(frozen_available)
+    except ValueError:
+        return None
+    if recorded.tzinfo is None or recorded != available_at:
+        return None
+    return "second"
 
 
 def _first_matching_revisions(

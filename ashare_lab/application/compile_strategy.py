@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -51,6 +53,122 @@ _POSITION_AWARE_EXIT_AND_EXPLANATION = (
     "当前回测只支持把持有期、止盈、止损、回撤与其他卖出条件按“任一先触发即卖出”执行，"
     "尚不能正确执行“同时满足才卖出”。请改用“或”，或只保留一个这类卖出条件。"
 )
+
+_NON_DAILY_TIMEFRAME_RE = re.compile(
+    r"(?:\d{1,4}\s*(?:分钟(?:线)?|小时(?:线)?|分(?:k|线))|"
+    r"\d{1,4}\s*[-_]?\s*(?:mins?|minutes?|m|hours?|hrs?|h)(?![a-z])|"
+    r"分时|分钟级|小时级|周线|月线|周频|月频|盘中|日内|实时信号)",
+    re.IGNORECASE,
+)
+_SAME_SESSION_EXECUTION_RE = re.compile(
+    r"(?:(?:当日|当天|同日|本交易日)[^,，。；;]{0,12}(?:买入|卖出|下单|成交)|"
+    r"(?:马上|立刻|立即|即时)[^,，。；;]{0,6}(?:买入|卖出|下单|成交)|"
+    r"(?:买入|卖出|下单|成交)[^,，。；;]{0,4}(?:马上|立刻|立即|即时))"
+)
+_NON_DEFAULT_EXECUTION_RE = re.compile(
+    r"(?:下一|下个|次)(?:个)?(?:可交易)?(?:交易日|日)"
+    r"[^,，。；;]{0,12}"
+    r"(?:收盘(?:价)?|尾盘|盘中|开盘后|\d{1,2}[:：]\d{2})"
+    r"[^,，。；;]{0,12}(?:买入|卖出|下单|成交)"
+)
+_DELAY_COUNT = r"(?:\d{1,4}|[零〇一二两三四五六七八九十百千]+)"
+_DELAY_UNIT = r"(?:交易日|交易天|天|日)"
+_DELAY_EXPRESSION = (
+    rf"(?:第{_DELAY_COUNT}(?:个)?{_DELAY_UNIT}|"
+    rf"{_DELAY_COUNT}(?:个)?{_DELAY_UNIT}(?:之后|以后|后)|"
+    rf"(?:之后|以后|后)\s*(?:第)?{_DELAY_COUNT}(?:个)?{_DELAY_UNIT}|"
+    r"隔天|隔日)"
+)
+_EXPLICIT_DELAYED_EXECUTION_RE = re.compile(
+    rf"{_DELAY_EXPRESSION}[^,，。；;]{{0,12}}"
+    r"(?P<action>买入|买进|建仓|下单|成交|卖出|卖掉|平仓|清仓)"
+)
+_SUPPORTED_HOLDING_EXIT_RE = re.compile(
+    r"(?:(?:买入)?成交后|买入后|持有)(?:第)?\d{1,4}(?:个)?"
+    r"(?:交易日|交易天|天|日)(?:后|时|到期)?"
+    r"[^,，。；;]{0,8}(?:卖出|卖掉|平仓|清仓)"
+)
+_SUPPORTED_BARE_HOLDING_EXIT_RE = re.compile(
+    r"\s*(?:后)?(?:第)?\d{1,4}(?:个)?(?:交易日|交易天|天|日)"
+    r"(?:后|时|到期)?\s*(?:卖出|卖掉|平仓|清仓)\s*"
+)
+_SPECIFIC_REPORT_PERIOD_RE = re.compile(
+    r"(?:(?:19|20)\d{2}(?:年(?:的)?)?(?:年度报告|年报|半年度报告|半年报|中报|"
+    r"季度报告|季报|第?[一二三四1234]季度报告|[一二三四1234]季报)|"
+    r"(?<!\d)\d{2}(?:年(?:的)?)?(?:年度报告|年报|半年度报告|半年报|中报|"
+    r"季度报告|季报|第?[一二三四1234]季度报告|[一二三四1234]季报)|"
+    r"(?:今年|去年|前年|上年|本年|当年)(?:的|发布的|公布的)?"
+    r"(?:年度报告|年报|半年度报告|半年报|中报|季度报告|季报)|"
+    r"(?:第?[一二三四1234]季度报告|[一二三四1234]季报))"
+)
+_PERIODIC_REPORT_RE = re.compile(
+    r"(?:业绩预告|业绩快报|年度报告|年报|半年度报告|半年报|中报|季度报告|季报)"
+)
+_UNMODELED_REPORT_FILTER_RE = re.compile(
+    r"(?:预增|预减|预亏|扭亏|续盈|首亏|略增|略减|亏损|"
+    r"大幅(?:增长|上升|下降|下滑)|净利润|净利|营业收入|营收|扣非|"
+    r"同比|环比|增长\s*\d+(?:\.\d+)?%|下降\s*\d+(?:\.\d+)?%)"
+)
+_MACD_UNMODELED_QUALIFIER_RE = re.compile(
+    r"(?:macd[^,，。；;]{0,16}(?:零轴上方|零轴之上|低位)|"
+    r"(?:低位|零轴上方|零轴之上)[^,，。；;]{0,16}macd)",
+    re.IGNORECASE,
+)
+_SOURCE_ACTION_RE = re.compile(r"(?<!超)(?:买入|卖出|买进|卖掉|(?<!购)买|卖)")
+_NAMED_INDICATOR_RE = re.compile(
+    r"(?:"
+    r"macd|rsi|kdj|cci|bbi|obv|ema|"
+    r"(?<![a-z])(?:ma|atr|natr|adx|dmi|roc|mom|momentum|wr|"
+    r"stoch(?:astic)?|boll(?:inger)?|donchian|bias)(?![a-z])|"
+    r"均线|移动平均|指数移动平均|指数均线|布林|乖离率|"
+    r"能量潮|成交量|相对成交量|量比|成交额|"
+    r"平均真实波幅|真实波幅|历史波动率|年化波动率|"
+    r"趋向指标|平均趋向指数|随机指标|随机振荡指标|"
+    r"威廉指标|唐奇安|振幅|涨跌幅|收益率|连涨|新高|阶段趋势"
+    r")",
+    re.IGNORECASE,
+)
+_EXPLICIT_INDICATOR_TRIGGER_RE = re.compile(
+    r"(?:[a-z]+(?:_[a-z]+)+|"
+    r"(?:above|below|rising|falling|uptrend|downtrend|range|breakout|breakdown|"
+    r"bullish|bearish)(?![a-z])|"
+    r"金叉|死叉|上穿|下穿|突破|跌破|站上|失守|"
+    r"高于|低于|大于|小于|超过|不少于|不低于|不高于|不大于|不超过|"
+    r"至少|至多|等于|达到|介于|之间|[<>≥≤]|"
+    r"超买|超卖|低位|高位|上方|下方|多头|空头|"
+    r"上升|下降|上涨|下跌|向上|向下|大涨|大跌|走强|走弱|转强|转弱|"
+    r"放量|缩量|背离|齐升|齐跌|新高|连涨|趋势|"
+    r"红柱|绿柱|零轴|0轴)",
+    re.IGNORECASE,
+)
+
+_SOURCE_SEMANTIC_EXPLANATIONS = {
+    "non_daily_timeframe_not_supported": (
+        "当前正式回测只支持日线收盘确认，不能把分钟、盘中、周线或月线信号改成日线执行。"
+    ),
+    "same_session_execution_not_supported": (
+        "当前正式回测只支持信号确认后在下一可交易日开盘尝试成交，不支持当天或立即成交。"
+    ),
+    "execution_price_time_not_supported": (
+        "当前正式日线回测只能在下一可交易日开盘尝试成交，不能把你指定的"
+        "下一交易日收盘、尾盘或具体时点改成开盘执行。"
+    ),
+    "event_report_period_filter_not_supported": (
+        "当前事件条件还不能精确限定某一报告年份或第几季度，因此不会扩大成匹配所有报告。"
+    ),
+    "event_attribute_filter_not_supported": (
+        "当前可以按报告发布回测，但还不能按业绩方向、净利润或增长幅度过滤，因此不会丢掉限定条件后假装成功。"
+    ),
+    "technical_qualifier_not_supported": (
+        "当前 MACD 支持目录中已发布的独立触发条件，还不能将‘低位’或"
+        "‘零轴上方金叉’这类组合限定精确执行。"
+    ),
+    "indicator_trigger_requires_clarification": (
+        "我识别到了指标和买卖动作，但没有识别到明确触发条件。请一次写清每个条件，"
+        "例如‘MACD 金叉买入、死叉卖出’或‘RSI 低于 30 买入、高于 70 卖出’；"
+        "系统不会替你补默认触发规则。"
+    ),
+}
 
 
 class _UnsupportedCandidateSemantics(ValueError):
@@ -133,6 +251,17 @@ class StrategyCompiler:
             return CompileOutcome(
                 status=CompileStatus.INVALID,
                 diagnostic_code="request_as_of_date_in_future",
+            )
+        source_semantic_diagnostic = _unsupported_source_semantics(request.utterance)
+        if source_semantic_diagnostic is not None:
+            return CompileOutcome(
+                status=(
+                    CompileStatus.NEEDS_CLARIFICATION
+                    if source_semantic_diagnostic == "indicator_trigger_requires_clarification"
+                    else CompileStatus.UNSUPPORTED
+                ),
+                clarification=_SOURCE_SEMANTIC_EXPLANATIONS[source_semantic_diagnostic],
+                diagnostic_code=source_semantic_diagnostic,
             )
         candidates = await self._generator.generate(request)
         if not candidates:
@@ -490,6 +619,103 @@ def _period_error(candidate: CandidateAst, as_of_date: date) -> str | None:
     if candidate.backtest_end is not None and candidate.backtest_end > as_of_date:
         return "backtest_end_after_as_of_date"
     return None
+
+
+def _unsupported_source_semantics(utterance: str) -> str | None:
+    """Reject source meaning that the bounded daily DSL cannot preserve.
+
+    This guard intentionally runs before every candidate generator.  It keeps
+    deterministic parsing and bounded-provider translation under one rule: a
+    valid-looking daily candidate cannot silently erase an explicit timeframe,
+    execution instruction, report filter, or compound MACD qualifier from the
+    user's sentence.
+    """
+
+    text = unicodedata.normalize("NFKC", utterance).casefold()
+    if _NON_DAILY_TIMEFRAME_RE.search(text) is not None:
+        return "non_daily_timeframe_not_supported"
+    if _SAME_SESSION_EXECUTION_RE.search(text) is not None:
+        return "same_session_execution_not_supported"
+    if _NON_DEFAULT_EXECUTION_RE.search(text) is not None:
+        return "execution_price_time_not_supported"
+    if _has_unmodeled_delayed_execution(text):
+        return "execution_price_time_not_supported"
+    if _SPECIFIC_REPORT_PERIOD_RE.search(text) is not None:
+        return "event_report_period_filter_not_supported"
+    for clause in re.split(r"[,，。；;！!?？]", text):
+        if (
+            _PERIODIC_REPORT_RE.search(clause) is not None
+            and _UNMODELED_REPORT_FILTER_RE.search(clause) is not None
+        ):
+            return "event_attribute_filter_not_supported"
+    if _MACD_UNMODELED_QUALIFIER_RE.search(text) is not None:
+        return "technical_qualifier_not_supported"
+    if _has_named_indicator_without_trigger(text):
+        return "indicator_trigger_requires_clarification"
+    return None
+
+
+def _has_unmodeled_delayed_execution(text: str) -> bool:
+    """Keep signal-delayed orders distinct from supported fill-anchored exits."""
+
+    for clause in re.split(r"[,，。；;!！?？]", text):
+        matches = tuple(_EXPLICIT_DELAYED_EXECUTION_RE.finditer(clause))
+        if not matches:
+            continue
+        supported_spans = [match.span() for match in _SUPPORTED_HOLDING_EXIT_RE.finditer(clause)]
+        bare_holding = _SUPPORTED_BARE_HOLDING_EXIT_RE.fullmatch(clause)
+        if bare_holding is not None:
+            supported_spans.append(bare_holding.span())
+        for match in matches:
+            if match.group("action") in {"买入", "买进", "建仓", "下单", "成交"}:
+                return True
+            if not any(
+                start <= match.start() and match.end() <= end for start, end in supported_spans
+            ):
+                return True
+    return False
+
+
+def _has_named_indicator_without_trigger(text: str) -> bool:
+    """Detect a named indicator plus action whose trigger was never stated.
+
+    This is intentionally a source-level guard rather than a parser default.
+    It therefore applies equally to the deterministic fast path and bounded
+    provider candidates.  Clauses with partial trigger language continue to the
+    normal parser/catalog validation, which can return a more specific error.
+    """
+
+    prefixed_markers = tuple(re.finditer(r"(买入|卖出)条件(?:是|为|：|:)?", text, re.IGNORECASE))
+    if prefixed_markers:
+        clauses = tuple(
+            text[
+                marker.end() : (
+                    prefixed_markers[index + 1].start()
+                    if index + 1 < len(prefixed_markers)
+                    else len(text)
+                )
+            ].strip(" ,，。；;、")
+            for index, marker in enumerate(prefixed_markers)
+        )
+    else:
+        clauses_list: list[str] = []
+        cursor = 0
+        for marker in _SOURCE_ACTION_RE.finditer(text):
+            clause = re.sub(
+                r"^[ ,，。；;、]*(?:然后|再|则|就)?",
+                "",
+                text[cursor : marker.start()],
+            ).strip(" ,，。；;、")
+            cursor = marker.end()
+            if clause:
+                clauses_list.append(clause)
+        clauses = tuple(clauses_list)
+
+    return any(
+        _NAMED_INDICATOR_RE.search(clause) is not None
+        and _EXPLICIT_INDICATOR_TRIGGER_RE.search(clause) is None
+        for clause in clauses
+    )
 
 
 def _resolve_backtest_period(

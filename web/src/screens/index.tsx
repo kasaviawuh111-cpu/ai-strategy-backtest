@@ -412,13 +412,20 @@ const providerLabels: Record<string, string> = {
 }
 
 const timeQualityLabels: Record<string, string> = {
-  exact: '秒级精确时间',
-  vendor_observed: '供应商秒级首次可得',
+  exact: '来源记录的可得时间',
+  vendor_observed: '供应商记录的首次可得时间',
   date_only: '可信日期；按当日收盘后可得，下一交易日委托',
   date_only_conservative: '可信日期；按当日收盘后可得，下一交易日委托',
   estimated_research_only: '估算时间（仅研究，不可交易）',
   daily_bar_open_proxy: '日线开盘价代理（时间非精确）',
   daily_bar_available_at_proxy: '日线整根可得价代理（时间非精确）',
+}
+
+const timestampPrecisionLabels: Record<string, string> = {
+  second: '秒级',
+  minute: '分钟级',
+  hour: '小时级',
+  date: '日期级',
 }
 
 const validationStatusLabels: Record<string, string> = {
@@ -811,12 +818,13 @@ export function ExecutionDetailsScreen(
                   {href ? <a href={href} target="_blank" rel="noreferrer">{provider} ↗</a>
                     : <span className="source-provider">{provider}</span>}
                   <small>首次可得：{item.availableAt}</small>
-                  <small>时间质量：{timeQualityLabels[item.timeQuality?.toLowerCase() ?? ''] ?? '已记录，可在技术详情中查看'} · {validationStatus}</small>
+                  <small>时间质量：{timeQualityLabels[item.timeQuality?.toLowerCase() ?? ''] ?? '已记录，可在技术详情中查看'} · 时间精度：{timestampPrecisionLabels[item.timestampPrecision ?? ''] ?? '未记录'} · {validationStatus}</small>
                 </span>
                 <details className="technical-details">
                   <summary>技术详情</summary>
                   <div className="technical-row">数据来源代码：<code>{item.provider ?? '未记录'}</code></div>
                   <div className="technical-row">时间质量代码：<code>{item.timeQuality ?? '未记录'}</code></div>
+                  <div className="technical-row">时间精度代码：<code>{item.timestampPrecision ?? '未记录'}</code></div>
                   <div className="technical-row">校验状态代码：<code>{item.validationStatus ?? '未记录'}</code></div>
                   <div className="technical-row">来源事件编号：<code>{shortIdentity(item.sourceEventId ?? item.id)}</code></div>
                   <div className="technical-row">原始响应校验：<code>{item.rawResponseSha256 ? shortIdentity(item.rawResponseSha256) : '未记录'}</code></div>

@@ -12,6 +12,7 @@ from ashare_lab.adapters.language.vibe_candidates import (
     CandidateTransportRequest,
     CandidateTransportResponse,
     VibeBoundedCandidateGenerator,
+    _source_action_fragments,
     build_candidate_capability_matrix,
 )
 from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
@@ -481,6 +482,34 @@ async def test_annual_report_alias_cannot_match_inside_semiannual_report() -> No
 
 
 @pytest.mark.asyncio
+async def test_midyear_report_alias_maps_only_to_semiannual_report() -> None:
+    entry_text = "中报发布后买入"
+    exit_text = "持有3个交易日卖出"
+    utterance = f"{entry_text}；{exit_text}"
+
+    for event_code, expected_code in (
+        ("event.financial_results.semiannual_report", None),
+        ("event.financial_results.annual_report", "candidate_provider_invalid_output"),
+    ):
+        payload = {
+            "candidates": [
+                {
+                    "instrument_symbol": None,
+                    "entry": [_event_payload(event_code)],
+                    "exit": [{"kind": "holding_period", "sessions": 3}],
+                    "entry_spans": [_span(utterance, entry_text)],
+                    "exit_spans": [_span(utterance, exit_text)],
+                    "confidence": 0.95,
+                }
+            ]
+        }
+
+        candidates = await _generator(payload).generate(_request(utterance))
+
+        assert candidates[0].unsupported_code == expected_code
+
+
+@pytest.mark.asyncio
 async def test_ma_alias_cannot_match_inside_ema_entity() -> None:
     entry_text = "EMA股价上穿买入"
     exit_text = "持有3个交易日卖出"
@@ -562,6 +591,43 @@ async def test_macd_positional_numbers_cannot_be_reassigned_to_other_fields() ->
     assert candidates[0].unsupported_code == "candidate_provider_invalid_output"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry_text",
+    (
+        "MACD(8,21,5)金叉买入",
+        "MACD快线8慢线21信号线5金叉买入",
+    ),
+)
+async def test_explicit_macd_parameters_cannot_be_replaced_by_catalog_defaults(
+    entry_text: str,
+) -> None:
+    exit_text = "持有3个交易日卖出"
+    utterance = f"{entry_text}；{exit_text}"
+    indicator = _indicator_payload("technical.macd", "golden_cross")
+    payload = {
+        "candidates": [
+            {
+                "instrument_symbol": None,
+                "entry": [indicator],
+                "exit": [{"kind": "holding_period", "sessions": 3}],
+                "entry_spans": [_span(utterance, entry_text)],
+                "exit_spans": [_span(utterance, exit_text)],
+                "confidence": 0.95,
+                "defaulted_fields": [
+                    "/entry/0/params/fast",
+                    "/entry/0/params/slow",
+                    "/entry/0/params/signal",
+                ],
+            }
+        ]
+    }
+
+    candidates = await _generator(payload).generate(_request(utterance))
+
+    assert candidates[0].unsupported_code == "candidate_provider_invalid_output"
+
+
 def _two_indicator_join_payload(
     *,
     join_word: str,
@@ -626,6 +692,58 @@ async def test_multi_leaf_any_join_accepts_explicit_or_connector() -> None:
     candidates = await _generator(payload).generate(_request(utterance))
 
     assert candidates[0].unsupported_code is None
+
+
+@pytest.mark.asyncio
+async def test_provider_cannot_omit_one_explicit_entry_leaf() -> None:
+    payload, utterance = _two_indicator_join_payload(join_word="且", candidate_join="all")
+    candidate = payload["candidates"][0]  # type: ignore[index]
+    candidate["entry"] = [candidate["entry"][0]]  # type: ignore[index]
+    candidate["entry_spans"] = [candidate["entry_spans"][0]]  # type: ignore[index]
+    defaults = candidate["defaulted_fields"]  # type: ignore[index]
+    assert isinstance(defaults, list)
+    candidate["defaulted_fields"] = [
+        item for item in defaults if not str(item).startswith("/entry/1/")
+    ]
+
+    candidates = await _generator(payload).generate(_request(utterance))
+
+    assert candidates[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+async def test_provider_cannot_omit_explicit_leaf_after_prefix_entry_action() -> None:
+    entry_text = "买入MACD金叉且RSI低于30"
+    exit_text = "持有3个交易日卖出"
+    utterance = f"{entry_text}；{exit_text}"
+    payload = {
+        "candidates": [
+            {
+                "instrument_symbol": None,
+                "entry": [_indicator_payload("technical.macd", "golden_cross")],
+                "exit": [{"kind": "holding_period", "sessions": 3}],
+                "entry_spans": [_span(utterance, entry_text)],
+                "exit_spans": [_span(utterance, exit_text)],
+                "confidence": 0.95,
+                "defaulted_fields": [
+                    "/entry/0/params/fast",
+                    "/entry/0/params/slow",
+                    "/entry/0/params/signal",
+                ],
+            }
+        ]
+    }
+
+    candidates = await _generator(payload).generate(_request(utterance))
+
+    assert candidates[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+def test_unpunctuated_prefix_actions_claim_only_their_following_conditions() -> None:
+    utterance = "买入MACD金叉卖出MACD死叉"
+
+    assert _source_action_fragments(utterance, side="entry", matrix=MATRIX) == ("买入MACD金叉",)
+    assert _source_action_fragments(utterance, side="exit", matrix=MATRIX) == ("卖出MACD死叉",)
 
 
 def _three_indicator_join_payload(
@@ -760,6 +878,18 @@ async def test_position_return_values_bind_to_take_profit_and_stop_loss_words() 
 @pytest.mark.asyncio
 async def test_position_return_values_cannot_be_swapped_across_shared_span() -> None:
     payload, utterance = _position_return_payload(take_profit=5, stop_loss=20)
+
+    candidates = await _generator(payload).generate(_request(utterance))
+
+    assert candidates[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+async def test_provider_cannot_omit_one_explicit_exit_leaf() -> None:
+    payload, utterance = _position_return_payload(take_profit=20, stop_loss=5)
+    candidate = payload["candidates"][0]  # type: ignore[index]
+    candidate["exit"] = [candidate["exit"][0]]  # type: ignore[index]
+    candidate["exit_spans"] = [candidate["exit_spans"][0]]  # type: ignore[index]
 
     candidates = await _generator(payload).generate(_request(utterance))
 
@@ -996,6 +1126,32 @@ async def test_lookback_without_exact_period_span_fails_closed() -> None:
     response = case.response
     candidate = response["candidates"][0]  # type: ignore[index]
     candidate.pop("backtest_span")  # type: ignore[union-attr]
+
+    candidates = await _generator(response).generate(_request(case.utterance))
+
+    assert candidates[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("period_kind", ("date_range", "lookback"))
+async def test_provider_cannot_omit_explicit_source_backtest_period(period_kind: str) -> None:
+    if period_kind == "date_range":
+        case = _batch(
+            [_indicator_payload("technical.macd", "golden_cross")],
+            backtest_start="2021-01-01",
+            backtest_end="2026-08-30",
+        )
+    else:
+        case = _batch(
+            [_indicator_payload("technical.macd", "golden_cross")],
+            backtest_lookback_years=5,
+        )
+    response = case.response
+    candidate = response["candidates"][0]  # type: ignore[index]
+    candidate.pop("backtest_start", None)  # type: ignore[union-attr]
+    candidate.pop("backtest_end", None)  # type: ignore[union-attr]
+    candidate.pop("backtest_lookback_years", None)  # type: ignore[union-attr]
+    candidate.pop("backtest_span", None)  # type: ignore[union-attr]
 
     candidates = await _generator(response).generate(_request(case.utterance))
 

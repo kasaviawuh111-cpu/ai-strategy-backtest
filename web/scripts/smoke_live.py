@@ -348,7 +348,7 @@ def run_journey(
         )
     page.get_by_role("button", name="识别交易规则").click()
 
-    expect(page.get_by_text("已读懂你的规则", exact=True)).to_be_visible(timeout=20_000)
+    expect(page.get_by_text("已完成思考", exact=True)).to_be_visible(timeout=20_000)
     if strategy == "event":
         expect(page.get_by_text("年度报告发布", exact=True).first).to_be_visible()
         expect(page.get_by_text("年度报告 参数", exact=True)).to_have_count(0)
@@ -357,7 +357,7 @@ def run_journey(
         expect(page.get_by_text("MACD 死叉", exact=True).first).to_be_visible()
 
     page.get_by_role("button", name="开始回测", exact=True).click()
-    expect(page.get_by_text("跑完了，结果在下面。", exact=True)).to_be_visible(timeout=120_000)
+    expect(page.get_by_text("回测结果", exact=True)).to_be_visible(timeout=120_000)
     assert_real_api_mode(page)
     expect(
         page.get_by_text(

@@ -219,20 +219,31 @@ const eventFacts = (draft: StrategyDraft): StrategyEventFact[] => [
   }]
 })
 
-const collectSpecIds = (condition: StrategySpecCondition): { indicators: string[]; events: string[] } => {
+type CollectedSpecIds = {
+  indicators: string[]
+  events: string[]
+  documentTextEvents: string[]
+}
+
+const collectSpecIds = (condition: StrategySpecCondition): CollectedSpecIds => {
   if (condition.type === 'indicator_condition') {
-    return { indicators: [condition.indicator_id], events: [] }
+    return { indicators: [condition.indicator_id], events: [], documentTextEvents: [] }
   }
   if (condition.type === 'event_condition') {
-    return { indicators: [], events: [condition.event_code] }
+    return {
+      indicators: [],
+      events: [condition.event_code],
+      documentTextEvents: condition.document_text ? [condition.event_code] : [],
+    }
   }
   if (condition.type === 'not') return collectSpecIds(condition.child)
   return condition.children.reduce((result, child) => {
     const next = collectSpecIds(child)
     result.indicators.push(...next.indicators)
     result.events.push(...next.events)
+    result.documentTextEvents.push(...next.documentTextEvents)
     return result
-  }, { indicators: [] as string[], events: [] as string[] })
+  }, { indicators: [], events: [], documentTextEvents: [] } as CollectedSpecIds)
 }
 
 const strategyIds = (draft: StrategyDraft) => {
@@ -246,11 +257,15 @@ const strategyIds = (draft: StrategyDraft) => {
     const next = collectSpecIds(condition)
     result.indicators.push(...next.indicators)
     result.events.push(...next.events)
+    result.documentTextEvents.push(...next.documentTextEvents)
     return result
-  }, { indicators: [] as string[], events: [] as string[] })
+  }, { indicators: [], events: [], documentTextEvents: [] } as CollectedSpecIds)
   return {
     indicators: [...new Set([...entry.indicators, ...exit.indicators])],
     events: [...new Set([...entry.events, ...exit.events])],
+    documentTextEvents: [
+      ...new Set([...entry.documentTextEvents, ...exit.documentTextEvents]),
+    ],
   }
 }
 
@@ -309,11 +324,24 @@ export const assessStrategyCapabilities = (
   }
   const indicators = new Map(capabilities.indicators.map((item) => [item.indicator_id, item]))
   const events = new Map(capabilities.events.map((item) => [item.event_code, item]))
+  const documentTextEvents = new Set(ids.documentTextEvents)
+  const eventRequirement = (eventCode: string) => {
+    const item = events.get(eventCode)
+    return documentTextEvents.has(eventCode) ? item?.document_text : item
+  }
+  const documentTextCatalogUnavailable = ids.documentTextEvents.some((eventCode) => {
+    const item = events.get(eventCode)
+    return item != null && item.document_text?.catalog_available !== true
+  })
   const declared = ids.indicators.every((id) => {
     const item = indicators.get(id)
     return item?.status === 'stable' || item?.status === 'experimental'
-  }) && ids.events.every((id) => events.has(id))
-  const eventCapabilities = ids.events.map((id) => events.get(id))
+  }) && ids.events.every((id) => {
+    const item = events.get(id)
+    return item != null
+      && (!documentTextEvents.has(id) || item.document_text?.catalog_available === true)
+  })
+  const eventCapabilities = ids.events.map(eventRequirement)
   const snapshotBacked = ids.events.length === 0
     || eventCapabilities.every((item) => item?.backtest_available === true
       && item.availability_scope === 'pinned_snapshot')
@@ -326,11 +354,15 @@ export const assessStrategyCapabilities = (
   const needsPreparation = ids.events.length > 0 && canPrepare && !snapshotBacked
   const canRun = declared && capabilities.backtest_execution_available && canPrepare
   const reason = !declared
-    ? '规则已经由服务端生成，但能力接口尚未声明全部定义可用于提交回测。'
+    ? documentTextCatalogUnavailable
+      ? '规则已经由服务端生成，但能力接口没有声明该公告正文词频定义可用于回测。'
+      : '规则已经由服务端生成，但能力接口尚未声明全部定义可用于提交回测。'
     : !capabilities.backtest_execution_available
       ? '后端当前没有可用的回测执行环境。规则可以查看，但不能提交运行。'
       : !canPrepare
-        ? '这类公告能被识别，但当前快照没有覆盖，后端也没有声明可按本次请求准备。'
+        ? ids.documentTextEvents.length > 0
+          ? '公告事件能被识别，但完整正文当前没有固定快照，后端也没有声明可按本次请求准备。'
+          : '这类公告能被识别，但当前快照没有覆盖，后端也没有声明可按本次请求准备。'
         : needsPreparation
           ? '当前固定快照尚未覆盖；提交后后端会先按股票、区间和事件类型准备并校验数据。'
           : null
@@ -341,23 +373,38 @@ export const assessStrategyCapabilities = (
     eventCodes: ids.events,
     events: ids.events.map((eventCode) => {
       const item = events.get(eventCode)
-      const pinned = item?.backtest_available === true
-        && item.availability_scope === 'pinned_snapshot'
-      const preparable = pinned || (item?.preparation_available === true
-        && item.availability_scope === 'request_preparation')
+      const requiresDocumentText = documentTextEvents.has(eventCode)
+      const requirement = eventRequirement(eventCode)
+      const pinned = requirement?.backtest_available === true
+        && requirement.availability_scope === 'pinned_snapshot'
+      const preparable = pinned || (requirement?.preparation_available === true
+        && requirement.availability_scope === 'request_preparation')
+      const catalog = !item
+        ? 'unknown'
+        : requiresDocumentText
+          ? item.document_text?.catalog_available === true ? 'available' : 'unavailable'
+          : 'available'
       return {
         eventCode,
         label: eventLabel(eventCode),
-        catalog: item ? 'available' : 'unknown',
+        catalog,
         preparable: preparable ? pinned ? 'available' : 'conditional' : 'unavailable',
         pinnedSnapshot: pinned ? 'available' : 'unavailable',
         detail: !item
           ? '最终策略规则已生成，但能力目录没有返回这一事件的可运行状态。'
+          : requiresDocumentText && item.document_text?.catalog_available !== true
+            ? '事件定义已存在，但能力接口没有声明公告正文词频 Catalog。'
           : pinned
-              ? '当前固定快照已覆盖。'
+              ? requiresDocumentText
+                ? '当前固定快照已覆盖事件与完整正文。'
+                : '当前固定快照已覆盖。'
               : preparable
-                ? '当前快照未覆盖；后端声明可按本次请求准备。'
-                : '当前快照无覆盖，也没有请求准备能力。',
+                ? requiresDocumentText
+                  ? '事件已识别；完整正文需按本次请求准备并校验。'
+                  : '当前快照未覆盖；后端声明可按本次请求准备。'
+                : requiresDocumentText
+                  ? '事件已识别，但完整正文当前无覆盖，也没有请求准备能力。'
+                  : '当前快照无覆盖，也没有请求准备能力。',
       }
     }),
     stages: [
@@ -395,7 +442,7 @@ export const toUiInstrument = (draft: StrategyDraft): Instrument => ({
 /**
  * 回测区间的说法。
  * 「2021—2026」看起来像跨了六年，实际只有五年；用户真正想知道的是「跑了多久」。
- * 所以主文案给时长，精确起止日期作为可核对的第二行保留。
+ * 所以卡片上只写时长；精确起止日期在参数页里，要核对的人点进去看。
  */
 export const describeBacktestWindow = (start: string, end: string) => {
   const exact = `${start} 至 ${end}`
@@ -445,7 +492,7 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
     {
       key: 'range',
       label: '区间',
-      ...describeBacktestWindow(draft.backtest.start, draft.backtest.end),
+      value: describeBacktestWindow(draft.backtest.start, draft.backtest.end).value,
     },
     ],
     strategyHash: draft.strategyHash ?? `${draft.id}@r${draft.revision}`,
@@ -828,6 +875,7 @@ const evidenceFacts = (activity: BacktestActivity): ChainFact[] =>
       },
       { label: `首次可得${suffix}`, value: item.availableAt },
       { label: `时间质量${suffix}`, value: labelOrRecorded(evidenceTimeQualityLabels, item.timeQuality) },
+      { label: `时间精度${suffix}`, value: item.timestampPrecision ?? '未记录' },
       { label: `校验状态${suffix}`, value: labelOrRecorded(validationStatusLabels, item.validationStatus) },
     ]
     return facts
@@ -839,6 +887,7 @@ const evidenceTechnicalFacts = (activity: BacktestActivity): ChainFact[] =>
     return [
       { label: `数据来源代码${suffix}`, value: item.provider ?? '未记录' },
       { label: `时间质量代码${suffix}`, value: item.timeQuality ?? '未记录' },
+      { label: `时间精度代码${suffix}`, value: item.timestampPrecision ?? '未记录' },
       { label: `校验状态代码${suffix}`, value: item.validationStatus ?? '未记录' },
       { label: `来源事件编号${suffix}`, value: item.sourceEventId ?? item.id },
       { label: `原始响应校验${suffix}`, value: item.rawResponseSha256 ?? '未记录' },

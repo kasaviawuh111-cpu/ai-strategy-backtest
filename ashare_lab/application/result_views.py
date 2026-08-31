@@ -174,6 +174,7 @@ def _activities(result: DailyBacktestResult) -> list[dict[str, object]]:
                         "provider": item.provider,
                         "sourceUrl": item.source_url,
                         "timeQuality": item.time_quality,
+                        "timestampPrecision": item.timestamp_precision,
                         "validationStatus": item.validation_status,
                         "rawResponseSha256": item.raw_response_sha256,
                     }
@@ -316,7 +317,7 @@ def _warnings(
     if dividend_tax_policy == "gross_research_no_withholding.v1":
         warnings.append(
             "现金分红按税前金额入账，尚未模拟个人投资者按持股期限差异化补税；"
-            "含分红收益仅适合研究演示。"
+            "含分红的结果不能用于判断个人税后收益。"
         )
     rights_issue_policy = assumptions.get("rights_issue_policy")
     if rights_issue_policy == "decline_no_external_cash.v1":

@@ -20,11 +20,14 @@ const renderApp = (
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
-  return render(
-    <QueryClientProvider client={client}>
-      <App instrument={instrument} {...options} />
-    </QueryClientProvider>,
-  )
+  return {
+    client,
+    ...render(
+      <QueryClientProvider client={client}>
+        <App instrument={instrument} {...options} />
+      </QueryClientProvider>,
+    ),
+  }
 }
 
 const expectMockPreviewBadge = () => {
@@ -67,11 +70,11 @@ describe('formal main.tsx App journey', () => {
       onUseStandaloneExample,
     })
 
-    expect(screen.getByText(/当前股票信息无法识别/)).toBeInTheDocument()
+    expect(screen.getByText(/未能识别当前股票/)).toBeInTheDocument()
     expect(screen.getByText('股票页上下文无效')).toBeInTheDocument()
-    expect(screen.queryByText(/你在看.*东方财富/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/说出买卖规则/)).not.toBeInTheDocument()
     expect(screen.getByLabelText('交易规则')).toHaveValue('')
-    expect(screen.queryByRole('button', { name: 'MACD 金叉买、死叉卖' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('策略示例')).not.toBeInTheDocument()
 
     const returnButtons = screen.getAllByRole('button', { name: '返回股票页' })
     await user.click(returnButtons.at(-1) as HTMLButtonElement)
@@ -88,12 +91,13 @@ describe('formal main.tsx App journey', () => {
     }
     renderApp(instrument)
 
-    expect(screen.getByText(/你在看/).closest('div')).toHaveTextContent('你在看 贵州茅台')
+    expect(screen.getByText(/说出买卖规则/).closest('.say'))
+      .toHaveTextContent('贵州茅台 · 说出买卖规则')
     expect(screen.getByLabelText('交易规则')).toHaveValue(
-      '贵州茅台 MACD 金叉买入，死叉卖出，回测近 5 年',
+      '贵州茅台 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果',
     )
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expect(compile).toHaveBeenCalledWith(expect.objectContaining({ instrument }))
   })
 
@@ -106,7 +110,7 @@ describe('formal main.tsx App journey', () => {
     expect(screen.queryByText(/^proved$/i)).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expectMockPreviewBadge()
     expect(screen.queryByText(/^proved$/i)).not.toBeInTheDocument()
   })
@@ -135,12 +139,15 @@ describe('formal main.tsx App journey', () => {
     const { container } = renderApp()
 
     expect(screen.getByLabelText('交易规则')).toHaveValue(
-      '东方财富 MACD 金叉买入，死叉卖出，回测近 5 年',
+      '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果',
     )
+    const examples = within(screen.getByLabelText('策略示例'))
+    expect(examples.getAllByRole('button')).toHaveLength(3)
     expectHomeToHideDefaultCapital(container)
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expect(screen.getAllByText('MACD 金叉').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('收盘突破 20 日均线').length).toBeGreaterThan(0)
     expect(screen.getAllByText('MACD 死叉').length).toBeGreaterThan(0)
     expectHomeToHideDefaultCapital(container)
 
@@ -157,7 +164,7 @@ describe('formal main.tsx App journey', () => {
     expect(await screen.findByText(/^预览：/)).toBeInTheDocument()
     expect(screen.queryByText(/后台返回的处理阶段/)).not.toBeInTheDocument()
     expect(
-      await screen.findByText('回测完成。', {}, { timeout: 6_000 }),
+      await screen.findByText('回测结果', {}, { timeout: 6_000 }),
     ).toBeInTheDocument()
     expectMockPreviewBadge()
     expectHomeToHideDefaultCapital(container)
@@ -210,18 +217,43 @@ describe('formal main.tsx App journey', () => {
     }
   }, 12_000)
 
-  it('runs the only supported annual-report event path without fake event parameters', async () => {
+  it('keeps a complete result authoritative when a later run-status refresh returns 404', async () => {
+    const getRun = settleMockRunOnFirstPoll()
+    const user = userEvent.setup()
+    const { client } = renderApp()
+
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    expect(await screen.findByText('回测结果', {}, { timeout: 6_000 })).toBeInTheDocument()
+
+    getRun.mockRejectedValueOnce(new ApiError({
+      type: 'about:blank',
+      title: '请求未完成',
+      status: 404,
+      detail: 'Backtest run was not found',
+      code: 'backtest_run_not_found',
+    }))
+    await client.refetchQueries({ queryKey: ['backtest-run'] })
+
+    expect(screen.getByText('回测结果')).toBeInTheDocument()
+    expect(screen.queryByText('任务状态读取失败')).not.toBeInTheDocument()
+    expect(screen.queryByText('Backtest run was not found')).not.toBeInTheDocument()
+  }, 8_000)
+
+  it('runs the earnings-forecast and MACD composite example without fake event parameters', async () => {
     const user = userEvent.setup()
     renderApp()
 
-    await user.click(screen.getByRole('button', { name: '年报发布后买入' }))
-    expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
-    expect(screen.getAllByText('年度报告发布').length).toBeGreaterThan(0)
-    expect(screen.queryByText('年度报告 参数')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '业绩预告 + MACD' }))
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
+    expect(screen.getAllByText('业绩预告发布').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('MACD 金叉').length).toBeGreaterThan(0)
+    expect(screen.queryByText('年度报告发布')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(
-      await screen.findByText('回测完成。', {}, { timeout: 6_000 }),
+      await screen.findByText('回测结果', {}, { timeout: 6_000 }),
     ).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '查看完整报告' }))
     expect(screen.getByRole('heading', { name: '回测报告' })).toBeInTheDocument()
@@ -230,7 +262,8 @@ describe('formal main.tsx App journey', () => {
     expect(screen.getByRole('heading', { name: '成交规则与数据依据' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '信号来源与时间' })).toBeInTheDocument()
     expect(screen.getByText('固定样例')).toBeVisible()
-    expect(screen.getByText(/供应商秒级首次可得/)).toBeInTheDocument()
+    expect(screen.getByText(/供应商记录的首次可得时间/)).toBeInTheDocument()
+    expect(screen.getByText(/时间精度：秒级/)).toBeInTheDocument()
     expect(screen.getByText(/仅用于界面预览，未连接事件数据/)).toBeVisible()
     expect(screen.getByText('mock_sample')).not.toBeVisible()
     expect(screen.getByText('demonstration_only')).not.toBeVisible()
@@ -253,7 +286,7 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '同花顺发年报提到ai次数超过5次的话就买入，3天后卖出')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expect(screen.getAllByText('年度报告正文中“AI”完整词出现 > 5 次').length).toBeGreaterThan(0)
     expect(screen.getAllByText('实际买入成交后第 3 个交易日卖出').length).toBeGreaterThan(0)
     expect(screen.getByText(/没有读取年报正文，也没有计算词频/)).toBeInTheDocument()
@@ -261,7 +294,7 @@ describe('formal main.tsx App journey', () => {
 
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(
-      await screen.findByText('回测完成。', {}, { timeout: 6_000 }),
+      await screen.findByText('回测结果', {}, { timeout: 6_000 }),
     ).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '查看完整报告' }))
@@ -316,7 +349,7 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, original)
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('还差一项确认')).toBeInTheDocument()
+    expect(await screen.findByText('只问这一次')).toBeInTheDocument()
     for (const preserved of [
       '股票：同花顺 300033.SZ',
       '公告事件：年度报告',
@@ -395,14 +428,14 @@ describe('formal main.tsx App journey', () => {
     await user.clear(input)
     await user.type(input, 'MACD')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('还差一项确认')).toBeInTheDocument()
+    expect(await screen.findByText('只问这一次')).toBeInTheDocument()
     expect(screen.getByText(/系统不会替你补默认买卖规则/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: /补充完整规则/ }))
     expect(screen.getByLabelText('交易规则')).toHaveValue('MACD')
     expect(screen.getByLabelText('交易规则')).toHaveFocus()
     expect(compile).toHaveBeenCalledTimes(1)
-    expect(screen.queryByText('已读懂你的规则')).not.toBeInTheDocument()
+    expect(screen.queryByText(/用到 \d+ 个条件/)).not.toBeInTheDocument()
   })
 
   it('returns a missing-exit clarification to the original input without inventing a rule', async () => {
@@ -430,7 +463,7 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '年度报告发布后买入')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('还差一项确认')).toBeInTheDocument()
+    expect(await screen.findByText('只问这一次')).toBeInTheDocument()
     expect(screen.getByText(/系统不会替你补一条默认策略/)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /使用东方财富/ })).not.toBeInTheDocument()
 
@@ -438,9 +471,9 @@ describe('formal main.tsx App journey', () => {
 
     expect(screen.getByLabelText('交易规则')).toHaveValue('年度报告发布后买入')
     expect(screen.getByLabelText('交易规则')).toHaveFocus()
-    expect(screen.queryByText('还差一项确认')).not.toBeInTheDocument()
+    expect(screen.queryByText('只问这一次')).not.toBeInTheDocument()
     expect(compile).toHaveBeenCalledTimes(1)
-    expect(screen.queryByText('已读懂你的规则')).not.toBeInTheDocument()
+    expect(screen.queryByText(/用到 \d+ 个条件/)).not.toBeInTheDocument()
   })
 
   it('returns a missing-entry clarification with the correct buy direction', async () => {
@@ -468,7 +501,7 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, 'MACD死叉卖出')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('还差一项确认')).toBeInTheDocument()
+    expect(await screen.findByText('只问这一次')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /补充买入条件/ })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /补充卖出条件/ })).not.toBeInTheDocument()
 
@@ -482,8 +515,8 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
 
-    await user.click(screen.getByRole('button', { name: 'RSI 超卖买、超买卖' }))
-    expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '超跌反转' }))
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expect(screen.getAllByText('RSI 低于 30').length).toBeGreaterThan(0)
     expect(screen.getAllByText('RSI 高于 70').length).toBeGreaterThan(0)
     expect(screen.queryByText('MACD 金叉')).not.toBeInTheDocument()
@@ -494,7 +527,7 @@ describe('formal main.tsx App journey', () => {
     renderApp()
 
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(await screen.findByText(/^预览：/)).toBeInTheDocument()
     await user.click(await screen.findByRole(
@@ -514,21 +547,24 @@ describe('formal main.tsx App journey', () => {
 
     expectHomeToHideDefaultCapital(container)
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expectHomeToHideDefaultCapital(container)
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(
-      await screen.findByText('回测完成。', {}, { timeout: 6_000 }),
+      await screen.findByText('回测结果', {}, { timeout: 6_000 }),
     ).toBeInTheDocument()
     expectHomeToHideDefaultCapital(container)
 
     expect(screen.queryByText('接下来可以继续验证')).not.toBeInTheDocument()
-    expect(screen.getByText('接下来：')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '换个条件再跑' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: '设成盯盘提醒' })).toHaveAttribute(
-      'title',
-      '功能入口，暂未接入提醒服务',
-    )
+    expect(screen.getByRole('group', { name: '可选的下一步' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '换个条件再跑一次' })).toBeEnabled()
+    const reminder = screen.getByRole('button', { name: '把这条设成盯盘提醒' })
+    expect(reminder).toHaveAttribute('title', '当前只记录在本页，尚未连接通知服务')
+    await user.click(reminder)
+    expect(screen.getByRole('button', { name: '已设置盯盘提醒' })).toBeDisabled()
+    const reminderStatus = screen.getByRole('status')
+    expect(reminderStatus).toHaveTextContent('盯盘提醒已设置')
+    expect(reminderStatus).toHaveTextContent('当前只记录在本页，尚未连接通知服务')
     expect(screen.getByRole('button', { name: '换只股票试试' })).toHaveAttribute(
       'title',
       '功能入口，暂未接入股票切换',
@@ -540,8 +576,9 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', { name: '返回' }))
     expectHomeToHideDefaultCapital(container)
 
-    await user.click(screen.getByRole('button', { name: '换个条件再跑' }))
+    await user.click(screen.getByRole('button', { name: '换个条件再跑一次' }))
     expect(screen.getByLabelText('交易规则')).toHaveFocus()
+    expect(screen.queryByText('盯盘提醒已设置')).not.toBeInTheDocument()
     expectHomeToHideDefaultCapital(container)
   }, 10_000)
 })

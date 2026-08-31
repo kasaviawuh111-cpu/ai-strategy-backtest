@@ -75,7 +75,13 @@ def test_result_bundle_is_json_safe_and_normalized() -> None:
         "09:15" in warning and "09:30" in warning and "不代表" in warning for warning in warnings
     )
     assert any("公司行动" in warning for warning in warnings)
-    assert any("税前金额" in warning and "持股期限" in warning for warning in warnings)
+    assert any(
+        "税前金额" in warning
+        and "持股期限" in warning
+        and "个人税后收益" in warning
+        and "演示" not in warning
+        for warning in warnings
+    )
     assert any("配股" in warning and "直接拒绝" in warning for warning in warnings)
     assert any("同初始资金" in warning for warning in warnings)
     fill_activity = next(item for item in bundle["activities"] if item["kind"] == "fill")
@@ -239,6 +245,7 @@ def test_signal_activity_retains_second_level_source_evidence() -> None:
                 provider="eastmoney",
                 source_url="https://example.test/announcement",
                 time_quality="vendor_observed",
+                timestamp_precision="second",
                 validation_status="validated",
                 raw_response_sha256="a" * 64,
             ),
@@ -262,4 +269,5 @@ def test_signal_activity_retains_second_level_source_evidence() -> None:
     assert item["evidence"][0]["availableAt"] == "2025-01-02T20:57:33+08:00"
     assert item["evidence"][0]["provider"] == "eastmoney"
     assert item["evidence"][0]["timeQuality"] == "vendor_observed"
+    assert item["evidence"][0]["timestampPrecision"] == "second"
     BacktestResultBundle.model_validate(bundle)

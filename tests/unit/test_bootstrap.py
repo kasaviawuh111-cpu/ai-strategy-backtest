@@ -21,12 +21,14 @@ from ashare_lab.adapters.event_sources import (
     build_event_acquisition_coverage,
 )
 from ashare_lab.adapters.event_sources.eastmoney import eastmoney_preparable_event_codes
+from ashare_lab.adapters.market_data import SnapshotPreparationFailedError
 from ashare_lab.adapters.market_data.choice_snapshot import (
     STRICT_CORPORATE_ACTION_CATEGORIES,
     STRICT_CORPORATE_ACTION_COVERAGE_SCOPE,
 )
 from ashare_lab.bootstrap import create_configured_app
 from ashare_lab.domain.shared import InstrumentId
+from ashare_lab.ports.market_data import DataRequirements, DateRange
 from ashare_lab.settings import AppSettings
 from tests.unit.adapters.event_sources.query_evidence import eastmoney_query_evidence
 from tests.unit.adapters.session_reference_fixture import choice_snapshot_fixture
@@ -670,6 +672,56 @@ def test_on_demand_profile_is_ready_without_pretending_a_snapshot_is_preloaded(
             settings.composite_snapshot_root,
             settings.snapshot_preparation_root,
         )
+    )
+
+
+def test_on_demand_bootstrap_never_selects_standalone_source_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    choice_root = tmp_path / "choice"
+    choice_snapshot_fixture(choice_root)
+    settings = AppSettings(
+        app_env="test",
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'runs.db'}",
+        catalog_root=Path(__file__).parents[2] / "catalogs",
+        market_data_profile="on_demand_snapshot",
+        choice_snapshot_root=choice_root,
+        technical_snapshot_root=tmp_path / "technical",
+        event_snapshot_root=tmp_path / "events",
+        composite_snapshot_root=tmp_path / "composite",
+        snapshot_preparation_root=tmp_path / "preparations",
+        on_demand_refresh_each_submission=False,
+    )
+
+    def provider_unavailable(
+        _self: object,
+        _requirements: DataRequirements,
+        _period: DateRange,
+    ) -> object:
+        raise SnapshotPreparationFailedError("fixture provider unavailable")
+
+    monkeypatch.setattr(
+        bootstrap_module.InternalDemoSnapshotPreparer,
+        "prepare",
+        provider_unavailable,
+    )
+    market_data, sessions_from_snapshot = bootstrap_module._build_market_data_repository(settings)
+    period = DateRange(date(2025, 1, 2), date(2025, 1, 3))
+    requirements = DataRequirements(
+        instruments=(InstrumentId("300059.SZ"),),
+        datasets=("daily_ohlcv", "corporate_actions"),
+    )
+
+    with pytest.raises(SnapshotPreparationFailedError, match="provider unavailable"):
+        market_data.pin_snapshot(requirements, period)
+
+    assert sessions_from_snapshot is True
+    assert market_data._registry._choice_root is None  # type: ignore[attr-defined]
+    assert market_data._registry._technical_root is None  # type: ignore[attr-defined]
+    assert market_data._preparer._choice_output_root == choice_root  # type: ignore[attr-defined]
+    assert market_data._preparer._technical_output_root == (  # type: ignore[attr-defined]
+        settings.technical_snapshot_root
     )
 
 

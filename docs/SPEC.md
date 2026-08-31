@@ -1,10 +1,10 @@
 # A 股单股自然语言策略回测 Spec
 
 > 文档状态：Living Spec（持续维护）
-> 当前版本：`spec@2026.08.30`
+> 当前版本：`spec@2026.08.31`
 > 当前工程范围：A 股、单股、只做多、日线 research demo
 > 主要读者：产品、设计、数据、算法、后端、前端，以及持续参与开发的 Vibe Coding Agent
-> 最后更新：2026-08-30
+> 最后更新：2026-08-31
 
 本文是当前项目的总规范。它不只回答“要做什么”，还固定为什么做、用户怎么走、数据何时可得、算法如何计算、哪些已经实现、怎样才算验收，以及下一步按什么顺序建设。
 
@@ -36,11 +36,11 @@ AI 在这里是规则编译器，不是收益预测器。用户确认后的策�
 
 | 能力 | 当前结论 |
 |---|---|
-| 单股日线技术策略 | `implemented / fixture-tested / Live-unverified`：主链和 22 个透明日线定义已实现；最终 clean-SHA 技术 run 未完成 |
-| 单股日线事件策略 | `implemented / fixture-tested / Live-unverified`：解析、证据、统一执行主链与五类定期报告采集路径已实现；历史本地事件切片可审计，但当前没有通过最新 strict loader 的 Event/Composite |
-| 定期报告正文词频 + 成交后持有期 | `implemented / fixture-tested / Mock-verified / Live-unverified`：初始完整正文确定性计数和首次真实买入成交后第 N 个 A 股交易日退出已落地；历史五事件工件的 `document_text=0`，且当前无新 strict Composite，需 opt-in 重采后才能 Live |
+| 单股日线技术策略 | `implemented / fixture-tested / Live-unverified`：主链和 35 个透明日线定义已实现；旧公网 revision 的技术 API run 已通过，最终 clean-SHA H5 技术旅程未完成 |
+| 单股日线事件策略 | `implemented / fixture-tested / local-real-data-verified / Live-unverified`：五类定期报告共有 26 条真实秒级观察，当前 producer 为 `composite:1f26…`、strict loader pin 为 `snapshot:4bd9…`；旧公网 revision 的事件 API run 已通过，最终 clean-SHA H5 事件旅程未完成 |
+| 定期报告正文词频 + 成交后持有期 | `implemented / fixture-tested / Mock-verified / Live-unverified`：初始完整正文确定性计数和首次真实买入成交后第 N 个 A 股交易日退出已落地；当前 `1f26…` 的 26 条 observation 均为 `document_text=0`，需 opt-in 重采后才能 Live |
 | 自然语言 | `implemented / fixture-tested / Live-unverified`：确定性规则解析器仍是默认快路；Vibe 风格的受限 JSON 候选 adapter 已落地并通过夹具，但正式模型 transport、bootstrap、审计持久化与 Live UI 尚未接通，不能宣称理解任意表达 |
-| H5 | `implemented / Mock-verified / Live-unverified`：唯一入口、策略确认、运行、结果和因果轨迹已实现；技术 Mock 四档、其他三条 390px 已验，真实 API 浏览器尚未运行 |
+| H5 | `implemented / Mock-verified / Live-unverified`：唯一入口、策略确认、运行、结果和因果轨迹已实现；149 个前端自动化测试已有 fresh 记录，最终 clean-SHA 公网 H5 的真实 API 浏览器验收尚未完成 |
 | 分钟数据层 | `implemented / fixture-tested / Live-unverified`：分钟模型、Choice 解码/探针、双价格发布器/读取器已落地；没有真实分钟快照 |
 | MACD 盘中策略链 | `decided / Live-unverified`：产品语义和默认执行政策已冻结；minute DSL、信号 runtime 与 matcher 未实现，前台禁用 |
 | 生产上线 | `production-unavailable`：数据授权、不可变存储、权限、审计、生产演练和 A 股全标的覆盖均不足 |
@@ -51,29 +51,29 @@ AI 在这里是规则编译器，不是收益预测器。用户确认后的策�
 
 1. 使用已经冻结的东方财富、两条策略、用户区间 2021-08-06 至 2026-08-06，以及预热/结算扩展区间 2021-02-07 至 2026-08-20；
 2. 由主线程形成 clean integration commit，并在该 SHA 上重跑全部代码与文档门禁；
-3. 待 Choice 连接恢复后重新生成 exact Event v2 + Composite v2，并通过当前 strict loader 与 `/ready`；
+3. 在 final clean SHA 下加载已经通过当前 strict loader 的 `composite:1f26…` / `snapshot:4bd9…` 并通过 `/ready`；
 4. 在该 SHA、同一份快照、同一 1,000,000 元资金和同一执行规则下，重跑一条技术策略和一条“秒级可得时间、日线撮合”的年度报告策略；
 5. 在 320/390/768/1280px H5 上完成真实 API 的输入、策略确认、运行、结果和逐笔因果验收；
 6. 再开始分钟 MACD、更多透明指标和更多真实事件覆盖。
 
 ### 0.4 本次交付的证据边界
 
-截至 2026-08-30 本次收口检查，Spec 不预填最终 Git SHA；可重放身份以交付后的 clean 40 位提交和运行证据为准：
+截至 2026-08-31 本次收口检查，Spec 不预填最终 Git SHA；可重放身份以交付后的 clean 40 位提交和运行证据为准：
 
 - strict readiness 对 dirty 或伪 revision 正确 fail closed；正式运行必须来自 clean 40 位 Git SHA；
 - 后端自动化、Ruff/format、Pyright、Catalog、schema export、Alembic 和 diff check 已有本轮 fresh 记录；精确测试数不在本 Spec 固化，最终提交后的同批重跑结果由交付报告记录；
-- 历史 `events:f22b9a…a1171fef` / `composite:1b3dbee…f5a6f053` 及其 expanded/user pins 已因公司行动 coverage 不完整被当前 strict loader 拒绝；这些 ID 只是迁移审计记录，不是当前有效身份；
-- 历史事件工件曾包含五类定期报告的 27 条秒级观察和 9 页/862 条公告查询 hash，但 `document_text=0`；这些历史数据事实不能替代新 strict Composite；
-- 单独 Choice 用户区间快照 `choice:a2eebf…a23b4f` 仍能被当前 loader pin 为 `snapshot:d3f5d91f…ef42d66`，但仅覆盖 2021-08-06 至 2026-08-06，不覆盖 expanded 区间且不包含事件；
-- clean SHA `0e9025779791d988f8451ef0ce68b4e2e10f008f` 下的新 exact 准备已通过 BaoStock 会话参考、东方财富公司行动和 Choice 登录，但不复权日线在有限重试后返回 `10002004 network connection closed when recv`，尚无新 Choice/Event/Composite、strict pins 或 run ID；
-- 前端 TypeScript、ESLint、Vitest、diff check 与 production build 已有本轮 fresh 记录；结果 UI 已展示 `timeQuality/timeSemantics` 和 edge/event/state/composite 有效期小白标签，Mock 旅程的响应式与无溢出证据已有记录，最终 clean-SHA Live 浏览器仍待重跑；
-- 当前没有最终 clean-SHA Live run ID、result hash 或真实 API 浏览器结果。
+- 当前真实五年 producer 为 `composite:1f26afb8b1223b656397abd5c99ce5a0ac9ed6593c3dbf7bdc46fb5a61bb9b8b`，当前代码的 strict loader pin 为 `snapshot:4bd9ae887af1cac159bf2d831313c73d839a313b11a746c015ea19fa3d5728cd`；本地 `.env` 已指向该 Composite；
+- 该工件覆盖 2021-02-07 至 2026-08-20，执行价、信号价和 session 各 1,340 行、公司行动 9 条，五类定期报告共有 26 条 `vendor_observed + validated` 秒级观察：年报 6、半年报 5、季报 10、业绩预告 3、业绩快报 2；并保留 9 页/862 条公告查询 hash；
+- 当前 26 条 observation 的 `document_text` 全部为 0；这不影响标题级五类事件回测，但正文词频策略仍必须 fail closed；
+- 较早公网 revision `4dc55904f38d4d26b6ed3e29fe8a729f529da66c` 上的技术 `run:b2778dc334cc4eb3b39ac9eab2efd54f` 与事件 `run:12fe45b6624249d5a6bba3458751cc98` 已再次通过，且引用 `1f26…/4bd9…`；它们只证明旧 revision 的公网 API，不替代当前工作树或老板实际使用的 H5 浏览器验收；
+- 前端 TypeScript、ESLint、149 个 Vitest、diff check 与 production build 已有本轮 fresh 记录；Mock 仅是开发期“界面预览”，最终交付入口必须使用真实 API，不得显示或回退为 Mock；
+- 当前没有最终 clean-SHA Live run ID、result hash 或真实 API 浏览器 Network/后端日志证据。
 
 这些状态区分的是代码、夹具、本地真实数据、Mock 与 Live 证据，不代表产品语义发生变化。新 exact 快照与 Live E2E 完成后再更新本节。
 
 ### 0.5 不允许出现的“完成假象”
 
-- Coverage Catalog 共登记 180 个 A 股单股指标/数据项：技术、价格行为、量能与流动性 130 项中只有 22 个 `stable`、86 个 `research_only`、22 个 `unavailable`，另有 50 个不可用的单股基本面/估值条目；目录登记不等于可回测。
+- Coverage Catalog 共登记 181 个 A 股单股指标/数据项：技术、价格行为、量能与流动性 131 项中只有 35 个 `stable`、74 个 `research_only`、22 个 `unavailable`，另有 50 个不可用的单股基本面/估值条目；目录登记不等于可回测。
 - Event Taxonomy 有 160 个事件代码，不等于 160 个事件已经有真实历史数据；当前 69 个代码路径也不等于 69 类都完成了 strict E2E。
 - Mock 页面跑通不等于真实 API、真实数据和真实撮合跑通。
 - 有 checksum 不等于原始数据已经进入不可变对象存储。
@@ -416,7 +416,9 @@ utterance + instrument_context + as_of_date
 → canonical JSON + SHA-256
 ```
 
-它不是能理解任意表达的大模型。22 个可执行指标定义不等于任意中文说法都能被识别；每个新增同义词、参数表达和组合语法都需要 golden case 和回归测试。
+它不是能理解任意表达的大模型。35 个可执行指标定义不等于任意中文说法都能被识别；每个新增同义词、参数表达和组合语法都需要 golden case 和回归测试。老板在真实入口里“随便说一句”是最终产品目标，但当前只允许落入受限 DSL 的合法候选执行，不能为了显得灵活而猜错规则。
+
+只输入“MACD”“RSI”这类裸指标时，买入、卖出方向都不完整，必须集中澄清一次，不能静默补成产品预设策略；只有补齐关键交易方向后才进入确认卡。这是当前 P0 真实入口验收项。
 
 方向语义检查曾因 `_has_unmodeled_direction` 缺失出现回归；当前工作树已补齐 helper，并通过编译矩阵和本轮全量 Python 门禁。当前状态是 `implemented / fixture-tested / Live-unverified`，仍需在最终 clean integration SHA 上复验。
 
@@ -452,6 +454,12 @@ Python、SQL、Pine Script 或任意代码；不能把 adapter 已存在写成�
 - `invalid`：参数、Catalog 或 Schema 校验失败。
 
 每个默认值都应写入 provenance，例如股票来自原话或页面上下文、开始日期来自默认五年、资金来自默认 1,000,000 元、指标参数来自 Catalog。
+
+#### 5.2.1 有主题但不构成策略的口语输入
+
+`"我讨厌特朗普"` 这类输入表达了主题和情绪，但没有给出可观测的事件、交易方向、入场、退出和时间范围，不是可执行策略。即使页面已经提供当前 A 股，系统也不得擅自把它改成“特朗普相关消息出现就买入/卖出”。
+
+目标交互是只集中澄清一次，询问用户想将哪个可观测事件转成什么买卖规则；澄清后仍必须完整落入已发布 Catalog、参数 Schema 和严格历史数据覆盖，否则明确拒绝回测。当前 Live 没有配置模型 transport，也没有“特朗普/关税”事件的已发布点时数据定义；本项状态为 `decided / unimplemented / Live-unavailable`，不影响当前回测纵切的发布验收。
 
 ### 5.3 DSL v1 约束
 
@@ -557,7 +565,7 @@ Python、SQL、Pine Script 或任意代码；不能把 adapter 已存在写成�
 
 编译器必须把“报告正文”“词项”“比较符/阈值”和“首次实际成交后的 A 股交易日数”分别写入受限策略对象，不能把标题、搜索摘要或报告期当成正文，也不能把“3 天”偷偷解释成自然日。词频与退出条件都进入 canonical JSON、provenance 和策略 hash。
 
-当前这条确定性自然语言、DSL、服务端校验、执行和策略确认卡已达到 `implemented / fixture-tested / Mock-verified`。Mock 只证明用户能看懂规则，不证明真实报告已经下载、词频已经在真实正文上计算，或订单真实成交；历史五事件 v2 工件的 `document_text=0`，且当前无有效 strict Composite，所以能力仍为 `Live-unverified`。
+当前这条确定性自然语言、DSL、服务端校验、执行和策略确认卡已达到 `implemented / fixture-tested / Mock-verified`。Mock 只证明用户能看懂规则，不证明真实报告已经下载、词频已经在真实正文上计算，或订单真实成交；当前 `composite:1f26…` 的 26 条 observation 均为 `document_text=0`，所以正文词频能力仍为 `Live-unverified`。
 
 ---
 
@@ -584,7 +592,7 @@ flowchart LR
 
 当前代码契约为 `ashare-lab.event-snapshot.v2` 与 `ashare-lab.composite-research-snapshot.v2`。旧 v1 composite 即使文件仍在磁盘，也不能被当前 strict 运行时接受。
 
-Registry 的正式选择语义是：提交端携带 `producer_snapshot_id` 或等价显式内容身份时，只校验并 pin 该目标；旧 v1 或其他坏条目不能毒化无关 v2，目标自身缺失、损坏或不满足 coverage 时仍 fail closed。无显式目标的全扫描继续对任一坏条目 fail closed。旧五事件 Composite 现正是“目标自身不满足最新公司行动 coverage”的反例：当前 loader 拒绝它，不因历史上曾 pin 成功而放行。
+Registry 的正式选择语义是：提交端携带 `producer_snapshot_id` 或等价显式内容身份时，只校验并 pin 该目标；旧 v1 或其他坏条目不能毒化无关 v2，目标自身缺失、损坏或不满足 coverage 时仍 fail closed。无显式目标的全扫描继续对任一坏条目 fail closed。当前有效 producer 为 `composite:1f26…`，由 strict loader pin 为 `snapshot:4bd9…`；较早 `composite:1b3d…` 是“目标自身不满足最新公司行动 coverage”的迁移反例，不因历史上曾 pin 成功而放行。
 
 | 文件 | 用途 | 关键原则 |
 |---|---|---|
@@ -625,7 +633,7 @@ eastmoney → ifind → rqdata → tushare
 | 来源 | 当前用途 | 状态 |
 |---|---|---|
 | Choice 个人研究账号 | 日线、交易日历、数据链探查 | Demo 可用；不是公司产品授权 |
-| 东方财富公开公告 | 历史公告、秒级供应商观测、原文证据 | 历史五事件本地切片可审计；当前 strict Event/Composite 待重新生成 |
+| 东方财富公开公告 | 历史公告、秒级供应商观测、原文证据 | 当前 `1f26…/4bd9…` 固定五类定期报告 26 条秒级观察与 9 页/862 条查询 hash；原始公告页字节尚未进入不可变存储 |
 | iFinD / RQData / Tushare 事件适配器 | 可插拔校验与降级 | 契约和测试已实现；本机无对应真实授权联网证据 |
 | `web_archive` | 非公告网页事件前向积累 | 可用于上线后新观察；不能历史倒填 |
 | 东方财富 Push2 资金流 | 研究探查 | `research_only + methodology_unknown`，不进入五年正式主链 |
@@ -691,7 +699,7 @@ OHLCV、session 和公司行动是正式运行的关键依赖，snapshot 用户�
 
 ## 7. 指标与事件算法
 
-### 7.1 A 股单股指标总账（130 项）
+### 7.1 A 股单股指标总账（131 项）
 
 本节只登记可绑定到当前 A 股单只标的的技术指标、价格行为、成交量与流动性数据；基本面估值和事件代码分别列账。
 
@@ -701,10 +709,10 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 
 | 家族 | 总数 | `stable` 可执行 | `research_only` 研究候选 | `unavailable` 当前不可用 |
 |---|---:|---:|---:|---:|
-| 技术指标 `technical` | 63 | 12 | 51 | 0 |
-| 价格行为 `price_action` | 37 | 4 | 33 | 0 |
+| 技术指标 `technical` | 63 | 24 | 39 | 0 |
+| 价格行为 `price_action` | 38 | 5 | 33 | 0 |
 | 量能与流动性 `volume_liquidity` | 30 | 6 | 2 | 22 |
-| **合计** | **130** | **22** | **86** | **22** |
+| **合计** | **131** | **35** | **74** | **22** |
 
 另外 50 个 `fundamental_valuation` 基本面/估值条目不计入本节；它们仍在 Coverage Catalog 中，但没有通过 PIT 数据门禁，不能借目录登记混入当前策略回测。事件信号另见 7.4。
 
@@ -715,20 +723,20 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 - `unavailable`：Catalog 尚未接受它成为研究运行候选，通常被 PIT 数据、授权、快照或上游序列阻塞；禁止用相似的日线字段伪造；
 - `rejected`：黑盒包装名、无法解释的评分或证据不足的数据，不进入 Catalog；只有取得原公式或合规的供应商原样历史序列后才能重新评审。
 
-当前 22/86/22 数量严格反映现有 Catalog 状态，不按本 Spec 自行改写。`technical.volume_profile` 是已知元数据例外：它当前仍计入 86 个 `research_only`，但真实价位分布缺分钟/逐笔输入，运营上按 P4 阻塞处理；若后续修正为 `unavailable`，必须同时更新生成器、Catalog、测试和本节数量，不能只改文档。
+当前 35/74/22 数量严格反映现有 Catalog 状态，不按本 Spec 自行改写。`technical.volume_profile` 是已知元数据例外：它当前仍计入 74 个 `research_only`，但真实价位分布缺分钟/逐笔输入，运营上按 P4 阻塞处理；若后续修正为 `unavailable`，必须同时更新生成器、Catalog、测试和本节数量，不能只改文档。
 
 三个“覆盖数”必须分别表达：
 
 | 层次 | 当前数量 | 准确含义 |
 |---|---:|---|
-| 权威运行时 | 22 | DSL 已可执行的 `stable` 定义 |
-| 确定性中文解析器 | 21 | 当前可由已验收中文表达产出；兼容旧语义的 `market.volume` 不再由新中文规则生成 |
+| 权威运行时 | 35 | DSL 已可执行的 `stable` 定义 |
+| 受限候选投影 | 35 | 可由确定性快路或受限 Candidate AST 映射；并不表示任意中文表达都已验收 |
 | 前端 Mock 技术策略生成 | 3 | 当前生成并演示 `technical.ma`、`technical.rsi`、`technical.macd` |
 | 前端 Mock 事件策略生成 | 1 | 当前只演示 `event.financial_results.annual_report`，并持续标记为 Mock |
 
-因此不能说“22 个指标已经在前端完整演示”，更不能说“130 项已接入”。
+因此不能说“35 个指标已经在前端完整演示”，更不能说“131 项已接入”。
 
-#### 7.1.2 22 个 `stable` 指标的共同契约
+#### 7.1.2 35 个 `stable` 指标的共同契约
 
 - 当前版本全部为 `1.0.0`，只支持 `1d + bar_close_confirmed`；指标事实时间为交易日 `15:00 Asia/Shanghai`，最早在下一可交易 session 使用日线开盘价代理尝试；
 - 价格类指标读取后复权 `signal_daily_ohlcv` 以保持序列连续；成交、费用、持仓和估值仍使用不复权执行价格；成交量和成交额原样复制，不做复权；
@@ -740,7 +748,7 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 - 下表的预热是默认参数下的 Catalog 安全值。提交时仍根据实际参数、交叉需求和复合条件动态重算；
 - 供应商技术序列只可用于黄金值对拍，不能静默覆盖本地透明定义。
 
-#### 7.1.3 22 个 `stable` 指标明细
+#### 7.1.3 35 个 `stable` 指标明细
 
 | 分组 | 定义 ID / 中文能力 | 公式与默认参数 | 可执行触发 | 默认预热与关键边界 |
 |---|---|---|---|---|
@@ -766,6 +774,19 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 | 量价 | `technical.obv` 能量潮 | 首个有效日以自身成交量初始化；涨加量、跌减量、平盘不变 | OBV 严格上升、严格下降 | 2 根；“上升”只比较上一有效日，不是 OBV 均线趋势 |
 | 量价 | `volume.price_divergence` 量价背离 | 左/右枢轴各 3；间隔 5—60；价格差 2%；OBV 差至少前 20 日均量的 1 倍 | 顶背离、底背离 | 84 根；只在右侧 K 线完成的确认日发信号，绝不回填枢轴日 |
 | 状态 | `technical.trend_regime` 阶段趋势 | SMA20/60、SMA20 的 5 日斜率、Wilder ADX/+DI/-DI(14)、ADX 25、连续确认 2 日、稳定期 120 日 | 上涨、下跌、震荡三态 | 121 根；是透明状态规则，不是强弱评分；状态持续时条件可每日为真 |
+| 波动 | `price.true_range` 真实波幅 | `max(high-low, abs(high-prev_close), abs(low-prev_close))` | 上穿/下穿阈值、持续高于/低于阈值 | 3 根；使用上一有效信号收盘，不是盘中实时值 |
+| 波动 | `technical.atr` ATR | Wilder 平滑真实波幅；`period=14` | 上穿/下穿阈值、持续高于/低于阈值 | 16 根；单位与价格一致 |
+| 波动 | `technical.natr` NATR | `100×ATR14/close` | 上穿/下穿阈值、持续高于/低于阈值 | 16 根；单位为百分点 |
+| 趋势 | `technical.adx` ADX | Wilder DMI/ADX；`period=14` | 上穿/下穿 0—100 阈值、持续高于/低于阈值 | 29 根；只描述趋势强度，不单独给方向 |
+| 趋势 | `technical.dmi` DMI | Wilder `+DI/-DI`；`period=14` | `+DI` 上穿/下穿 `-DI`、持续位于其上/下 | 29 根；方向来自两线关系 |
+| 乖离 | `technical.bias` BIAS | `100×(price/SMA20-1)`；默认 `close` | 上穿/下穿阈值、持续高于/低于阈值 | 21 根；单位为百分点 |
+| 动量 | `technical.roc` ROC | `100×(P_t/P_(t-12)-1)`；默认 `close` | 上穿/下穿阈值、持续高于/低于阈值 | 14 根；单位为百分点 |
+| 动量 | `technical.momentum` MOM | `P_t-P_(t-10)`；默认 `close` | 上穿/下穿阈值、持续高于/低于阈值 | 12 根；单位与价格一致 |
+| 摆动 | `technical.stochastic` 随机指标 | 14 日 `%K` 与 3 日 `%D` | K 金叉/死叉 D、K 高于/低于 0—100 阈值 | 17 根；零振幅窗口按确定性边界处理 |
+| 摆动 | `technical.williams_r` Williams %R | 14 日高低区间中的收盘位置 | 上穿/下穿阈值、持续高于/低于阈值 | 15 根；范围 -100—0 |
+| 通道 | `technical.donchian` Donchian | 前 20 个有效观察的最高/最低通道 | 价格上穿上轨、下穿下轨、持续在轨道外 | 22 根；基线不包含当日，避免自我比较 |
+| 波动 | `technical.return_stddev` 收益标准差 | 最近 20 个日收益的总体标准差；默认 `close` | 上穿/下穿阈值、持续高于/低于阈值 | 22 根；不年化 |
+| 波动 | `technical.historical_volatility` 历史波动率 | 最近 20 个日收益标准差乘 `sqrt(252)` | 上穿/下穿阈值、持续高于/低于阈值 | 22 根；年化 session 默认 252 |
 
 `technical.trend_regime` 的上涨态必须同时满足 `close > SMA20 > SMA60`、SMA20 相比 5 日前上升、`ADX >= 25`、`+DI > -DI` 并连续成立 2 个有效交易日；下跌态完全反向；其余完成预热的情况归为震荡。
 
@@ -780,20 +801,20 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 | 放量 / 缩量 | 推荐映射为 `volume.relative`：默认 RVOL `>=1.5` / `<=0.7` |
 | 连续或持续放量 | 默认连续 3 个有效交易日且 RVOL `>=1.2` |
 
-22 个运行时定义不等于任意中文都能调用：当前中文解析通常固定使用 `close`；`market.volume` 只保留旧策略兼容；“RSI 上涨”“20 日均线向上”“OBV 不下降”等未建模方向或否定表达必须 fail closed。每个定义后续还要维护“可执行 Trigger”和“已验收中文说法”两列，不能把 DSL 能力写成自然语言能力。
+35 个运行时定义不等于任意中文都能调用：当前中文解析通常固定使用 `close`；`market.volume` 只保留旧策略兼容；“RSI 上涨”“20 日均线向上”“OBV 不下降”等未建模方向或否定表达必须 fail closed。每个定义后续还要维护“可执行 Trigger”和“已验收中文说法”两列，不能把 DSL 能力写成自然语言能力。
 
-#### 7.1.5 86 个 `research_only` 指标完整清单
+#### 7.1.5 74 个 `research_only` 指标完整清单
 
 以下条目都是候选，不是当前回测能力。它们升级前必须冻结公开公式、初始化、参数、缺失值、触发器、动态预热和无未来数据测试；Catalog 中现有的摘要或参数不能直接当作产品承诺。
 
 | 子类 | 完整清单 |
 |---|---|
 | 均线扩展（8） | 加权均线 `technical.wma`；成交量加权均线 `technical.vwma`；双重 EMA `technical.dema`；三重 EMA `technical.tema`；Hull 均线 `technical.hma`；KAMA `technical.kama`；ALMA `technical.alma`；三角均线 `technical.trima` |
-| 动量/摆动/乖离（16） | PPO `technical.ppo`；PVO `technical.pvo`；TRIX `technical.trix`；ROC `technical.roc`；MOM `technical.momentum`；Stochastic `technical.stochastic`；Stoch RSI `technical.stoch_rsi`；Williams %R `technical.williams_r`；Ultimate Oscillator `technical.ultimate_oscillator`；AO `technical.awesome_oscillator`；CMO `technical.cmo`；DPO `technical.dpo`；Fisher Transform `technical.fisher_transform`；Connors RSI `technical.connors_rsi`；BIAS `technical.bias`；ARBR `technical.arbr` |
-| 通道/波动率（8） | Keltner `technical.keltner`；Donchian `technical.donchian`；ATR `technical.atr`；NATR `technical.natr`；收益标准差 `technical.return_stddev`；历史波动率 `technical.historical_volatility`；Parkinson `technical.parkinson_volatility`；Garman-Klass `technical.garman_klass_volatility` |
-| 趋势/结构（10） | ADX `technical.adx`；DMI `technical.dmi`；Aroon `technical.aroon`；SAR `technical.parabolic_sar`；Ichimoku `technical.ichimoku`；Supertrend `technical.supertrend`；Vortex `technical.vortex`；Mass Index `technical.mass_index`；Choppiness `technical.choppiness`；分形维数 `technical.fractal_dimension` |
+| 动量/摆动/乖离（11） | PPO `technical.ppo`；PVO `technical.pvo`；TRIX `technical.trix`；Stoch RSI `technical.stoch_rsi`；Ultimate Oscillator `technical.ultimate_oscillator`；AO `technical.awesome_oscillator`；CMO `technical.cmo`；DPO `technical.dpo`；Fisher Transform `technical.fisher_transform`；Connors RSI `technical.connors_rsi`；ARBR `technical.arbr` |
+| 通道/波动率（3） | Keltner `technical.keltner`；Parkinson `technical.parkinson_volatility`；Garman-Klass `technical.garman_klass_volatility` |
+| 趋势/结构（8） | Aroon `technical.aroon`；SAR `technical.parabolic_sar`；Ichimoku `technical.ichimoku`；Supertrend `technical.supertrend`；Vortex `technical.vortex`；Mass Index `technical.mass_index`；Choppiness `technical.choppiness`；分形维数 `technical.fractal_dimension` |
 | 量价衍生（9） | ADL `technical.ad_line`；CMF `technical.chaikin_money_flow`；MFI `technical.money_flow_index`；Force Index `technical.force_index`；EMV `technical.ease_of_movement`；NVI `technical.negative_volume_index`；PVI `technical.positive_volume_index`；Chaikin Oscillator `technical.chaikin_oscillator`；Volume Profile `technical.volume_profile` |
-| 价格与状态（10） | 对数收益 `price.log_return`；真实波幅 `price.true_range`；日内收益 `price.intraday_return`；收盘位置值 `price.close_location_value`；滚动新低 `price.rolling_low`；历史新高 `price.all_time_high`；历史新低 `price.all_time_low`；涨跌停状态 `price.limit_state`；一字涨跌停 `price.one_price_limit`；连续下跌 `price.consecutive_down` |
+| 价格与状态（10） | 对数收益 `price.log_return`；日内收益 `price.intraday_return`；收盘位置值 `price.close_location_value`；滚动新低 `price.rolling_low`；历史新高 `price.all_time_high`；历史新低 `price.all_time_low`；开盘缺口 `price.opening_gap`；涨跌停状态 `price.limit_state`；一字涨跌停 `price.one_price_limit`；连续下跌 `price.consecutive_down` |
 | K 线形态（23） | 十字星 `price.doji`；锤头 `price.hammer`；倒锤头 `price.inverted_hammer`；射击之星 `price.shooting_star`；上吊线 `price.hanging_man`；看涨/看跌吞没 `price.bullish_engulfing` / `price.bearish_engulfing`；看涨/看跌孕线 `price.bullish_harami` / `price.bearish_harami`；早晨/黄昏之星 `price.morning_star` / `price.evening_star`；光头光脚阳/阴线 `price.bullish_marubozu` / `price.bearish_marubozu`；纺锤线 `price.spinning_top`；刺透 `price.piercing_pattern`；乌云盖顶 `price.dark_cloud_cover`；红三兵 `price.three_white_soldiers`；三只乌鸦 `price.three_black_crows`；内包/外包线 `price.inside_bar` / `price.outside_bar`；NR4/NR7 `price.nr4` / `price.nr7`；宽幅 K 线 `price.wide_range_bar` |
 | 量能基础（2） | 日线 VWAP `market.vwap`；平均成交量 `volume.average` |
 
@@ -813,19 +834,19 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 
 #### 7.1.7 非 `stable` 指标的候选评审批次
 
-下表用于安排“先评审什么”，不是已经承诺的版本排期或待实现清单，也不改变 108 项当前的 `research_only` / `unavailable` 状态。任何一项只有单独通过发布门禁才能进入开发，不能整批一次性改成 `stable`。
+下表用于安排“先评审什么”，不是已经承诺的版本排期或待实现清单，也不改变 96 项当前的 `research_only` / `unavailable` 状态。任何一项只有单独通过发布门禁才能进入开发，不能整批一次性改成 `stable`。
 
 | 候选批次 | 数量与当前状态 | 范围 | 选择理由 |
 |---|---:|---|---|
-| P1：主要基于日线，可透明复算 | 43 = 33 `research_only` + 10 `unavailable` | 技术 20、价格 11、量能 12 | 大多不依赖新的供应商体系；涨跌停状态项先补准确 session/limit 数据，再评审公式、边界和无未来数据测试 |
+| P1：主要基于日线，可透明复算 | 31 = 21 `research_only` + 10 `unavailable` | 技术 8、价格 11、量能 12 | 大多不依赖新的供应商体系；涨跌停状态项先补准确 session/limit 数据，再评审公式、边界和无未来数据测试 |
 | P2：日线可算但重复度或定义争议较高 | 52 `research_only` | 技术 30、价格/K 线 22 | 先避免堆同质指标和模糊 K 线包装 |
 | P3：必须增加单股 PIT 参考数据 | 3 `unavailable` | 换手率、换手速度、自由流通股换手率 | 需要完整历史流通股本、可得时间、修订和授权快照 |
 | P4：必须有分钟、逐笔或 L2 | 10 = 1 `research_only` + 9 `unavailable` | `technical.volume_profile` 和 9 个单股流动性微观结构指标 | 当前日线无法还原，严禁近似冒充 |
 
 P1 的完整候选为：
 
-- 技术 20：`technical.atr`、`technical.natr`、`technical.adx`、`technical.dmi`、`technical.bias`、`technical.roc`、`technical.momentum`、`technical.stochastic`、`technical.stoch_rsi`、`technical.williams_r`、`technical.donchian`、`technical.keltner`、`technical.parabolic_sar`、`technical.supertrend`、`technical.vwma`、`technical.ad_line`、`technical.chaikin_money_flow`、`technical.money_flow_index`、`technical.historical_volatility`、`technical.return_stddev`；
-- 价格 11：`price.log_return`、`price.true_range`、`price.intraday_return`、`price.close_location_value`、`price.rolling_low`、`price.consecutive_down`、`price.limit_state`、`price.one_price_limit`、`price.nr4`、`price.nr7`、`price.wide_range_bar`；
+- 技术 8：`technical.stoch_rsi`、`technical.keltner`、`technical.parabolic_sar`、`technical.supertrend`、`technical.vwma`、`technical.ad_line`、`technical.chaikin_money_flow`、`technical.money_flow_index`；
+- 价格 11：`price.log_return`、`price.intraday_return`、`price.close_location_value`、`price.rolling_low`、`price.consecutive_down`、`price.opening_gap`、`price.limit_state`、`price.one_price_limit`、`price.nr4`、`price.nr7`、`price.wide_range_bar`；
 - 量能 12：`market.vwap`、`volume.average`、`amount.percentile`、`liquidity.amihud`、`liquidity.corwin_schultz_spread`、`liquidity.roll_spread`、`liquidity.zero_return_ratio`、`volume.dry_up`、`volume.percentile`、`volume.roc`、`volume.rolling_high`、`volume.zscore`。
 
 其中 `price.limit_state` / `price.one_price_limit` 还需要逐日准确涨跌停价、ST/板块制度和证券 session；`market.vwap` 必须先明确是当日 `amount/volume` 还是跨日 VWAP。它们不能仅凭“已有 OHLCV”直接发布。P2 是 7.1.5 中除 P1 外剩余的 30 个技术指标和 22 个价格/K 线指标；历史新高/新低必须有 IPO 至当前的完整历史。
@@ -836,7 +857,7 @@ P4 的 10 项是：`technical.volume_profile`、`liquidity.average_trade_size`�
 
 非 `stable` Coverage Catalog 目前只能做“名称与状态总账”，不能直接充当算法实现说明：
 
-- 51 个技术和 33 个价格候选大量沿用占位式公式摘要、统一 `lookback`、通用 `above/below/crosses` 触发和 20 根预热；这些对 SAR、Ichimoku、Supertrend 和 K 线形态并不构成可执行规格；
+- 39 个技术和 33 个价格候选大量沿用占位式公式摘要、统一 `lookback`、通用 `above/below/crosses` 触发和 20 根预热；这些对 SAR、Ichimoku、Supertrend 和 K 线形态并不构成可执行规格；
 - 10 个已有日线数据可推导的量能/流动性条目被统一写成“数据不足”，实际核心 blocker 是公式、边界、运行时和测试未冻结；
 - `technical.volume_profile` 缺分钟/逐笔数据依赖，`liquidity.free_float_turnover` 缺 PIT 流通股本依赖；
 - `price.limit_state` / `price.one_price_limit` 缺逐日证券状态和准确涨跌停制度依赖；
@@ -849,7 +870,7 @@ P4 的 10 项是：`technical.volume_profile`、`liquidity.average_trade_size`�
 
 | 数据主题 | 当前或候选路由 | 在本项目中的口径 |
 |---|---|---|
-| 单股日线 OHLCV/成交额 | Choice 快照；东方财富 Push2 日线仅为采集候选 | 当前 22 个稳定指标的主要输入仍是已校验快照；Push2 返回必须先通过身份、单位、session、公司行动和 coverage 校验并发布不可变快照，回测运行时不直接请求 API |
+| 单股日线 OHLCV/成交额 | Choice 快照；东方财富 Push2 日线仅为采集候选 | 当前 35 个稳定指标的主要输入仍是已校验快照；Push2 返回必须先通过身份、单位、session、公司行动和 coverage 校验并发布不可变快照，回测运行时不直接请求 API |
 | 换手率、流通股本、市值等 | Choice `cfc` 验证后的字段，或 Tushare `daily_basic` 候选 | 尚未形成全区间 PIT 快照与授权验收，当前不可用 |
 | 主力/资金流 | Tushare `moneyflow_dc`、`moneyflow`，以及独立 Push2 研究快照 | 不同供应商、不同方法学的序列禁止拼接；Push2 当前每行均不得进入历史回测 |
 | 筹码分布 | Tushare `cyq_perf` / `cyq_chips` 或 Choice 对应原样序列候选 | 需要供应商原样历史、首次可得时间和修订政策；不能由日线 OHLCV 反推 |
@@ -868,7 +889,7 @@ Choice 个人研究账号只用于 Demo 建链；生产必须换公司授权。�
 - 技术包装：蓝粉彩带、中期彩带、紧贴彩带、四合一、底部出击、操盘提醒；
 - 机构与筹码：机构新进、机构连续增持、筹码集中度、平均持仓成本、获利盘比例。
 
-其中估值擒龙、价值策略、业绩超预期、彼得林奇成长指标属于基本面/估值候选；扫雷、事件驱动、消息观测台属于事件产品包装；它们记录在这里是为了防止误仿造，不计入 130 项 A 股单股指标。
+其中估值擒龙、价值策略、业绩超预期、彼得林奇成长指标属于基本面/估值候选；扫雷、事件驱动、消息观测台属于事件产品包装；它们记录在这里是为了防止误仿造，不计入 131 项 A 股单股指标。
 
 处理原则只有三种：
 
@@ -878,11 +899,11 @@ Choice 个人研究账号只用于 Demo 建链；生产必须换公司授权。�
 
 每个新指标从候选升级为 `stable` 时，必须同时交付：definition ID/version、中文可用说法、公式与初始化、参数/关系/单位、输入数据与复权口径、`available_at`、默认和动态预热、触发器、停牌/零值/缺失值规则、黄金值对拍、前缀不变性、自然语言编译矩阵和结果解释文案；缺一项都不能发布。
 
-当前 22 个定义的主要工程证据位于 `tests/unit/signals/test_indicators.py`、`tests/unit/signals/test_runtime.py`、`tests/unit/strategy/test_catalog.py`、`tests/unit/application/test_backtest_submission.py` 和 `tests/unit/application/test_compile_strategy.py`。指标/Catalog/动态预热与中文编译矩阵已有定向夹具证据；本轮不沿用旧测试数量，最终仍须在 clean integration SHA 重跑，且这些测试不替代新 strict composite 下的 Live E2E。
+当前 35 个定义的主要工程证据位于 `tests/unit/signals/test_indicators.py`、`tests/unit/signals/test_runtime.py`、`tests/unit/strategy/test_catalog.py`、`tests/unit/application/test_backtest_submission.py` 和 `tests/unit/application/test_compile_strategy.py`。指标/Catalog/动态预热与中文编译矩阵已有定向夹具证据；本轮不沿用旧测试数量，最终仍须在 clean integration SHA 重跑，且这些测试不替代当前 strict composite 下的 Live E2E。
 
 ### 7.2 指标确认与预热
 
-- 当前 22 个定义全部是 `1d + bar_close_confirmed`；
+- 当前 35 个定义全部是 `1d + bar_close_confirmed`；
 - 交叉必须比较两个已经完成的指标点；
 - 停牌/零量日按各指标的显式规则处理，不用前值冒充新信号；
 - 枢轴背离只在右侧 K 线全部完成后的确认日产生，绝不回填到历史高低点；
@@ -970,11 +991,10 @@ Choice 个人研究账号只用于 Demo 建链；生产必须换公司授权。�
 |---|---:|---|---|
 | 事件分类词典 | 160 | `decided`：16 个家族的统一命名、状态与规划总表 | 否 |
 | Catalog / 编译 / 目录代码路径 | 69 | `implemented`：确定性规则可编译到受限 EventCondition，且存在适配/运行时代码路径 | 否；不是 69 类真实历史覆盖 |
-| 当前有效 strict 事件代码 | 0 | 没有通过最新公司行动 coverage 门禁的 Event/Composite | 否；新 exact 采集在 Choice 不复权日线读取时被 `10002004` 阻断 |
-| 历史定期报告事件代码 | 5 | 业绩预告、业绩快报、年报、半年报、季报；旧 Composite 当前已失效 | 否；只作迁移审计和新快照目标范围 |
-| 历史定期报告观察 | 27 | 东方财富 `vendor_observed + validated` 秒级观察；当时为 `local-real-data-verified` | 只能证明该股票、区间和旧数据切片，不能替代当前 strict coverage |
+| 当前有效 strict 事件代码 | 5 | `1f26…/4bd9…` 对业绩预告、业绩快报、年报、半年报、季报固定完整区间 coverage | 只能说本地真实数据已验证；final clean-SHA H5 尚未验收 |
+| 当前定期报告观察 | 26 | 东方财富 `vendor_observed + validated` 秒级观察；年报 6、半年报 5、季报 10、业绩预告 3、业绩快报 2 | 只能证明该股票、区间和数据切片，不能证明达到逐码样本门槛或策略有效 |
 
-> **口径护栏：**下表的 69 项是 Catalog、编译和目录代码路径，不是 69 类真实历史数据均已覆盖，也不表示 69 类都跑过 runtime 或 E2E。五类定期报告是本轮新 strict 快照的目标范围；当前没有有效的 strict Event/Composite。
+> **口径护栏：**下表的 69 项是 Catalog、编译和目录代码路径，不是 69 类真实历史数据均已覆盖，也不表示 69 类都跑过 runtime 或 E2E。当前 strict `1f26…/4bd9…` 只覆盖五类定期报告，其余 64 类不得冒充已有真实数据。
 
 69 项的构成为：5 个财务披露 + 1 个重大中标 + 1 个业务许可获批 + 62 个明确生命周期公告事件。它们共同使用 `EventCondition@1.0.0` 和 `published` 触发语义；这里只描述代码契约。
 
@@ -1167,18 +1187,18 @@ Choice 个人研究账号只用于 Demo 建链；生产必须换公司授权。�
 
 | 事件范围 | 数量 | Acquisition lane | 必需的区间来源与当前正式状态 |
 |---|---:|---|---|
-| 五类定期报告 | 5 | `announcement` | 采集、分类与 strict coverage 代码已实现；历史工件有 27 条秒级观察，但当前无有效 strict Composite |
+| 五类定期报告 | 5 | `announcement` | 当前 `1f26…/4bd9…` 固定 26 条真实秒级观察与完整区间查询证据；达到本地真实数据验证，不等于样本门槛或最终 H5 验收 |
 | 其余明确生命周期公告 | 62 | `announcement` | 代码路径存在；需逐事件码显式采集、完整区间覆盖与真实正反例 |
 | 重大中标 | 1 | `major_contract` | 代码路径存在；需东方财富区间查询 + 合格外部事实证据，不在当前 strict 快照 |
 | 业务许可获批 | 1 | `license_approval` | 代码路径存在；需监管源/`web_archive` 完整区间覆盖，当前不具备历史回测条件 |
 
 | 项目 | 当前事实 |
 |---|---|
-| 当前 strict Event/Composite | 无；新 exact 准备已登录 Choice，但不复权日线读取被 `10002004` 阻断 |
+| 当前 strict Event/Composite | `composite:1f26afb8b1223b656397abd5c99ce5a0ac9ed6593c3dbf7bdc46fb5a61bb9b8b`；当前代码 strict loader pin 为 `snapshot:4bd9ae887af1cac159bf2d831313c73d839a313b11a746c015ea19fa3d5728cd` |
 | 历史 Event/Composite | `events:f22b9a…a1171fef` / `composite:1b3dbee…f5a6f053` 及旧 pins；当前 loader 因公司行动 coverage 不完整而拒绝，只作迁移审计 |
-| 历史事件数据 | 五类定期报告；27 条东方财富 `vendor_observed + validated` 秒级观察；9 页/862 条公告查询 hash |
-| 历史正文数据 | `document_text=0`；需要正文的策略必须 fail closed，直到 opt-in 重采并发布新 v2 |
-| 当前可 pin 的本地真实数据 | 单独 Choice 用户区间 `choice:a2eebf…a23b4f` → `snapshot:d3f5d91f…ef42d66`；不覆盖 expanded 区间，不包含事件 |
+| 当前事件数据 | 五类定期报告；26 条东方财富 `vendor_observed + validated` 秒级观察：年报 6、半年报 5、季报 10、业绩预告 3、业绩快报 2；9 页/862 条公告查询 hash |
+| 当前正文数据 | `1f26…` 的 26 条 observation 均为 `document_text=0`；需要正文的策略必须 fail closed，直到 opt-in 重采并发布新 v2 |
+| 当前本地真实数据 | expanded 2021-02-07 至 2026-08-20；执行/信号/session 各 1,340 行、公司行动 9 条，运行时禁止供应商联网 |
 | 原始归档限制 | 原始公告列表响应字节尚未归档；当前本地快照目录也不随 Git integration commit 固化 |
 | 其他事件 | 必须显式请求并为每个事件码生成完整区间 acquisition coverage；成功查询 0 条可以成为零结果证明 |
 | 业务许可 | 需要监管源或 `web_archive` 的前向真实抓取与完整区间覆盖；当前日期级示例只会隔离 |
@@ -1189,7 +1209,7 @@ Choice 个人研究账号只用于 Demo 建链；生产必须换公司授权。�
 
 前端当前真实边界：
 
-1. `/capabilities` 将 69 个 Catalog 可编译事件、on-demand 按请求准备能力与当前 pinned strict snapshot 的逐码运行可用性分开；当前无事件 `pinned_snapshot` 可用能力，前端只能按后端明确返回的 on-demand 准备能力进入采集链。Mock 主演示仍只提供年度报告，始终标注演示数据；
+1. `/capabilities` 将 69 个 Catalog 可编译事件、on-demand 按请求准备能力与当前 pinned strict snapshot 的逐码运行可用性分开；当前只有五类定期报告可返回 `pinned_snapshot`，其余 64 类不得冒充已有真实数据。Mock 主演示仍只提供年度报告，并以“界面预览”与 `data-api-mode=mock` 隔离；老板验收入口必须是 Live，不能回退为 Mock；
 2. 前端没有事件选择器和属性编辑器；Catalog 名称不能绕过当前 pinned snapshot 的逐码覆盖门禁；
 3. 未来扩事件时必须按 strict snapshot 实际覆盖动态开放：没有该事件码覆盖证明时显示“当前数据未覆盖”，不能显示“区间内没有发生”；
 4. `capitalization_issue` 与 `rights_issue` 的自然语言阶段和公告采集阶段仍需统一或拆分，且公司行动账户侧遇到未支持经济条款会 fail closed。
@@ -1211,7 +1231,7 @@ Choice 个人研究账号只用于 Demo 建链；生产必须换公司授权。�
 
 策略效果另做统计功效分析，按去重、聚类或块 Bootstrap 后的有效独立样本 `n_eff` 判断：`<30` 只演示路径，30—89 只能探索性展示置信区间，`>=90` 才评估普通效应；要识别小效应通常需要约 200 个有效事件，并做时间外验证与多重试验修正。原始交易笔数不等于独立样本数。
 
-历史五类定期报告工件合计只有 27 条本地真实观察，各类分别为 3/2/6/5/11，连任何单一 event code 的 30 条正例 Demo 门槛都未达到；也没有基于当前执行政策和 clean SHA 的 10 条完整因果 E2E。它们只能作为历史本地数据切片，不是当前 strict 运行身份。旧 v1 的一笔事件交易只能作为迁移/历史贯通证据，不能写成当前 v2 已完成真实链路，更不能证明任何定期报告策略有效。
+当前五类定期报告工件合计只有 26 条本地真实观察，各类分别为 3/2/6/5/10（业绩预告、业绩快报、年报、半年报、季报），连任何单一 event code 的 30 条正例 Demo 门槛都未达到；也没有基于当前执行政策和 final clean SHA 的 10 条完整因果 E2E。它们是当前 strict 本地真实数据身份，但不能因此宣称任何一类事件已达到样本门槛或策略有效。旧 v1 的一笔事件交易只能作为迁移/历史贯通证据，不能写成当前 v2 已完成最终 Live 闭环。
 
 #### 7.4.8 初始完整定期报告正文词频
 
@@ -1475,19 +1495,47 @@ docs/                Spec、验收、ADR、数据契约和运行手册
 
 - 相同 RunManifest fingerprint 复用同一个 run；
 - queued 状态的重放可再次入队，修复入库成功但投递失败；
+- 客户端只对传输层断连、超时和可重试 5xx 做最多 3 次有限重试；认证、Schema、能力不足和其他业务错误不重试；
+- 创建/修订/提交类 POST 在重试期间必须复用稳定幂等键，不能每次生成新 run；
 - Worker 原子抢占 queued，重复投递不能重复执行；
 - Worker 重算策略、配置、manifest 和数据 checksum；
+- completed run 的幂等复用必须先重读 summary、series、trades 与证据字段并重算完整 bundle hash；缺页、身份漂移或 hash 不一致时拒绝 replay，不能只看数据库状态；
 - 结果 hash 覆盖摘要、曲线、活动、事件 provenance 和压力测试；
 - dirty revision、临时内容指纹和伪造 Git SHA 不能成为 strict 验收证据。
 
 ### 9.5 本地与部署形态
 
-- 本地：SQLite + thread queue；
-- 目标部署：PostgreSQL + Redis/RQ + Docker；
+#### 当前实际公网拓扑（2026-08-31）
+
+```mermaid
+flowchart LR
+    U["用户手机 / 电脑"] -->|"公网 HTTPS"| W["WorkBuddy 静态 H5"]
+    W -->|"CORS HTTPS API"| A["腾讯云 CloudBase FastAPI 容器"]
+    A --> S["镜像内只读 Composite v2 快照"]
+    A --> D["容器 /tmp SQLite + thread queue"]
+    C["Choice 日线"] -->|"离线采集并冻结"| S
+    E["东方财富公告与公司行动"] -->|"离线采集并冻结"| S
+```
+
+| 项目 | 当前实际值 | localhost / VPN 依赖 |
+|---|---|---|
+| 前端 | `https://59ac3319a9594be59fa3034fcae82a8f.app.workbuddy.link/`；当前线上仍是上一版 H5，新 UI 尚未重新发布 | 线上运行不依赖 localhost；服务设计不依赖 VPN |
+| API | `https://ashare-backtest-api-305722-11-1330091763.sh.run.tcloudbase.com`；FastAPI/Uvicorn，CORS 只开放上述 WorkBuddy origin | 线上运行不依赖 localhost；服务设计不依赖 VPN |
+| 回测数据 | 容器镜像内固定 `composite:1f26afb8…`，由 Choice 日线和东方财富公告/公司行动离线组成；运行时禁止联网和自动回退 | 不依赖 localhost/VPN；运行时不调用 Choice、Push2 或公告 API |
+| 数据库 / 队列 | 当前是容器 `/tmp/ashare-demo.db` 的 SQLite 与进程内 thread queue；容器重建后不保证保留 run | 不依赖 localhost/VPN，但不是持久化生产形态 |
+| 已创建的 PostgreSQL | CloudBase 环境已创建，但尚无证据表明当前 FastAPI 服务已连接它 | 当前不在请求链路中 |
+| 本机验收 | 当前开发机访问上述公网地址时使用 `127.0.0.1:1082` 代理 | 这是本机网络路由，不是线上服务依赖；最终大陆直连仍须关闭 VPN 实测 |
+
+当前公网 API 已返回 `/ready=ready`，但代码仍是较早公网 revision；本地最新 UI 与后端修复尚未形成 final clean SHA、重新部署和浏览器 Network/后端日志闭环，因此不得把上图写成最终老板验收完成。
+
+#### 目标生产形态
+
+- 本地开发：SQLite + thread queue；
+- 正式生产：PostgreSQL + Redis/RQ + Docker；
 - `/health` 只证明进程活着；
 - `/ready` 才证明当前配置所需数据、session、公司行动、事件、数据库、队列和代码身份满足启动门禁。
 
-当前有 Dockerfile、Compose、Alembic 和 CI 材料，但未完成生产机实演，不得写成已经生产部署。
+当前有 Dockerfile、Compose、Alembic 和 CI 材料；公网容器已部署，但 PostgreSQL/Redis、持久化备份恢复、final clean-SHA Live H5 仍未完成，不得写成生产可用。
 
 ---
 
@@ -1497,16 +1545,16 @@ docs/                Spec、验收、ADR、数据契约和运行手册
 |---|---|---|---|
 | 规则输入、标的身份与受限 DSL | `implemented / fixture-tested / Live-unverified` | 编译、修订、hash、Schema 与契约测试存在 | 最终 clean-SHA Live 双策略 |
 | Vibe 风格受限候选 adapter | `implemented / fixture-tested / Live-unverified` | 确定性快路、严格 JSON CandidateAst、最多 3 个候选、置信度门槛与一次集中澄清已落地 | 正式模型 transport、bootstrap、完整 provenance、真实 API/H5 |
-| 22 个日线指标 | `implemented / fixture-tested / Live-unverified` | 公式、黄金值、预热、停牌和前缀测试通过 | 最终技术 run |
+| 35 个日线指标 | `implemented / fixture-tested / Live-unverified` | 公式、黄金值、预热、停牌和前缀测试通过 | 最终 clean-SHA 技术 run 与真实常用问句验收 |
 | MOSS/pandas 指标 adapter | `implemented / fixture-tested / Live-unverified` | `IndicatorBackend` 已建立；EMA/MACD 通过显式容差与前缀门禁，RSI 因口径不兼容被排除 | 尚非运行时默认；其余指标需逐项对拍和版本化迁移 |
 | Vibe/mootdx 日线采集 adapter | `implemented / fixture-tested / Live-unverified` | 注入式 A 股日线 Protocol、session 完整性、单位转换和证据形状已用 fake client 验证 | `mootdx` 商业/数据条款待审，未安装、未联网、未发布不可变快照 |
 | AKShare-shaped Push2 日线采集 adapter | `implemented / fixture-tested / Live-unverified` | 固定 AKShare commit 的完整请求协议；A 股身份、raw hash、量纲、区间与 session/公司行动交叉校验已有夹具 | 直连被远端断开；无真实 batch、不可变 snapshot 或生产授权；AKShare 不作为运行依赖 |
-| 180 项覆盖目录 | `implemented` 的 Catalog | 仅 22 个单股指标为 `stable`；其他仍为 Catalog 的 `research_only/unavailable` | 不能称 180 项可执行 |
+| 181 项覆盖目录 | `implemented` 的 Catalog | 仅 35 个单股指标为 `stable`；其他仍为 Catalog 的 `research_only/unavailable` | 不能称 181 项可执行 |
 | 160 项事件 Taxonomy | `decided` | 统一分类词典 | 不代表代码或真实数据覆盖 |
-| 69 个事件代码路径 | `implemented / Live-unverified` | Catalog、编译、适配/运行时代码路径存在；`/capabilities` 另按 pinned snapshot coverage 逐码给出运行可用性 | 当前没有通过最新 loader 的事件 Composite；历史五类定期报告切片也不能称 69 类 E2E |
+| 69 个事件代码路径 | `implemented / Live-unverified` | Catalog、编译、适配/运行时代码路径存在；`/capabilities` 另按 pinned snapshot coverage 逐码给出运行可用性 | 当前 `1f26…/4bd9…` 只允许五类定期报告；不能称 69 类 E2E |
 | 四源事件观察与融合 | `implemented / fixture-tested / Live-unverified` | 固定优先级与隔离有测试；东方财富有本地真实观察 | iFinD/RQData/Tushare 缺授权实网验证 |
-| Event/Composite v2 | `implemented / fixture-tested / Live-unverified` | v2 内容寻址、coverage 与 loader 门禁已实现；历史五事件数据切片可审计 | 新 exact producer、expanded/user pins、clean-SHA `/ready` 与双 run |
-| 定期报告正文词频 + 持有期退出 | `implemented / fixture-tested / Mock-verified / Live-unverified` | 初始完整主文档门禁、NFKC/ASCII token/中文 literal 计数、首次真实成交后第 N 个 pinned A 股 session 退出；PDF 内嵌文本复用 `pypdfium2` | 历史五事件工件 `document_text=0`；需 opt-in 重采、新 v2 pins 与 Live API/H5 |
+| Event/Composite v2 | `implemented / fixture-tested / local-real-data-verified / Live-unverified` | 当前 `1f26…/4bd9…` 固定 expanded 区间、五类定期报告 26 条观察及 9 页/862 条查询证据 | final clean-SHA `/ready`、双 run 与 H5 浏览器闭环 |
+| 定期报告正文词频 + 持有期退出 | `implemented / fixture-tested / Mock-verified / Live-unverified` | 初始完整主文档门禁、NFKC/ASCII token/中文 literal 计数、首次真实成交后第 N 个 pinned A 股 session 退出；PDF 内嵌文本复用 `pypdfium2` | 当前 `1f26…` 的 `document_text=0`；需 opt-in 重采、新 v2 pins 与 Live API/H5 |
 | 日线撮合、公司行动和 funded benchmark | `implemented / fixture-tested / Live-unverified` | PIT 容量、T+1、费用、三阶段账本、整数股/非整手余额、配股默认不认购、同约束基准均有代码与测试 | 双 run 对账；配股认购路径与个人税制未闭环 |
 | 执行压力测试 | `implemented / fixture-tested / Live-unverified` | 候选场景按完整 config hash 去重且不选最优 | 最终双 run 中的真实报告 |
 | H5 | `implemented / fixture-tested / Mock-verified / Live-unverified` | 唯一入口；TypeScript/ESLint/Vitest/build 已有 fresh 记录；技术 Mock 四档，年报/unsupported/一次澄清为 390px | 四档真实 API 旅程 |
@@ -1522,14 +1570,21 @@ docs/                Spec、验收、ADR、数据契约和运行手册
 
 ### 10.1 中间运行证据，不是当前验收
 
-当前运行库留有两条使用 1,000,000 元资金的中间记录：
+较早公网 revision `4dc55904f38d4d26b6ed3e29fe8a729f529da66c` 已用当前 `1f26…/4bd9…` 数据身份再次通过两条真实 API run：
+
+| 类型 | Run ID | 证据边界 |
+|---|---|---|
+| MACD 技术策略 | `run:b2778dc334cc4eb3b39ac9eab2efd54f` | 真实公网 API、固定 producer/slice；不是当前 dirty 工作树或 final clean-SHA H5 浏览器证据 |
+| 年报事件 → MACD 死叉 | `run:12fe45b6624249d5a6bba3458751cc98` | 同上；只能证明该旧 revision 的 API 链路，不证明事件样本门槛或策略有效 |
+
+运行库还留有两条更早迁移记录：
 
 | 类型 | Run ID | 中间结果 | 为什么不能作为当前正式结果 |
 |---|---|---|---|
 | MACD 技术策略 | `run:d11c9425fd0b4d19a91efe171c7a3c16` | 总收益约 +51.79%，39 笔完整交易 | 产生于后续 Event/Composite v2 与当前 dirty 修改之前；producer composite 仍是旧 schema，当前门禁未全绿 |
 | 年报事件 → MACD 死叉 | `run:b11a00f5912945898c68142cc162e90a` | 总收益约 -6.62%，1 笔完整交易 | 同上，且一条事件/一笔交易只能证明旧链路曾贯通，不能证明事件覆盖或策略有效 |
 
-两条记录只用于迁移审计和定位回归。它们不能出现在对外结果、老板验收或“当前真实收益”中，也不能替代本 Spec 11.5 要求的已验证 v2 数据 + clean Git 双策略证据包。Mock 的 -2.54%、-39.23%、-58.19% 和 37 笔同样只是界面展示数据。
+更早两条记录只用于迁移审计和定位回归。上面的 4dc 公网 run 可以作为真实 API 历史证据，但四条都不能替代本 Spec 11.5 要求的 final clean Git + 公网 H5 双策略证据包。Mock 的 -2.54%、-39.23%、-58.19% 和 37 笔只是开发期界面预览数据，禁止出现在老板验收入口。
 
 ---
 
@@ -1542,22 +1597,24 @@ docs/                Spec、验收、ADR、数据契约和运行手册
 - [x] `implemented`：盘中能力未实现时选项禁用，不生成日线替代结果；
 - [ ] `Live-unverified`：技术和年度报告两个入口在四档宽度走完真实 API；
 - [ ] `Live-unverified`：真实 API 的失败、空状态和因果轨迹均说明原因与下一步。
+- [ ] `Live-unverified`：老板在公网 Live 入口使用常见、口语化但属于已发布 Catalog/事件范围的问句随机试用；页面不得显示“演示数据”、发出 Mock 请求或在真实 API 失败时静默回退。
 
 ### 11.2 策略与语言
 
 - [x] `implemented / fixture-tested`：用户原话、StrategySpec、provenance、revision、strategy hash 和受限执行契约有自动化覆盖；
 - [x] `implemented / fixture-tested`：不执行任意代码；同义词、参数、否定、歧义和复合条件有 golden set；
 - [x] `implemented / fixture-tested / Mock-verified`：完整表达不追问；缺买入或缺卖出分别只展示一次方向正确的集中澄清；盘中选项禁用；
+- [ ] `Live-unverified`：只输入“MACD”“RSI”等裸指标时，公网入口集中澄清一次买入和卖出方向，不静默补默认策略；这是老板随机试用前的 P0。
 - [x] `implemented / fixture-tested / Mock-verified`：可把“初始完整年报正文中某词超过阈值买入，首次实际买入成交后第 N 个 A 股交易日退出”还原为可编辑策略；Mock 不冒充真实正文或真实词频；
 - [ ] `Live-unverified`：Live 缺股票澄清写入 `instrument_context`，页面编辑值与服务端最终 StrategySpec 完全一致。
 
 ### 11.3 数据与时间
 
-- [ ] `Live-unverified`：重新生成并校验包含执行价、信号价、session、公司行动、canonical events、observations/quarantine 和全部 manifest 的 strict Composite v2；
-- [x] 历史数据记录（不属于当前运行身份）：五类定期报告工件曾保留 9 页/862 条查询 hash 和 27 条 strict 秒级观察；
+- [x] `local-real-data-verified`：当前 `composite:1f26…` 已包含执行价、信号价、session、公司行动、canonical events、observations/quarantine 和全部 manifest，并被当前 loader pin 为 `snapshot:4bd9…`；
+- [x] 当前数据记录：五类定期报告保留 9 页/862 条查询 hash 和 26 条 strict 秒级观察；
 - [x] `fixture-tested`：搜索、抓取时间、报告期和日期级字段不能进入历史信号；Worker 重算 checksum，篡改稳定失败；
 - [x] `fixture-tested`：正文只接受初始完整主文档；摘要/英文版/更正/修订/取消等版本排除，同报告期双初始完整候选 fail closed；计数固定 NFKC、ASCII token/中文 literal，无同义词和 OCR；
-- [ ] `Live-unverified`：历史五事件工件的 `document_text=0`；需要显式 opt-in 重采、发布新 Event/Composite v2 并在新 pins 上验证正文 hash 与抽取元数据；
+- [ ] `Live-unverified`：当前 `1f26…` 的 26 条 observation 均为 `document_text=0`；需要显式 opt-in 重采、发布新 Event/Composite v2 并在新 pins 上验证正文 hash 与抽取元数据；
 - [ ] `production-unavailable`：公告列表原始响应字节和结果尚未进入不可变存储；
 - [ ] `Live-unverified`：最终 run 记录精确 clean Git SHA、producer composite 与 strict slice 身份。
 
@@ -1575,7 +1632,7 @@ docs/                Spec、验收、ADR、数据契约和运行手册
 
 本轮只有同时具备以下内容才可写“最终验收通过”；当前全部为 `Live-unverified`：
 
-1. 新 strict composite ID、checksum、schema、覆盖证明与原始响应 hash；
+1. final clean SHA 下加载并验证 strict producer `1f26…`、slice `4bd9…`、checksum、schema、覆盖证明与原始响应 hash；若数据内容变化则必须产生新身份，不能改旧快照；
 2. 一条 1,000,000 元技术策略 run；
 3. 一条 1,000,000 元、事件可得时间精确到秒且仍按日线撮合的事件策略 run；
 4. 两条 run 的 strategy/catalog/config/data/engine/Git identity；
@@ -1601,11 +1658,11 @@ docs/                Spec、验收、ADR、数据契约和运行手册
 | 资金 | 1,000,000 元，100% allocation | 1,000,000 元，100% allocation |
 | 用户回测区间 | 2021-08-06 至 2026-08-06 | 2021-08-06 至 2026-08-06 |
 | expanded 数据区间 | 2021-02-07 至 2026-08-20，用于预热与尾部结算 | 同左 |
-| 本轮 strict producer | 待 Choice 连接恢复后重新生成 | 同左 |
-| expanded loader pin | 待新 Composite 通过当前 loader | 同左 |
-| 用户区间 loader pin | 待新 Composite 通过当前 loader | 同左 |
+| 本轮 strict producer | `composite:1f26afb8b1223b656397abd5c99ce5a0ac9ed6593c3dbf7bdc46fb5a61bb9b8b` | 同左 |
+| expanded loader pin | `snapshot:4bd9ae887af1cac159bf2d831313c73d839a313b11a746c015ea19fa3d5728cd` | 同左 |
+| 用户区间 loader pin | 由同一 producer 按固定用户区间切片；最终 run 必须记录实际 slice 身份 | 同左 |
 
-两个 canonical StrategySpec、strategy hash 和完整 execution config 必须保存为版本化验收 fixture。新 producer identity 与 strict loader pins 不得预填；必须在重新采集、通过当前 coverage 门禁后由内容生成，并在 clean integration SHA 下完成双策略验收。
+两个 canonical StrategySpec、strategy hash 和完整 execution config 必须保存为版本化验收 fixture。上表 producer 与 expanded pin 是已存在的本地真实数据身份，不是最终 Live 结果；必须在 clean integration SHA 下重新通过 `/ready` 并完成双策略和公网 H5 验收。
 
 首次新口径运行前不预设“应该赚钱”或手填收益数字。验收值是：相同 manifest 重跑得到相同 result hash，且该 hash schema 受支持并在状态、摘要、曲线、交易读取时对完整持久化 bundle 重算一致；指标、费用、公司行动和小型撮合黄金样例在各自容差内与独立实现一致。浏览器验收固定从 `/` 进入，显式 `VITE_USE_MOCK=false`，依次跑上述两句并核对 summary、series、trades、事件来源和运行证据。
 
@@ -1679,16 +1736,16 @@ docs/                Spec、验收、ADR、数据契约和运行手册
 
 - [x] `decided`：按 11.6 固定股票、两条策略、用户区间、expanded 数据区间、event code、公司行动和成交口径；
 - [x] `fixture-tested`：后端自动化与静态门禁已有本轮 fresh 记录；精确数字留待最终 clean integration SHA 同批刷新；
-- [ ] `Live-unverified`：重新生成并验证 Event v2、Composite v2、五类定期报告 acquisition coverage 与正式 loader pins；
+- [x] `local-real-data-verified`：`1f26…/4bd9…` 已通过 Event/Composite v2、五类定期报告 acquisition coverage 与正式 loader pin；
 - [x] `implemented / fixture-tested`：压力候选场景已按完整 config hash 去重；
 - [x] `implemented / Mock-verified`：无交易、数据不完整、事件时间不足、unsupported、取消等状态已有明确原因和恢复动作；
 - [x] `implemented / fixture-tested`：H5 接收规范 A 股 symbol，非法/非 A 股/后缀错配 fail closed；URL name 不作为可信身份；300059 只作 standalone 默认和 golden fixture；
 - [x] `implemented / fixture-tested`：日线事件采用 1 秒处理延迟、09:15 cutoff 和非精确日线开盘价代理；09:30 只作记录边界；
 - [x] `implemented / fixture-tested`：simple edge=3、event=1、state=1、composite=1 已进入执行与 UI 审计；event/composite 在安全失效重验完成前不跨日重试；
 - [x] `implemented / fixture-tested / Mock-verified`：初始完整定期报告正文确定性词频、首次实际成交后第 N 个 A 股交易日退出和策略确认卡已落地；
-- [ ] 若将正文策略纳入 Live 演示，显式 opt-in 重采完整报告并发布 `document_text > 0` 的新 Event/Composite v2；当前无可用 strict pins，必须继续 fail closed；
+- [ ] 若将正文策略纳入 Live 演示，显式 opt-in 重采完整报告并发布 `document_text > 0` 的新 Event/Composite v2；当前 `1f26…` 没有正文，必须继续 fail closed；
 - [ ] 完成代码、契约、Catalog、文档和数据生成器提交，得到 clean 40 位 Git SHA；
-- [ ] 用该 SHA 加载新生成且通过当前 loader 的 Composite v2，并通过 strict `/ready`；
+- [ ] 用该 SHA 加载当前已验证的 `1f26…/4bd9…`（或内容变化后生成的新身份），并通过 strict `/ready`；
 - [ ] 在同一 composite、同一 100 万和同一 funded benchmark 下重跑技术与年度报告双策略；
 - [ ] 以 `VITE_USE_MOCK=false` 完成 320/390/768/1280 真实 API H5 验收；
 - [ ] 让 result evidence 直接追溯 producer composite ID、切片 snapshot ID 和全部 checksum；
@@ -1699,7 +1756,7 @@ docs/                Spec、验收、ADR、数据契约和运行手册
 - 为已实现且夹具验证的 `deterministic_fast_path_llm_bounded_candidate.v1` adapter 接正式模型 transport、bootstrap、超时与完整 provenance；先影子双跑，服务端硬校验后才进入确认卡；
 - 以真实用户问句集扩同义词、参数、比较符、时间窗口和复合条件；
 - 建立解析准确率、未支持率、错误拒绝率和策略语义一致性评测；
-- 按 7.1.7 的 45 项日线候选池逐项评审，不承诺一次全部上线；优先 ATR/NATR、ADX/DMI、BIAS/ROC/MOM、Stochastic、Donchian/Keltner、VWMA、ADL/CMF/MFI，以及滚动新低、连跌、NR4/NR7、透明量能统计；
+- 按 7.1.7 的 31 项 P1 日线候选池逐项评审，不承诺一次全部上线；ATR/NATR、ADX/DMI、BIAS/ROC/MOM、Stochastic、Williams %R、Donchian、真实波幅、收益标准差和历史波动率已升级为 `stable`，下一批优先 Keltner、VWMA、ADL/CMF/MFI、滚动新低、连跌、NR4/NR7 与透明量能统计；
 - 每个被选中的指标逐项补公式、数据、warmup、黄金值、边界、前缀测试、中文 golden sentence 和解释文案，再从 research-only/unavailable 升级为 stable；
 - 供应商财务/估值/筹码/龙虎榜先验证字段、单位、修订与可得时间，再进 snapshot；
 - 不为了数量仿造特色包装指标。

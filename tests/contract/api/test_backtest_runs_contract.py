@@ -610,6 +610,23 @@ def test_submit_rejects_a_strategy_that_bypasses_the_published_catalog(
     assert submitter.configs == []
 
 
+def test_submit_rejects_a_share_code_suffix_mismatch(
+    configured_api: tuple[TestClient, FakeRunStore, FakeSubmitter],
+    strategy_payload: dict[str, Any],
+) -> None:
+    client, _store, submitter = configured_api
+    invalid_strategy = deepcopy(strategy_payload)
+    invalid_strategy["instrument"]["symbol"] = "300059.SH"
+
+    response = client.post(
+        "/api/v1/backtest-runs",
+        json={"strategy": invalid_strategy},
+    )
+
+    _assert_error(response, status_code=422, code="backtest_submission_invalid")
+    assert submitter.configs == []
+
+
 def _assert_error(response: Any, *, status_code: int, code: str) -> None:
     assert response.status_code == status_code
     payload: dict[str, Any] = response.json()

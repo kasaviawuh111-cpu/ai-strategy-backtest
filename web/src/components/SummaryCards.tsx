@@ -200,6 +200,19 @@ export function StrategyCard(
               {instrument.changePct ? <span className="up">{instrument.changePct}</span> : null}
             </span>
           ) : null}
+          {/*
+            成交设置是入口，不是一行说明。放在标题行右上角：想改的人找得到，
+            不想改的人一眼跳过，卡片不再为它多占一整行 48px。
+          */}
+          <button
+            type="button"
+            className={`exec-entry${isReadOnly ? ' off' : ''}`}
+            onClick={onOpenMore}
+            disabled={isReadOnly}
+          >
+            成交设置<span className="v">{executionSummary ?? '默认'}</span>
+            <Chevron />
+          </button>
         </div>
         <div className="erows">
           {strategy.rows.map((row) => (
@@ -220,16 +233,6 @@ export function StrategyCard(
           ))}
         </div>
       </div>
-      {/*
-        这行是入口，不是说明书。首页不解释涨跌停、滑点和次日可卖是什么——
-        确认策略的人不会在这里读三行规则。右侧只回答「现在是不是动过」，
-        想看具体规则或者想改，点进去改。
-      */}
-      <button type="button" className={`linkrow${isReadOnly ? ' off' : ''}`} onClick={onOpenMore} disabled={isReadOnly}>
-        <span className="k">成交设置</span>
-        <span className="v">{executionSummary ?? '默认'}</span>
-        <Chevron />
-      </button>
       <CardFoot settled={settled} actions={[
         {
           label: isStarting ? '正在创建任务' : isLocked ? '回测运行中' : canStart ? '开始回测' : '请检查设置',

@@ -1,6 +1,6 @@
 # SPARK：决策与问题台账
 
-> 最后更新：2026-08-30
+> 最后更新：2026-08-31
 > 用途：记录已经确认的决定、Demo 边界、上线阻塞项和后续问答。未确认事项只记录问题，不在这里替用户做决定。
 
 本文件统一使用以下证据层级：`decided`、`implemented`、`fixture-tested`、
@@ -31,10 +31,10 @@
 - “同期持有”政策固定为 `funded_buy_and_hold.same_execution_ledger.v1`：同样 100 万起始资金、同费用/滑点/整手/涨跌停/停牌/容量/公司行动，不再使用后复权价格首尾比。
 - 公司行动账本政策为 `cn.a_share.timeline_entitlement_receivable_settlement.date_only_cash_after_close_conservative.v2`：“登记日权益 → 除权日应收 → 派息/到账结算”。现金派息只有日期而没有日内到账时间时，派息日交易时段内继续作为应收，收盘后才转为可用现金，最早下一交易日可用于下单；不得声称有盘中到账证据。股份仍按明确到账/上市/可卖日期盘前处理。现金分红政策为 `gross_research_no_withholding.v1`，按税前总额入账且未模拟个人按持有期补税。账户股数始终为整数；不足 1 股权益尾数缺最终登记证据时 fail closed，不默认现金补偿；配股默认 `decline_no_external_cash.v1` 已实现，记录拒绝认购，不注入外部资金、不改变账户经济状态。
 - 公开公司行动派息日补链不能把 `BonusFinancing.PageAjax` 当作完整历史：实测它只保留最近窗口。较早现金分红必须以 `RPT_SHAREBONUS_DET` 为动作锚点，完整查询并哈希同一 `NOTICE_DATE` 的公告列表，在下载正文前按东方财富官方“分配方案实施”栏目筛候选，再以证券代码、报告期、登记日、除权日、税前每 10 股金额和正文唯一明确划款日做严格 join。无候选、字段冲突或双候选一律拒绝，绝不把除权日当派息日猜测。
-- Choice 日历与日线读取是幂等供应商查询；日历按自然年有界分为最多 366 天一批，并显式设置 `RECVtimeout=30`，避免五年窗口退化为 60 多次串行月请求。仅明确瞬态网络码 `10002004` 允许最多 3 次有限重试（0.25s、0.75s 退避）；登录只对 `10002002/10002004` 做相同上限的有限重试。最终成功结果仍按固定请求写入并哈希，实际区间、参数和尝试次数进入 request audit。权限、字段、数据、其他错误码和 SDK 异常不重试，不能用重试掩盖口径或授权错误。
+- Choice 日历与日线读取是幂等供应商查询；日历按自然年有界分为最多 366 天一批，并显式设置 `RECVtimeout=30`，避免五年窗口退化为 60 多次串行月请求。对外请求只在 transport 瞬态失败时最多重试 3 次；权限、字段、Schema、业务数据和非交通层异常不重试。POST 使用稳定幂等键，超时后重放不得创建第二条 draft/run；最终成功结果、实际区间、参数、尝试次数和请求身份进入 audit。
 - 严格 Demo 必须从 `composite_snapshot` 启动，结果展示秒级事件 provenance、snapshot 身份和精确 40 位 clean Git SHA；`local-demo`、dirty revision、临时内容指纹和日期级事件都不能作为验收证据。
 - 技术策略 fresh submission 也必须发布显式 `no_event_required` Event v2，再组成 Composite v2；这表示“本次策略不需要事件”，不是查询到了 0 条事件，也不赋予任何事件回测能力。Run evidence 分开保存 loader slice 的 `dataSchemaVersion=local-parquet.market-data.v3` 与 producer 的 `producerSnapshotSchemaVersion=ashare-lab.composite-research-snapshot.v2`，Worker 对两层身份分别重验。
-- Registry 显式选择按 `producer_snapshot_id`/内容身份只校验目标快照：mixed v1/v2 root 中旧 v1 不得毒化无关 v2，目标自身损坏或不满足当前 coverage 仍拒绝；无显式目标的全扫描继续对坏条目 fail closed。旧快照不删除，但也不因“曾经 pin 过”而保持当前有效；目前没有通过最新公司行动 coverage 门禁的事件 Composite。
+- Registry 显式选择按 `producer_snapshot_id`/内容身份只校验目标快照：mixed v1/v2 root 中旧 v1 不得毒化无关 v2，目标自身损坏或不满足当前 coverage 仍拒绝；无显式目标的全扫描继续对坏条目 fail closed。旧快照不删除，但也不因“曾经 pin 过”而保持当前有效；当前通过最新公司行动 coverage 门禁的事件 Composite 是 `composite:1f26…`，loader pin 为 `snapshot:4bd9…`。
 - MACD 盘中能力已冻结为两个独立产品：首版默认做“日线 MACD 盘中估算”，每根已完成 1 分钟 K 线都从上一交易日最终日线 EMA/DIF/DEA 状态重新估算当日值，分钟结束后产生临时信号并在下一可交易分钟开盘尝试成交；明确说“1 分钟/5 分钟 MACD”时才使用分钟周期 MACD。两者不得共用一个开关。默认容量使用上一已完成分钟成交量代理；午休顺延 13:00、尾盘顺延下一交易日；无 L2 时不模拟排队，一字涨停买入/一字跌停卖出不成交；同分钟收盘成交仅可作为未来明确标注的乐观研究选项。当前只有分钟数据模型、Choice `cmc` 解码/探针、双价格分钟快照发布器和本地读取器达到 `implemented / fixture-tested`；网络实测被 `10000017 overseas ip is restricted` 阻断，尚无真实分钟快照。完整分钟策略链仅为 `decided / Live-unverified`：DSL、盘中信号 runtime 和分钟撮合仍未实现，盘中选项必须显示“待接入”并禁止产生假结果。
 - 视觉继续沿用当前新版东方财富橙色语义、规整对话和渐进卡片；不回退旧红白主题，也不因工程修复整体换皮。Spec 只约束可信度、信息层级、交易因果轨迹、响应式和可访问性，不写死像素、字体、圆角或卡片尺寸。
 - Live 对缺股票、缺买入条件或缺卖出条件分别只集中澄清一次，并让用户编辑原话；缺入场不能误提示补退出。系统没有默认金叉买、死叉卖等交易策略。“MACD 收盘确认还是盘中触发”目前只完成 Mock 交互，盘中真实链路完成前不能泛化为 Live 能力。
@@ -54,11 +54,11 @@
 - 权限状态（2026-08-29）：用户当前暂时无法取得 RQData、iFinD 或 Wind 的新闻/资讯历史权限；本轮 Demo 不再要求用户继续申请、购买或提供这些账号。
 - 事件目录中的 16 个家族、160 个事件代码只是统一分类词典，用来避免以后重复命名和接口返工；它不是“160 个事件已经支持”，也不是本轮必须全部建设的产品承诺。
 - 当前 11 个家族、69 个事件项只达到 Catalog、自然语言编译、Adapter/统一事件运行时代码路径的 `implemented` 口径；它不表示 69 项逐项测试通过，也不表示 69 类都有真实历史样本、真实快照或 strict E2E。
-- `/capabilities` 必须把这 69 个 Catalog 可编译项、按需准备能力与当前 pinned strict snapshot 的逐码运行可用性分开；只有 acquisition coverage 合格的事件码才可返回 `backtest_available=true`。on-demand 尚无具体股票与区间快照时只能返回 `preparation_available=true + request_preparation`，随后按请求采集、校验并 pin；不得冒充当前快照已有数据。前端 Live 编译、修订和提交均动态读取该合同并 fail closed。当前没有可暴露为 `pinned_snapshot` 的事件 Composite；五类是本轮新快照的目标范围，不是永久硬编码白名单。
-- 历史本地工件曾覆盖年报、半年报、季报、业绩预告和业绩快报五类：东方财富 `300059.SZ` 在 2021-02-07 至 2026-08-20 共形成 27 条 `vendor_observed + validated` 秒级 canonical/observation，依次为 6、5、11、3、2 条。它只证明旧数据切片；其 Composite 的公司行动 coverage 不满足最新 strict loader，不再属于当前 `local-real-data-verified` 运行身份。
+- `/capabilities` 必须把这 69 个 Catalog 可编译项、按需准备能力与当前 pinned strict snapshot 的逐码运行可用性分开；只有 acquisition coverage 合格的事件码才可返回 `backtest_available=true`。on-demand 尚无具体股票与区间快照时只能返回 `preparation_available=true + request_preparation`，随后按请求采集、校验并 pin；不得冒充当前快照已有数据。前端 Live 编译、修订和提交均动态读取该合同并 fail closed。当前 `composite:1f26…` 对五类定期报告暴露 `pinned_snapshot`；其余 64 码不得冒充已有真实数据。
+- 当前本地真实工件覆盖年报、半年报、季报、业绩预告和业绩快报五类：东方财富 `300059.SZ` 在 2021-02-07 至 2026-08-20 共形成 26 条 `vendor_observed + validated` 秒级 canonical/observation，依次为 6、5、10、3、2 条；producer 为 `composite:1f26…`，loader pin 为 `snapshot:4bd9…`，状态为 `local-real-data-verified`。
 - `event_snapshot` / `composite_snapshot` 已升级到 v2，并按 event code 保存 acquisition coverage。东方财富公告类和重大中标必须证明指定股票、区间与事件代码查询成功；网页许可事件必须有 `web_archive` 区间覆盖。成功查询 0 条可以发布，缺少覆盖则 snapshot、composite 和 runtime 全部 fail closed。当前无法证明区间覆盖的 `license_approval` 已从默认 strict codes 移除。
-- 五类财务事件的历史本地工件保留了 2021-02-07 至 2026-08-20 的 9 页、862 条公告查询 hash；原始响应 bytes 尚未进入不可变归档，只有 hash 还不能独立重放页面内容。该记录不可被当作最新 strict coverage。
-- 历史五事件 Event 中 `document_text` 观察数为 0。正文词频虽达到 `implemented / fixture-tested / Mock-verified`，但真实策略仍是 `Live-unverified`；必须显式 opt-in 开启正文抽取、重新采集并发布新的内容寻址 Event v2 + Composite v2，不能用历史 pins 或标题/摘要代替正文。
+- 五类财务事件的当前本地工件保留了 2021-02-07 至 2026-08-20 的 9 页、862 条公告查询 hash；原始响应 bytes 尚未进入不可变归档，只有 hash 还不能独立重放页面内容。
+- 当前五事件 Event 中 `document_text` 观察数为 0。正文词频虽达到 `implemented / fixture-tested / Mock-verified`，但真实策略仍是 `Live-unverified`；必须显式 opt-in 开启正文抽取、重新采集并发布新的内容寻址 Event v2 + Composite v2，不能用标题/摘要代替正文。
 - 历史事件优先使用能够证明秒级首次公开时间的东方财富公开公告及其原始公告证据。最终重大中标或业务许可获批只有在上市公司公告链满足事件边界、实体映射和秒级时间门禁时，才可进入历史回测。
 - 不属于公告链的网页事件采用 `web_archive` 前向采集：只从采集器上线后使用真实 `collector_observed_at`，不得把今天抓到的旧网页倒填成历史首次可得时间。
 - RQData、iFinD、Wind 后续若获得授权，只作为数据覆盖增强和独立交叉验证来源；接入前仍需重新验证时间语义、历史修订、缓存和产品使用授权，不得事后在多源中挑最早时间。
@@ -66,7 +66,7 @@
 - 本轮按“现有可验证数据优先”推进三条能力：东方财富公告事实进入事件快照；基于冻结 OHLCV 的量价/阶段趋势由本地确定性算法计算；东方财富 Push2 主力资金只建设独立研究快照，不进入五年正式回测主链。
 - 东方财富公告不能无条件承诺“全历史都稳定到秒”。对 2017 年及以后，只有通过可信 `eiTime/display_time`、正文和区间覆盖门禁的记录才可进入 strict；2017 年以前存在 `eiTime` 历史回填风险，2016 段需更权威来源交叉证明。产品默认近 5 年；2017 年至今只在来源、时间质量和完整区间覆盖均合格时条件开放，不先承诺完整 10 年。合格记录使用 `max(ceil(display_time), credible_eiTime)` 作为保守供应商观测时间，并保留原始字段和 response hash；它不是交易所认证发布时间，也不能承诺到毫秒。
 - 公告分类采用“细栏目代码 + 标题确定性规则 + 正文证据 + 歧义隔离”。一级栏目、标题大模型自由判断或当前抓取时间都不能直接生成历史可交易事件；回购、增减持、重组等必须区分计划、进展、完成、终止等阶段。
-- `event.repurchase_capital.repurchase_change` 已完成“回购方案修订”细栏目映射、自然语言编译、查询覆盖/分页/0 结果夹具和 strict 代码门禁，状态仅为 `implemented / fixture-tested / Live-unverified`；当前没有通过最新 loader 的事件 Composite，更没有该码的新 live coverage，不得算入历史五类事件切片。
+- `event.repurchase_capital.repurchase_change` 已完成“回购方案修订”细栏目映射、自然语言编译、查询覆盖/分页/0 结果夹具和 strict 代码门禁，状态仅为 `implemented / fixture-tested / Live-unverified`；当前 `1f26…/4bd9…` 不含该码的 live coverage，不得算入五类定期报告切片。
 - 成交量和趋势标签不是交易所原始事实，必须公开公式并固定版本。正式首版采用前 N 个有效交易日、排除当日的量基准；背离只能在右侧 K 线完成后确认，禁止倒填到历史高低点。
 - “主力/超大/大/中/小单资金流”是东方财富 Choice 供应商计算结果，公开接口未披露完整算法、L2 依赖或版本，无法由 OHLCV 复算；任何展示必须标记 `research_only + methodology_unknown`，不得称为真实机构账户流向。
 
@@ -88,10 +88,10 @@
 - [x] 历史 session 改为 BaoStock `preclose/tradestatus/isST` 年度有界查询，并逐日与 Choice 前收/交易状态精确交叉校验；`instrument_sessions.parquet` 升级为 v2 数量规则。沪深主板、创业板、科创板进入按需准备链；北交所完整历史数据仍 fail closed。
 - [x] dirty worktree 上 fresh 发布 `300059.SZ` 五年 Choice 公司行动快照 `choice:a2eebf97b7c2ed4f2467ca6f91a3e95f48ed609c4026b440a16e7a11a4a23b4f`：2021-08-06 至 2026-08-06，执行/信号/session 各 1,211 行，公司行动 7 条（现金 5、送转 2），配股 0 条正向结果、拆股/缩股 0 个候选；前缀 969 行差异 0、`passed`。该项只为 `local-real-data-verified`，不是 clean-SHA Live E2E。
 - [x] `implemented / fixture-tested`：现金派息日的旧记录补链已接入东方财富实施公告，先完成列表分页证据再做 provider-column 正文筛选；报告期/登记日/除权日/现金额/明确支付日不一致、无候选和双候选均有 fail-closed 回归。真实五年 exact API 链仍必须以最终 fresh snapshot/run 证据单独验收。
-- [ ] 重新生成并由当前正式 loader/Pin 校验五类定期报告 Event v2 + Composite v2；历史 `events:f22b9a…a1171fef` / `composite:1b3dbee…f5a6f053` 及其 pins 因公司行动 coverage 不完整已对当前 strict 验收失效。
+- [x] `local-real-data-verified`：五类定期报告 Event/Composite v2 已生成并由当前 loader pin；producer `composite:1f26…`，slice `snapshot:4bd9…`，26 条秒级观察、9 页/862 条查询证据。本地 `.env` 已指向该 Composite。
 - [x] 正文词频 DSL、初始完整版本门禁、确定性计数和首次实际成交后 N 个 A 股交易日退出达到 `implemented / fixture-tested`；年度报告词频 + 3 个交易日退出的策略卡达到 `Mock-verified`，Mock 不证明真实正文或成交。
-- [ ] 为正文策略显式 opt-in 重采完整报告，发布 `document_text > 0` 的新 Event/Composite v2，并用新 pins 跑 strict API/H5；历史五事件工件的 `document_text=0`，当前无可用 strict pins，必须 fail closed。
-- [ ] 用同一 100 万资金、同一 funded benchmark 重跑至少一条技术策略和一条秒级事件策略，并持久化新 run。
+- [ ] 为正文策略显式 opt-in 重采完整报告，发布 `document_text > 0` 的新 Event/Composite v2，并用新 pins 跑 strict API/H5；当前 `1f26…` 的 26 条 observation 全部 `document_text=0`，必须 fail closed。
+- [ ] 在 final clean SHA 下用同一 100 万资金、同一 funded benchmark 重跑至少一条技术策略和一条秒级事件策略，并持久化新 run。较早 `4dc55904…` 的公网双 run 已再次通过，但不替代本项。
 - [x] 前台代码展示秒级 available_at、provider、time quality、snapshot/Git 身份和 signal → order → fill/unfilled 因果链；Mock 技术旅程覆盖 320/390/768/1280px，年报/不支持/一次澄清覆盖 390px，所有已执行旅程均无横向溢出且 console/page error 为 0。该项是 `Mock-verified`，不是 Live。
 - [x] 公告分类的否定、候选、传闻、错股票/错市场和生命周期误判已进入 `fixture-tested` 门禁；当前真实 snapshot 另证明 `300059.SZ` 五类财务事件数据，不据此声称其他事件或全 A 股已有真实覆盖。
 - [x] 为新量价信号完成前缀不变性、停牌零量、末端未确认背离和参数版本迁移测试。
@@ -174,7 +174,7 @@
 - 2026-08-30：采纳“拼好码”工程原则：通用指标、统计、日历、解析和图表优先复用成熟开源并以薄 adapter 隔离；A 股点时证据、交易规则、快照身份和因果轨迹保留领域自研。具体候选、许可证和双跑门禁见 `docs/reference/reuse-first.md`。
 - 2026-08-30：东方财富 Push2 日线采集按 AKShare 固定 commit `8e95744b…b53c55` 的 `stock_zh_a_hist` 请求协议补齐 `ut` 与 `f116`，AKShare 不进入运行依赖；本地仍增加 A 股身份、raw hash、量纲、session/公司行动与不可变快照门禁。当前直连在远端无响应后断开，只能称 `implemented / fixture-tested / Live-unverified`，不能用夹具冒充已取得真实 Push2 数据。
 - 2026-08-30：定期报告 PDF 内嵌文本抽取已实际复用 `pypdfium2`，项目只保留薄 adapter 和 A 股版本/点时门禁，不自行重写 PDF 引擎；当前不支持 OCR。Vibe-Trading、MOSS 与 AKShare 协议参考均已固定 commit/许可证并完成四个窄胶水 adapter：受限候选、MOSS/pandas 指标差分、Vibe/mootdx 日线接口、AKShare-shaped 东方财富 Push2 日线请求协议。它们均只到 `implemented / fixture-tested / Live-unverified`，没有整体导入上游运行时；正式模型未配置，指标未切默认，mootdx 因商业/数据条款待审而未安装或联网，Push2 直连被远端断开且无真实 batch/snapshot，不能把夹具写成 Live。
-- 2026-08-30：正文词频和成交后持有期链路完成代码、夹具与 Mock 收口；历史五事件 Event 的 `document_text` 为 0，且当前没有通过最新 loader 的事件 Composite，因此整体保持 `Live-unverified`，待 opt-in 重采并发布新内容身份后再验收。
+- 2026-08-30：正文词频和成交后持有期链路完成代码、夹具与 Mock 收口；当前 `composite:1f26…` 虽已通过 loader，但 26 条 observation 的 `document_text` 为 0，因此正文策略保持 `Live-unverified`，待 opt-in 重采并发布新内容身份后再验收。
 - 2026-08-30：按需数据链完成联网准备与 Worker 重放隔离：fresh submission 默认重采并发布内容寻址 snapshot；Worker 只按 manifest expected identity 本地 pin，禁止调用采集器。历史 session 使用 BaoStock 年度有界 `preclose/tradestatus/isST` 并与 Choice 逐日交叉校验；Choice `tradedates` 长区间按自然年有界分块。
 - 2026-08-30：fresh 发布 `choice:a2eebf97b7c2ed4f2467ca6f91a3e95f48ed609c4026b440a16e7a11a4a23b4f`，覆盖 `300059.SZ` 2021-08-06 至 2026-08-06：执行/信号/session 各 1,211 行，公司行动 7 条，前缀 969 行差异 0。东方财富对现金/送转/配股做正向覆盖，对拆股/缩股做完整股本历史负证明。证据来自 dirty worktree，只为 `local-real-data-verified`。
 - 2026-08-30：`instrument_sessions.parquet` 升级为 v2 的最低买入数量/递增单位；主板/创业板 100/100、科创板 200/1、北交所领域规则 100/1。按需真实链放行沪深主板、创业板、科创板；北交所仍因历史挂牌场所和跨源逐日 reference 未闭环而 fail closed。
@@ -192,3 +192,7 @@
 - 2026-08-29：22 个 stable 指标统一在信号运行时排除零成交量非交易观察，再按原日期回填 `None`；参数化测试验证插入停牌极端价格不会改变其余有效交易日的指标结果。现有固定东方财富 Choice/composite 快照实测没有零量或非交易行，因此该修复不改写当前 Demo 数据结果。
 - 2026-08-29：修正组合条件三值逻辑：`Any` 有一个真值即为真，`All` 有一个假值即为假，其余含未知时继续等待；新增 `FirstOfExit` 中另一条件尚在预热也不会压掉真实卖出信号的整链回归。
 - 2026-08-30：本次集成内容树已有后端自动化、Ruff/format、Pyright、Catalog、schema export、fresh SQLite Alembic 和 diff check 的 fresh 通过记录；前端 TypeScript、ESLint、Vitest 与 production build 也已通过本轮阶段门禁。精确测试数不在本文档固化；最终提交后的同批重跑结果与 clean SHA 由交付报告记录。
+- 2026-08-31：当前真实五年 producer 为 `composite:1f26afb8b1223b656397abd5c99ce5a0ac9ed6593c3dbf7bdc46fb5a61bb9b8b`，loader pin 为 `snapshot:4bd9ae887af1cac159bf2d831313c73d839a313b11a746c015ea19fa3d5728cd`；五类定期报告共 26 条秒级观察，本地 `.env` 已指向该 Composite。
+- 2026-08-31：较早公网 revision `4dc55904…` 的技术 `run:b2778dc334cc4eb3b39ac9eab2efd54f` 与事件 `run:12fe45b6624249d5a6bba3458751cc98` 已再次通过；这是 prior public API E2E，不是 final clean-SHA H5 验收。
+- 2026-08-31：裸指标、缺买入或缺卖出的方向澄清已补 P0 回归；完成态幂等 replay 必须重算完整 result bundle；对外请求只对 transport 瞬态失败最多重试 3 次，POST 使用稳定幂等键。前端本轮 fresh Vitest 为 149 个；最终 clean SHA 仍需同批重跑。
+- 2026-08-31：最终交付对象是老板在公网入口使用常见口语化问句随机试用，不是 Mock 展示。Mock 只保留为本地“界面预览”；交付构建必须 `VITE_USE_MOCK=false`、命中真实 HTTPS API/固定真实快照，接口失败不得静默回退，且需补齐浏览器 Network、API 响应与后端日志证据。

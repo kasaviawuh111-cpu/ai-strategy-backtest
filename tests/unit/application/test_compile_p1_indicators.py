@@ -158,9 +158,11 @@ async def test_p1_ambiguous_direction_or_threshold_fails_closed(
         )
     )
 
-    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
     assert outcome.strategy is None
-    assert outcome.diagnostic_code is not None and outcome.diagnostic_code.startswith("ambiguous_")
+    assert outcome.diagnostic_code == "indicator_trigger_requires_clarification"
+    assert outcome.clarification is not None
+    assert "不会替你补默认触发规则" in outcome.clarification
 
 
 @pytest.mark.asyncio

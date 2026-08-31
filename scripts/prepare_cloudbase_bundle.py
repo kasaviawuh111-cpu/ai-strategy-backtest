@@ -12,6 +12,11 @@ import subprocess
 from pathlib import Path
 from typing import cast
 
+from ashare_lab.adapters.market_data import (
+    LocalParquetMarketDataRepository,
+    MarketDataAdapterError,
+)
+
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _ROOT_FILES = ("pyproject.toml", "uv.lock", "README.md", "LICENSE")
@@ -62,6 +67,15 @@ def prepare_bundle(
 
     snapshot = repository / "var" / "snapshots" / "composite" / snapshot_digest
     manifest_sha256 = _validate_snapshot(snapshot, snapshot_digest)
+    try:
+        strict_snapshot = LocalParquetMarketDataRepository(
+            snapshot,
+            profile="composite_snapshot",
+        ).pin_strict_composite_snapshot()
+    except MarketDataAdapterError as exc:
+        raise BundleError("selected composite snapshot failed strict runtime validation") from exc
+    if strict_snapshot.producer_snapshot_id != f"composite:{snapshot_digest}":
+        raise BundleError("strict runtime pin returned a different producer snapshot")
     _validate_allowlisted_sources(repository)
 
     output.mkdir(parents=True, exist_ok=True)

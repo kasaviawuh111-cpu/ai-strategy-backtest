@@ -161,7 +161,7 @@ def run_technical(page: Page, base_url: str, width: int) -> None:
     open_initial(page, base_url)
     screenshot(page, f"initial-{width}.png")
     page.get_by_role("button", name="识别交易规则").click()
-    expect(page.get_by_text("已读懂你的规则", exact=True)).to_be_visible()
+    expect(page.get_by_text("已完成思考", exact=True)).to_be_visible()
     expect(page.get_by_text("MACD 金叉", exact=True).first).to_be_visible()
     expect(page.get_by_text("MACD 死叉", exact=True).first).to_be_visible()
     assert_home_hides_default_capital(page)
@@ -175,12 +175,12 @@ def run_technical(page: Page, base_url: str, width: int) -> None:
     page.get_by_role("button", name="开始回测", exact=True).click()
     page.wait_for_function(
         """() => document.body.innerText.includes('演示：') ||
-        document.body.innerText.includes('回测完成。')"""
+        document.body.innerText.includes('回测结果')"""
     )
     expect(page.get_by_text("下面显示的是后台返回的真实阶段。", exact=False)).to_have_count(0)
-    expect(page.get_by_text("回测完成。", exact=True)).to_be_visible(timeout=15_000)
-    expect(page.get_by_text("接下来：", exact=True)).to_be_visible()
-    for label in ("换个条件再跑", "设成盯盘提醒", "换只股票试试"):
+    expect(page.get_by_text("回测结果", exact=True)).to_be_visible(timeout=15_000)
+    expect(page.get_by_role("group", name="可选的下一步")).to_be_visible()
+    for label in ("换个条件再跑一次", "把这条设成盯盘提醒", "换只股票试试"):
         expect(page.get_by_role("button", name=label, exact=True)).to_be_visible()
     assert_mock_identity(page)
     assert_home_hides_default_capital(page)
@@ -250,11 +250,11 @@ def run_technical(page: Page, base_url: str, width: int) -> None:
 def run_event(page: Page, base_url: str) -> None:
     open_initial(page, base_url)
     page.get_by_role("button", name="年报发布后买入", exact=True).click()
-    expect(page.get_by_text("已读懂你的规则", exact=True)).to_be_visible()
+    expect(page.get_by_text("已完成思考", exact=True)).to_be_visible()
     expect(page.get_by_text("年度报告发布", exact=True).first).to_be_visible()
     expect(page.get_by_text("年度报告 参数", exact=True)).to_have_count(0)
     page.get_by_role("button", name="开始回测", exact=True).click()
-    expect(page.get_by_text("回测完成。", exact=True)).to_be_visible(timeout=15_000)
+    expect(page.get_by_text("回测结果", exact=True)).to_be_visible(timeout=15_000)
     assert_mock_identity(page)
     page.get_by_role("button", name="查看完整报告", exact=True).click()
     expect(page.get_by_role("heading", name="回测报告", exact=True)).to_be_visible()
@@ -302,10 +302,10 @@ def run_document_term_strategy(
     rule.fill(utterance)
     page.get_by_role("button", name="识别交易规则").click()
 
-    expect(page.get_by_text("已读懂你的规则", exact=True)).to_be_visible()
+    expect(page.get_by_text("已完成思考", exact=True)).to_be_visible()
     expect(page.get_by_text(entry_rule, exact=True).first).to_be_visible()
     expect(page.get_by_text(exit_rule, exact=True).first).to_be_visible()
-    # 说明保留在可展开的“已读懂你的规则”内; Mock 继续由内部模式字段隔离,
+    # 说明保留在可展开的“已完成思考”内; Mock 继续由内部模式字段隔离,
     # 因此这里验证内容存在即可, 不额外增加首页说明卡.
     expect(page.get_by_text(re.compile(r"没有读取真实年报正文，也没有真实计算词频"))).to_have_count(
         1
@@ -321,10 +321,10 @@ def run_document_term_strategy(
 
     screenshot(page, f"document-term-strategy-{width}.png")
     page.get_by_role("button", name="开始回测", exact=True).click()
-    expect(page.get_by_text("回测完成。", exact=True)).to_be_visible(timeout=15_000)
+    expect(page.get_by_text("回测结果", exact=True)).to_be_visible(timeout=15_000)
     expect(page.get_by_text("接下来可以继续验证", exact=True)).to_have_count(0)
-    expect(page.get_by_text("接下来：", exact=True)).to_be_visible()
-    for label in ("换个条件再跑", "设成盯盘提醒", "换只股票试试"):
+    expect(page.get_by_role("group", name="可选的下一步")).to_be_visible()
+    for label in ("换个条件再跑一次", "把这条设成盯盘提醒", "换只股票试试"):
         expect(page.get_by_role("button", name=label, exact=True)).to_be_visible()
     expect(page.get_by_text("MACD 金叉", exact=True)).to_have_count(0)
     expect(page.get_by_text("MACD 死叉", exact=True)).to_have_count(0)
@@ -335,8 +335,12 @@ def run_document_term_strategy(
     page.get_by_role("button", name="查看完整报告", exact=True).click()
     expect(page.get_by_role("heading", name="回测报告", exact=True)).to_be_visible()
     expect(page.get_by_role("heading", name="每笔委托", exact=True)).to_be_visible()
-    expect(page.get_by_role("button", name=re.compile("买入 年度报告正文词频条件确认 已成"))).to_be_visible()
-    expect(page.get_by_role("button", name=re.compile("卖出 持有 3 个交易日退出 已成"))).to_be_visible()
+    expect(
+        page.get_by_role("button", name=re.compile("买入 年度报告正文词频条件确认 已成"))
+    ).to_be_visible()
+    expect(
+        page.get_by_role("button", name=re.compile("卖出 持有 3 个交易日退出 已成"))
+    ).to_be_visible()
     expect(page.get_by_text("MACD 金叉确认", exact=True)).to_have_count(0)
     expect(page.get_by_text("MACD 死叉确认", exact=True)).to_have_count(0)
     assert_mock_identity(page)
@@ -382,14 +386,14 @@ def run_clarification(page: Page, base_url: str) -> None:
     rule = page.get_by_role("textbox", name="交易规则")
     rule.fill("MACD")
     page.get_by_role("button", name="识别交易规则").click()
-    expect(page.get_by_text("还差一项确认", exact=True)).to_be_visible()
+    expect(page.get_by_text("只问这一次", exact=True)).to_be_visible()
     expect(page.get_by_text("请一次写清什么时候买入、什么时候卖出。", exact=True)).to_be_visible()
     recommended = page.get_by_role("button", name=re.compile("补充完整规则"))
     expect(recommended).to_be_enabled()
     recommended.click()
     expect(rule).to_have_value("MACD")
     expect(rule).to_be_focused()
-    expect(page.get_by_text("已读懂你的规则", exact=True)).to_have_count(0)
+    expect(page.get_by_text("已完成思考", exact=True)).to_have_count(0)
     assert_mock_identity(page)
     assert_no_horizontal_overflow(page)
     screenshot(page, "clarification-390.png")

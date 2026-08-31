@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import type { BacktestActivity, CapabilitiesResponse, StrategyDraft } from './shared/api/types'
+import type {
+  BacktestActivity,
+  BacktestSignalEvidence,
+  CapabilitiesResponse,
+  StrategyDraft,
+} from './shared/api/types'
 import type { BacktestMetrics, RunEvidence } from './types'
 import {
   assessStrategyCapabilities,
@@ -71,7 +76,7 @@ const draft: StrategyDraft = {
   },
 }
 
-const evidence = {
+const evidence: BacktestSignalEvidence = {
   type: 'event_observation',
   id: 'AN202403141626765931',
   availableAt: '2024-03-14T20:57:33+08:00',
@@ -79,6 +84,7 @@ const evidence = {
   provider: 'eastmoney',
   sourceUrl: 'https://data.eastmoney.com/notices/detail/300059/AN202403141626765931.html',
   timeQuality: 'vendor_observed',
+  timestampPrecision: 'second',
   validationStatus: 'validated',
   rawResponseSha256: '5afd37736349f7adcf8104dc4e0c9e33339e680e371cef9dd2be2bb38cebcb43',
 }
@@ -293,6 +299,85 @@ describe('result view model', () => {
     expect(status.canRun).toBe(false)
     expect(status.events[0]).toMatchObject({
       catalog: 'available', preparable: 'unavailable', pinnedSnapshot: 'unavailable',
+    })
+  })
+
+  it('uses the independent document-text capability for a report word-count strategy', () => {
+    const documentTextDraft: StrategyDraft = {
+      ...draft,
+      sourceText: '东方财富年报正文中 AI 超过 5 次就买入，3 个交易日后卖出',
+      entry: {
+        operator: 'all',
+        conditions: [{
+          id: 'entry-event-text', kind: 'event',
+          eventCode: 'event.financial_results.annual_report',
+          label: '年度报告正文中“AI”完整词出现 > 5 次',
+          trigger: '按首次可获得时间确认', attributes: {},
+          documentText: {
+            metric_id: 'document.literal_mention_count', metric_version: '1.0.0',
+            term: 'AI', normalization: 'nfkc', match_mode: 'ascii_token',
+            case_sensitive: false, comparator: 'gt', value: 5,
+          },
+        }],
+      },
+      strategySpec: {
+        ...draft.strategySpec,
+        entry: {
+          type: 'event_condition', event_code: 'event.financial_results.annual_report',
+          definition_version: '1.0.0', trigger: 'published', attributes: {},
+          document_text: {
+            metric_id: 'document.literal_mention_count', metric_version: '1.0.0',
+            term: 'AI', normalization: 'nfkc', match_mode: 'ascii_token',
+            case_sensitive: false, comparator: 'gt', value: 5,
+          },
+        },
+      },
+    }
+    const capabilities: CapabilitiesResponse = {
+      markets: ['CN_A'], input_modes: ['natural_language_zh'],
+      strategy_scopes: ['single_instrument', 'long_only'], indicators: [{
+        indicator_id: 'technical.macd', definition_version: '1.0.0', status: 'stable',
+        display_name: 'MACD', description: 'MACD 指标', warmup_bars: 35,
+        timeframes: ['1d'], evaluation_modes: ['bar_close_confirmed'],
+        triggers: ['death_cross'], parameters: [], trigger_definitions: [],
+      }],
+      events: [{
+        event_code: 'event.financial_results.annual_report', definition_version: '1.0.0',
+        catalog_status: 'stable', status: 'available', backtest_available: true,
+        preparation_available: false, availability_scope: 'pinned_snapshot',
+        unavailable_reason: null, triggers: ['published'],
+        document_text: {
+          catalog_available: true, backtest_available: false, preparation_available: false,
+          availability_scope: 'unavailable', unavailable_reason: 'snapshot_coverage_unavailable',
+        },
+      }],
+      execution_policies: ['next_tradable_session_open'], event_catalog_status: 'published',
+      event_backtest_available: true, event_preparation_available: false,
+      event_availability_scope: 'pinned_snapshot', backtest_execution_available: true,
+      limits: { max_body_bytes: 16_384, max_utterance_characters: 2000,
+        max_instrument_context_characters: 32 },
+    }
+
+    const unavailable = assessStrategyCapabilities(documentTextDraft, capabilities, 'live')
+    expect(unavailable.canRun).toBe(false)
+    expect(unavailable.reason).toMatch(/完整正文/)
+    expect(unavailable.events[0]).toMatchObject({
+      catalog: 'available', preparable: 'unavailable', pinnedSnapshot: 'unavailable',
+    })
+
+    const preparable = assessStrategyCapabilities(documentTextDraft, {
+      ...capabilities,
+      events: [{
+        ...capabilities.events[0]!,
+        document_text: {
+          catalog_available: true, backtest_available: false, preparation_available: true,
+          availability_scope: 'request_preparation', unavailable_reason: 'preparation_required',
+        },
+      }],
+    }, 'live')
+    expect(preparable).toMatchObject({ canRun: true, needsPreparation: true })
+    expect(preparable.events[0]).toMatchObject({
+      catalog: 'available', preparable: 'conditional', pinnedSnapshot: 'unavailable',
     })
   })
 

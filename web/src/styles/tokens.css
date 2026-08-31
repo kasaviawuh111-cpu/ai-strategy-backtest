@@ -15,7 +15,10 @@
   --color-down: #00ab61;  /* 跌 */
   --color-warn: #ff9048;
   --color-info: #3b84ff;
-  --color-purple: #8b5cf6; /* 深度思考等能力标识 */
+  /* 宿主的能力色：深度思考胶囊、回答末尾的追问都用它。
+     取自妙想AI 线上截图（追问行文字与深度思考文字同色），比原来的 #8b5cf6 更偏蓝。 */
+  --color-purple: #4f46d6;
+  --color-purple-weak: rgba(79, 70, 214, 0.09);
 
   /* ---- 文字层级 ---- */
   --ink-1: #1a1a1a;
@@ -30,6 +33,7 @@
   --surface-sunken: rgba(170, 170, 185, 0.16);
   --hairline: rgba(166, 172, 184, 0.2);
   --hairline-2: rgba(166, 172, 184, 0.38);
+  --hairline-3: #e4e4e9; /* 宿主底栏与追问行的浅描边 */
 
   /* 对话页顶部渐变底（妙想AI） */
   --wash: linear-gradient(180deg, #fcedee 0%, #fef6f4 40%, #ffffff 100%);

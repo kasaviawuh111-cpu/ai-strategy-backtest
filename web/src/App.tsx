@@ -2,7 +2,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 
 import { FailureCard, ResultCard, RunningCard, StrategyCard } from './components/SummaryCards'
-import { Bubble, Chip, Chips, DayDivider, Say, ThinkBlock, Turn, Typing } from './components/primitives'
+import {
+  Bubble, Chip, Chips, DayDivider, FollowUp, FollowUps, Say, ThinkBlock, Turn, Typing,
+} from './components/primitives'
 import { ChainScreen, ExecutionDetailsScreen, ParamsScreen, ReportScreen } from './screens'
 import { apiMode, backtestApi, strategyApi, systemApi } from './shared/api/client'
 import { ApiError } from './shared/api/types'
@@ -70,6 +72,8 @@ type JourneySnapshot = {
 }
 
 const terminalStates = new Set(['succeeded', 'failed', 'cancelled'])
+/** 点「开始回测」时替用户发出的那句话；和按钮文案保持同一个词。 */
+const RUN_COMMAND = '开始回测'
 const cloneDraft = (draft: StrategyDraft): StrategyDraft => JSON.parse(JSON.stringify(draft)) as StrategyDraft
 
 type QuickIconName = 'thinking' | 'skill' | 'task' | 'timer' | 'stock'
@@ -134,7 +138,6 @@ const failureFor = (
       key: 'missing_stock',
       status: 'rejected',
       title: '缺少股票',
-      bubble: '还不知道要回测哪只股票。',
       reason: `请使用当前股票“${instrument.name} ${instrument.symbol}”，或返回股票页后再试。`,
       actions: [`使用${instrument.name}`, '修改规则'],
     }
@@ -147,7 +150,6 @@ const failureFor = (
       key: 'data_incomplete',
       status: 'partial',
       title: '已理解规则，但缺少报告正文数据',
-      bubble: '买卖条件已经还原，但当前还不能安全回测。',
       reason: `${errorMessage(error)} 系统不会用公告标题代替正文，也不会猜测词频。请补齐可校验的报告正文快照后再运行。`,
       actions: ['修改规则', '使用技术示例'],
       runId,
@@ -164,7 +166,6 @@ const failureFor = (
       key: 'unsupported_strategy',
       status: 'rejected',
       title: '无法识别这条策略',
-      bubble: '我还缺少能落到回测里的关键信息。',
       reason: '没有识别到当前可执行的技术指标或公告事件。请写清何时买入、何时卖出和回测区间，或先使用页面示例。',
       actions: ['修改规则', '使用技术示例'],
     }
@@ -178,7 +179,6 @@ const failureFor = (
       key: 'capability_unavailable',
       status: 'unavailable',
       title: '规则已识别，但当前能力不能运行',
-      bubble: '我保留了这条规则，不过现在还不能安全回测。',
       reason: `${errorMessage(error)} 你可以修改规则，或等固定快照与准备能力可用后再试。`,
       actions: ['修改规则', '使用技术示例'],
       runId,
@@ -193,7 +193,6 @@ const failureFor = (
       key: 'event_time_insufficient',
       status: 'unavailable',
       title: '事件时间质量不足',
-      bubble: '这条事件暂时不能用于正式回测。',
       reason: '目前无法证明事件在历史上的精确首次可得时间。为避免偷看未来数据，本次不触发交易。',
       actions: ['改用技术策略', '修改规则'],
       runId,
@@ -209,7 +208,6 @@ const failureFor = (
       key: 'data_incomplete',
       status: 'partial',
       title: '数据不完整',
-      bubble: '这次回测缺少可重放的数据。',
       reason: '当前快照没有覆盖这条策略需要的事件或行情，系统不会自动联网补数或放宽规则。',
       actions: ['改用技术策略', '修改规则'],
       runId,
@@ -220,7 +218,6 @@ const failureFor = (
     key: fallbackKey,
     status: 'rejected',
     title: fallbackTitle,
-    bubble: fallbackTitle,
     reason: errorMessage(error),
     actions: runId ? ['重新读取', '修改规则'] : ['修改规则', '使用技术示例'],
     runId,
@@ -290,7 +287,7 @@ export default function App({
   const queryClient = useQueryClient()
   const defaultUtterance = instrumentContextError
     ? ''
-    : `${instrument.name} MACD 金叉买入，死叉卖出，回测近 5 年`
+    : `${instrument.name} MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果`
   const [utterance, setUtterance] = useState(defaultUtterance)
   const [submittedText, setSubmittedText] = useState<string>()
   const [draft, setDraft] = useState<StrategyDraft>()
@@ -298,6 +295,11 @@ export default function App({
   const [clarification, setClarification] = useState<Clarification>()
   const [clarificationRecord, setClarificationRecord] = useState<ClarificationRecord>()
   const [runId, setRunId] = useState<string>()
+  /**
+   * 点「开始回测」是用户下的指令，所以它应该像用户说的一句话那样进入对话流，
+   * 而不是卡片自己悄悄变成运行态——否则回看会话时，这一步没有留下任何痕迹。
+   */
+  const [runCommand, setRunCommand] = useState<string>()
   const [journeyHistory, setJourneyHistory] = useState<JourneySnapshot[]>([])
   const [reportSnapshot, setReportSnapshot] = useState<JourneySnapshot>()
   const [stack, setStack] = useState<Overlay[]>([])
@@ -305,6 +307,7 @@ export default function App({
   const [chainTitle, setChainTitle] = useState('交易因果轨迹')
   const [chainNodes, setChainNodes] = useState<ReturnType<typeof buildChain>>([])
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
+  const [reminderSet, setReminderSet] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -322,6 +325,7 @@ export default function App({
     onSuccess: (outcome) => {
       setRunId(undefined)
       setStack([])
+      setRunCommand(undefined)
       if (outcome.status === 'needs_clarification') {
         setDraft(undefined)
         setBaselineDraft(undefined)
@@ -471,8 +475,10 @@ export default function App({
     setClarification(undefined)
     setClarificationRecord(undefined)
     setRunId(undefined)
+    setRunCommand(undefined)
     setSubmittedText(undefined)
     setReportSnapshot(undefined)
+    setReminderSet(false)
     setStack([])
     compileMutation.reset()
     startMutation.reset()
@@ -495,7 +501,9 @@ export default function App({
     setClarification(undefined)
     setClarificationRecord(undefined)
     setRunId(undefined)
+    setRunCommand(undefined)
     setReportSnapshot(undefined)
+    setReminderSet(false)
     setStack([])
     startMutation.reset()
     compileMutation.mutate({ text: normalized })
@@ -521,6 +529,7 @@ export default function App({
   const handleDraftChange = (nextDraft: StrategyDraft) => {
     setDraft(nextDraft)
     setRunId(undefined)
+    setRunCommand(undefined)
   }
 
   const openChain = (trade: TradeRow) => {
@@ -560,13 +569,12 @@ export default function App({
       key: 'missing_stock',
       status: 'rejected',
       title: '股票页上下文无效',
-      bubble: '还不知道要回测哪只 A 股。',
       reason: instrumentContextError,
       actions: ['返回股票页', '使用东方财富示例'],
     }
   } else if (compileMutation.isError) {
     failure = failureFor(compileMutation.error, 'compile_failed', '这句话暂时不能还原', instrument)
-  } else if (runQuery.isError) {
+  } else if (runQuery.isError && !resultReady) {
     failure = failureFor(runQuery.error, 'run_read_failed', '任务状态读取失败', instrument, runId)
   } else if (cancelMutation.isError) {
     failure = failureFor(cancelMutation.error, 'cancel_failed', '取消请求没有完成', instrument, runId)
@@ -580,7 +588,7 @@ export default function App({
     )
   } else if (runQuery.data?.state === 'cancelled') {
     failure = {
-      key: 'cancelled', status: 'implemented', title: '用户取消', bubble: '已经取消这次回测。',
+      key: 'cancelled', status: 'implemented', title: '用户取消',
       reason: '任务已停止。修改规则或参数后可以重新提交。', actions: ['修改规则'], runId,
     }
   } else if (resultError) {
@@ -668,7 +676,6 @@ export default function App({
                   ) : null}
                   <Turn>
                     <ThinkBlock
-                      title="已读懂你的规则"
                       meta="历史记录"
                       lines={[
                         `买入：${summarizeRule(journey.strategy.entryRule)}`,
@@ -676,7 +683,6 @@ export default function App({
                         '已提交并完成回测，这张卡片保留为不可编辑的记录',
                       ]}
                     />
-                    <Say>这条策略已经跑完：</Say>
                     <StrategyCard
                       instrument={journey.instrument}
                       strategy={journey.strategy}
@@ -686,8 +692,9 @@ export default function App({
                       settled="已完成回测"
                     />
                   </Turn>
+                  {/* 历史回合里也保留那句「开始回测」，往回翻时这一步不会凭空消失 */}
+                  <Turn mine><Bubble>{RUN_COMMAND}</Bubble></Turn>
                   <Turn>
-                    <Say>结果保留在这里，方便和下一次对比。</Say>
                     <ResultCard
                       metrics={journey.metrics}
                       series={journey.series}
@@ -705,10 +712,10 @@ export default function App({
                 <Turn>
                   <Say>
                     {instrumentContextError
-                      ? '当前股票信息无法识别。请返回股票页重新选择，或明确使用示例股票。'
+                      ? '未能识别当前股票。请返回股票页重新选择，或使用示例股票。'
                       : journeyHistory.length > 0
-                        ? <>上一次的结果保留在上面。直接说新的买卖规则，我接着往下还原。</>
-                        : <>你在看 <b>{instrument.name}</b>。说一句你的交易规则，我把它变成一条能检查、能回测的策略。</>}
+                        ? <>说出新的买卖规则，继续回测。</>
+                        : <><b>{instrument.name}</b> · 说出买卖规则，转成可回测的策略。</>}
                   </Say>
                   {/*
                     示例只在冷启动时出现：它的作用是告诉第一次来的人「一句话可以写成什么样」。
@@ -716,11 +723,13 @@ export default function App({
                     也像是在暗示「你应该选我给的这几个」。
                   */}
                   {!instrumentContextError && journeyHistory.length === 0 ? (
-                    <Chips>
-                      <Chip onClick={() => submitText(defaultUtterance)}>MACD 金叉买、死叉卖</Chip>
-                      <Chip onClick={() => submitText(`${instrument.name}年度报告发布后买入，MACD 死叉卖出，回测近 5 年`)}>年报发布后买入</Chip>
-                      <Chip onClick={() => submitText(`${instrument.name} RSI 低于 30 买入，高于 70 卖出，回测近 5 年`)}>RSI 超卖买、超买卖</Chip>
-                    </Chips>
+                    <div className="home-examples" aria-label="策略示例">
+                      <Chips>
+                        <Chip onClick={() => submitText(defaultUtterance)}>趋势共振</Chip>
+                        <Chip onClick={() => submitText(`${instrument.name} RSI 低于 30 我就买入，RSI 高于 70 我就卖出，看看近 5 年`)}>超跌反转</Chip>
+                        <Chip onClick={() => submitText(`${instrument.name} 业绩预告发布且 MACD 金叉时买入，MACD 死叉卖出，回测近 5 年`)}>业绩预告 + MACD</Chip>
+                      </Chips>
+                    </div>
                   ) : null}
                 </Turn>
               ) : <Turn mine><Bubble>{submittedText}</Bubble></Turn>}
@@ -728,8 +737,7 @@ export default function App({
               {clarificationRecord ? (
                 <>
                   <Turn>
-                    <ThinkBlock title="已确认规则" meta="回答已记录"
-                      lines={[clarificationRecord.reason]} />
+                    <ThinkBlock meta="回答已记录" lines={[clarificationRecord.reason]} />
                     <Say>{clarificationRecord.question}</Say>
                   </Turn>
                   <Turn mine><Bubble>{clarificationRecord.answer}</Bubble></Turn>
@@ -740,7 +748,7 @@ export default function App({
 
               {clarification && !clarificationRecord && !compileMutation.isPending ? (
                 <Turn>
-                  <ThinkBlock title="还差一项确认" meta="只问这一次" lines={[
+                  <ThinkBlock meta="只问这一次" lines={[
                     clarification.reason,
                     ...(clarification.recognized ?? []).map((item) => `${item.label}：${item.value}`),
                   ]} />
@@ -759,7 +767,6 @@ export default function App({
               {draft && uiStrategy ? (
                 <Turn>
                   <ThinkBlock
-                    title="已读懂你的规则"
                     meta={`用到 ${conditionCount} 个条件`}
                     lines={[
                       `买入：${summarizeRule(strategyRuleTrees(draft).entry)}`,
@@ -774,13 +781,16 @@ export default function App({
                         : []),
                     ]}
                   />
-                  <Say>规则已经还原成下面这条策略，确认后再跑：</Say>
                   <StrategyCard
                     instrument={toUiInstrument(draft)}
                     strategy={uiStrategy}
                     onEditRow={openParams}
                     onOpenMore={() => openParams('more')}
-                    onRun={() => canStart && startMutation.mutate(draft)}
+                    onRun={() => {
+                      if (!canStart) return
+                      setRunCommand(RUN_COMMAND)
+                      startMutation.mutate(draft)
+                    }}
                     isStarting={startMutation.isPending}
                     isLocked={isJourneyLocked}
                     settled={runQuery.data?.state === 'succeeded' ? '已完成回测' : undefined}
@@ -789,42 +799,52 @@ export default function App({
                     error={startMutation.isError ? errorMessage(startMutation.error) : undefined}
                     executionSummary={summarizeExecution(draft, baselineDraft)}
                   />
-                  <p className="hint">要改哪一条，点开对应那行；也可以在下面直接说一句话重写。</p>
                 </Turn>
               ) : null}
 
+              {runCommand ? <Turn mine><Bubble>{runCommand}</Bubble></Turn> : null}
+
+              {startMutation.isPending ? <Turn><Typing>正在提交回测</Typing></Turn> : null}
+
               {runQuery.data && !terminalStates.has(runQuery.data.state) ? (
                 <Turn>
-                  <Say>{apiMode === 'mock'
-                    ? '这是界面预览，下面的阶段和结果来自固定样例。'
-                    : '任务已提交。下面显示后台返回的处理阶段。'}</Say>
                   <RunningCard phase={runQuery.data.state} onCancel={() => cancelMutation.mutate()}
                     isCancelling={cancelMutation.isPending} isMock={apiMode === 'mock'} />
                 </Turn>
               ) : null}
 
-              {resultLoading ? <Turn><Say>计算已结束，正在读取报告数据。</Say><Typing /></Turn> : null}
+              {resultLoading ? <Turn><Typing>正在读取结果</Typing></Turn> : null}
 
               {draft && metrics && evidence && resultReady ? (
                 <>
                   <Turn>
-                    <Say>回测完成。</Say>
                     <ResultCard metrics={metrics} series={series} marks={marks}
                       onOpenReport={openCurrentReport} />
                   </Turn>
                   <Turn>
-                    <Say>接下来：</Say>
-                    <Chips>
-                      <Chip onClick={startNewCondition}>换个条件再跑</Chip>
-                      <Chip onClick={() => undefined} title="功能入口，暂未接入提醒服务">设成盯盘提醒</Chip>
-                      <Chip onClick={() => undefined} title="功能入口，暂未接入股票切换">换只股票试试</Chip>
-                    </Chips>
+                    <FollowUps>
+                      <FollowUp lead onClick={startNewCondition}>换个条件再跑一次</FollowUp>
+                      <FollowUp onClick={() => setReminderSet(true)} disabled={reminderSet}
+                        title="当前只记录在本页，尚未连接通知服务">
+                        {reminderSet ? '已设置盯盘提醒' : '把这条设成盯盘提醒'}
+                      </FollowUp>
+                      <FollowUp onClick={() => undefined} title="功能入口，暂未接入股票切换">
+                        换只股票试试
+                      </FollowUp>
+                    </FollowUps>
+                    {reminderSet ? (
+                      <p className="hint reminder-status" role="status" aria-live="polite">
+                        <b>盯盘提醒已设置</b><br />
+                        <span>当前只记录在本页，尚未连接通知服务</span>
+                      </p>
+                    ) : null}
                   </Turn>
                 </>
               ) : null}
 
-              {failure ? <Turn><Say>{failure.bubble}</Say>
-                <FailureCard state={failure} onAction={handleFailureAction} /></Turn> : null}
+              {failure ? (
+                <Turn><FailureCard state={failure} onAction={handleFailureAction} /></Turn>
+              ) : null}
             </div>
           </div>
 
@@ -850,23 +870,38 @@ export default function App({
 
             <div className="dock-row">
               <form className="inputbar" onSubmit={(event) => { event.preventDefault(); submitText(utterance) }}>
-                <button type="button" className="ib" aria-label="键盘输入" onClick={() => inputRef.current?.focus()}>
-                  <svg width="20" height="16" viewBox="0 0 20 16" fill="none" aria-hidden="true">
-                    <rect x="1" y="2.5" width="18" height="11" rx="3" stroke="currentColor" strokeWidth="1.4" />
-                    <path d="M5 6.5h.01M8 6.5h.01M11 6.5h.01M14 6.5h.01M6 10h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                {/* 左侧语音、右侧「+」都是宿主自带的入口，本原型不接管，保持禁用 */}
+                <button type="button" className="ib" aria-label="语音输入（宿主能力，本原型未接入）" disabled>
+                  <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
+                    <circle cx="11" cy="11" r="9.2" stroke="currentColor" strokeWidth="1.5" />
+                    <path d="M7 9.4v3.2M9.4 7.6v6.8M11.8 6.6v8.8M14.2 9v4" stroke="currentColor"
+                      strokeWidth="1.4" strokeLinecap="round" />
                   </svg>
                 </button>
                 <input ref={inputRef} className="strategy-input" aria-label="交易规则" value={utterance}
                   disabled={isJourneyLocked || Boolean(instrumentContextError)} onChange={(event) => setUtterance(event.target.value)}
                   placeholder="说出什么时候买、什么时候卖" />
-                <button type="submit" className="send" aria-label="识别交易规则"
-                  disabled={isJourneyLocked || compileMutation.isPending || Boolean(instrumentContextError) || !utterance.trim()}>
-                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-                    <path d="M4 9h10M10 5l4 4-4 4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
+                {utterance.trim() ? (
+                  <button type="submit" className="send" aria-label="识别交易规则"
+                    disabled={isJourneyLocked || compileMutation.isPending || Boolean(instrumentContextError)}>
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                      <path d="M4 9h10M10 5l4 4-4 4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                ) : (
+                  <button type="button" className="plus" aria-label="更多输入方式（宿主能力，本原型未接入）" disabled>
+                    <svg width="28" height="28" viewBox="0 0 26 26" fill="none" aria-hidden="true">
+                      <circle cx="13" cy="13" r="11.2" stroke="currentColor" strokeWidth="1.5" />
+                      <path d="M13 8.2v9.6M8.2 13h9.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                )}
               </form>
               <button type="button" className="trade-fab" aria-label="宿主买卖入口，本原型不执行交易" disabled>
+                <svg className="arc" viewBox="0 0 50 50" fill="none" aria-hidden="true">
+                  <path d="M11 32a16 16 0 0 0 8 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                  <path d="M39 18a16 16 0 0 0-8-7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                </svg>
                 <span className="b">买</span><span className="s">卖</span>
               </button>
             </div>

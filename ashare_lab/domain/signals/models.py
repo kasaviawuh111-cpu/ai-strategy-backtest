@@ -20,6 +20,7 @@ class SignalEvidence:
     provider: str | None = None
     source_url: str | None = None
     time_quality: str | None = None
+    timestamp_precision: str | None = None
     validation_status: str | None = None
     raw_response_sha256: str | None = None
 
@@ -31,6 +32,8 @@ class SignalEvidence:
             value = getattr(self, field_name)
             if value is not None and not value.strip():
                 raise DomainValidationError(f"signal evidence {field_name} cannot be blank")
+        if self.timestamp_precision not in {None, "second", "minute", "hour", "date"}:
+            raise DomainValidationError("signal evidence timestamp_precision is invalid")
         if self.raw_response_sha256 is not None:
             digest = self.raw_response_sha256.removeprefix("sha256:")
             if len(digest) != 64 or any(

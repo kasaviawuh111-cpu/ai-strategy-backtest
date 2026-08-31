@@ -77,6 +77,40 @@ def test_event_is_aligned_to_its_session_without_changing_available_at() -> None
     assert aligned[0] is not None and not aligned[0].triggered
 
 
+def test_eastmoney_seconds_precision_requires_frozen_matching_provenance() -> None:
+    bars = make_bars([10, 11, 12])
+    pre_open = datetime(2024, 1, 3, 8, 0, 33, tzinfo=SHANGHAI)
+    attributes = {
+        "provider": "eastmoney",
+        "validation_status": "validated",
+        "time_quality": "exact",
+        "timing_policy": "max(ceil(display_time), credible_eitime)",
+        "raw_ei_time": "2024-01-03 08:00:33:000",
+        "conservative_available_at": pre_open.isoformat(),
+    }
+
+    aligned = SignalRuntime().evaluate_aligned(
+        condition(),
+        bars,
+        (event("event-second", pre_open, attributes=attributes),),
+    )
+
+    fact = aligned[1]
+    assert fact is not None and fact.triggered
+    assert fact.evidence[0].timestamp_precision == "second"
+
+    mismatched = dict(attributes)
+    mismatched["conservative_available_at"] = pre_open.replace(second=34).isoformat()
+    rejected = SignalRuntime().evaluate_aligned(
+        condition(),
+        bars,
+        (event("event-unproven", pre_open, attributes=mismatched),),
+    )
+    rejected_fact = rejected[1]
+    assert rejected_fact is not None and rejected_fact.triggered
+    assert rejected_fact.evidence[0].timestamp_precision is None
+
+
 def test_later_revision_does_not_retrigger_an_event_already_seen() -> None:
     bars = make_bars([10, 11, 12, 13])
     first_time = datetime(2024, 1, 3, 8, 0, tzinfo=SHANGHAI)

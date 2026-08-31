@@ -132,32 +132,69 @@ export const DayDivider = ({ children }: { children: ReactNode }) => (
   <div className="daydiv">{children}</div>
 );
 
-export const Typing = () => (
+export const Typing = ({ children = '正在识别规则' }: { children?: ReactNode }) => (
   <Say>
-    正在读你的规则
+    {children}
     <span className="dots" aria-hidden><i /><i /><i /></span>
   </Say>
 );
 
 /**
  * 妙想AI 的「已完成思考」折叠头。
- * 默认只占一行：标题 + 「N个可执行指标 · M轮编译」；展开才显示过程。
+ *
+ * 标题在宿主里是固定的一句「已完成思考」，不随场景换说法：换说法会让人以为
+ * 这是几种不同的东西。场景差异放在右侧 meta（历史记录 / 用到 N 个条件 / 只问这一次），
+ * 所以标题不开放成 props，避免以后又长出第二种叫法。
  * SPEC 4.3：不循环播放虚假的长思考过程。
  */
+export const THINK_TITLE = '已完成思考';
+
 export function ThinkBlock(
-  { title, meta, lines }: { title: string; meta: string; lines: string[] },
+  { meta, lines }: { meta: string; lines: string[] },
 ) {
   const [open, setOpen] = useState(false);
   return (
     <div className="thinkwrap">
       <button type="button" className="think" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <b>{title}</b>
+        <b>{THINK_TITLE}</b>
         <span className="meta">{meta}<Caret /></span>
       </button>
       <div className={`thinkbody${open ? ' open' : ''}`}>
         {lines.map((l) => <div key={l}>{l}</div>)}
       </div>
     </div>
+  );
+}
+
+/**
+ * 回答末尾的「可选下一步」。
+ *
+ * 对齐妙想AI 宿主：整行、左文案右箭头，第一条是建议先做的那件事（浅紫底）。
+ * 之前用的是主色 chip——主色在这一页属于「开始回测」那种要用户下决心的动作，
+ * 拿来标可选项会互相抢，而且三个橙色小标签堆在结果卡下面像广告位。
+ */
+export const FollowUps = ({ children }: { children: ReactNode }) => (
+  <div className="followups" role="group" aria-label="可选的下一步">{children}</div>
+);
+
+export function FollowUp(
+  { children, onClick, disabled, lead, title }:
+  { children: ReactNode; onClick?: () => void; disabled?: boolean; lead?: boolean; title?: string },
+) {
+  return (
+    <button
+      type="button"
+      className={`followup${lead ? ' followup--lead' : ''}`}
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+    >
+      <span className="fu-text">{children}</span>
+      <svg className="fu-arrow" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+        <path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" stroke="currentColor" strokeWidth="1.5"
+          strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
   );
 }
 

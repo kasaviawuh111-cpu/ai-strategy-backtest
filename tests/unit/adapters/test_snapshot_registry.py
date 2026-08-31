@@ -28,6 +28,7 @@ from ashare_lab.adapters.market_data import (
     compose_choice_event_snapshot,
 )
 from ashare_lab.adapters.market_data.choice_snapshot import (
+    MIXED_CORPORATE_ACTION_COVERAGE_SCOPE,
     STRICT_CORPORATE_ACTION_CATEGORIES,
     STRICT_CORPORATE_ACTION_COVERAGE_SCOPE,
     TECHNICAL_SNAPSHOT_SCHEMA_VERSION,
@@ -63,6 +64,7 @@ def _publish_choice(
     variant: int = 0,
     captured_at: datetime = datetime(2025, 2, 1, tzinfo=UTC),
     source: DailySnapshotSource | None = None,
+    corporate_action_coverage: dict[str, object] | None = None,
 ) -> Path:
     trading_dates = _weekdays(start, end)
     execution_rows: list[dict[str, object]] = []
@@ -127,7 +129,8 @@ def _publish_choice(
         sdk_archive_sha256="a" * 64,
         session_reference_rows=session_rows,
         session_reference_coverage=session_coverage,
-        corporate_action_coverage={
+        corporate_action_coverage=corporate_action_coverage
+        or {
             "status": "complete",
             "querySucceeded": True,
             "provider": "fixture-source",
@@ -154,6 +157,7 @@ def _publish_composite(
     variant: int = 0,
     composed_minute: int | None = None,
     source: DailySnapshotSource | None = None,
+    corporate_action_coverage: dict[str, object] | None = None,
 ) -> Path:
     choice_path = _publish_choice(
         source_root / "choice",
@@ -162,6 +166,7 @@ def _publish_composite(
         end=end,
         variant=variant,
         source=source,
+        corporate_action_coverage=corporate_action_coverage,
     )
     if no_event_required:
         events = build_no_event_required_snapshot(
@@ -233,6 +238,65 @@ def _push2_source() -> DailySnapshotSource:
         previous_close_cross_check="Push2 implied preclose equals BaoStock per date",
         limitations=("public undocumented endpoint; not authorized for production use",),
     )
+
+
+def _mixed_corporate_action_coverage(start: date, end: date) -> dict[str, object]:
+    counts = {category: 0 for category in STRICT_CORPORATE_ACTION_CATEGORIES}
+    positive_categories = ("cash_dividend", "rights_issue", "share_distribution")
+    negative_categories = ("reverse_split", "stock_split")
+    return {
+        "status": "complete_mixed_mode",
+        "querySucceeded": True,
+        "provider": "Eastmoney public datasets",
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "rowCount": 0,
+        "zeroResult": True,
+        "rawResponseSha256": "d" * 64,
+        "coverageScope": MIXED_CORPORATE_ACTION_COVERAGE_SCOPE,
+        "positiveCapableCategories": list(positive_categories),
+        "negativeProofCategories": list(negative_categories),
+        "unsupportedCategories": [],
+        "strictEligibleUnderCurrentChoiceValidator": True,
+        "categoryActionCounts": counts,
+        "categoryCoverage": {
+            **{
+                category: {
+                    "status": "complete_for_filtered_dataset",
+                    "dataset": f"fixture-{category}",
+                    "zeroResult": True,
+                }
+                for category in positive_categories
+            },
+            **{
+                category: {
+                    "status": "complete",
+                    "categoryMode": "complete_negative_proof",
+                    "dataset": "RPT_F10_EH_EQUITY",
+                    "candidateCount": 0,
+                    "zeroResult": True,
+                }
+                for category in negative_categories
+            },
+        },
+        "negativeSplitProof": {
+            "categoryMode": "complete_negative_proof",
+            "queryScope": "full_instrument_history_filtered_locally_to_requested_interval",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "scannedRows": 1,
+            "recognizedChangeReasons": ["高管股份变动"],
+            "stockSplitCandidates": 0,
+            "reverseSplitCandidates": 0,
+            "sourceDataset": "RPT_F10_EH_EQUITY",
+            "sourceDeclaredCount": 1,
+            "sourceTotalPages": 1,
+            "sourceRawResponseSha256": "e" * 64,
+        },
+        "timeQuality": "date_only_conservative",
+        "dateAvailabilityPolicy": "implementation notice date @ 15:00:00 Asia/Shanghai",
+        "hashSemantics": "fixture raw body aggregate",
+    }
 
 
 def _weekdays(start: date, end: date) -> list[date]:
@@ -595,6 +659,47 @@ def test_on_demand_worker_restart_pins_exact_v2_beside_bad_legacy_and_rejects_ba
     with pytest.raises(SnapshotIntegrityError, match="file hash mismatch"):
         corrupt_target_worker.pin_snapshot(_expecting(requirements, submitted_ref), period)
     assert preparer.calls == 0
+
+
+def test_restart_exact_pin_accepts_authoritative_mixed_corporate_action_coverage(
+    tmp_path: Path,
+) -> None:
+    composite_root = tmp_path / "composite"
+    composite_root.mkdir()
+    instrument = InstrumentId("300059.SZ")
+    period = DateRange(date(2025, 1, 2), date(2025, 1, 3))
+    selected_root = _publish_composite(
+        composite_root,
+        tmp_path / "mixed-sources",
+        instrument=instrument,
+        start=period.start,
+        end=period.end,
+        corporate_action_coverage=_mixed_corporate_action_coverage(
+            period.start,
+            period.end,
+        ),
+    )
+    requirements = _event_requirements(instrument, ANNUAL)
+    submitted = SnapshotRegistryMarketDataRepository(composite_root).pin_snapshot(
+        requirements,
+        period,
+    )
+    assert submitted.producer_snapshot_id == f"composite:{selected_root.name}"
+    producer_snapshot_id = submitted.producer_snapshot_id
+    assert producer_snapshot_id is not None
+
+    restarted = SnapshotRegistryMarketDataRepository(composite_root)
+    replay = restarted.pin_selected_snapshot(
+        producer_snapshot_id,
+        _expecting(requirements, submitted),
+        period,
+    )
+
+    assert replay.snapshot_id == submitted.snapshot_id
+    assert replay.checksum == submitted.checksum
+    assert replay.producer_schema_version == submitted.producer_schema_version
+    assert replay.producer_snapshot_id == submitted.producer_snapshot_id
+    assert restarted.load_corporate_actions(replay, instrument, period) == ()
 
 
 def test_expected_push2_snapshot_replays_from_independent_registry_after_restart(

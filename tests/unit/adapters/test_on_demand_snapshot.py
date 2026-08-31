@@ -318,6 +318,76 @@ def test_refresh_policy_reacquires_for_each_sequential_fresh_submission(
     assert repository.preparation_results == (result, result)
 
 
+def test_refresh_policy_never_returns_old_snapshot_when_provider_fails(
+    tmp_path: Path,
+) -> None:
+    registry = FakeRegistry(available=True)
+    source_error = SnapshotPreparationFailedError("stable provider failure")
+    preparer = FakePreparer(
+        registry,
+        _result(tmp_path),
+        failure=source_error,
+    )
+    repository = _wrapper(
+        registry,
+        preparer,
+        refresh_each_submission=True,
+    )
+
+    with pytest.raises(SnapshotPreparationFailedError) as caught:
+        repository.pin_snapshot(_requirements(), PERIOD)
+
+    assert caught.value is source_error
+    assert registry.pin_calls == 1
+    assert preparer.calls == 1
+    assert registry.producer_pin_calls == []
+    assert repository.preparation_results == ()
+
+
+def test_refresh_policy_never_returns_old_snapshot_when_new_publication_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    registry = FakeRegistry(available=True)
+    result = _result(tmp_path)
+    preparer = FakePreparer(registry, result)
+    repository = _wrapper(
+        registry,
+        preparer,
+        refresh_each_submission=True,
+    )
+
+    def reject_new_publication(
+        producer_snapshot_id: str,
+        producer_snapshot_path: str | Path,
+        requirements: DataRequirements,
+        period: DateRange,
+    ) -> DataSnapshotRef:
+        registry.producer_pin_calls.append(
+            (
+                producer_snapshot_id,
+                Path(producer_snapshot_path).resolve(),
+                requirements,
+                period,
+            )
+        )
+        raise SnapshotRegistryNoMatchError("fixture exact producer is incomplete")
+
+    registry.pin_producer_snapshot = reject_new_publication  # type: ignore[method-assign]
+    with pytest.raises(
+        SnapshotPreparationIncompleteError,
+        match="prepared producer snapshot still does not cover the request",
+    ) as caught:
+        repository.pin_snapshot(_requirements(), PERIOD)
+
+    assert result.producer_snapshot_id in str(caught.value)
+    assert registry.pin_calls == 1
+    assert preparer.calls == 1
+    assert registry.producer_pin_calls == [
+        (result.producer_snapshot_id, result.path, _requirements(), PERIOD)
+    ]
+    assert repository.preparation_results == (result,)
+
+
 def test_registry_miss_prepares_refreshes_and_retries(tmp_path: Path) -> None:
     registry = FakeRegistry(available=False)
     result = _result(tmp_path)

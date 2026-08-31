@@ -1405,6 +1405,7 @@ def _to_observation(
         "document_url": document_url,
         "ingested_at": retrieved_at.isoformat(),
         "time_quality": time_quality.value,
+        "timestamp_precision": ("second" if validation_status == "validated" else "date"),
         "validation_status": validation_status,
         "raw_response_sha256": record.raw_response_sha256,
         "raw_content_response_sha256": content.raw_response_sha256,

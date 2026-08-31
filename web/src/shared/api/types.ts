@@ -337,6 +337,18 @@ export type IndicatorCapability = {
   trigger_definitions: CapabilityTriggerDefinition[]
 }
 
+export type EventDocumentTextCapability = {
+  catalog_available: boolean
+  backtest_available: boolean
+  preparation_available: boolean
+  availability_scope: 'pinned_snapshot' | 'request_preparation' | 'unavailable'
+  unavailable_reason:
+    | 'not_catalog_available'
+    | 'snapshot_coverage_unavailable'
+    | 'preparation_required'
+    | null
+}
+
 export type EventCapability = {
   event_code: string
   definition_version: string
@@ -346,6 +358,8 @@ export type EventCapability = {
   preparation_available: boolean
   availability_scope: 'pinned_snapshot' | 'request_preparation' | 'unavailable'
   unavailable_reason: 'snapshot_coverage_unavailable' | 'preparation_required' | null
+  /** Required by capabilities v2; optional here only so older responses fail closed instead of crashing. */
+  document_text?: EventDocumentTextCapability
   triggers: ['published']
 }
 
@@ -448,6 +462,7 @@ export type BacktestSignalEvidence = {
   provider?: string | null
   sourceUrl?: string | null
   timeQuality?: string | null
+  timestampPrecision?: 'second' | 'minute' | 'hour' | 'date' | null
   validationStatus?: string | null
   rawResponseSha256?: string | null
 }

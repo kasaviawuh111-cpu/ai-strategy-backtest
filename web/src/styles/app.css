@@ -93,6 +93,23 @@ button,input,select{font:inherit}
 .chip:hover{background:rgba(255,119,0,.18)}
 .chip[disabled]{border-color:var(--hairline-2);color:var(--ink-4);background:none;cursor:not-allowed}
 .chip .pin{font-size:10px;line-height:14px;padding:0 4px;border-radius:3px;background:var(--color-primary);color:#fff}
+.home-examples .chips{gap:6px}
+.home-examples .chip{padding:6px 12px;font-size:13px;line-height:19px}
+/* 可选下一步：整行、左文右箭头；第一条是建议动作，用能力色（紫）而不是主色橙。
+   主色在这一页属于「开始回测」那种要下决心的按钮，可选项不跟它抢。 */
+.followups{display:flex;flex-direction:column;gap:12px;width:100%}
+.followup{display:flex;align-items:center;gap:12px;width:100%;text-align:left;cursor:pointer;
+  border:1px solid var(--hairline-3);background:transparent;border-radius:14px;
+  padding:13px 16px;min-height:52px;color:var(--ink-1);font-size:16px;line-height:24px}
+.followup .fu-text{flex:1;min-width:0}
+/* 箭头在宿主里两种行都是深色，只有底色区分主次 */
+.followup .fu-arrow{flex:0 0 auto;color:var(--ink-1)}
+.followup:hover{background:rgba(166,172,184,.08)}
+.followup--lead{background:var(--color-purple-weak);border-color:transparent;color:var(--color-purple)}
+.followup--lead:hover{background:rgba(79,70,214,.15)}
+.followup:disabled{cursor:default;color:var(--ink-4);background:var(--surface-card);border-color:transparent}
+.followup:disabled .fu-arrow{color:var(--ink-4)}
+
 /* ---------- 对话内卡片（摘要级） ---------- */
 .mcard{width:100%;background:var(--surface);border-radius:var(--r-card);overflow:hidden;
   border:.5px solid rgba(166,172,184,.24);box-shadow:0 1px 3px rgba(16,24,40,.04)}
@@ -149,18 +166,22 @@ button,input,select{font:inherit}
 .erow:hover{background:rgba(255,119,0,.04)}
 .erow:disabled{cursor:not-allowed;opacity:.55}
 .erow.off:disabled{cursor:default;opacity:.76}
-.erow.off .chev,.linkrow.off .chev{visibility:hidden}
+.erow.off .chev{visibility:hidden}
 .erow .lb{flex:0 0 44px;font-size:15px;line-height:22px;color:var(--ink-3)}
 .erow .val{flex:1;min-width:0;font-size:16px;line-height:23px;overflow-wrap:anywhere}
 .erow.buy .lb{color:var(--color-up)}
 .erow.sell .lb{color:var(--color-down)}
 .hint{font-size:13px;line-height:20px;color:var(--ink-3);margin:-4px 0 0}
-.linkrow{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:0;background:none;cursor:pointer;
-  padding:13px 16px;border-top:1px solid rgba(166,172,184,.28)}
-.linkrow:hover{background:var(--surface-card)}
-.linkrow.off:disabled{cursor:default;opacity:.7;background:none}
-.linkrow .k{font-size:16px;line-height:23px}
-.linkrow .v{margin-left:auto;font-size:13px;line-height:19px;color:var(--ink-3);font-family:var(--font-num);text-align:right}
+/* 成交设置：标题行右上角的小入口，不再占一整行 */
+.exec-entry{margin-left:auto;flex:0 0 auto;display:inline-flex;align-items:center;gap:1px;
+  border:0;background:none;padding:2px 0 2px 10px;cursor:pointer;
+  color:var(--ink-3);font-size:12px;line-height:18px;white-space:nowrap}
+.exec-entry .v{color:var(--ink-4)}
+.exec-entry .v::before{content:"·";margin:0 4px;color:var(--ink-5)}
+.exec-entry .chev{width:14px;height:14px}
+.exec-entry:hover{color:var(--ink-2)}
+.exec-entry:disabled{cursor:default;color:var(--ink-4)}
+.exec-entry.off .chev{visibility:hidden}
 .chev{color:var(--ink-4);flex:0 0 auto}
 .headline{display:flex;align-items:baseline;gap:8px}
 .headline .big{font-family:var(--font-num);font-variant-numeric:tabular-nums;font-size:28px;line-height:36px;font-weight:700;letter-spacing:-.01em}
@@ -351,29 +372,34 @@ button.grow:hover{background:rgba(255,119,0,.05)}
 .source-evidence .technical-details>summary{justify-content:flex-end}
 /* ---------- 底部输入区（妙想AI） ---------- */
 .dock{position:absolute;left:0;right:0;bottom:0;z-index:3;padding-top:12px;padding-bottom:var(--safe-bottom);
-  background:linear-gradient(180deg,rgba(255,255,255,0) 0%,#fff 20%)}
-.quick{display:flex;gap:8px;padding:0 calc(var(--gutter) + var(--safe-right)) 10px calc(var(--gutter) + var(--safe-left));overflow-x:auto;scrollbar-width:none}
+  background:linear-gradient(180deg,rgba(250,250,252,0) 0%,#fafafc 20%)}
+.quick{display:flex;gap:8px;padding:0 calc(var(--gutter) + var(--safe-right)) 12px calc(var(--gutter) + var(--safe-left));overflow-x:auto;scrollbar-width:none}
 .quick::-webkit-scrollbar{display:none}
-.quick button{flex:0 0 auto;display:flex;align-items:center;gap:5px;height:34px;padding:0 12px;border-radius:18px;
-  border:.5px solid var(--hairline-2);background:#fff;font-size:14px;line-height:20px;color:var(--ink-2);cursor:pointer}
-.quick button.on{background:rgba(139,92,246,.10);border-color:rgba(139,92,246,.35);color:var(--color-purple);font-weight:500}
+.quick button{flex:0 0 auto;display:flex;align-items:center;gap:6px;height:38px;padding:0 14px;border-radius:19px;
+  border:1px solid var(--hairline-3);background:#fff;font-size:15px;line-height:21px;color:var(--ink-1);cursor:pointer}
+.quick button.on{background:var(--color-purple-weak);border-color:transparent;color:var(--color-purple)}
 .quick button.on svg{color:var(--color-purple)}
-.quick svg{width:17px;height:17px;color:var(--ink-1);flex:0 0 auto}
+.quick svg{width:18px;height:18px;color:var(--ink-1);flex:0 0 auto}
 .quick svg .quick-accent{stroke:var(--color-up)}
 .dock-row{display:flex;align-items:center;gap:8px;padding:0 calc(var(--gutter) + var(--safe-right)) 0 calc(var(--gutter) + var(--safe-left))}
-.inputbar{flex:1;min-width:0;height:46px;border-radius:23px;background:#fff;border:.5px solid var(--hairline-2);
-  display:flex;align-items:center;gap:6px;padding:0 10px;box-shadow:0 1px 3px rgba(16,24,40,.05)}
-.inputbar .ib{width:34px;height:34px;flex:0 0 auto;border:0;background:none;padding:0;cursor:pointer;display:grid;place-items:center;color:var(--ink-2)}
-.strategy-input{flex:1;min-width:0;height:100%;border:0;outline:0;background:none;font-size:14px;color:var(--ink-1)}
-.strategy-input::placeholder{color:var(--ink-4)}
+.inputbar{flex:1;min-width:0;height:50px;border-radius:25px;background:#fff;border:1px solid #f0f0f4;
+  display:flex;align-items:center;gap:8px;padding:0 8px 0 10px;box-shadow:0 1px 3px rgba(16,24,40,.04)}
+.inputbar .ib{width:32px;height:32px;flex:0 0 auto;border:0;background:none;padding:0;display:grid;place-items:center;color:var(--ink-1)}
+.inputbar .ib:disabled{cursor:default;color:var(--ink-2)}
+.strategy-input{flex:1;min-width:0;height:100%;border:0;outline:0;background:none;font-size:15px;color:var(--ink-1)}
+.strategy-input::placeholder{color:#8a8a8a}
+/* 空输入时是宿主的「+」；有内容才变成本页真正能按的发送键 */
+.inputbar .plus{width:36px;height:36px;flex:0 0 auto;border:0;background:none;padding:0;display:grid;place-items:center;
+  color:var(--ink-1);cursor:default}
 .inputbar .send{width:34px;height:34px;flex:0 0 auto;border:0;border-radius:50%;display:grid;place-items:center;
   background:var(--color-primary);color:#fff;cursor:pointer}
 .inputbar .send:disabled{background:var(--ink-5);cursor:not-allowed}
-.trade-fab{width:46px;height:46px;flex:0 0 auto;border-radius:50%;border:.5px solid var(--hairline-2);background:#fff;
-  cursor:pointer;box-shadow:0 1px 3px rgba(16,24,40,.06);position:relative;font-weight:700;font-size:13px;padding:0}
+.trade-fab{width:50px;height:50px;flex:0 0 auto;border-radius:50%;border:1px solid var(--hairline-3);background:#fff;
+  cursor:pointer;box-shadow:0 1px 3px rgba(16,24,40,.06);position:relative;font-weight:700;font-size:14px;padding:0}
+.trade-fab .arc{position:absolute;inset:0;color:var(--ink-4)}
 .trade-fab:disabled{cursor:not-allowed;opacity:.65}
-.trade-fab .b{position:absolute;top:7px;left:8px;color:var(--color-up)}
-.trade-fab .s{position:absolute;bottom:7px;right:8px;color:var(--color-info)}
+.trade-fab .b{position:absolute;top:8px;left:9px;color:var(--color-up)}
+.trade-fab .s{position:absolute;bottom:8px;right:9px;color:var(--color-info)}
 .disclaimer{text-align:center;font-size:10px;line-height:14px;color:var(--ink-5);margin:8px 0 0}
 .fab{position:absolute;right:calc(14px + var(--safe-right));bottom:156px;width:36px;height:36px;border-radius:50%;background:#fff;border:.5px solid var(--hairline-2);
   box-shadow:0 2px 8px rgba(16,24,40,.10);display:grid;place-items:center;cursor:pointer;z-index:2;color:var(--ink-2)}
@@ -465,10 +491,6 @@ button.grow:hover{background:rgba(255,119,0,.05)}
 /* 策略卡：区间等行的可核对副值 */
 .erow .val small{display:block;font-size:11px;line-height:16px;color:var(--ink-4);
   font-family:var(--font-num);margin-top:1px}
-.linkrow .k{display:flex;flex-direction:column;min-width:0}
-.linkrow .k small{font-size:11px;line-height:16px;color:var(--ink-4);margin-top:1px}
-.linkrow .v.wrap{flex:1;margin-left:auto;padding-left:10px;max-width:56%;white-space:normal;
-  font-family:var(--font);font-size:12px;line-height:17px}
 
 /* 委托列表：对齐券商委托单的四列节奏
    方向/时间 · 信号 · 委托价 · 状态/成交价。数量按需求不展示。

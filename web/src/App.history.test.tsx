@@ -30,18 +30,18 @@ describe('append-only strategy conversation', () => {
     const { container } = renderApp()
 
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
+    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(
-      await screen.findByText('回测完成。', {}, { timeout: 6_000 }),
+      await screen.findByText('回测结果', {}, { timeout: 6_000 }),
     ).toBeInTheDocument()
 
     expect(screen.queryByRole('button', { name: /^换个条件$/ }))
       .not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '换个条件再跑' }))
+    await user.click(screen.getByRole('button', { name: '换个条件再跑一次' }))
 
     expect(screen.getByText('历史回测结果')).toBeInTheDocument()
-    expect(screen.getByText('上一次的结果保留在上面。直接说新的买卖规则，我接着往下还原。'))
+    expect(screen.getByText('说出新的买卖规则，继续回测。'))
       .toBeInTheDocument()
     expect(screen.getAllByText('已完成回测').length).toBeGreaterThan(0)
     expect(screen.getByRole('button', { name: '查看这次报告' })).toBeEnabled()

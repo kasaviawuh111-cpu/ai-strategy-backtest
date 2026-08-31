@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Response, status
 
 from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus, FieldProvenance
+from ashare_lab.domain.market_data import AshareInstrumentCodeError, normalize_a_share_instrument
 from ashare_lab.domain.strategy import (
     StrategyCatalogError,
     canonical_hash,
@@ -84,8 +85,9 @@ async def revise_strategy_draft(
 ) -> StrategyDraftResponse:
     validate_idempotency_key(idempotency_key)
     try:
+        normalize_a_share_instrument(body.strategy.instrument.symbol)
         strategy = validate_strategy_against_catalog(body.strategy, container.catalog)
-    except StrategyCatalogError as exc:
+    except (AshareInstrumentCodeError, StrategyCatalogError) as exc:
         raise ApiProblem(
             status_code=422,
             code="strategy_revision_invalid",

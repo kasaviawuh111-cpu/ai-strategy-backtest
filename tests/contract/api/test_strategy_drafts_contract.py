@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ashare_lab.api import create_app
@@ -140,6 +141,151 @@ def test_unsupported_position_aware_exit_and_is_explicit_in_http_contract(
     assert payload["strategy"] is None
     assert payload["diagnostic_code"] == "position_aware_exit_and_not_supported"
     assert "同时满足才卖出" in payload["clarification"]
+
+
+@pytest.mark.parametrize(
+    ("utterance", "diagnostic_code"),
+    [
+        ("5分钟MACD金叉买入，5分钟死叉卖出", "non_daily_timeframe_not_supported"),
+        ("30min MACD金叉买入，30min MACD死叉卖出", "non_daily_timeframe_not_supported"),
+        (
+            "MACD金叉当天收盘买入，死叉当天收盘卖出",
+            "same_session_execution_not_supported",
+        ),
+        (
+            "MACD金叉后下一交易日收盘买入，死叉后下一交易日收盘卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉后第二天收盘买入，MACD死叉卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉后第二个交易日收盘买入，MACD死叉卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉三天后买入，MACD死叉卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉后3个交易日买入，MACD死叉卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉买入，MACD死叉三天后卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "业绩预告亏损后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
+            "一季报发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "2024年报发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "2024年度报告发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "今年年报发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "去年的年度报告发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "24年报发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "MACD在零轴上方金叉买入，MACD死叉卖出",
+            "technical_qualifier_not_supported",
+        ),
+    ],
+)
+def test_http_draft_never_erases_explicit_unsupported_source_semantics(
+    client: TestClient,
+    utterance: str,
+    diagnostic_code: str,
+) -> None:
+    response = client.post(
+        "/api/v1/strategy-drafts",
+        json={
+            "utterance": utterance,
+            "instrument_context": "300059.SZ",
+            "as_of_date": "2026-08-30",
+        },
+    )
+    payload: dict[str, Any] = response.json()
+
+    assert response.status_code == 201
+    assert payload["status"] == "unsupported"
+    assert payload["diagnostic_code"] == diagnostic_code
+    assert payload["strategy"] is None
+
+
+def test_http_draft_preserves_supported_fill_anchored_holding_exit(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/v1/strategy-drafts",
+        json={
+            "utterance": "年报发布后买入，持有3个交易日卖出",
+            "instrument_context": "300059.SZ",
+            "as_of_date": "2026-08-30",
+        },
+    )
+    payload: dict[str, Any] = response.json()
+
+    assert response.status_code == 201
+    assert payload["status"] == "ready"
+    assert payload["strategy"]["exit"]["children"] == [
+        {
+            "type": "holding_period_exit",
+            "sessions": 3,
+            "anchor": "first_entry_fill",
+            "count_mode": "subsequent_trading_sessions",
+            "execution": "target_session_open_proxy",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "MACD买入，MACD卖出",
+        "RSI买入，RSI卖出",
+        "KDJ买入，KDJ卖出",
+        "成交量买入，MACD死叉卖出",
+    ],
+)
+def test_http_draft_clarifies_named_indicators_without_triggers(
+    client: TestClient,
+    utterance: str,
+) -> None:
+    response = client.post(
+        "/api/v1/strategy-drafts",
+        json={
+            "utterance": utterance,
+            "instrument_context": "300059.SZ",
+            "as_of_date": "2026-08-30",
+        },
+    )
+    payload: dict[str, Any] = response.json()
+
+    assert response.status_code == 201
+    assert payload["status"] == "needs_clarification"
+    assert payload["diagnostic_code"] == "indicator_trigger_requires_clarification"
+    assert payload["strategy"] is None
+    assert payload["clarification"] is not None
+    assert "不会替你补默认触发规则" in payload["clarification"]
 
 
 def test_compiler_statuses_are_preserved_as_domain_results(client: TestClient) -> None:
@@ -313,6 +459,22 @@ def test_revision_rejects_strategy_outside_active_catalog(
     created = client.post("/api/v1/strategy-drafts", json=ready_request).json()
     strategy = deepcopy(created["strategy"])
     strategy["entry"]["definition_version"] = "999.0.0"
+
+    response = client.post(
+        f"/api/v1/strategy-drafts/{created['draft_id']}/revisions",
+        json={"utterance": ready_request["utterance"], "strategy": strategy},
+    )
+
+    _assert_error(response, status_code=422, code="strategy_revision_invalid")
+
+
+def test_revision_rejects_a_share_code_suffix_mismatch(
+    client: TestClient,
+    ready_request: dict[str, str],
+) -> None:
+    created = client.post("/api/v1/strategy-drafts", json=ready_request).json()
+    strategy = deepcopy(created["strategy"])
+    strategy["instrument"]["symbol"] = "300059.SH"
 
     response = client.post(
         f"/api/v1/strategy-drafts/{created['draft_id']}/revisions",

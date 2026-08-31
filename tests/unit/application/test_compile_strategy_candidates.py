@@ -137,6 +137,84 @@ async def test_compiler_rejects_first_candidate_and_selects_first_catalog_valid_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "diagnostic_code"),
+    [
+        ("5分钟MACD金叉买入，5分钟死叉卖出", "non_daily_timeframe_not_supported"),
+        ("30min MACD金叉买入，30min MACD死叉卖出", "non_daily_timeframe_not_supported"),
+        (
+            "MACD金叉当天收盘买入，死叉当天收盘卖出",
+            "same_session_execution_not_supported",
+        ),
+        (
+            "MACD金叉后下一交易日收盘买入，死叉后下一交易日收盘卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "业绩预告亏损后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
+            "2024年报发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "2024年度报告发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "MACD在零轴上方金叉买入，MACD死叉卖出",
+            "technical_qualifier_not_supported",
+        ),
+    ],
+)
+async def test_bounded_candidate_cannot_erase_explicit_source_semantics(
+    utterance: str,
+    diagnostic_code: str,
+) -> None:
+    outcome = await _compiler((_macd_candidate(rank=1),)).compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.diagnostic_code == diagnostic_code
+    assert outcome.strategy is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "MACD买入，MACD卖出",
+        "RSI买入，RSI卖出",
+        "KDJ买入，KDJ卖出",
+        "成交量买入，成交量卖出",
+    ],
+)
+async def test_bounded_candidate_cannot_invent_missing_indicator_triggers(
+    utterance: str,
+) -> None:
+    outcome = await _compiler((_macd_candidate(rank=1),)).compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "indicator_trigger_requires_clarification"
+    assert outcome.strategy is None
+    assert outcome.candidate_provenance is None
+    assert outcome.clarification is not None
+    assert "不会替你补默认触发规则" in outcome.clarification
+
+
+@pytest.mark.asyncio
 async def test_future_dated_candidate_cannot_block_a_later_valid_candidate() -> None:
     future = replace(
         _macd_candidate(rank=1),

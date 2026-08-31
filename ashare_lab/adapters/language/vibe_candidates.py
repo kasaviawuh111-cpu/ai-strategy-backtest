@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -28,6 +29,7 @@ from pydantic import (
     model_validator,
 )
 
+from ashare_lab.adapters.language.backtest_period import parse_backtest_period
 from ashare_lab.domain.catalog import CatalogSnapshot, CoverageCatalogSnapshot
 from ashare_lab.domain.events.catalog import (
     DOCUMENT_TEXT_EVENT_CODES,
@@ -66,7 +68,7 @@ class CandidateTransportError(RuntimeError):
 # accepts the event only by its exact allowlisted code.
 _EVENT_ALIAS_OVERRIDES: Mapping[str, tuple[str, ...]] = {
     "event.financial_results.annual_report": ("年报",),
-    "event.financial_results.semiannual_report": ("半年报",),
+    "event.financial_results.semiannual_report": ("半年报", "中报"),
     "event.financial_results.quarterly_report": ("季报",),
     "event.financial_results.earnings_forecast_published": ("业绩预告",),
     "event.contracts_orders.major_contract_won": ("最终中标", "重大项目中标"),
@@ -969,6 +971,18 @@ def _validate_candidate_grounding(
             defaults=defaults,
             consumed_defaults=consumed_defaults,
         )
+    _validate_explicit_leaf_coverage(
+        candidate.entry,
+        side="entry",
+        utterance=request.utterance,
+        matrix=matrix,
+    )
+    _validate_explicit_leaf_coverage(
+        candidate.exit,
+        side="exit",
+        utterance=request.utterance,
+        matrix=matrix,
+    )
     _validate_document_predicate_coverage(
         candidate.entry,
         candidate.entry_spans,
@@ -1052,6 +1066,7 @@ def _validate_leaf_grounding(
         )
         trigger = next(item for item in capability.triggers if item.id == leaf.trigger)
         _require_alias(span.text, trigger.aliases_zh)
+        explicit_parameters = _explicit_parameter_names(span.text, capability)
         for parameter in capability.parameters:
             value = leaf.params.get(parameter.name)
             if value is None:
@@ -1060,6 +1075,8 @@ def _validate_leaf_grounding(
             if path in defaults:
                 if value != parameter.default:
                     raise ValueError("defaulted indicator parameter differs from the Catalog")
+                if parameter.name in explicit_parameters:
+                    raise ValueError("explicit indicator parameter cannot be replaced by a default")
                 consumed_defaults.add(path)
             elif not _parameter_evidence(span.text, capability, parameter.name, value):
                 raise ValueError("explicit indicator parameter lacks lexical evidence")
@@ -1165,6 +1182,184 @@ def _validate_join_grounding(
         raise ValueError("candidate any-join lacks one connector per source condition")
 
 
+def _validate_explicit_leaf_coverage(
+    leaves: tuple[_SignalCandidate | _ExitCandidate, ...],
+    *,
+    side: Literal["entry", "exit"],
+    utterance: str,
+    matrix: CandidateCapabilityMatrix,
+) -> None:
+    """Reject candidates that omit an explicitly named source condition.
+
+    Per-leaf grounding proves that every emitted leaf exists in the source, but
+    it does not prove the reverse.  Without this coverage check a provider can
+    return only MACD for ``MACD且RSI`` and still give that one leaf a span over
+    the whole clause.  Count named capabilities and position-aware exits in
+    action-local source fragments, then require the candidate to cover each of
+    them.
+    """
+
+    source = Counter[str]()
+    for action_fragment in _source_action_fragments(
+        utterance,
+        side=side,
+        matrix=matrix,
+    ):
+        for condition_fragment in _split_condition_fragments(action_fragment):
+            source.update(_named_capability_keys(condition_fragment, matrix))
+            if side == "exit":
+                source.update(_named_position_exit_keys(condition_fragment))
+
+    candidate = Counter(_candidate_leaf_key(item) for item in leaves)
+    missing = source - candidate
+    if missing:
+        raise ValueError("candidate leaves do not cover every explicit source condition")
+
+
+def _source_action_fragments(
+    utterance: str,
+    *,
+    side: Literal["entry", "exit"],
+    matrix: CandidateCapabilityMatrix,
+) -> tuple[str, ...]:
+    target_words = _ENTRY_ACTION_WORDS if side == "entry" else _EXIT_ACTION_WORDS
+    all_actions = tuple(dict.fromkeys((*_ENTRY_ACTION_WORDS, *_EXIT_ACTION_WORDS)))
+    fragments: list[str] = []
+    for segment in re.split(r"[，,；;。！？!?]", utterance):
+        occurrences = sorted(
+            (
+                (occurrence.start, occurrence.end, word)
+                for word in all_actions
+                for occurrence in _alias_occurrences(segment, word)
+            ),
+            key=lambda item: (item[0], -(item[1] - item[0]), item[2]),
+        )
+        selected: list[tuple[int, int, str]] = []
+        consumed_until = -1
+        for occurrence in occurrences:
+            if occurrence[0] < consumed_until:
+                continue
+            selected.append(occurrence)
+            consumed_until = occurrence[1]
+        claimed_following_intervals: set[int] = set()
+        for index, (start, end, word) in enumerate(selected):
+            preceding_start = selected[index - 1][1] if index else 0
+            preceding = segment[preceding_start:end].strip()
+            following_end = selected[index + 1][0] if index + 1 < len(selected) else len(segment)
+            following = segment[start:following_end].strip()
+            action_side: Literal["entry", "exit"] = (
+                "entry" if word in _ENTRY_ACTION_WORDS else "exit"
+            )
+            preceding_was_claimed = index > 0 and index - 1 in claimed_following_intervals
+            preceding_has_condition = _has_named_condition(
+                preceding,
+                side=action_side,
+                matrix=matrix,
+            )
+            following_has_condition = _has_named_condition(
+                following,
+                side=action_side,
+                matrix=matrix,
+            )
+
+            # Resolve the action's orientation for every action, not only the
+            # requested side.  This lets an earlier prefix action claim the
+            # interval after it, so the next action cannot misread the same
+            # condition as its own suffix.
+            if not preceding_was_claimed and preceding_has_condition:
+                fragment = preceding
+            elif following_has_condition:
+                fragment = following
+                claimed_following_intervals.add(index)
+            else:
+                fragment = segment[start:end].strip()
+
+            if word in target_words and fragment:
+                fragments.append(fragment)
+    return tuple(fragments)
+
+
+def _has_named_condition(
+    text: str,
+    *,
+    side: Literal["entry", "exit"],
+    matrix: CandidateCapabilityMatrix,
+) -> bool:
+    if _named_capability_keys(text, matrix):
+        return True
+    return side == "exit" and bool(_named_position_exit_keys(text))
+
+
+def _split_condition_fragments(text: str) -> tuple[str, ...]:
+    aliases = sorted(
+        {*_ALL_JOIN_WORDS, *_ANY_JOIN_WORDS},
+        key=lambda item: (-len(item), item.casefold()),
+    )
+    pattern = "|".join(re.escape(item) for item in aliases)
+    return tuple(
+        item.strip() for item in re.split(pattern, text, flags=re.IGNORECASE) if item.strip()
+    )
+
+
+def _named_capability_keys(
+    text: str,
+    matrix: CandidateCapabilityMatrix,
+) -> tuple[str, ...]:
+    occurrences: list[tuple[str, _AliasOccurrence]] = []
+    for capability in matrix.indicators:
+        key = f"indicator:{capability.indicator_id}"
+        occurrences.extend(
+            (key, occurrence)
+            for alias in capability.aliases_zh
+            for occurrence in _alias_occurrences(text, alias)
+        )
+    for capability in matrix.events:
+        key = f"event:{capability.event_code}"
+        occurrences.extend(
+            (key, occurrence)
+            for alias in capability.aliases_zh
+            for occurrence in _alias_occurrences(text, alias)
+        )
+
+    selected: set[str] = set()
+    for key, occurrence in occurrences:
+        shadowed = any(
+            other.start <= occurrence.start
+            and other.end >= occurrence.end
+            and (other.start < occurrence.start or other.end > occurrence.end)
+            for _other_key, other in occurrences
+        )
+        if not shadowed:
+            selected.add(key)
+    return tuple(sorted(selected))
+
+
+def _named_position_exit_keys(text: str) -> tuple[str, ...]:
+    keys: set[str] = set()
+    if re.search(r"(?:持有|成交后|买入后)[^，。；;]{0,16}\d{1,4}(?:个)?(?:交易日|交易天)", text):
+        keys.add("exit:holding_period")
+    if "止盈" in text:
+        keys.add("exit:take_profit")
+    has_trailing_stop = any(word in text for word in ("移动止损", "跟踪止损"))
+    if "止损" in text and not has_trailing_stop:
+        keys.add("exit:stop_loss")
+    if "回撤" in text or has_trailing_stop:
+        keys.add("exit:trailing_drawdown")
+    return tuple(sorted(keys))
+
+
+def _candidate_leaf_key(leaf: _SignalCandidate | _ExitCandidate) -> str:
+    if isinstance(leaf, IndicatorCandidate):
+        return f"indicator:{leaf.indicator_id}"
+    if isinstance(leaf, EventCandidate):
+        return f"event:{leaf.event_code}"
+    if isinstance(leaf, HoldingPeriodCandidate):
+        return "exit:holding_period"
+    if isinstance(leaf, PositionReturnCandidate):
+        return f"exit:{leaf.trigger}"
+    return "exit:trailing_drawdown"
+
+
 def _non_overlapping_alias_occurrences(
     text: str,
     aliases: tuple[str, ...],
@@ -1220,6 +1415,69 @@ def _parameter_evidence(
                 if len(tokens) == count and _token_matches_scalar(tokens[parameter_index], value):
                     return True
     return False
+
+
+def _explicit_parameter_names(
+    text: str,
+    capability: IndicatorCandidateCapability,
+) -> frozenset[str]:
+    """Return parameters for which the source supplies an explicit value.
+
+    A provider may use a Catalog default only when the user omitted that
+    parameter.  Positional calls such as ``MACD(8,21,5)`` therefore mark all
+    three slots explicit even when the provider tries to return the default
+    ``12,26,9`` tuple.
+    """
+
+    explicit: set[str] = set()
+    numeric = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
+    for parameter in capability.parameters:
+        labels = (parameter.name, *_PARAMETER_ALIAS_OVERRIDES.get(parameter.name, ()))
+        for label in labels:
+            for occurrence in _alias_occurrences(text, label):
+                for value_match in numeric.finditer(text):
+                    between = (
+                        text[occurrence.end : value_match.start()]
+                        if occurrence.end <= value_match.start()
+                        else text[value_match.end() : occurrence.start]
+                        if value_match.end() <= occurrence.start
+                        else None
+                    )
+                    if (
+                        between is not None
+                        and len(between) <= 6
+                        and re.fullmatch(r"[\s:=：为是()（）%％]*", between)
+                    ):
+                        explicit.add(parameter.name)
+                        break
+                if parameter.name in explicit:
+                    break
+
+    parameter_names = tuple(item.name for item in capability.parameters)
+    expected_count = len(parameter_names)
+    if expected_count:
+        for alias in capability.aliases_zh:
+            for occurrence in _alias_occurrences(text, alias):
+                remainder = text[occurrence.end :]
+                parenthesized = re.match(r"\s*[（(]([^）)]*)[）)]", remainder)
+                token_sets: list[tuple[str, ...]] = []
+                if parenthesized is not None:
+                    token_sets.append(
+                        tuple(
+                            item.strip() for item in re.split(r"[,，、/]", parenthesized.group(1))
+                        )
+                    )
+                scalar = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+                separator = r"(?:\s*[,，、/]\s*|\s+)"
+                bare = re.match(
+                    rf"\s+(?P<values>{scalar}(?:{separator}{scalar}){{{expected_count - 1}}})",
+                    remainder,
+                )
+                if bare is not None:
+                    token_sets.append(tuple(re.findall(scalar, bare.group("values"))))
+                if any(len(tokens) == expected_count for tokens in token_sets):
+                    explicit.update(parameter_names)
+    return frozenset(explicit)
 
 
 def _labeled_scalar_evidence(
@@ -1401,15 +1659,24 @@ def _validate_instrument_grounding(candidate: BoundedCandidate, request: Compile
 
 
 def _validate_period_grounding(candidate: BoundedCandidate, request: CompileInput) -> None:
-    span = candidate.backtest_span
-    has_period = any(
-        item is not None
-        for item in (
-            candidate.backtest_start,
-            candidate.backtest_end,
-            candidate.backtest_lookback_years,
-        )
+    requested = parse_backtest_period(request.utterance)
+    if requested.diagnostic_code is not None:
+        raise _CandidateSemanticRejection(requested.diagnostic_code)
+    requested_period = (
+        requested.start,
+        requested.end,
+        requested.lookback_years,
     )
+    candidate_period = (
+        candidate.backtest_start,
+        candidate.backtest_end,
+        candidate.backtest_lookback_years,
+    )
+    if any(item is not None for item in requested_period) and candidate_period != requested_period:
+        raise ValueError("candidate omitted or changed the explicit backtest period")
+
+    span = candidate.backtest_span
+    has_period = any(item is not None for item in candidate_period)
     if not has_period:
         if span is not None:
             raise ValueError("backtest evidence was supplied without a requested period")

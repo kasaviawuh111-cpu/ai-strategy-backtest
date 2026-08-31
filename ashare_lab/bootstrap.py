@@ -158,11 +158,12 @@ def _build_market_data_repository(
     preparation_root = _repository_path(repository_root, settings.snapshot_preparation_root)
     for root in (choice_root, technical_root, event_root, composite_root, preparation_root):
         root.mkdir(parents=True, exist_ok=True)
-    registry = SnapshotRegistryMarketDataRepository(
-        composite_root,
-        choice_root=choice_root,
-        technical_root=technical_root,
-    )
+    # The runnable on-demand registry exposes only finished Composite v2
+    # publications.  Choice and provider-neutral technical snapshots are
+    # source artifacts for the preparer; selecting either one directly would
+    # bypass the event/corporate-action/provenance contract carried by the
+    # Composite manifest.
+    registry = SnapshotRegistryMarketDataRepository(composite_root)
     preparer = InternalDemoSnapshotPreparer(
         repository_root,
         python_executable=sys.executable,

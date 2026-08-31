@@ -12,6 +12,49 @@ const request = (utterance: string): CompileRequest => ({
 })
 
 describe('mock API trust boundary', () => {
+  it('keeps the trend example as an explicit MACD and MA20 conjunction', async () => {
+    const outcome = await mockApi.compile(request(
+      '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果',
+    ))
+    expect(outcome.status).toBe('compiled')
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled trend strategy')
+
+    expect(outcome.draft.strategySpec.entry).toMatchObject({
+      type: 'all',
+      children: [
+        { type: 'indicator_condition', indicator_id: 'technical.macd', trigger: 'golden_cross' },
+        { type: 'indicator_condition', indicator_id: 'technical.ma', trigger: 'price_crosses_above', params: { period: 20 } },
+      ],
+    })
+    expect(outcome.draft.entry.conditions.map((condition) => condition.label)).toEqual([
+      'MACD 金叉',
+      '收盘突破 20 日均线',
+    ])
+  })
+
+  it('keeps the earnings-forecast example as an event and MACD conjunction', async () => {
+    const outcome = await mockApi.compile(request(
+      '东方财富 业绩预告发布且 MACD 金叉时买入，MACD 死叉卖出，回测近 5 年',
+    ))
+    expect(outcome.status).toBe('compiled')
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled earnings strategy')
+
+    expect(outcome.draft.strategySpec.entry).toMatchObject({
+      type: 'all',
+      children: [
+        { type: 'event_condition', event_code: 'event.financial_results.earnings_forecast_published' },
+        { type: 'indicator_condition', indicator_id: 'technical.macd', trigger: 'golden_cross' },
+      ],
+    })
+    expect(outcome.draft.entry.conditions.map((condition) => condition.label)).toEqual([
+      '业绩预告发布',
+      'MACD 金叉',
+    ])
+    expect(outcome.draft.entry.conditions).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventCode: 'event.financial_results.annual_report' }),
+    ]))
+  })
+
   it('rejects arbitrary language instead of silently creating a MACD strategy', async () => {
     await expect(mockApi.compile(request('火星逆行时满仓，月圆时卖出'))).rejects.toMatchObject({
       problem: {

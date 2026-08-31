@@ -62,13 +62,13 @@ _DOCUMENT_TERM = r"(?:[A-Za-z][A-Za-z0-9+.#_-]{0,31}|[\u3400-\u9fff]{1,16})"
 _DOCUMENT_COMPARATOR = r"(?:不少于|不低于|大于等于|至少|超过|大于|多于|>=|>|≥)"
 _DOCUMENT_TERM_COUNT_PATTERNS = (
     re.compile(
-        rf"(?:完整)?(?:年度报告|年报|半年度报告|半年报|季度报告|季报)"
+        rf"(?:完整)?(?:年度报告|年报|半年度报告|半年报|中报|季度报告|季报)"
         rf"(?:(?:的)?(?:正文|全文))?(?:中|里)?[\"'“”‘’]?"
         rf"(?P<term>{_DOCUMENT_TERM})[\"'“”‘’]?(?:出现|提及|被提到)?"
         rf"(?P<comparator>{_DOCUMENT_COMPARATOR})(?P<value>\d{{1,7}})次"
     ),
     re.compile(
-        rf"(?:完整)?(?:年度报告|年报|半年度报告|半年报|季度报告|季报)"
+        rf"(?:完整)?(?:年度报告|年报|半年度报告|半年报|中报|季度报告|季报)"
         rf"(?:(?:的)?(?:正文|全文))?(?:中|里)?[\"'“”‘’]?"
         rf"(?P<term>{_DOCUMENT_TERM})[\"'“”‘’]?"
         rf"(?P<comparator>{_DOCUMENT_COMPARATOR})(?:出现|提及|被提到)"
@@ -2125,6 +2125,7 @@ def _event_intent(text: str) -> EventIntent | None:
         # half-year names, so reversing this order silently changes the event.
         ("半年度报告", "event.financial_results.semiannual_report"),
         ("半年报", "event.financial_results.semiannual_report"),
+        ("中报", "event.financial_results.semiannual_report"),
         ("季度报告", "event.financial_results.quarterly_report"),
         ("季报", "event.financial_results.quarterly_report"),
         ("年度报告", "event.financial_results.annual_report"),

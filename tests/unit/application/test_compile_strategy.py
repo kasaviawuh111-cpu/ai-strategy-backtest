@@ -52,6 +52,61 @@ async def test_macd_sentence_compiles_without_unnecessary_question(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("utterance", "indicator_id", "entry_trigger", "exit_trigger"),
+    [
+        ("MACD金叉买入，死叉卖出", "technical.macd", "golden_cross", "death_cross"),
+        ("RSI低于30买入，高于70卖出", "technical.rsi", "below", "above"),
+        (
+            "股价突破20日均线买入，跌破20日均线卖出",
+            "technical.ma",
+            "price_crosses_above",
+            "price_crosses_below",
+        ),
+        ("KDJ金叉买入，死叉卖出", "technical.kdj", "golden_cross", "death_cross"),
+        (
+            "股价突破布林线上轨买入，跌破布林线中轨卖出",
+            "technical.bollinger",
+            "price_crosses_above_upper",
+            "price_crosses_below_middle",
+        ),
+        ("OBV上升买入，下降卖出", "technical.obv", "rising", "falling"),
+        (
+            "放量上涨5%买入，放量下跌5%卖出",
+            "volume.price_confirmation",
+            "surge_up",
+            "surge_down",
+        ),
+    ],
+)
+async def test_common_daily_technical_utterances_preserve_direction(
+    compiler: StrategyCompiler,
+    utterance: str,
+    indicator_id: str,
+    entry_trigger: str,
+    exit_trigger: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, IndicatorCondition)
+    assert outcome.strategy.entry.indicator_id == indicator_id
+    assert outcome.strategy.entry.trigger == entry_trigger
+    assert len(outcome.strategy.exit.children) == 1
+    exit_condition = outcome.strategy.exit.children[0]
+    assert isinstance(exit_condition, IndicatorCondition)
+    assert exit_condition.indicator_id == indicator_id
+    assert exit_condition.trigger == exit_trigger
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("utterance", "term", "comparator", "value"),
     [
         ("同花顺发年报提到ai次数超过5次的话就买入，3天后卖出", "ai", "gt", 5),
@@ -126,6 +181,7 @@ async def test_document_text_upper_bound_or_equality_fails_closed(
         ("年报", "event.financial_results.annual_report"),
         ("半年度报告", "event.financial_results.semiannual_report"),
         ("半年报", "event.financial_results.semiannual_report"),
+        ("中报", "event.financial_results.semiannual_report"),
         ("季度报告", "event.financial_results.quarterly_report"),
         ("季报", "event.financial_results.quarterly_report"),
     ],
@@ -386,7 +442,7 @@ async def test_big_drop_rebound_routes_to_unpublished_template_without_question(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "utterance",
-    ["业绩预告大幅增长后买入", "MACD金叉买入", "RSI低于30买入"],
+    ["业绩预告发布后买入", "MACD金叉买入", "RSI低于30买入"],
 )
 async def test_entry_without_exit_requires_one_explicit_clarification(
     compiler: StrategyCompiler,
@@ -453,6 +509,42 @@ async def test_named_signal_without_buy_or_sell_does_not_invent_a_strategy(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "MACD买入，MACD卖出",
+        "RSI买入，RSI卖出",
+        "KDJ买入，KDJ卖出",
+        "成交量买入，MACD死叉卖出",
+        "OBV买入，MACD死叉卖出",
+        "CCI买入，CCI卖出",
+        "EMA28买入，EMA28卖出",
+        "20日均线买入，20日均线卖出",
+        "BBI买入，BBI卖出",
+        "EMA28乖离率买入，EMA28乖离率卖出",
+    ],
+)
+async def test_named_indicator_actions_without_triggers_request_one_clarification(
+    compiler: StrategyCompiler,
+    utterance: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "indicator_trigger_requires_clarification"
+    assert outcome.strategy is None
+    assert outcome.clarification is not None
+    assert "一次写清每个条件" in outcome.clarification
+    assert "不会替你补默认触发规则" in outcome.clarification
+
+
+@pytest.mark.asyncio
 async def test_event_entry_and_macd_exit_compile_as_a_mixed_strategy(
     compiler: StrategyCompiler,
 ) -> None:
@@ -474,6 +566,176 @@ async def test_event_entry_and_macd_exit_compile_as_a_mixed_strategy(
     assert exit_condition.indicator_id == "technical.macd"
     assert exit_condition.trigger == "death_cross"
     assert outcome.strategy.execution.data_capability == "daily_ohlcv_events"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_phrase", "event_code"),
+    [
+        ("业绩预告", "event.financial_results.earnings_forecast_published"),
+        ("业绩快报", "event.financial_results.earnings_flash_report"),
+        ("年报", "event.financial_results.annual_report"),
+        ("半年报", "event.financial_results.semiannual_report"),
+        ("季报", "event.financial_results.quarterly_report"),
+    ],
+)
+async def test_five_periodic_report_entries_preserve_event_lane_and_technical_exit(
+    compiler: StrategyCompiler,
+    event_phrase: str,
+    event_code: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=f"{event_phrase}发布后买入，MACD死叉卖出",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, EventCondition)
+    assert outcome.strategy.entry.event_code == event_code
+    assert outcome.strategy.entry.attributes == {}
+    assert len(outcome.strategy.exit.children) == 1
+    exit_condition = outcome.strategy.exit.children[0]
+    assert isinstance(exit_condition, IndicatorCondition)
+    assert exit_condition.indicator_id == "technical.macd"
+    assert exit_condition.trigger == "death_cross"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "diagnostic_code"),
+    [
+        ("5分钟MACD金叉买入，5分钟死叉卖出", "non_daily_timeframe_not_supported"),
+        ("30min MACD金叉买入，30min MACD死叉卖出", "non_daily_timeframe_not_supported"),
+        ("周线MACD金叉买入，周线死叉卖出", "non_daily_timeframe_not_supported"),
+        ("盘中MACD金叉马上买入，盘中死叉马上卖出", "non_daily_timeframe_not_supported"),
+        (
+            "MACD金叉当天收盘买入，死叉当天收盘卖出",
+            "same_session_execution_not_supported",
+        ),
+        (
+            "MACD金叉后下一交易日收盘买入，死叉后下一交易日收盘卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉后第二天收盘买入，MACD死叉卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉后第二个交易日收盘买入，MACD死叉卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉三天后买入，MACD死叉卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉后3个交易日买入，MACD死叉卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "MACD金叉买入，MACD死叉三天后卖出",
+            "execution_price_time_not_supported",
+        ),
+        (
+            "业绩预告大幅增长后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
+            "业绩预告亏损后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
+            "业绩快报营收增长30%以上后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
+            "2024年报发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "2024年度报告发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "今年年报发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "去年的年度报告发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "24年报发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "一季报发布后买入，MACD死叉卖出",
+            "event_report_period_filter_not_supported",
+        ),
+        (
+            "MACD在零轴上方金叉买入，MACD死叉卖出",
+            "technical_qualifier_not_supported",
+        ),
+        ("低位MACD金叉买入，MACD死叉卖出", "technical_qualifier_not_supported"),
+    ],
+)
+async def test_unrepresentable_source_semantics_fail_closed_before_strategy_creation(
+    compiler: StrategyCompiler,
+    utterance: str,
+    diagnostic_code: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.diagnostic_code == diagnostic_code
+    assert outcome.strategy is None
+    assert outcome.clarification
+
+
+@pytest.mark.asyncio
+async def test_fill_anchored_holding_period_exit_is_not_rejected_as_signal_delay(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="年报发布后买入，持有3个交易日卖出",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert outcome.strategy.exit.children == (HoldingPeriodExit(sessions=3),)
+
+
+@pytest.mark.asyncio
+async def test_explicit_supported_daily_confirmation_and_next_open_stays_ready(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="日线MACD收盘金叉确认后买入，死叉确认后下一交易日开盘卖出",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert outcome.strategy.execution.evaluation_frequency == "1d_close"
+    assert outcome.strategy.execution.entry_policy == "next_tradable_session_open"
+    assert outcome.strategy.execution.exit_policy == "next_tradable_session_open"
 
 
 @pytest.mark.asyncio
@@ -1469,28 +1731,3 @@ async def test_volume_and_trend_family_is_inherited_by_short_sell_clause(
     assert isinstance(exit_condition, IndicatorCondition)
     assert exit_condition.indicator_id == indicator_id
     assert exit_condition.trigger == exit_trigger
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("utterance", "diagnostic_code"),
-    [
-        ("OBV买入，MACD死叉卖出", "ambiguous_obv_direction"),
-        ("成交量买入，MACD死叉卖出", "ambiguous_volume_direction"),
-    ],
-)
-async def test_bare_volume_signal_fails_closed_without_a_direction(
-    compiler: StrategyCompiler,
-    utterance: str,
-    diagnostic_code: str,
-) -> None:
-    outcome = await compiler.compile(
-        CompileInput(
-            utterance=utterance,
-            instrument_context="300059.SZ",
-            as_of_date=date(2026, 8, 27),
-        )
-    )
-
-    assert outcome.status is CompileStatus.UNSUPPORTED
-    assert outcome.diagnostic_code == diagnostic_code

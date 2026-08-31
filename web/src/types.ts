@@ -284,7 +284,8 @@ export interface RunEvidence {
 /** 空 / 失败 / 拒绝态（SPEC 4.10） */
 export interface FailureState {
   key: string;
-  bubble: string;    // 气泡里的一句话
+  // 这里原本还有一句「气泡文案」。卡片标题已经说明发生了什么，
+  // 上面再放一句同义的旁白只是把同一件事用 AI 的口气再说一遍，已删。
   title: string;
   status: StatusWord;
   reason: string;    // 必须告诉用户具体缺了什么

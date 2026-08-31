@@ -12,6 +12,8 @@
 
 当前不是生产交易系统，也不构成投资建议。
 
+本轮交付是给老板直接在公网入口随机试用的 Live 回测，不是 Mock 演示。Mock 仅用于本地开发预览；正式入口必须使用真实 HTTPS API、固定真实快照和真实回测结果，断网或接口失败时明确报错，绝不静默回退或展示预设收益。
+
 产品默认回看近 5 年。2017 年至今只有在来源、秒级时间质量和完整区间覆盖都合格时才条件开放；
 不先承诺完整 10 年，2017 年以前尤其需要更权威来源交叉证明。
 
@@ -31,16 +33,16 @@
 |---|---|
 | 策略 | A 股、单股、只做多、日线 |
 | 开源胶水 | `implemented / fixture-tested / Live-unverified`：Vibe 受限候选、MOSS/pandas 指标差分、Vibe/mootdx 日线接口和 AKShare-shaped 东方财富 Push2 日线请求协议已落地；正式模型/client 未配置，指标未切默认，mootdx 商业与数据条款待审，Push2 直连未取得真实 batch 或 snapshot，公共未文档化接口不视为生产授权 |
-| 技术信号 | 22 个日线定义：MA/EMA、双均线、MACD、RSI、KDJ、CCI、BOLL、BBI、EMA 乖离、区间涨跌幅、阶段新高、连涨、振幅、成交量/成交额、相对成交量、量价确认、OBV、确认式量价背离、阶段趋势 |
-| 事件信号 | 69 项只达到 Catalog/编译/Adapter/运行时代码路径；`/capabilities` 再按当前 pinned strict snapshot 逐码给出运行可用性。历史工件曾包含五类定期报告的 27 条东方财富秒级观察，但已不满足当前公司行动 coverage 门禁；当前没有可用于 strict 重放的新 Event/Composite |
-| 报告正文词频 | `implemented / fixture-tested / Mock-verified / Live-unverified`：可对“初始完整定期报告正文”做确定性词频，并与“首次实际买入成交后第 N 个 A 股交易日退出”组合；历史五事件工件的 `document_text` 为 0，且当前无新 strict Composite，尚不能 Live 运行 |
+| 技术信号 | 35 个透明日线定义：均线/趋势、MACD/RSI/KDJ/CCI/Stochastic/Williams %R、BIAS/ROC/Momentum、BOLL/Donchian、TR/ATR/NATR/波动率、ADX/DMI、价格与量价等；目录可执行不等于任意中文说法都已验收 |
+| 事件信号 | 69 项只达到 Catalog/编译/Adapter/运行时代码路径；当前 strict Composite 只对年报、半年报、季报、业绩预告、业绩快报 5 码提供 pinned coverage，共 26 条东方财富秒级观察；不得写成 69 类真实历史覆盖 |
+| 报告正文词频 | `implemented / fixture-tested / Mock-verified / Live-unverified`：可对“初始完整定期报告正文”做确定性词频，并与“首次实际买入成交后第 N 个 A 股交易日退出”组合；当前 strict Composite 的 26 条 observation 中 `document_text=0`，必须 opt-in 重采正文后才能 Live 运行 |
 | A 股规则 | T+1、停牌、涨跌停、手数、费用、滑点、PIT 容量、部分成交、订单过期 |
 | 资金账户 | 策略与同期持有同资金、同撮合；分红/送转按权益、应收、结算三阶段记账 |
 | 结果 | 摘要、净值、因果活动、秒级事件来源、运行证据、版本化完整结果哈希、预设执行敏感性场景 |
 | 交互 | React H5/WebView，支持编辑参数、区间、资金和成本 |
 | 运行 | 本地 SQLite/thread；部署材料为 PostgreSQL/Redis/RQ/Docker |
 
-覆盖目录还登记了 180 个 A 股单股指标/数据项和 160 个 A 股相关事件，但登记不等于可执行。最终以
+覆盖目录还登记了 181 个 A 股单股指标/数据项和 160 个 A 股相关事件，但登记不等于可执行。其中技术、价格、量能 131 项中只有 35 个 `stable`；最终以
 `GET /api/v1/capabilities` 的 `backtest_execution_available`、逐事件码
 `backtest_available` 与 `preparation_available` 为准。固定 composite 只有在当前
 pinned snapshot 已有合格区间覆盖时才返回 `backtest_available=true`；on-demand
@@ -104,7 +106,8 @@ Compose 路径见[本地运行手册](docs/runbooks/local-development.md)。
 
 ## 关键语义
 
-- v1 技术指标按日线收盘确认；日线 MACD 金叉不能按同一收盘价成交。
+- 技术指标按日线收盘确认；日线 MACD 金叉不能按同一收盘价成交。
+- 只说“MACD”等裸指标、只有买入或只有卖出条件时，系统只集中澄清一次缺少的交易方向，不自动补成“金叉买、死叉卖”。
 - 事件只能在 `available_at` 后触发。通用研究文件仍可把日期级记录按收盘后处理；
   Demo 严格模式只接受经验证的 `Asia/Shanghai` 秒级时间，日期级记录只审计、不交易。
 - 技术日线信号在 15:00 收盘确认，下一可交易 session 使用已发布的日线开盘价代理尝试成交；日线 OHLCV 不能证明集合竞价逐笔成交。
@@ -143,23 +146,13 @@ session 和内容寻址 manifest；配置与验收见 [Choice Quant API 本地�
 供应商 API，详见[多源事件数据与回放](docs/runbooks/multi-source-events.md)和
 [网页发现事件](docs/runbooks/web-discovered-events.md)。
 
-公司行动按 `cn.a_share.timeline_entitlement_receivable_settlement.date_only_cash_after_close_conservative.v2` 的“登记日权益 → 除权日应收 → 派息/到账结算”进入策略和同期持有账户。现金派息来源只有日期而没有日内到账时间时，派息日交易时段内仍保持应收，收盘后才转为可用现金，最早下一交易日可用于下单；不得把日期解释成开盘前或盘中到账。股份仍按来源明确的到账日、上市日和可卖日盘前处理。现金分红按 `gross_research_no_withholding.v1` 税前总额记账，尚未模拟个人按持有期补税。账户股数始终为整数；送转计算出现不足 1 股权益尾数但没有最终整数登记证据时 fail closed，不默认现金补偿。配股当前代码仍 fail closed，产品默认已决定为“不认购、不注入外部资金”，尚待账本实现。同期持有政策为 `funded_buy_and_hold.same_execution_ledger.v1`。后复权价格只用于相对技术信号，不能直接成交或替代公司行动。完整字段和拒绝条件见[公司行动契约](docs/reference/corporate-actions-v1.md)。
+公司行动按 `cn.a_share.timeline_entitlement_receivable_settlement.date_only_cash_after_close_conservative.v2` 的“登记日权益 → 除权日应收 → 派息/到账结算”进入策略和同期持有账户。现金派息来源只有日期而没有日内到账时间时，派息日交易时段内仍保持应收，收盘后才转为可用现金，最早下一交易日可用于下单；不得把日期解释成开盘前或盘中到账。股份仍按来源明确的到账日、上市日和可卖日盘前处理。现金分红按 `gross_research_no_withholding.v1` 税前总额记账，尚未模拟个人按持有期补税。账户股数始终为整数；送转计算出现不足 1 股权益尾数但没有最终整数登记证据时 fail closed，不默认现金补偿。配股默认 `decline_no_external_cash.v1` 已进入策略与 funded benchmark 账本：保留拒绝认购审计，不注入外部资金；配股认购、缴款、退款和上市可卖链仍未实现。同期持有政策为 `funded_buy_and_hold.same_execution_ledger.v1`。后复权价格只用于相对技术信号，不能直接成交或替代公司行动。完整字段和拒绝条件见[公司行动契约](docs/reference/corporate-actions-v1.md)。
 
-当前只有一份单独 Choice 用户区间快照还能通过正式 loader：
-`choice:a2eebf97b7c2ed4f2467ca6f91a3e95f48ed609c4026b440a16e7a11a4a23b4f`。它覆盖
-`300059.SZ` 2021-08-06 至 2026-08-06，在当前 loader 下 pin 为
-`snapshot:d3f5d91ff0ddd688c0f6ef58c18500f9435f86433b572cffa21296277ef42d66`；该证据仅为
-`local-real-data-verified`。它不覆盖 2021-02-07 至 2026-08-20 的预热/结算 expanded 区间，
-也没有事件数据，不能替代 Event v2 + Composite v2 或用于最终双策略 Live 验收。
+当前真实五年运行身份为 `composite:1f26afb8b1223b656397abd5c99ce5a0ac9ed6593c3dbf7bdc46fb5a61bb9b8b`，当前代码的 strict loader pin 为 `snapshot:4bd9ae887af1cac159bf2d831313c73d839a313b11a746c015ea19fa3d5728cd`。它覆盖 `300059.SZ` 2021-02-07 至 2026-08-20，执行/信号/session 各 1,340 行、公司行动 9 条，并对五类定期报告固定 26 条 `vendor_observed + validated` 秒级观察（年报 6、半年报 5、季报 10、业绩预告 3、业绩快报 2）与 9 页/862 条公告查询证据。本地 `.env` 已指向该 Composite，运行时只读固定快照并禁止访问供应商网络；该层级为 `local-real-data-verified`，不等于最终 clean-SHA H5 验收。
 
-历史工件曾固定五类定期报告的 27 条秒级观察和 9 页/862 条公告查询证据，
-但其 Composite 的公司行动 coverage 仅是旧口径。当前 strict loader 会以
-`strict corporate-action coverage must prove all categories` 拒绝该组快照和旧 pins；它们只保留为历史本地真实工件，
-不是当前可用身份。历史 Event 中 `document_text` 观察为 0。正文词频链路已在代码、夹具和 Mock 中落地，
-PDF 内嵌文本抽取实际复用 `pypdfium2`，但要做 Live 仍必须显式开启正文抽取，重新采集并发布新的内容寻址
-Event v2 + Composite v2。clean SHA `0e9025779791d988f8451ef0ce68b4e2e10f008f` 下的最新精确采集已通过
-BaoStock 会话参考、东方财富公司行动和 Choice 登录，但不复权日线在有限重试后返回
-`10002004 network connection closed when recv`。因此尚无新 exact Choice/Event/Composite、run ID 或 Live 结果。
+该 Composite 的 26 条 observation 中 `document_text=0`。正文词频链路已在代码、夹具和 Mock 中落地，PDF 内嵌文本抽取实际复用 `pypdfium2`，但要做 Live 仍必须显式开启正文抽取、重新采集并发布新的内容寻址 Event v2 + Composite v2。
+
+公网 API 已在较早 revision `4dc55904f38d4d26b6ed3e29fe8a729f529da66c` 上再次跑通技术策略 `run:b2778dc334cc4eb3b39ac9eab2efd54f` 与年报事件策略 `run:12fe45b6624249d5a6bba3458751cc98`，两者都引用上述 producer/slice 身份。它们是先前公网 API E2E 证据，不是当前工作树的 final clean SHA，也不替代公网 H5 Network/后端日志验收。
 
 ## 项目结构
 

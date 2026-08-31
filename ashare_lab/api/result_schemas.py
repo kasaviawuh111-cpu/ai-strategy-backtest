@@ -82,6 +82,10 @@ class BacktestSignalEvidence(CamelApiModel):
     provider: str | None = None
     source_url: str | None = Field(default=None, alias="sourceUrl")
     time_quality: str | None = Field(default=None, alias="timeQuality")
+    timestamp_precision: Literal["second", "minute", "hour", "date"] | None = Field(
+        default=None,
+        alias="timestampPrecision",
+    )
     validation_status: str | None = Field(default=None, alias="validationStatus")
     raw_response_sha256: str | None = Field(
         default=None,
