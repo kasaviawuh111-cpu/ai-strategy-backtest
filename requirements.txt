@@ -1,0 +1,3 @@
+# Compatibility entry point for environments that still invoke pip.
+# pyproject.toml is the dependency source of truth; uv.lock is the reproducible lock.
+-e .

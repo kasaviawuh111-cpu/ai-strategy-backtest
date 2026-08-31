@@ -1,0 +1,198 @@
+name: ashare-lab
+
+x-backend-environment: &backend-environment
+  # Default compose is an explicitly labelled local research demo.  It still
+  # exercises the strict Parquet session adapter; the bundled data provenance
+  # remains research-only and is not a production market-data claim.
+  APP_ENV: ${APP_ENV:-local}
+  APP_HOST: 0.0.0.0
+  APP_PORT: 8000
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://ashare:ashare@postgres:5432/ashare}
+  INITIALIZE_SCHEMA: "false"
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  QUEUE_BACKEND: rq
+  QUEUE_NAME: backtests
+  DATA_ROOT: ${DATA_ROOT:-/app/var/data}
+  MARKET_DATA_PROFILE: ${MARKET_DATA_PROFILE:-composite_snapshot}
+  EVENT_DATA_REQUIRED: ${EVENT_DATA_REQUIRED:-true}
+  SESSION_REFERENCE_MODE: ${SESSION_REFERENCE_MODE:-parquet}
+  SESSION_REFERENCE_PATH: ${SESSION_REFERENCE_PATH:-/app/var/data/instrument_sessions.parquet}
+  ARTIFACT_ROOT: /app/var/artifacts
+  CATALOG_ROOT: /app/catalogs
+  ENGINE_VERSION: ${ENGINE_VERSION:-2.0.0a0}
+  MAX_BODY_BYTES: ${MAX_BODY_BYTES:-16384}
+  CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+  NUMBA_CACHE_DIR: /tmp/numba
+
+x-backend-service: &backend-service
+  image: ${BACKEND_IMAGE:-ashare-lab/backend:local}
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      CODE_REVISION: ${CODE_REVISION:?CODE_REVISION must be the exact 40-character Git SHA}
+  environment: *backend-environment
+  init: true
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  networks:
+    - backend
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ashare}
+      POSTGRES_USER: ${POSTGRES_USER:-ashare}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ashare}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - backend
+
+  redis:
+    image: redis:7.4.11-alpine3.21
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if [ -n "$${REDIS_PASSWORD:-}" ]; then
+          exec redis-server --appendonly yes --appendfsync everysec --requirepass "$$REDIS_PASSWORD"
+        fi
+        exec redis-server --appendonly yes --appendfsync everysec
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          if [ -n "$${REDIS_PASSWORD:-}" ]; then
+            redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping;
+          else
+            redis-cli ping;
+          fi
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    networks:
+      - backend
+
+  migrate:
+    <<: *backend-service
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend-service
+    command:
+      - uvicorn
+      - ashare_lab.main:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "${API_WORKERS:-2}"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "${FORWARDED_ALLOW_IPS:-127.0.0.1}"
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
+    volumes:
+      - ${MARKET_DATA_PATH:?MARKET_DATA_PATH must point to one immutable composite snapshot}:/app/var/data:ro
+      - artifacts:/app/var/artifacts
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "scripts/container_healthcheck.py", "api"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  worker:
+    <<: *backend-service
+    command:
+      - /bin/sh
+      - -ec
+      - exec rq worker "$$QUEUE_NAME" --url "$$REDIS_URL"
+    volumes:
+      - ${MARKET_DATA_PATH:?MARKET_DATA_PATH must point to one immutable composite snapshot}:/app/var/data:ro
+      - artifacts:/app/var/artifacts
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "scripts/container_healthcheck.py", "redis"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 90s
+
+  web:
+    profiles: ["web"]
+    image: ${WEB_IMAGE:-ashare-lab/web:local}
+    build:
+      context: .
+      dockerfile: deploy/docker/web.Dockerfile
+      args:
+        VITE_USE_MOCK: "false"
+        VITE_API_BASE_URL: ""
+        VITE_DATA_AS_OF_DATE: ${VITE_DATA_AS_OF_DATE:-2026-08-06}
+    ports:
+      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    restart: unless-stopped
+    stop_grace_period: 15s
+    networks:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  artifacts:
+
+networks:
+  backend:
+    driver: bridge

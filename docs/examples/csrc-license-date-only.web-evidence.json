@@ -1,0 +1,36 @@
+[
+  {
+    "provider": "web_archive",
+    "event_code": "event.macro_policy_industry.license_approval",
+    "source_event_id": "csrc-c7552337",
+    "external_fact_id": "证监许可〔2025〕689号",
+    "title": "关于核准东方财富证券股份有限公司上市证券做市交易业务资格的批复",
+    "canonical_url": "https://www.csrc.gov.cn/csrc/c101857/c7552337/content.shtml",
+    "raw_response_sha256": "a1b5d42a7fea1f166fb1488ae9ce5f4993ff7eefab2e408e56378d4eaaa4012c",
+    "content_sha256": "a1b5d42a7fea1f166fb1488ae9ce5f4993ff7eefab2e408e56378d4eaaa4012c",
+    "instrument_id": "300059.SZ",
+    "entity_mapping_status": "exact",
+    "entity_mapping_key": "300059.SZ",
+    "entity_match_method": "point_in_time_controlled_subsidiary",
+    "mapping_confidence": 1,
+    "source_entity_id": "东方财富证券股份有限公司",
+    "publisher_name": "中国证券监督管理委员会",
+    "publisher_type": "regulator",
+    "extractor_id": "regulatory-license-fields",
+    "extractor_version": "1.0.0",
+    "classifier_id": "web-event-classifier",
+    "classifier_version": "1.0.0",
+    "revision_type": "initial",
+    "revision_no": 0,
+    "revision_id": "证监许可〔2025〕689号:r0",
+    "review_status": "accepted",
+    "evidence_span": "核准东方财富证券上市证券做市交易业务资格。",
+    "timing_basis": "page_metadata_only",
+    "source_released_at": "2025-04-02",
+    "event_attributes": {
+      "approval_status": "approved",
+      "license_type": "上市证券做市交易业务资格",
+      "regulator": "中国证券监督管理委员会"
+    }
+  }
+]

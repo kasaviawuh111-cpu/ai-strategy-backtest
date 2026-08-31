@@ -1,0 +1,60 @@
+/**
+ * Design tokens
+ * 来源：Figma 0828 (node 39-34171) 的 CSS 导出 + 妙想AI 线上宿主环境。
+ * 主色统一为东方财富橙；涨跌语义色保持 A 股口径，且必须同时配合文字与形状表达（SPEC 4.11）。
+ */
+:root {
+  /* ---- 主色 ---- */
+  --color-primary: #ff7700;
+  --color-primary-press: #e56a00;
+  --color-primary-weak: rgba(255, 119, 0, 0.1);
+  --color-em-logo: #ff6600; /* 顶栏东方财富徽标 */
+
+  /* ---- 语义色 ---- */
+  --color-up: #f62f3f;    /* 涨 */
+  --color-down: #00ab61;  /* 跌 */
+  --color-warn: #ff9048;
+  --color-info: #3b84ff;
+  --color-purple: #8b5cf6; /* 深度思考等能力标识 */
+
+  /* ---- 文字层级 ---- */
+  --ink-1: #1a1a1a;
+  --ink-2: #353739;
+  --ink-3: #6d778b;
+  --ink-4: #a6acb8;
+  --ink-5: #ccd0d8;
+
+  /* ---- 面与分割 ---- */
+  --surface: #ffffff;
+  --surface-card: rgba(170, 170, 185, 0.08);
+  --surface-sunken: rgba(170, 170, 185, 0.16);
+  --hairline: rgba(166, 172, 184, 0.2);
+  --hairline-2: rgba(166, 172, 184, 0.38);
+
+  /* 对话页顶部渐变底（妙想AI） */
+  --wash: linear-gradient(180deg, #fcedee 0%, #fef6f4 40%, #ffffff 100%);
+  --bubble-me: #fbe7e9; /* 用户气泡 */
+
+  /* ---- 圆角 ---- */
+  --r-card: 16px;
+  --r-inner: 12px;
+  --r-chip: 8px;
+  --r-btn: 22px;
+  --r-bubble: 16px;
+
+  /* ---- 版心 ---- */
+  --gutter: 16px;
+
+  /* ---- 字体 ---- */
+  --font: "PingFang SC", -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+    "Microsoft YaHei", sans-serif;
+  /* 数字：Figma 用「涨乐财富体 / ZLShuZiTi」，宿主无该字体时退到等宽数字栈 */
+  --font-num: "DIN Alternate", "SF Pro Text", -apple-system, ui-sans-serif,
+    "Helvetica Neue", sans-serif;
+
+  /* ---- iOS safe area ---- */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}

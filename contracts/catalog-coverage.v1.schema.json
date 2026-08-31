@@ -1,0 +1,481 @@
+{
+  "$defs": {
+    "CapabilityStatus": {
+      "enum": [
+        "stable",
+        "research_only",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "CatalogTimeSemantics": {
+      "additionalProperties": false,
+      "description": "Availability and default trading policy, independent of event fact time.",
+      "properties": {
+        "daily_bar_fallback": {
+          "enum": [
+            "next_tradable_session_open",
+            "reject"
+          ],
+          "title": "Daily Bar Fallback",
+          "type": "string"
+        },
+        "date_only_policy": {
+          "enum": [
+            "conservative_after_close",
+            "reject",
+            "not_applicable"
+          ],
+          "title": "Date Only Policy",
+          "type": "string"
+        },
+        "default_order_time": {
+          "enum": [
+            "next_tradable_session_open",
+            "next_continuous_match_after_available",
+            "not_tradable"
+          ],
+          "title": "Default Order Time",
+          "type": "string"
+        },
+        "notes": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Notes",
+          "type": "string"
+        },
+        "observation_basis": {
+          "enum": [
+            "bar_close",
+            "bar_intraday",
+            "available_at",
+            "effective_at",
+            "report_period"
+          ],
+          "title": "Observation Basis",
+          "type": "string"
+        },
+        "required_quality": {
+          "enum": [
+            "exact_timestamp",
+            "exchange_session",
+            "date_only",
+            "report_period_with_publication_time"
+          ],
+          "title": "Required Quality",
+          "type": "string"
+        },
+        "revision_policy": {
+          "enum": [
+            "as_known_at_cutoff",
+            "first_seen_only",
+            "reject_revisions"
+          ],
+          "title": "Revision Policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "observation_basis",
+        "required_quality",
+        "date_only_policy",
+        "revision_policy",
+        "default_order_time",
+        "daily_bar_fallback",
+        "notes"
+      ],
+      "title": "CatalogTimeSemantics",
+      "type": "object"
+    },
+    "DataRequirement": {
+      "additionalProperties": false,
+      "description": "One versioned input needed to evaluate a metric or event.",
+      "properties": {
+        "dataset_id": {
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "fields": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Fields",
+          "type": "array"
+        },
+        "frequency": {
+          "enum": [
+            "tick",
+            "1m",
+            "5m",
+            "1d",
+            "event",
+            "quarterly",
+            "annual",
+            "reference"
+          ],
+          "title": "Frequency",
+          "type": "string"
+        },
+        "license_status": {
+          "$ref": "#/$defs/LicenseStatus"
+        },
+        "point_in_time_required": {
+          "title": "Point In Time Required",
+          "type": "boolean"
+        },
+        "required_time_fields": {
+          "items": {
+            "enum": [
+              "fact_at",
+              "available_at",
+              "ingested_at",
+              "revision_id"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Required Time Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "fields",
+        "frequency",
+        "point_in_time_required",
+        "required_time_fields",
+        "license_status"
+      ],
+      "title": "DataRequirement",
+      "type": "object"
+    },
+    "EventDefinition": {
+      "additionalProperties": false,
+      "description": "A normalized A-share event code with point-in-time lifecycle semantics.",
+      "properties": {
+        "blockers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "category": {
+          "enum": [
+            "financial_results",
+            "dividends_corporate_actions",
+            "repurchase_capital",
+            "shareholder_holdings",
+            "restricted_shares_pledges",
+            "trading_status",
+            "regulation_risk",
+            "market_activity",
+            "financing_securities",
+            "index_passive",
+            "contracts_orders",
+            "capacity_operations",
+            "m_and_a_restructuring",
+            "governance_personnel",
+            "litigation_credit",
+            "macro_policy_industry"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "data_requirements": {
+          "items": {
+            "$ref": "#/$defs/DataRequirement"
+          },
+          "minItems": 1,
+          "title": "Data Requirements",
+          "type": "array"
+        },
+        "dedupe_keys": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2,
+          "title": "Dedupe Keys",
+          "type": "array"
+        },
+        "description": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^event\\.[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+          "title": "Id",
+          "type": "string"
+        },
+        "implementation_ref": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Implementation Ref"
+        },
+        "lifecycle_states": {
+          "items": {
+            "enum": [
+              "announced",
+              "amended",
+              "approved",
+              "effective",
+              "completed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "minItems": 2,
+          "title": "Lifecycle States",
+          "type": "array"
+        },
+        "name_zh": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Name Zh",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/CapabilityStatus"
+        },
+        "time_semantics": {
+          "$ref": "#/$defs/CatalogTimeSemantics"
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "name_zh",
+        "description",
+        "status",
+        "lifecycle_states",
+        "dedupe_keys",
+        "data_requirements",
+        "time_semantics"
+      ],
+      "title": "EventDefinition",
+      "type": "object"
+    },
+    "LicenseStatus": {
+      "enum": [
+        "cleared",
+        "internal_only",
+        "unknown",
+        "not_acquired"
+      ],
+      "type": "string"
+    },
+    "MetricDefinition": {
+      "additionalProperties": false,
+      "description": "A normalized indicator or raw/derived data series in the coverage inventory.",
+      "properties": {
+        "blockers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "data_requirements": {
+          "items": {
+            "$ref": "#/$defs/DataRequirement"
+          },
+          "minItems": 1,
+          "title": "Data Requirements",
+          "type": "array"
+        },
+        "description": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "technical",
+            "price_action",
+            "volume_liquidity",
+            "fundamental_valuation"
+          ],
+          "title": "Family",
+          "type": "string"
+        },
+        "formula_summary": {
+          "anyOf": [
+            {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Formula Summary"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+          "title": "Id",
+          "type": "string"
+        },
+        "implementation_ref": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Implementation Ref"
+        },
+        "kind": {
+          "enum": [
+            "indicator",
+            "data_series"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "legacy_atom_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Legacy Atom Ids",
+          "type": "array"
+        },
+        "name_zh": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Name Zh",
+          "type": "string"
+        },
+        "parameters": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Parameters",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/CapabilityStatus"
+        },
+        "time_semantics": {
+          "$ref": "#/$defs/CatalogTimeSemantics"
+        },
+        "triggers": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Triggers",
+          "type": "array"
+        },
+        "warmup_bars": {
+          "anyOf": [
+            {
+              "maximum": 100000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Warmup Bars"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "family",
+        "name_zh",
+        "description",
+        "status",
+        "triggers",
+        "data_requirements",
+        "time_semantics"
+      ],
+      "title": "MetricDefinition",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.ashare-lab.local/catalog-coverage.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "catalog_id": {
+      "pattern": "^[a-z][a-z0-9_.-]{2,63}$",
+      "title": "Catalog Id",
+      "type": "string"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/EventDefinition"
+      },
+      "minItems": 1,
+      "title": "Events",
+      "type": "array"
+    },
+    "metrics": {
+      "items": {
+        "$ref": "#/$defs/MetricDefinition"
+      },
+      "minItems": 1,
+      "title": "Metrics",
+      "type": "array"
+    },
+    "published_on": {
+      "format": "date",
+      "title": "Published On",
+      "type": "string"
+    },
+    "release_version": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "title": "Release Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "catalog-coverage.v1",
+      "default": "catalog-coverage.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "active",
+        "retired"
+      ],
+      "title": "State",
+      "type": "string"
+    }
+  },
+  "required": [
+    "catalog_id",
+    "release_version",
+    "state",
+    "published_on",
+    "metrics",
+    "events"
+  ],
+  "title": "CoverageCatalogRelease",
+  "type": "object"
+}

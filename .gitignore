@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+.venv-shared-old-link
+venv/
+.vendor/
+*.egg-info/
+dist/
+build/
+
+# Env / secrets
+.env
+.env.local
+*.key
+*.pem
+
+# Data (do not commit market data)
+*.parquet
+*.csv
+*.csv.gz
+astock_data/
+var/data/
+var/artifacts/
+var/snapshots/
+
+# Runtime
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
+.uv-cache/
+.mypy_cache/
+.pyright/
+.hypothesis/
+.pnpm-store/
+.rq-dashboard/
+*.sqlite3
+*.db
+
+# Frontend
+node_modules/
+web/dist/
+web/artifacts/
+playwright-report/
+test-results/
+pnpm-debug.log*
+
+# Local exports, screenshots, and integration scratch
+.artifacts/
+artifacts/
+.frontend-export.*/
+.rollback-backups/
+.work/
+.work-user-merge.*/
+backtesth5web-*.tar.gz
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Backup / scratch
+*.bak
+*.bak_*
+*.orig

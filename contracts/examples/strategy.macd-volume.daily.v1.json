@@ -1,0 +1,67 @@
+{
+  "schema_version": "strategy.v1",
+  "catalog": {
+    "catalog_id": "cn_a.signals",
+    "release_version": "2026.08.30"
+  },
+  "instrument": {
+    "market": "CN_A",
+    "symbol": "300059.SZ",
+    "position_mode": "long_only"
+  },
+  "entry": {
+    "type": "all",
+    "children": [
+      {
+        "type": "indicator_condition",
+        "indicator_id": "technical.macd",
+        "definition_version": "1.0.0",
+        "params": {"fast": 12, "slow": 26, "signal": 9},
+        "timeframe": "1d",
+        "evaluation_mode": "bar_close_confirmed",
+        "trigger": "golden_cross",
+        "value": null
+      },
+      {
+        "type": "indicator_condition",
+        "indicator_id": "market.volume",
+        "definition_version": "1.0.0",
+        "params": {"baseline_period": 20},
+        "timeframe": "1d",
+        "evaluation_mode": "bar_close_confirmed",
+        "trigger": "gte_multiple",
+        "value": 2
+      }
+    ]
+  },
+  "exit": {
+    "op": "first_of",
+    "children": [
+      {
+        "type": "indicator_condition",
+        "indicator_id": "technical.macd",
+        "definition_version": "1.0.0",
+        "params": {"fast": 12, "slow": 26, "signal": 9},
+        "timeframe": "1d",
+        "evaluation_mode": "bar_close_confirmed",
+        "trigger": "death_cross",
+        "value": null
+      }
+    ]
+  },
+  "execution": {
+    "timezone": "Asia/Shanghai",
+    "entry_policy": "next_tradable_session_open",
+    "exit_policy": "next_tradable_session_open",
+    "data_capability": "daily_ohlcv",
+    "execution_resolution": "1d",
+    "evaluation_frequency": "1d_close",
+    "position_policy": "single_position_no_pyramiding",
+    "t_plus_one": true
+  },
+  "backtest": {
+    "start": "2021-01-01",
+    "end": "2026-08-27",
+    "initial_cash_cny": 1000000
+  }
+}

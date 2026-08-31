@@ -1,0 +1,318 @@
+{
+  "$defs": {
+    "IndicatorDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "evaluation_modes": {
+          "items": {
+            "const": "bar_close_confirmed",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Evaluation Modes",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+          "title": "Id",
+          "type": "string"
+        },
+        "parameter_relations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ParameterRelation"
+          },
+          "title": "Parameter Relations",
+          "type": "array"
+        },
+        "parameters": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ParameterDefinition"
+          },
+          "title": "Parameters",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "stable",
+            "experimental",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "timeframes": {
+          "items": {
+            "const": "1d",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Timeframes",
+          "type": "array"
+        },
+        "triggers": {
+          "items": {
+            "$ref": "#/$defs/TriggerDefinition"
+          },
+          "minItems": 1,
+          "title": "Triggers",
+          "type": "array"
+        },
+        "version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "title": "Version",
+          "type": "string"
+        },
+        "warmup_bars": {
+          "maximum": 100000,
+          "minimum": 0,
+          "title": "Warmup Bars",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "status",
+        "warmup_bars",
+        "timeframes",
+        "evaluation_modes",
+        "triggers"
+      ],
+      "title": "IndicatorDefinition",
+      "type": "object"
+    },
+    "JsonScalar": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        }
+      ]
+    },
+    "ParameterDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "choices": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/JsonScalar"
+          },
+          "title": "Choices",
+          "type": "array"
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonScalar"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Name",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "value_type": {
+          "enum": [
+            "integer",
+            "number",
+            "string",
+            "boolean"
+          ],
+          "title": "Value Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value_type"
+      ],
+      "title": "ParameterDefinition",
+      "type": "object"
+    },
+    "ParameterRelation": {
+      "additionalProperties": false,
+      "properties": {
+        "left": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Left",
+          "type": "string"
+        },
+        "op": {
+          "enum": [
+            "lt",
+            "lte",
+            "gt",
+            "gte"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "right": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "title": "Right",
+          "type": "string"
+        }
+      },
+      "required": [
+        "left",
+        "op",
+        "right"
+      ],
+      "title": "ParameterRelation",
+      "type": "object"
+    },
+    "TriggerDefinition": {
+      "additionalProperties": false,
+      "properties": {
+        "exclusive_maximum": {
+          "default": false,
+          "title": "Exclusive Maximum",
+          "type": "boolean"
+        },
+        "exclusive_minimum": {
+          "default": false,
+          "title": "Exclusive Minimum",
+          "type": "boolean"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{1,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maximum"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minimum"
+        },
+        "value_requirement": {
+          "enum": [
+            "required",
+            "forbidden"
+          ],
+          "title": "Value Requirement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "value_requirement"
+      ],
+      "title": "TriggerDefinition",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.ashare-lab.local/indicator-catalog.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "catalog_id": {
+      "pattern": "^[a-z][a-z0-9_.-]{2,63}$",
+      "title": "Catalog Id",
+      "type": "string"
+    },
+    "indicators": {
+      "items": {
+        "$ref": "#/$defs/IndicatorDefinition"
+      },
+      "minItems": 1,
+      "title": "Indicators",
+      "type": "array"
+    },
+    "published_on": {
+      "format": "date",
+      "title": "Published On",
+      "type": "string"
+    },
+    "release_version": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "title": "Release Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "indicator-catalog.v1",
+      "default": "indicator-catalog.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "active",
+        "retired"
+      ],
+      "title": "State",
+      "type": "string"
+    }
+  },
+  "required": [
+    "catalog_id",
+    "release_version",
+    "state",
+    "published_on",
+    "indicators"
+  ],
+  "title": "CatalogManifest",
+  "type": "object"
+}

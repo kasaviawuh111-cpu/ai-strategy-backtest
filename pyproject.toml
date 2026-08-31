@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "astock-backtest-engine"
+version = "2.0.0a0"
+description = "A 股单股自然语言策略编译与可重放回测平台"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0,<3",
+    "pandas>=2.2,<4",
+    "pyarrow>=16,<27",
+    "numba>=0.60,<1",
+    "pydantic>=2.10,<3",
+    "pydantic-settings>=2.7,<3",
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "sqlalchemy>=2.0,<3",
+    "alembic>=1.14,<2",
+    "psycopg[binary]>=3.2,<4",
+    "redis>=5,<8",
+    "rq>=2.3,<3",
+    "duckdb>=1.2,<2",
+    "httpx>=0.28,<1",
+]
+
+[project.optional-dependencies]
+demo = [
+    "baostock>=0.8.9,<1",
+    "pypdfium2>=5.12,<6",
+]
+dev = [
+    "hypothesis>=6.120,<7",
+    "import-linter>=2.1,<3",
+    "playwright>=1.57,<2",
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=0.25,<2",
+    "pytest-cov>=6,<8",
+    "pyright>=1.1.400,<2",
+    "ruff>=0.11,<1",
+]
+
+[tool.setuptools.packages.find]
+include = ["astock_backtest*", "ashare_lab*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "legacy: characterization tests for the legacy v1 engine",
+    "integration: tests that cross process or storage boundaries",
+    "e2e: end-to-end product flows",
+    "benchmark: performance budgets",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["ashare_lab"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+include = ["ashare_lab"]
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false

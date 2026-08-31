@@ -1,0 +1,669 @@
+{
+  "schema_version": "indicator-catalog.v1",
+  "catalog_id": "cn_a.signals",
+  "release_version": "2026.08.30",
+  "state": "active",
+  "published_on": "2026-08-30",
+  "indicators": [
+    {
+      "id": "technical.macd",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 35,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "fast", "value_type": "integer", "required": true, "default": 12, "minimum": 1, "maximum": 500},
+        {"name": "slow", "value_type": "integer", "required": true, "default": 26, "minimum": 2, "maximum": 1000},
+        {"name": "signal", "value_type": "integer", "required": true, "default": 9, "minimum": 1, "maximum": 500}
+      ],
+      "parameter_relations": [
+        {"left": "fast", "op": "lt", "right": "slow"}
+      ],
+      "triggers": [
+        {"id": "golden_cross", "value_requirement": "forbidden"},
+        {"id": "death_cross", "value_requirement": "forbidden"},
+        {"id": "crosses_above_zero", "value_requirement": "forbidden"},
+        {"id": "crosses_below_zero", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.ma",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 21,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "price_crosses_above", "value_requirement": "forbidden"},
+        {"id": "price_crosses_below", "value_requirement": "forbidden"},
+        {"id": "price_above", "value_requirement": "forbidden"},
+        {"id": "price_below", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.rsi",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 16,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 14, "minimum": 2, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0, "maximum": 100},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0, "maximum": 100},
+        {"id": "above", "value_requirement": "required", "minimum": 0, "maximum": 100},
+        {"id": "below", "value_requirement": "required", "minimum": 0, "maximum": 100}
+      ]
+    },
+    {
+      "id": "market.volume",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 20,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "baseline_period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "gte_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
+        {"id": "lte_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true}
+      ]
+    },
+    {
+      "id": "technical.ema",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 29,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 28, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "price_crosses_above", "value_requirement": "forbidden"},
+        {"id": "price_crosses_below", "value_requirement": "forbidden"},
+        {"id": "price_above", "value_requirement": "forbidden"},
+        {"id": "price_below", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.ma_cross",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 21,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "fast_period", "value_type": "integer", "required": true, "default": 5, "minimum": 1, "maximum": 500},
+        {"name": "slow_period", "value_type": "integer", "required": true, "default": 20, "minimum": 2, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [
+        {"left": "fast_period", "op": "lt", "right": "slow_period"}
+      ],
+      "triggers": [
+        {"id": "golden_cross", "value_requirement": "forbidden"},
+        {"id": "death_cross", "value_requirement": "forbidden"},
+        {"id": "fast_above_slow", "value_requirement": "forbidden"},
+        {"id": "fast_below_slow", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.bollinger",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 21,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 20, "minimum": 2, "maximum": 1000},
+        {"name": "stddev_multiplier", "value_type": "number", "required": true, "default": 2, "minimum": 0.000001, "maximum": 100},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "price_crosses_above_upper", "value_requirement": "forbidden"},
+        {"id": "price_crosses_below_upper", "value_requirement": "forbidden"},
+        {"id": "price_crosses_above_middle", "value_requirement": "forbidden"},
+        {"id": "price_crosses_below_middle", "value_requirement": "forbidden"},
+        {"id": "price_crosses_above_lower", "value_requirement": "forbidden"},
+        {"id": "price_crosses_below_lower", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.kdj",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 10,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 9, "minimum": 2, "maximum": 1000},
+        {"name": "k_smoothing", "value_type": "integer", "required": true, "default": 3, "minimum": 1, "maximum": 500},
+        {"name": "d_smoothing", "value_type": "integer", "required": true, "default": 3, "minimum": 1, "maximum": 500}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "golden_cross", "value_requirement": "forbidden"},
+        {"id": "death_cross", "value_requirement": "forbidden"},
+        {"id": "j_above", "value_requirement": "required"},
+        {"id": "j_below", "value_requirement": "required"}
+      ]
+    },
+    {
+      "id": "technical.cci",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 15,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 14, "minimum": 2, "maximum": 1000},
+        {"name": "constant", "value_type": "number", "required": true, "default": 0.015, "minimum": 0.000000001, "maximum": 100}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required"},
+        {"id": "crosses_below", "value_requirement": "required"},
+        {"id": "above", "value_requirement": "required"},
+        {"id": "below", "value_requirement": "required"}
+      ]
+    },
+    {
+      "id": "technical.bbi",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 25,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period_1", "value_type": "integer", "required": true, "default": 3, "minimum": 1, "maximum": 1000},
+        {"name": "period_2", "value_type": "integer", "required": true, "default": 6, "minimum": 1, "maximum": 1000},
+        {"name": "period_3", "value_type": "integer", "required": true, "default": 12, "minimum": 1, "maximum": 1000},
+        {"name": "period_4", "value_type": "integer", "required": true, "default": 24, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [
+        {"left": "period_1", "op": "lt", "right": "period_2"},
+        {"left": "period_2", "op": "lt", "right": "period_3"},
+        {"left": "period_3", "op": "lt", "right": "period_4"}
+      ],
+      "triggers": [
+        {"id": "price_crosses_above", "value_requirement": "forbidden"},
+        {"id": "price_crosses_below", "value_requirement": "forbidden"},
+        {"id": "price_above", "value_requirement": "forbidden"},
+        {"id": "price_below", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.ema_bias",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 29,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 28, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required"},
+        {"id": "crosses_below", "value_requirement": "required"},
+        {"id": "above", "value_requirement": "required"},
+        {"id": "below", "value_requirement": "required"}
+      ]
+    },
+    {
+      "id": "price.return_pct",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 7,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 5, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required"},
+        {"id": "crosses_below", "value_requirement": "required"},
+        {"id": "above", "value_requirement": "required"},
+        {"id": "below", "value_requirement": "required"}
+      ]
+    },
+    {
+      "id": "price.rolling_high",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 21,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "new_high", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "price.consecutive_up",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 4,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "days", "value_type": "integer", "required": true, "default": 3, "minimum": 1, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "at_least", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "price.amplitude",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 3,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": 0}
+      ]
+    },
+    {
+      "id": "market.amount",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 2,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": 0}
+      ]
+    },
+    {
+      "id": "amount.average",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 21,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": 0}
+      ]
+    },
+    {
+      "id": "volume.relative",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 23,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "baseline_period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000},
+        {"name": "consecutive_days", "value_type": "integer", "required": true, "default": 3, "minimum": 1, "maximum": 100}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "gte_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
+        {"id": "lte_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
+        {"id": "consecutive_gte_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true}
+      ]
+    },
+    {
+      "id": "volume.price_confirmation",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 21,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "baseline_period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000},
+        {"name": "volume_multiple", "value_type": "number", "required": true, "default": 1.5, "minimum": 0.000001, "maximum": 1000},
+        {"name": "return_threshold_pct", "value_type": "number", "required": true, "default": 5, "minimum": 0, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "surge_up", "value_requirement": "forbidden"},
+        {"id": "surge_down", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.obv",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 2,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "rising", "value_requirement": "forbidden"},
+        {"id": "falling", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "volume.price_divergence",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 84,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "left_bars", "value_type": "integer", "required": true, "default": 3, "minimum": 1, "maximum": 100},
+        {"name": "right_bars", "value_type": "integer", "required": true, "default": 3, "minimum": 1, "maximum": 100},
+        {"name": "min_separation", "value_type": "integer", "required": true, "default": 5, "minimum": 1, "maximum": 1000},
+        {"name": "max_separation", "value_type": "integer", "required": true, "default": 60, "minimum": 1, "maximum": 5000},
+        {"name": "price_threshold_pct", "value_type": "number", "required": true, "default": 2, "minimum": 0, "maximum": 1000},
+        {"name": "obv_threshold_adv", "value_type": "number", "required": true, "default": 1, "minimum": 0, "maximum": 1000},
+        {"name": "average_volume_period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000}
+      ],
+      "parameter_relations": [
+        {"left": "min_separation", "op": "lte", "right": "max_separation"}
+      ],
+      "triggers": [
+        {"id": "bearish", "value_requirement": "forbidden"},
+        {"id": "bullish", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.trend_regime",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 121,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "short_period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000},
+        {"name": "long_period", "value_type": "integer", "required": true, "default": 60, "minimum": 2, "maximum": 5000},
+        {"name": "slope_lookback", "value_type": "integer", "required": true, "default": 5, "minimum": 1, "maximum": 1000},
+        {"name": "adx_period", "value_type": "integer", "required": true, "default": 14, "minimum": 2, "maximum": 1000},
+        {"name": "adx_threshold", "value_type": "number", "required": true, "default": 25, "minimum": 0, "maximum": 100},
+        {"name": "confirmation_days", "value_type": "integer", "required": true, "default": 2, "minimum": 1, "maximum": 100},
+        {"name": "stability_bars", "value_type": "integer", "required": true, "default": 120, "minimum": 2, "maximum": 10000}
+      ],
+      "parameter_relations": [
+        {"left": "short_period", "op": "lt", "right": "long_period"}
+      ],
+      "triggers": [
+        {"id": "uptrend", "value_requirement": "forbidden"},
+        {"id": "downtrend", "value_requirement": "forbidden"},
+        {"id": "range", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "price.true_range",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 3,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": 0}
+      ]
+    },
+    {
+      "id": "technical.atr",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 16,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 14, "minimum": 1, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": 0}
+      ]
+    },
+    {
+      "id": "technical.natr",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 16,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 14, "minimum": 1, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": 0}
+      ]
+    },
+    {
+      "id": "technical.adx",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 29,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 14, "minimum": 2, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0, "maximum": 100},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0, "maximum": 100},
+        {"id": "above", "value_requirement": "required", "minimum": 0, "maximum": 100},
+        {"id": "below", "value_requirement": "required", "minimum": 0, "maximum": 100}
+      ]
+    },
+    {
+      "id": "technical.dmi",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 29,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 14, "minimum": 2, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "plus_crosses_above_minus", "value_requirement": "forbidden"},
+        {"id": "plus_crosses_below_minus", "value_requirement": "forbidden"},
+        {"id": "plus_above_minus", "value_requirement": "forbidden"},
+        {"id": "plus_below_minus", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.bias",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 21,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required"},
+        {"id": "crosses_below", "value_requirement": "required"},
+        {"id": "above", "value_requirement": "required"},
+        {"id": "below", "value_requirement": "required"}
+      ]
+    },
+    {
+      "id": "technical.roc",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 14,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 12, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required"},
+        {"id": "crosses_below", "value_requirement": "required"},
+        {"id": "above", "value_requirement": "required"},
+        {"id": "below", "value_requirement": "required"}
+      ]
+    },
+    {
+      "id": "technical.momentum",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 12,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 10, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required"},
+        {"id": "crosses_below", "value_requirement": "required"},
+        {"id": "above", "value_requirement": "required"},
+        {"id": "below", "value_requirement": "required"}
+      ]
+    },
+    {
+      "id": "technical.stochastic",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 17,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "k_period", "value_type": "integer", "required": true, "default": 14, "minimum": 2, "maximum": 1000},
+        {"name": "d_period", "value_type": "integer", "required": true, "default": 3, "minimum": 1, "maximum": 500}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "k_crosses_above_d", "value_requirement": "forbidden"},
+        {"id": "k_crosses_below_d", "value_requirement": "forbidden"},
+        {"id": "k_above", "value_requirement": "required", "minimum": 0, "maximum": 100},
+        {"id": "k_below", "value_requirement": "required", "minimum": 0, "maximum": 100}
+      ]
+    },
+    {
+      "id": "technical.williams_r",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 15,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 14, "minimum": 2, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": -100, "maximum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": -100, "maximum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": -100, "maximum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": -100, "maximum": 0}
+      ]
+    },
+    {
+      "id": "technical.donchian",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 22,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "price_crosses_above_upper", "value_requirement": "forbidden"},
+        {"id": "price_crosses_below_lower", "value_requirement": "forbidden"},
+        {"id": "price_above_upper", "value_requirement": "forbidden"},
+        {"id": "price_below_lower", "value_requirement": "forbidden"}
+      ]
+    },
+    {
+      "id": "technical.return_stddev",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 22,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 20, "minimum": 2, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": 0}
+      ]
+    },
+    {
+      "id": "technical.historical_volatility",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 22,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [
+        {"name": "period", "value_type": "integer", "required": true, "default": 20, "minimum": 2, "maximum": 1000},
+        {"name": "annualization_sessions", "value_type": "integer", "required": true, "default": 252, "minimum": 1, "maximum": 1000},
+        {"name": "price_field", "value_type": "string", "required": true, "default": "close", "choices": ["open", "high", "low", "close"]}
+      ],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": 0}
+      ]
+    }
+  ]
+}

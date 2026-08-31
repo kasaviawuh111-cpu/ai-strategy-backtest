@@ -1,0 +1,758 @@
+import { ApiError } from './types'
+import type {
+  CapabilitiesResponse,
+  CandidateAlternativeItem,
+  CandidateGroundingPayload,
+  CandidateProvenanceItem,
+  CandidateRejectionItem,
+  CapabilityParameter,
+  CapabilityTriggerDefinition,
+  Clarification,
+  CompileRequest,
+  Instrument,
+  StrategyCondition,
+  StrategyDraft,
+  StrategyEventCondition,
+  StrategyHoldingPeriodCondition,
+  StrategyIndicatorCondition,
+  StrategyLeg,
+  StrategyParameter,
+  StrategyPositionReturnCondition,
+  StrategySpec,
+  StrategySpecCondition,
+  StrategySpecExitRule,
+  StrategySpecEventCondition,
+  StrategySpecHoldingPeriodExit,
+  StrategySpecIndicatorCondition,
+  StrategySpecPositionReturnExit,
+  StrategySpecTrailingDrawdownExit,
+  StrategyTrailingDrawdownCondition,
+} from './types'
+
+export type LiveCompileBody = {
+  utterance: string
+  instrument_context: string
+  as_of_date: string
+}
+
+export type LiveRevisionBody = {
+  strategy: StrategySpec
+  utterance: string
+}
+
+export type LiveBacktestBody = {
+  strategy: StrategySpec
+  config: {
+    capacityMode: 'point_in_time_volume' | 'unlimited'
+    participationRate: number
+    slippageBps: number
+    allocationRatio: number
+    limitHandling: 'wait_for_unlock' | 'strict_no_fill_at_limit' | 'allow_limit_volume'
+    commissionRate: number
+    minimumCommissionCny: number
+    retryUnfilledExits: boolean
+    maxExitAttempts: number
+    warmupCalendarDays: number
+    settlementExtensionDays: number
+    runRobustness: boolean
+  }
+}
+
+export type LiveDraftResponse = {
+  draft_id: string
+  revision: number
+  status: 'ready' | 'needs_clarification' | 'unsupported' | 'invalid'
+  strategy: StrategySpec | null
+  strategy_hash: string | null
+  clarification: string | null
+  diagnostic_code: string | null
+  provenance: Array<{ path: string; source: string }>
+  candidate_provenance: CandidateProvenanceItem | null
+  candidate_grounding: CandidateGroundingPayload | null
+  candidate_alternatives: CandidateAlternativeItem[]
+  candidate_rejections: CandidateRejectionItem[]
+  created_at: string
+}
+
+const FALLBACK_EVENT_LABELS: Record<string, string> = {
+  'event.financial_results.annual_report': '年度报告',
+  'event.financial_results.semiannual_report': '半年度报告',
+  'event.financial_results.quarterly_report': '季度报告',
+  'event.financial_results.earnings_forecast_published': '业绩预告',
+  'event.financial_results.earnings_flash_report': '业绩快报',
+}
+
+const readableIdentifier = (value: string): string => {
+  const leaf = value.split('.').at(-1) ?? value
+  if (/^(macd|rsi|ema|ma|kdj|cci|bbi|obv)$/i.test(leaf)) return leaf.toUpperCase()
+  return leaf.replaceAll('_', ' ')
+}
+
+const triggerFallback = (trigger: string): string => ({
+  golden_cross: '金叉',
+  death_cross: '死叉',
+  published: '首次发布',
+  above: '高于',
+  below: '低于',
+  crosses_above: '由下向上穿过阈值',
+  crosses_below: '由上向下穿过阈值',
+  price_crosses_above: '价格上穿',
+  price_crosses_below: '价格下穿',
+  new_high: '创新高',
+  new_low: '创新低',
+  consecutive_gte_multiple: '连续达到倍数',
+  bearish: '顶背离',
+  bullish: '底背离',
+  turns_up: '转强',
+  turns_down: '转弱',
+} as Record<string, string>)[trigger] ?? trigger.replaceAll('_', ' ')
+
+const indicatorCapability = (capabilities: CapabilitiesResponse | undefined, id: string) =>
+  capabilities?.indicators.find((item) => item.indicator_id === id)
+
+const triggerDefinition = (
+  definitions: CapabilityTriggerDefinition[] | undefined,
+  trigger: string,
+) => definitions?.find((item) => item.id === trigger)
+
+const parameterDefinition = (
+  parameters: CapabilityParameter[] | undefined,
+  key: string,
+) => parameters?.find((item) => item.name === key)
+
+const numericBoundary = (value: number | null | undefined, fallback: number) =>
+  typeof value === 'number' && Number.isFinite(value) ? value : fallback
+
+const diagnosticMessages: Record<string, string> = {
+  'template_not_published/big_drop_rebound': '“大跌反弹”会按选股模板处理，当前模板尚未发布，暂时不能执行回测。',
+  event_catalog_not_published: '这类事件尚未进入可执行目录，请改用已支持的定期报告事件。',
+  entry_rule_not_recognized: '已识别卖出条件，但没有识别到买入规则。请在原话中补充何时买入。',
+  exit_rule_not_recognized: '已识别买入条件，但没有识别到卖出规则。请在原话中补充何时卖出。',
+  strategy_rule_incomplete: '已识别指标或事件，但还缺什么时候买入和什么时候卖出。请补充完整规则。',
+  no_supported_signal_recognized: '没有识别到当前可执行的技术指标或公告事件。请写清何时买入、何时卖出和回测区间。',
+  invalid_a_share_instrument: '股票代码不是可验证的沪、深、北交所 A 股代码，或代码与交易所后缀不一致。',
+  ambiguous_obv_direction: '请说明能量潮（OBV）上升还是下降时触发，系统不会替你猜方向。',
+  ambiguous_volume_direction: '请说明放量、缩量或相对成交量倍数，系统不会替你猜方向。',
+  ambiguous_boolean_expression: '买入或卖出条件的“且/或”关系不够明确。请用括号或分别写清每组条件。',
+  ambiguous_document_text_qualifier: '公告正文的大小写要求相互冲突，请只保留一种。',
+  ambiguous_event_qualifier: '事件限定条件同时指向多个值，请只保留一个报告期、方向或数据来源。',
+  document_fuzzy_match_not_executable: '正式回测暂不支持正文近义词或语义模糊匹配，请改成明确的字词和次数。',
+  document_regex_not_executable: '正式回测暂不执行用户提供的正则表达式，请改成明确的字词和次数。',
+  document_text_qualifier_conflict: '公告正文的匹配方式与原话不一致，系统已拒绝执行，请重新识别。',
+  document_text_qualifier_not_consumed: '原话中的公告正文限定没有完整进入策略，请简化后重试。',
+  document_title_scope_not_executable: '当前只能对首次完整报告正文做字词统计，不会把“标题”自动改成“正文”。',
+  event_document_variant_not_executable: '当前只接受首次可获得的完整定期报告；摘要、更正版、英文版、取消或延期公告不会被偷换成完整报告。',
+  event_entity_not_consumed: '原话中有事件没有进入策略，系统已拒绝执行。请分别写清事件之间的“且/或”关系。',
+  event_execution_timing_not_executable: '你指定的事件买入时点尚不能保真回测。当前仅支持事件可得后，下一可交易日开盘尝试成交。',
+  event_free_text_filter_not_executable: '交易对方、项目名、许可证类型等自由文本还没有可校验的规范值，暂不用于正式回测。',
+  event_lifecycle_qualifier_not_executable: '“取消、撤回、终止或吊销”是另一类事件，当前不会把它当成原事件执行。',
+  event_materiality_conflicts_with_event: '原话说的是非重大或普通小额项目，不符合“重大合同中标”事件口径。',
+  event_numeric_filter_not_executable: '当前事件快照还没有可稳定校验的公告金额、比例或业绩阈值，系统不会忽略这些数字继续回测。',
+  event_qualifier_conflict: '识别出的事件限定值与原话冲突，系统已拒绝执行，请重新识别。',
+  event_qualifier_not_consumed: '原话中的报告期、方向或来源等限定没有完整进入策略，系统已拒绝执行。',
+  event_qualifier_not_executable: '原话中包含当前事件运行时无法精确执行的限定条件，请删除该条件或改用已支持的规则。',
+  event_report_period_not_executable: '该事件的具体报告期还没有可校验的精确映射，暂不执行。',
+  event_retry_policy_not_executable: '你指定了跨日重试或保留信号，但当前事件规则仅支持一次成交尝试。',
+  event_source_qualifier_not_executable: '你限定的公告来源不在这类事件的可执行快照契约中。',
+  multiple_document_predicates_not_executable: '一句话里的多个正文字词条件还无法完整保真组合，请拆分或改成一个明确条件。',
+  multiple_event_expression_not_executable: '一句话里有多个公告事件，但它们的组合关系尚未完整进入策略。请明确“同时满足”或“任一满足”。',
+  empty_utterance: '请输入一条完整的买卖规则。',
+  clarification_choice_not_supported: '这个补充选项不在当前后端契约内，请返回重新识别。',
+  event_not_available_for_backtest: '当前运行环境既没有这类事件的固定快照，也没有声明可按本次请求准备数据。',
+}
+
+export const dataAsOfDate = () => import.meta.env.VITE_DATA_AS_OF_DATE ?? '2026-08-06'
+
+export const toLiveCompileBody = (
+  input: CompileRequest,
+  asOfDate = dataAsOfDate(),
+): LiveCompileBody => {
+  const instrumentContext = liveInstrumentContext(input)
+  return {
+    utterance: input.utterance,
+    instrument_context: instrumentContext,
+    as_of_date: asOfDate,
+  }
+}
+
+function liveInstrumentContext(input: CompileRequest): string {
+  const answer = input.clarification
+  if (!answer) return input.instrument.symbol
+
+  // StrategyDraftRequest v2 has no generic clarification field. Its only
+  // supported clarification is `instrument_required`, answered through the
+  // existing `instrument_context` field.
+  if (
+    answer.id !== 'instrument_required'
+    || answer.choiceId !== 'use-current-instrument'
+  ) {
+    throw new ApiError({
+      type: 'about:blank',
+      title: '无法提交这个补充选项',
+      status: 422,
+      detail: diagnosticMessages.clarification_choice_not_supported
+        ?? '这个补充选项不在当前后端契约内。',
+      code: 'clarification_choice_not_supported',
+    })
+  }
+  return input.instrument.symbol
+}
+
+/**
+ * 澄清态只保留原话中可以逐字指认的片段，不在前端补成 StrategySpec。
+ * 后端再次返回 ready 前，这些内容只能帮助用户少改一句话。
+ */
+function recognizedFragments(input: CompileRequest): Array<{ label: string; value: string }> {
+  const fragments: Array<{ label: string; value: string }> = []
+  const text = input.utterance
+  const mentionedCompany = text.match(/([\u4e00-\u9fa5A-Za-z0-9]{2,16})(?:发|发布)(?:年度报告|年报)/)?.[1]
+  fragments.push({
+    label: '股票',
+    value: mentionedCompany
+      ? `${mentionedCompany}（原话提及；代码仍待服务端确认）`
+      : `${input.instrument.name} ${input.instrument.symbol}`,
+  })
+  if (/(?:年度报告|年报)/.test(text)) {
+    fragments.push({ label: '事件', value: '年度报告发布' })
+  }
+  const termCount = text.match(/(?:提到|出现)\s*([A-Za-z0-9\u4e00-\u9fa5_-]+?)\s*(?:次数?)?\s*(超过|大于|不少于|至少|>=|＞|>)\s*(\d+)\s*次?/i)
+  if (termCount) {
+    const comparator = /不少于|至少|>=/.test(termCount[2] ?? '') ? '≥' : '>'
+    fragments.push({
+      label: '正文条件',
+      value: `完整词“${termCount[1]}”出现 ${comparator} ${termCount[3]} 次`,
+    })
+  }
+  const holding = text.match(/(\d+)\s*(?:个)?(交易日|交易天|天|日)后(?:卖出|退出)/)
+  if (holding) {
+    const exactTradingSessions = /交易/.test(holding[2] ?? '')
+    fragments.push({
+      label: '持有期',
+      value: exactTradingSessions
+        ? `${holding[1]} 个交易日`
+        : `${holding[1]} 天（自然日还是交易日待确认）`,
+    })
+  }
+  return fragments
+}
+
+export const fromLiveDraftResponse = (
+  response: LiveDraftResponse,
+  input: CompileRequest,
+  capabilities?: CapabilitiesResponse,
+): { status: 'compiled'; draft: StrategyDraft } | {
+  status: 'needs_clarification'
+  draftId: string
+  clarification: Clarification
+} => {
+  if (response.status === 'ready' && response.strategy) {
+    return { status: 'compiled', draft: toDraft(response, input, capabilities) }
+  }
+  if (response.status === 'needs_clarification') {
+    const diagnosticCode = response.diagnostic_code ?? 'strategy_clarification'
+    const asksForInstrument = diagnosticCode === 'instrument_required'
+    const asksForCompleteRule = diagnosticCode === 'strategy_rule_incomplete'
+    const asksForEntry = diagnosticCode === 'entry_rule_not_recognized'
+    return {
+      status: 'needs_clarification',
+      draftId: response.draft_id,
+      clarification: {
+        id: diagnosticCode,
+        question: response.clarification ?? '请补充策略所需的信息。',
+        reason: asksForInstrument
+          ? '补齐股票后，系统才能生成可执行规则。'
+          : asksForEntry
+            ? '买入条件决定什么时候建立持仓。系统不会替你补一条默认策略。'
+          : diagnosticCode === 'exit_rule_not_recognized'
+            ? '卖出条件决定何时结束持仓。系统不会替你补一条默认策略。'
+            : '请回到原话补齐关键信息，系统不会自行猜测交易规则。',
+        choices: [{
+          id: asksForInstrument ? 'use-current-instrument' : 'edit-utterance',
+          label: asksForInstrument
+            ? `使用 ${input.instrument.name}`
+            : asksForCompleteRule
+              ? '补充完整规则'
+              : asksForEntry
+                ? '补充买入条件'
+              : '补充卖出条件',
+          description: asksForInstrument
+            ? `继续回测 ${input.instrument.symbol}。`
+            : asksForCompleteRule
+              ? '返回输入框，一次写清买入条件和卖出条件。'
+              : asksForEntry
+                ? '返回输入框，在原话前补充明确的买入条件。'
+              : '返回输入框，在原话后补充明确的卖出条件。',
+          recommended: true,
+          action: asksForInstrument ? 'submit_clarification' : 'edit_utterance',
+        }],
+        recognized: recognizedFragments(input),
+      },
+    }
+  }
+
+  const code = response.diagnostic_code ?? `compile_${response.status}`
+  throw new ApiError({
+    type: 'about:blank',
+    title: '暂时不能生成这条策略',
+    status: 422,
+    detail: diagnosticMessages[code] ?? '这句话还不能转换成可执行策略，请补充明确的买入和卖出条件。',
+    code,
+  })
+}
+
+export const toLiveRevisionBody = (draft: StrategyDraft): LiveRevisionBody => ({
+  utterance: draft.sourceText,
+  strategy: strategySpecFromDraft(draft),
+})
+
+export const mergeLiveRevision = (
+  response: LiveDraftResponse,
+  editedDraft: StrategyDraft,
+  capabilities?: CapabilitiesResponse,
+): StrategyDraft => {
+  if (response.status !== 'ready' || !response.strategy) {
+    const code = response.diagnostic_code ?? `revision_${response.status}`
+    throw new ApiError({
+      type: 'about:blank',
+      title: '策略版本未保存',
+      status: 422,
+      detail: diagnosticMessages[code] ?? '修改后的规则未通过校验，请检查买入、卖出和回测区间。',
+      code,
+    })
+  }
+  const savedDraft = toDraft(response, {
+    instrument: editedDraft.instrument,
+    utterance: editedDraft.sourceText,
+  }, capabilities)
+  return {
+    ...savedDraft,
+    confidence: editedDraft.confidence,
+    execution: {
+      ...savedDraft.execution,
+      priceLimitMode: editedDraft.execution.priceLimitMode,
+      capacityMode: editedDraft.execution.capacityMode,
+      participationRate: editedDraft.execution.participationRate,
+      allocationRatio: editedDraft.execution.allocationRatio,
+      commissionRate: editedDraft.execution.commissionRate,
+      minimumCommissionCny: editedDraft.execution.minimumCommissionCny,
+      slippageBps: editedDraft.execution.slippageBps,
+      retryUnfilledExits: editedDraft.execution.retryUnfilledExits,
+      maxExitAttempts: editedDraft.execution.maxExitAttempts,
+      warmupCalendarDays: editedDraft.execution.warmupCalendarDays,
+      settlementExtensionDays: editedDraft.execution.settlementExtensionDays,
+      runRobustness: editedDraft.execution.runRobustness,
+    },
+    warnings: editedDraft.warnings,
+  }
+}
+
+export const strategySpecFromDraft = (draft: StrategyDraft): StrategySpec => {
+  return applyDraftEdits(draft.strategySpec, draft)
+}
+
+export const toLiveBacktestBody = (draft: StrategyDraft): LiveBacktestBody => ({
+  strategy: strategySpecFromDraft(draft),
+  config: {
+    capacityMode: draft.execution.capacityMode,
+    participationRate: draft.execution.participationRate,
+    slippageBps: draft.execution.slippageBps,
+    allocationRatio: draft.execution.allocationRatio,
+    limitHandling: draft.execution.priceLimitMode,
+    commissionRate: draft.execution.commissionRate,
+    minimumCommissionCny: draft.execution.minimumCommissionCny,
+    retryUnfilledExits: draft.execution.retryUnfilledExits,
+    maxExitAttempts: draft.execution.maxExitAttempts,
+    warmupCalendarDays: draft.execution.warmupCalendarDays,
+    settlementExtensionDays: draft.execution.settlementExtensionDays,
+    runRobustness: draft.execution.runRobustness,
+  },
+})
+
+function toDraft(
+  response: LiveDraftResponse,
+  input: CompileRequest,
+  capabilities?: CapabilitiesResponse,
+): StrategyDraft {
+  const strategy = response.strategy as StrategySpec
+  const entry = toLeg(strategy.entry, 'entry', capabilities)
+  const exit = toExitLeg(strategy.exit.children, capabilities)
+  const hasInterpretationEvidence = [
+    response.candidate_provenance !== null,
+    response.candidate_grounding !== null,
+    response.candidate_alternatives.length > 0,
+    response.candidate_rejections.length > 0,
+  ].some(Boolean)
+  return {
+    id: response.draft_id,
+    revision: response.revision,
+    strategyHash: response.strategy_hash,
+    sourceText: input.utterance,
+    title: strategyTitle([...entry.conditions, ...exit.conditions]),
+    instrument: instrumentFrom(strategy, input.instrument),
+    confidence: null,
+    entry,
+    exit,
+    execution: {
+      entryPolicy: strategy.execution.entry_policy,
+      exitPolicy: strategy.execution.exit_policy,
+      priceLimitMode: 'wait_for_unlock',
+      tPlusOne: strategy.execution.t_plus_one,
+      dataCapability: strategy.execution.data_capability,
+      evaluationFrequency: strategy.execution.evaluation_frequency,
+      capacityMode: 'point_in_time_volume',
+      participationRate: 0.05,
+      allocationRatio: 1,
+      commissionRate: 0.0003,
+      minimumCommissionCny: 5,
+      slippageBps: 5,
+      retryUnfilledExits: true,
+      maxExitAttempts: 20,
+      warmupCalendarDays: 180,
+      settlementExtensionDays: 14,
+      runRobustness: true,
+    },
+    backtest: {
+      start: strategy.backtest.start,
+      end: strategy.backtest.end,
+      initialCashCny: strategy.backtest.initial_cash_cny,
+    },
+    assumptions: [
+      ...(strategy.execution.data_capability === 'daily_ohlcv_events'
+        ? [
+            '事件按首次可获得时间确认，不倒填公告日期',
+            '事件首次可得后按 09:15 截止规则选择可用的日线开盘价代理；记录时间不代表真实逐笔成交',
+          ]
+        : ['日线收盘确认信号，下一交易日使用开盘价代理；记录时间不代表真实逐笔成交']),
+      '遵守 A 股 T+1；当天买入的股票下一交易日才可卖出',
+      '买入默认使用 100% 可用资金，按 100 股整手向下取整；未投入现金继续保留',
+      '涨停买入或跌停卖出时等待开板；仅日线数据无法证明开板则保守记为未成交',
+    ],
+    warnings: [],
+    strategySpec: strategy,
+    ...(hasInterpretationEvidence ? {
+      interpretationEvidence: {
+        candidateProvenance: response.candidate_provenance ?? null,
+        grounding: response.candidate_grounding,
+        alternatives: response.candidate_alternatives,
+        rejections: response.candidate_rejections,
+      },
+    } : {}),
+  }
+}
+
+function instrumentFrom(strategy: StrategySpec, fallback: Instrument): Instrument {
+  const suffix = strategy.instrument.symbol.slice(-2)
+  const exchange = suffix === 'SH' ? 'SSE' : suffix === 'BJ' ? 'BSE' : 'SZSE'
+  return {
+    ...fallback,
+    symbol: strategy.instrument.symbol,
+    exchange,
+  }
+}
+
+function toLeg(
+  condition: StrategySpecCondition,
+  prefix: string,
+  capabilities?: CapabilitiesResponse,
+): StrategyLeg {
+  const operator = condition.type === 'all' || condition.type === 'any' ? condition.type : 'all'
+  return { operator, conditions: flattenConditions(condition, prefix, capabilities) }
+}
+
+function toExitLeg(
+  conditions: StrategySpecExitRule[],
+  capabilities?: CapabilitiesResponse,
+): StrategyLeg {
+  return {
+    operator: 'first_of',
+    conditions: conditions.flatMap((condition, index) => {
+      const id = `exit-${index}`
+      if (condition.type === 'holding_period_exit') return [toUiHoldingPeriod(condition, id)]
+      if (condition.type === 'position_return_exit') return [toUiPositionReturn(condition, id)]
+      if (condition.type === 'trailing_drawdown_exit') return [toUiTrailingDrawdown(condition, id)]
+      return flattenConditions(condition, id, capabilities)
+    }),
+  }
+}
+
+function flattenConditions(
+  condition: StrategySpecCondition,
+  path: string,
+  capabilities?: CapabilitiesResponse,
+): StrategyCondition[] {
+  if (condition.type === 'indicator_condition') {
+    return [toUiCondition(condition, path, capabilities)]
+  }
+  if (condition.type === 'event_condition') {
+    return [toUiEventCondition(condition, path)]
+  }
+  if (condition.type === 'not') {
+    return flattenConditions(condition.child, `${path}-not`, capabilities)
+  }
+  return condition.children.flatMap((child, index) =>
+    flattenConditions(child, `${path}-${index}`, capabilities))
+}
+
+function toUiCondition(
+  condition: StrategySpecIndicatorCondition,
+  id: string,
+  capabilities?: CapabilitiesResponse,
+): StrategyIndicatorCondition {
+  const capability = indicatorCapability(capabilities, condition.indicator_id)
+  const trigger = triggerDefinition(capability?.trigger_definitions, condition.trigger)
+  const name = capability?.display_name ?? readableIdentifier(condition.indicator_id)
+  const parameters: StrategyParameter[] = Object.entries(condition.params)
+    .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+    .map(([key, value]) => {
+      const definition = parameterDefinition(capability?.parameters, key)
+      return {
+        key,
+        label: definition?.display_name ?? parameterLabel(condition.indicator_id, key),
+        value,
+        integer: definition?.value_type === 'integer' || isIntegerIndicatorParameter(key),
+        min: numericBoundary(definition?.minimum, -1_000_000_000),
+        max: numericBoundary(definition?.maximum, 1_000_000_000),
+        unit: definition?.unit ?? undefined,
+      }
+    })
+  if (condition.value != null) {
+    parameters.push({
+      key: '$value',
+      label: trigger?.display_name ? `${trigger.display_name}阈值` : `${triggerFallback(condition.trigger)}阈值`,
+      value: condition.value,
+      min: numericBoundary(trigger?.minimum, -1_000_000_000),
+      max: numericBoundary(trigger?.maximum, 1_000_000_000),
+      unit: trigger?.unit ?? undefined,
+    })
+  }
+  const triggerName = trigger?.display_name ?? triggerFallback(condition.trigger)
+  return {
+    id,
+    kind: 'indicator',
+    indicatorId: condition.indicator_id,
+    label: movingAverageLabel(condition, triggerName) ?? `${name} ${triggerName}`,
+    trigger: trigger?.description ?? `${name}：${triggerName}`,
+    timeframe: condition.timeframe,
+    evaluationMode: condition.evaluation_mode,
+    parameters,
+  }
+}
+
+function isIntegerIndicatorParameter(key: string): boolean {
+  return /(?:^fast$|^slow$|^signal$|period|days$|bars$|smoothing$|lookback$|separation$)/.test(key)
+}
+
+function parameterLabel(indicatorId: string, key: string): string {
+  const scoped = ({
+    'amount.average:period': '平均周期',
+    'price.rolling_high:period': '观察周期',
+    'price.rolling_low:period': '观察周期',
+  } as Record<string, string>)[`${indicatorId}:${key}`]
+  if (scoped) return scoped
+  return ({
+    fast: '快线',
+    slow: '慢线',
+    signal: '信号线',
+    period: '周期',
+    fast_period: '快线周期',
+    slow_period: '慢线周期',
+    lookback: '观察周期',
+    average_period: '平均周期',
+    baseline_period: '前序基准周期',
+    baseline_lookback: '前序基准周期',
+    consecutive_days: '连续天数',
+    consecutive_sessions: '连续天数',
+    max_spacing: '最大间隔',
+  } as Record<string, string>)[key] ?? readableIdentifier(key)
+}
+
+function movingAverageLabel(
+  condition: StrategySpecIndicatorCondition,
+  triggerName: string,
+): string | null {
+  if (condition.indicator_id !== 'technical.ma') return null
+  const period = typeof condition.params.period === 'number' ? condition.params.period : null
+  const prefix = period == null ? '均线' : `${period} 日均线`
+  return `${triggerName} ${prefix}`
+}
+
+function toUiEventCondition(
+  condition: StrategySpecEventCondition,
+  id: string,
+): StrategyEventCondition {
+  const name = FALLBACK_EVENT_LABELS[condition.event_code]
+    ?? readableEventCode(condition.event_code)
+  const documentText = condition.document_text
+  return {
+    id,
+    kind: 'event',
+    eventCode: condition.event_code,
+    label: documentText
+      ? `${name}正文中“${documentText.term}”完整词出现 ${comparatorLabel(documentText.comparator)} ${documentText.value} 次`
+      : `${name}发布`,
+    trigger: documentText
+      ? `先按首次可获得时间确认，再用冻结的正文提取版本计数`
+      : '按首次可获得时间确认',
+    attributes: condition.attributes,
+    ...(documentText ? { documentText } : {}),
+  }
+}
+
+function comparatorLabel(comparator: string): string {
+  return ({ gt: '>', gte: '≥', eq: '=', lte: '≤', lt: '<' } as Record<string, string>)[comparator]
+    ?? comparator
+}
+
+function toUiHoldingPeriod(
+  condition: StrategySpecHoldingPeriodExit,
+  id: string,
+): StrategyHoldingPeriodCondition {
+  return {
+    id,
+    kind: 'holding_period',
+    label: `实际买入成交后第 ${condition.sessions} 个交易日卖出`,
+    trigger: `从首次买入成交后的下一交易日起计，第 ${condition.sessions} 个 A 股交易日使用开盘价代理尝试卖出`,
+    sessions: condition.sessions,
+    anchor: condition.anchor,
+    countMode: condition.count_mode,
+    execution: condition.execution,
+  }
+}
+
+function toUiPositionReturn(
+  condition: StrategySpecPositionReturnExit,
+  id: string,
+): StrategyPositionReturnCondition {
+  const isTakeProfit = condition.trigger === 'take_profit'
+  return {
+    id,
+    kind: 'position_return',
+    label: isTakeProfit
+      ? `持仓收益达到 ${condition.threshold_pct}% 止盈`
+      : `持仓亏损达到 ${condition.threshold_pct}% 止损`,
+    trigger: '以首次实际买入成交为基准，后复权日线收盘确认；下一可交易日使用开盘价代理尝试卖出',
+    exitTrigger: condition.trigger,
+    thresholdPct: condition.threshold_pct,
+    anchor: condition.anchor,
+    observation: condition.observation,
+    evaluationMode: condition.evaluation_mode,
+    execution: condition.execution,
+    editable: false,
+  }
+}
+
+function toUiTrailingDrawdown(
+  condition: StrategySpecTrailingDrawdownExit,
+  id: string,
+): StrategyTrailingDrawdownCondition {
+  return {
+    id,
+    kind: 'trailing_drawdown',
+    label: `持仓后收盘高点回撤 ${condition.threshold_pct}% 卖出`,
+    trigger: '以实际买入后的后复权日线收盘高点为基准，收盘确认回撤；下一可交易日使用开盘价代理尝试卖出',
+    thresholdPct: condition.threshold_pct,
+    anchor: condition.anchor,
+    peakBasis: condition.peak_basis,
+    evaluationMode: condition.evaluation_mode,
+    execution: condition.execution,
+    editable: false,
+  }
+}
+
+function readableEventCode(eventCode: string): string {
+  const leaf = eventCode.split('.').at(-1) ?? eventCode
+  return leaf.replace(/_published$/, '').replaceAll('_', ' ')
+}
+
+function strategyTitle(conditions: StrategyCondition[]): string {
+  const names = [...new Set(conditions.map((condition) => {
+    if (condition.kind === 'holding_period') return '持有期退出'
+    if (condition.kind === 'position_return') return condition.exitTrigger === 'take_profit' ? '止盈' : '止损'
+    if (condition.kind === 'trailing_drawdown') return '移动止盈'
+    if (condition.kind === 'event') {
+      return condition.label.split('正文')[0]?.replace(/发布$/, '') || readableEventCode(condition.eventCode)
+    }
+    return readableIdentifier(condition.indicatorId)
+  }))]
+  return `${names.join(' + ')} 规则 · 日线`
+}
+
+function applyDraftEdits(strategy: StrategySpec, draft: StrategyDraft): StrategySpec {
+  return {
+    ...strategy,
+    entry: applyLegEdits(strategy.entry, draft.entry.conditions),
+    exit: {
+      ...strategy.exit,
+      children: applyConditionList(strategy.exit.children, draft.exit.conditions),
+    },
+    backtest: {
+      start: draft.backtest.start,
+      end: draft.backtest.end,
+      initial_cash_cny: draft.backtest.initialCashCny,
+    },
+  }
+}
+
+function applyLegEdits(
+  condition: StrategySpecCondition,
+  edits: StrategyCondition[],
+): StrategySpecCondition {
+  let cursor = 0
+  const visit = (node: StrategySpecCondition): StrategySpecCondition => {
+    if (node.type === 'indicator_condition' || node.type === 'event_condition') {
+      const edit = edits[cursor]
+      cursor += 1
+      return node.type === 'indicator_condition' && edit?.kind === 'indicator'
+        ? applyIndicatorEdit(node, edit)
+        : node
+    }
+    if (node.type === 'not') return { ...node, child: visit(node.child) }
+    return { ...node, children: node.children.map(visit) }
+  }
+  return visit(condition)
+}
+
+function applyConditionList(
+  conditions: StrategySpecExitRule[],
+  edits: StrategyCondition[],
+): StrategySpecExitRule[] {
+  let cursor = 0
+  const visitCondition = (node: StrategySpecCondition): StrategySpecCondition => {
+    if (node.type === 'indicator_condition' || node.type === 'event_condition') {
+      const edit = edits[cursor]
+      cursor += 1
+      return node.type === 'indicator_condition' && edit?.kind === 'indicator'
+        ? applyIndicatorEdit(node, edit)
+        : node
+    }
+    if (node.type === 'not') return { ...node, child: visitCondition(node.child) }
+    return { ...node, children: node.children.map(visitCondition) }
+  }
+  const visit = (node: StrategySpecExitRule): StrategySpecExitRule => {
+    if (
+      node.type === 'holding_period_exit'
+      || node.type === 'position_return_exit'
+      || node.type === 'trailing_drawdown_exit'
+    ) {
+      cursor += 1
+      return node
+    }
+    return visitCondition(node)
+  }
+  return conditions.map(visit)
+}
+
+function applyIndicatorEdit(
+  condition: StrategySpecIndicatorCondition,
+  edit: StrategyIndicatorCondition,
+): StrategySpecIndicatorCondition {
+  const parameterValues = new Map(edit.parameters.map((parameter) => [parameter.key, parameter.value]))
+  return {
+    ...condition,
+    params: Object.fromEntries(Object.entries(condition.params).map(([key, value]) => [
+      key,
+      typeof value === 'number' ? (parameterValues.get(key) ?? value) : value,
+    ])),
+    value: parameterValues.get('$value') ?? condition.value,
+  }
+}

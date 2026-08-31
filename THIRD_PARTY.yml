@@ -1,0 +1,362 @@
+schema_version: "1.0"
+reviewed_at: "2026-08-30"
+scope: "A-share single-stock natural-language strategy compilation and replayable backtesting"
+adoption_state: "glue_adapters_implemented_fixture_tested_live_unverified"
+release_status: "blocked_pending_live_acceptance_and_unresolved_baostock_license_and_data_terms"
+
+policy:
+  - "Pin every upstream component to an immutable commit before copying or adapting code."
+  - "Third-party types stop at adapters; ashare_lab domain models remain the runtime contract."
+  - "Acquisition fallbacks may run before snapshot publication, never during a backtest."
+  - "No third-party implementation replaces an accepted implementation until differential gates pass."
+  - "Every run records provider id, provider version, source revision, and data snapshot identity."
+
+components:
+  - id: "astock-backtest-engine"
+    relationship: "first_party"
+    source_url: "https://github.com/tiantianlaolao/astock-backtest-engine"
+    pinned_revision: "7a3a9cc1861f4b3006d0f000e0674355229da02d"
+    revision_note: "Clean base revision only; the review worktree contains uncommitted changes."
+    license:
+      spdx: "MIT"
+      file: "LICENSE"
+      sha256: "5ab1b627130c0ded29307914a37f34eb771fc155ebbfb5f43701185f6e3c1a5f"
+    retained_authority:
+      - "ashare_lab/ports/candidate_generation.py"
+      - "ashare_lab/ports/market_data.py"
+      - "ashare_lab/domain/strategy/"
+      - "ashare_lab/domain/events/"
+      - "ashare_lab/domain/execution/"
+      - "ashare_lab/domain/orders/"
+      - "ashare_lab/domain/portfolio/"
+      - "ashare_lab/domain/runs/"
+      - "ashare_lab/application/daily_backtest.py"
+      - "ashare_lab/application/execute_backtest.py"
+    forbidden_replacement_scope:
+      - "A-share point-in-time evidence and immutable snapshot identity"
+      - "T+1, suspension, historical price-limit, lot, fee, and company-action semantics"
+      - "restricted Strategy DSL, causal activity trail, and result identity"
+
+  - id: "hku-vibe-trading"
+    relationship: "third_party_source_and_candidate"
+    project_name: "HKUDS/Vibe-Trading"
+    source_url: "https://github.com/HKUDS/Vibe-Trading"
+    pinned_source_url: "https://github.com/HKUDS/Vibe-Trading/tree/e90b6c6cd9fea23067a85667e7fbf74f9d73ea48"
+    version: "0.1.14"
+    pinned_revision: "e90b6c6cd9fea23067a85667e7fbf74f9d73ea48"
+    license:
+      spdx: "MIT"
+      source_url: "https://github.com/HKUDS/Vibe-Trading/blob/e90b6c6cd9fea23067a85667e7fbf74f9d73ea48/LICENSE"
+      sha256: "b155549b8bc4e43a9b96b2288dbf4eb1bc0c697f14b3f5ec6b36bf64d5a18679"
+      local_artifact: "third_party/licenses/HKUDS-Vibe-Trading-e90b6c6cd9fea23067a85667e7fbf74f9d73ea48/LICENSE"
+      notice_required_if_distributed: true
+      artifact_status: "exact_upstream_text_archived_and_hash_verified"
+      distribution_gate: "retain the archived copyright and permission notice with distributed adapted or copied code"
+    adoption_status: "optional_candidate_generator_runtime_wired_fixture_tested_live_unverified_no_upstream_runtime_import"
+    planned_reuse:
+      - upstream_path: "agent/src/skills/strategy-generate/SKILL.md"
+        mode: "adapted_pattern_with_attribution_no_source_copy"
+        target_seam: "CandidateGenerator prompt and clarification workflow"
+        local_path: "ashare_lab/adapters/language/vibe_candidates.py"
+        evidence_path: "tests/unit/adapters/language/test_vibe_candidates.py"
+        status: "implemented_fixture_tested_transport_unconfigured"
+      - upstream_path: "agent/src/tools/technical_indicator_tool.py"
+        mode: "research_reference_only"
+        target_seam: "independent indicator comparison corpus"
+        status: "not_adopted_in_current_adapter"
+      - upstream_path: "agent/backtest/loaders/registry.py"
+        mode: "adapt_design"
+        target_seam: "market-data acquisition provider registry"
+        retained_constraints:
+          - "A-share sources only"
+          - "fallback decision captured in acquisition provenance"
+          - "published snapshot is immutable and runtime-offline"
+      - upstream_path: "agent/backtest/loaders/mootdx_loader.py"
+        mode: "adapt_with_attribution"
+        target_seam: "optional Mootdx A-share daily acquisition adapter"
+        local_path: "ashare_lab/adapters/market_data/vibe_mootdx.py"
+        evidence_path: "tests/unit/adapters/test_vibe_mootdx.py"
+        status: "fixture_only_adapter_not_wired_to_production_runtime_live_client_unconfigured"
+        retained_constraints:
+          - "normalize lots to canonical shares"
+          - "record server/query/raw-response evidence"
+          - "fail closed on incomplete pagination or unsupported Beijing symbols"
+        transitive_dependencies_to_audit_before_live:
+          - "mootdx"
+      - upstream_path: "agent/backtest/loaders/tencent_loader.py"
+        mode: "differential_or_adapter_candidate"
+        target_seam: "public daily-bar acquisition fallback"
+      - upstream_path: "agent/backtest/loaders/eastmoney_loader.py"
+        mode: "differential_or_adapter_candidate"
+        target_seam: "Push2 daily-bar acquisition fallback"
+      - upstream_path: "agent/backtest/loaders/baostock_loader.py"
+        mode: "differential_or_adapter_candidate"
+        target_seam: "BaoStock daily-bar acquisition fallback"
+      - upstream_path: "agent/backtest/loaders/tushare.py"
+        mode: "differential_or_adapter_candidate"
+        target_seam: "authorized A-share acquisition fallback"
+      - upstream_path: "agent/backtest/validation.py"
+        mode: "adapt_with_attribution"
+        target_seam: "optional deterministic Monte Carlo, bootstrap, and walk-forward report provider"
+      - upstream_path: "agent/src/shadow_account/codegen.py"
+        mode: "security_reference_only"
+        target_seam: "literal-safe rendering and generated-shape test ideas"
+      - upstream_path: "agent/backtest/runner.py"
+        mode: "security_oracle_only"
+        target_seam: "negative corpus for generated-code safety; not the production execution contract"
+    prohibited_modules_or_semantics:
+      - "agent/backtest/engines/china_a.py as the authoritative matcher"
+      - "runtime auto-fallback that downloads data while a backtest is running"
+      - "generated signal_engine.py or arbitrary user/LLM Python in the production process"
+      - "broker, live-trading, channel, credential, and order-submission modules"
+      - "cross-market, crypto, futures, options, short-selling, leverage, and portfolio engines"
+      - "unknown price-limit state treated as tradable"
+      - "symbol-prefix-only historical ST or board classification"
+
+  - id: "moss-trade-bot-skills"
+    relationship: "third_party_source_and_candidate"
+    project_name: "moss-site/moss-trade-bot-skills"
+    source_url: "https://github.com/moss-site/moss-trade-bot-skills"
+    pinned_source_url: "https://github.com/moss-site/moss-trade-bot-skills/tree/1fce09b03151a01ba1dee230466ec64cdd12fda8"
+    version: "v1.0.28"
+    pinned_revision: "1fce09b03151a01ba1dee230466ec64cdd12fda8"
+    license:
+      spdx: "MIT-0"
+      source_url: "https://github.com/moss-site/moss-trade-bot-skills/blob/1fce09b03151a01ba1dee230466ec64cdd12fda8/LICENSE"
+      sha256: "2240860ab80645793a63fd3e2efbbc975d36f5856a1c9ff621b5ec2ed088d7f3"
+      local_artifact: "third_party/licenses/moss-trade-bot-skills-1fce09b03151a01ba1dee230466ec64cdd12fda8/LICENSE"
+      notice_required_if_distributed: false
+      artifact_status: "exact_upstream_text_archived_and_hash_verified"
+    adoption_status: "fixture_only_indicator_reference_adapter_not_wired_to_runtime"
+    planned_reuse:
+      - upstream_path: "moss-trade-bot-factory/scripts/core/indicators.py"
+        mode: "adapted_pandas_formula_path_with_attribution_then_differential"
+        target_seam: "IndicatorBackend formula candidates"
+        local_path: "ashare_lab/adapters/signals/moss_pandas_backend.py"
+        evidence_path: "tests/unit/adapters/signals/test_open_source_backend.py"
+        status: "ema_macd_fixture_equivalent_rsi_incompatible_not_runtime_default"
+        adopted_candidate_allowlist:
+          - "ema"
+          - "macd"
+        explicitly_incompatible:
+          - "rsi: MOSS adjusted-EWM seed and zero-loss NaN differ from frozen A-share Wilder RSI"
+          - "atr/adx: MOSS ewm(span=period) smoothing is not the frozen Wilder alpha=1/period seed and recurrence"
+          - "ichimoku: chikou=close.shift(-kijun) writes future closes into older rows and is prohibited"
+          - "donchian_channel: upstream window includes the current bar while the executable breakout channel excludes it"
+          - "supertrend: initialization and band-contraction semantics have not passed an independent golden-vector gate"
+        allowlist_candidates:
+          - "ema"
+          - "sma"
+          - "rsi"
+          - "macd"
+          - "bollinger_bands"
+          - "atr"
+          - "adx"
+          - "stochastic"
+          - "supertrend"
+          - "obv"
+          - "volume_spike"
+          - "price_breakout"
+          - "keltner_channels"
+          - "donchian_channel"
+          - "williams_r"
+          - "cci"
+          - "mfi"
+      - upstream_path: "moss-trade-bot-factory/scripts/core/replay_baseline.py"
+        mode: "method_and_test_reference"
+        target_seam: "replay-equivalence and drift-detection tests"
+      - upstream_path: "moss-trade-bot-factory/scripts/core/data_cache_archive.py"
+        mode: "method_and_test_reference"
+        target_seam: "fixed-dataset archive and fingerprint checks"
+      - upstream_path: "moss-trade-bot-factory/scripts/tests/test_evolve_invariants.py"
+        mode: "test_pattern_reference"
+        target_seam: "parameter and replay invariants"
+      - upstream_path: "moss-trade-bot-factory/tests/test_fingerprint_cross_language.py"
+        mode: "test_pattern_reference"
+        target_seam: "cross-implementation fingerprint parity"
+      - upstream_path: "moss-trade-bot-factory/scripts/core/regime.py"
+        mode: "research_only"
+        target_seam: "future optional regime indicator; never an implicit trade rule"
+    prohibited_modules_or_semantics:
+      - "moss-trade-bot-factory/scripts/core/backtest.py as the A-share account engine"
+      - "moss-trade-bot-factory/scripts/core/engine.py as the A-share order matcher"
+      - "moss-trade-bot-factory/scripts/core/decision.py as an implicit default strategy"
+      - "ichimoku chikou or any negative shift used as a historical signal"
+      - "Hyperliquid data, funding, liquidation, cross-margin, leverage, rolling leverage, or perpetual futures"
+      - "short-selling or 24x7/sessionless execution semantics"
+      - "live_trade.py, live_runner.py, trading_client.py, credentials, uploads, or bot creation"
+      - "strategy evolution or parameter selection presented as an unbiased backtest"
+
+  - id: "bukosabino-ta-0.11.0"
+    relationship: "third_party_indicator_oracle_candidate_no_runtime_dependency"
+    project_name: "bukosabino/ta"
+    source_url: "https://github.com/bukosabino/ta"
+    package_url: "https://pypi.org/project/ta/0.11.0/"
+    version: "0.11.0"
+    release_year: 2023
+    pinned_artifact:
+      kind: "pypi_sdist"
+      sha256: "de86af43418420bd6b088a2ea9b95483071bf453c522a8441bc2f12bcf8493fd"
+    license:
+      spdx_declared: "MIT"
+      declaration_source: "ta==0.11.0 PyPI package metadata"
+      notice_required_if_distributed: true
+    separate_source_review:
+      revision: "a890410710a6e483c9ba08da7f3dd5089e4b9dff"
+      url: "https://github.com/bukosabino/ta/tree/a890410710a6e483c9ba08da7f3dd5089e4b9dff"
+      reviewed_at: "2026-08-30"
+      evidence_boundary: >-
+        This later master commit was reviewed for current formula shapes only. It is not the
+        source revision of the 2023 ta==0.11.0 sdist and must never be presented as such.
+    adoption_status: "pypi_sdist_pinned_source_reviewed_oracle_candidate_not_installed_not_executed_not_runtime_dependency"
+    reviewed_paths:
+      - "ta/volatility.py:AverageTrueRange"
+      - "ta/volatility.py:DonchianChannel"
+      - "ta/trend.py:ADXIndicator"
+      - "ta/momentum.py:StochasticOscillator"
+    candidate_scope:
+      - "future independent float/pandas comparison vectors for ATR, ADX/DMI, Stochastic and related transparent indicators"
+    retained_constraints:
+      - "The first-party Decimal implementation, Catalog definition, warmup, and SignalRuntime remain authoritative."
+      - "fillna is disabled and pre-warmup zeros/NaNs are never accepted as executable observations."
+      - "ATR seed alignment differs: upstream exposes a value at window-1 using its first-row true range; this project leaves first true range unknown and seeds ranges 1..window."
+      - "Donchian comparison must shift the upstream band by one completed bar because the executable definition excludes the current bar."
+      - "Pandas float, NaN, fillna, index, and zero-volume behavior must be normalized explicitly before any differential assertion."
+      - "No library output may bypass prefix-invariance, suspension, parameter-boundary, or golden-vector tests."
+    prohibited_semantics:
+      - "installing ta as a production dependency solely to replace the Decimal signal runtime"
+      - "treating default fill values, leading zeros, or NaNs as tradeable signals"
+      - "using an unshifted current-inclusive Donchian band for strict close breakout"
+
+  - id: "akshare-push2-protocol-reference"
+    relationship: "third_party_protocol_reference_no_runtime_dependency"
+    project_name: "akfamily/akshare"
+    source_url: "https://github.com/akfamily/akshare"
+    pinned_source_url: "https://github.com/akfamily/akshare/blob/8e95744b79ae22326308ccd2b4e62650c5b53c55/akshare/stock_feature/stock_hist_em.py"
+    version: "source commit"
+    pinned_revision: "8e95744b79ae22326308ccd2b4e62650c5b53c55"
+    source_file_sha256: "d2a4c09d55d9362c8c7e58ec82f78d198cf6d2c2daf004033eef42ded915050d"
+    license:
+      spdx: "MIT"
+      source_url: "https://github.com/akfamily/akshare/blob/8e95744b79ae22326308ccd2b4e62650c5b53c55/LICENSE"
+      sha256: "d1c84fbaccd5fdbc75cd12ab9a05f4f791d89ee266569bc976c8b0befafc2d65"
+      local_artifact: "third_party/licenses/AKShare-8e95744b79ae22326308ccd2b4e62650c5b53c55/LICENSE"
+      notice_required_if_distributed: true
+      artifact_status: "exact_upstream_text_archived_and_hash_verified"
+    adoption_status: "adopted_acquisition_protocol_reference_fixture_tested_live_network_unverified_no_runtime_akshare_import"
+    adopted_reference:
+      upstream_path: "akshare/stock_feature/stock_hist_em.py:stock_zh_a_hist"
+      mode: "adapt_request_protocol_with_attribution_no_runtime_import"
+      local_path: "ashare_lab/adapters/market_data/eastmoney_daily.py"
+      evidence_path: "tests/unit/adapters/test_eastmoney_daily.py"
+      retained_fields:
+        - "stock/kline/get endpoint"
+        - "fields1/fields2 including f116"
+        - "ut token, daily klt, fqt, secid, beg, end"
+    retained_constraints:
+      - "SH/SZ A-shares only"
+      - "public undocumented endpoint is research-only and not production-authorized"
+      - "raw response bytes and exact query are hashed"
+      - "volume lots are normalized to shares with explicit 100-share resolution"
+      - "session, ST, suspension, previous close, price limits, and company actions come from independent evidence"
+      - "collection publishes an immutable snapshot before any backtest"
+
+  - id: "pypdfium2"
+    relationship: "optional_runtime_dependency"
+    project_name: "pypdfium2-team/pypdfium2"
+    source_url: "https://github.com/pypdfium2-team/pypdfium2"
+    package_url: "https://pypi.org/project/pypdfium2/5.13.0/"
+    version: "5.13.0"
+    package_sha256:
+      sdist: "7ca2d8e31bd8d0d40c496416b7d8bea423388669ffd494929f50e8c3a82326b8"
+      macos_arm64_wheel: "da5c7b74eebf40b5c1fbe1de01aa1edc8827a79fb1efd999616bc20dcaf77ba4"
+    license:
+      spdx_declared:
+        - "BSD-3-Clause"
+        - "Apache-2.0"
+        - "dependency-specific licenses"
+      local_artifact_root: "third_party/licenses/pypdfium2-5.13.0"
+      artifact_platform: "darwin_arm64"
+      deterministic_bundle_sha256: "cc2c17701650d5a478469a53cf705b7757c30dc7180643c94697335b9def8d2a"
+      artifact_status: "exact_installed_wheel_license_tree_archived_and_hash_verified"
+      distribution_gate: >-
+        Package this complete license tree for the locked darwin_arm64 wheel.
+        Each additional wheel platform must archive and verify its own matching license tree.
+    adoption_status: "installed_optional_runtime_dependency_used_for_embedded_pdf_text_extraction_live_unverified"
+    adopted_path: "ashare_lab/adapters/event_sources/document_text.py"
+    retained_constraints:
+      - "Extract embedded PDF text only; this dependency does not provide OCR."
+      - "Document bytes, extraction version, and extracted-text evidence remain in first-party provenance."
+      - "A successful parse does not by itself make an event historically tradable."
+
+  - id: "baostock"
+    relationship: "optional_demo_runtime_dependency"
+    project_name: "BaoStock"
+    source_url: "http://www.baostock.com"
+    package_url: "https://pypi.org/project/baostock/0.9.3/"
+    version: "0.9.3"
+    package_sha256:
+      sdist: "16699d82d05037a8c133577fcdeb9ac0d5a7f31edc2432c4e883004e0a95e3f7"
+      wheel: "acbd19403285bc4e254cee8297cf0e2646ae2276e5af7e549deed3988ab02293"
+    license:
+      declared_text: "BSD License"
+      declaration_source: "locked wheel METADATA"
+      local_metadata_artifact: "third_party/licenses/baostock-0.9.3/METADATA"
+      local_metadata_sha256: "c7844acdfa68490d06a04ec8d17d85c6da9ce7a260f96d68878ff4dda58a542e"
+      exact_license_text_status: "unavailable_in_locked_wheel_do_not_substitute_generic_bsd_text"
+    data_terms_status: "unresolved"
+    adoption_status: "installed_optional_demo_acquisition_dependency_release_blocked"
+    adopted_paths:
+      - "scripts/prepare_baostock_reference.py"
+      - "ashare_lab/adapters/market_data/baostock_daily.py"
+      - "ashare_lab/adapters/market_data/internal_demo_preparer.py"
+    release_blocker: >-
+      Do not distribute or enable this provider for production until the exact upstream
+      license text and the BaoStock data/service redistribution and commercial-use terms
+      are obtained and approved. The package metadata declaration is evidence, not a
+      substitute for the missing license text or data authorization.
+
+  - id: "mootdx"
+    relationship: "optional_transitive_candidate_not_installed"
+    project_name: "mootdx/mootdx"
+    source_url: "https://github.com/mootdx/mootdx"
+    package_url: "https://pypi.org/project/mootdx/0.11.7/"
+    version: "0.11.7"
+    package_sha256:
+      wheel: "eab475f1d08b1c71ea51212c8b1b1038c4739798f7d95ad1a6fb7bb26e348ef2"
+      sdist: "446c15f55c1509bc706a1b44d3f26a0f40d7ac016e326ffd6df3cf7ebcdf1c0a"
+    license:
+      spdx_declared: "MIT"
+      source_url: "https://github.com/mootdx/mootdx/blob/master/LICENSE"
+    conflicting_upstream_notice:
+      source_url: "https://github.com/mootdx/mootdx#readme"
+      text: "本项目只作学习交流, 不得用于任何商业目的"
+    adoption_status: "blocked_pending_legal_and_data_source_review"
+    blocker: >-
+      The repository LICENSE grants MIT rights while the project README also states
+      non-commercial use only. Do not add the package to runtime or distribution until
+      legal review resolves that conflict and the underlying TDX data-use terms are approved.
+
+adoption_gates:
+  - "license_and_provenance"
+  - "adapter_boundary"
+  - "fixture_and_negative_corpus"
+  - "golden_vector_and_prefix_invariance"
+  - "current_vs_candidate_differential_run"
+  - "immutable_snapshot_replay"
+  - "clean_revision_live_acceptance"
+
+current_glue_evidence:
+  status: "inventory_only_not_final_acceptance_evidence"
+  evidence_policy: >-
+    Test counts are intentionally not frozen in this inventory. Final evidence must come
+    from fresh integration gates on the exact clean revision and locked data snapshots.
+  limitations:
+    - "No production LLM transport is configured."
+    - "The MOSS/pandas indicator adapter is not the canonical runtime default; only EMA and MACD passed the current equivalence gate, while RSI is explicitly incompatible."
+    - "No real Mootdx client request or immutable snapshot publication is proven."
+    - "The AKShare-shaped Push2 adapter is fixture-tested; the 2026-08-30 direct network probe was disconnected by the remote endpoint, so no Live Push2 batch or snapshot is claimed."
+    - "The Mootdx runtime dependency is intentionally not installed because its MIT file and README non-commercial statement conflict; legal and source-data review is pending."
+    - "Exact Vibe, MOSS, and AKShare license texts are archived; BaoStock's exact license text and data/service terms remain unresolved."
+    - "The archived pypdfium2/PDFium license bundle is specific to the locked darwin_arm64 wheel; other deployment platforms require matching bundles."
+    - "No clean-revision Live API or browser acceptance has been run for these adapters."

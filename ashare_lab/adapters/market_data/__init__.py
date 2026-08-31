@@ -1,0 +1,151 @@
+"""Concrete market-data adapters."""
+
+from .baostock_reference import (
+    BaoStockReferenceAdapter,
+    BaoStockReferenceError,
+    BaoStockReferenceResult,
+    to_choice_snapshot_payload,
+)
+from .choice_minute import (
+    ChoiceMinuteDecodeError,
+    canonical_payload_sha256,
+    classify_choice_error,
+    compare_cmc_prefix,
+    decode_cmc_batch,
+    decode_csd_batch,
+    infer_timestamp_semantics,
+    reconcile_minute_daily,
+    serialize_sdk_result,
+)
+from .choice_minute_snapshot import (
+    SNAPSHOT_SCHEMA_VERSION as CHOICE_MINUTE_SNAPSHOT_SCHEMA_VERSION,
+)
+from .choice_minute_snapshot import (
+    ChoiceMinuteSnapshotError,
+    ChoiceMinuteSnapshotResult,
+    ChoiceMinuteSnapshotSpec,
+    build_choice_minute_snapshot,
+)
+from .composite_snapshot import (
+    COMPOSITE_SNAPSHOT_SCHEMA_VERSION,
+    CompositeSnapshotError,
+    CompositeSnapshotResult,
+    compose_choice_event_snapshot,
+)
+from .event_snapshot import (
+    EVENT_SNAPSHOT_SCHEMA_VERSION,
+    NO_EVENT_REQUIRED_MODE,
+    EventSnapshotError,
+    EventSnapshotResult,
+    build_event_snapshot,
+    build_no_event_required_snapshot,
+    validate_persisted_acquisition_query_evidence,
+)
+from .internal_demo_preparer import (
+    CURRENT_ON_DEMAND_EVENT_CODES,
+    STRICT_EVENT_TIMESTAMP_FLOOR,
+    STRICT_INTERNAL_DEMO_EVENT_CODES,
+    InternalDemoSnapshotPreparer,
+)
+from .local_parquet import (
+    LocalParquetMarketDataRepository,
+    MarketDataAdapterError,
+    MarketDataCapabilityError,
+    MarketDataSchemaError,
+    SessionFactory,
+    SnapshotIntegrityError,
+    SnapshotScopeError,
+    normalize_instrument_id,
+)
+from .on_demand_snapshot import (
+    OnDemandSnapshotMarketDataRepository,
+    SnapshotPreparationDocumentTextIncompleteError,
+    SnapshotPreparationError,
+    SnapshotPreparationFailedError,
+    SnapshotPreparationIncompleteError,
+    SnapshotPreparationResult,
+    SnapshotPreparationUnavailableError,
+    SnapshotPreparationUnsupportedError,
+)
+from .parquet_sessions import (
+    ParquetInstrumentSessionProvider,
+    SessionReferenceAdapterError,
+    SessionReferenceIntegrityError,
+    SessionReferenceSchemaError,
+)
+from .research_sessions import (
+    ResearchFallbackSessionProvider,
+    ResearchInstrumentProfile,
+)
+from .snapshot_registry import (
+    SnapshotRegistryAmbiguityError,
+    SnapshotRegistryError,
+    SnapshotRegistryIntegrityError,
+    SnapshotRegistryMarketDataRepository,
+    SnapshotRegistryNoMatchError,
+    SnapshotRegistryRouteError,
+)
+
+__all__ = [
+    "CHOICE_MINUTE_SNAPSHOT_SCHEMA_VERSION",
+    "COMPOSITE_SNAPSHOT_SCHEMA_VERSION",
+    "CURRENT_ON_DEMAND_EVENT_CODES",
+    "EVENT_SNAPSHOT_SCHEMA_VERSION",
+    "NO_EVENT_REQUIRED_MODE",
+    "STRICT_EVENT_TIMESTAMP_FLOOR",
+    "STRICT_INTERNAL_DEMO_EVENT_CODES",
+    "BaoStockReferenceAdapter",
+    "BaoStockReferenceError",
+    "BaoStockReferenceResult",
+    "ChoiceMinuteDecodeError",
+    "ChoiceMinuteSnapshotError",
+    "ChoiceMinuteSnapshotResult",
+    "ChoiceMinuteSnapshotSpec",
+    "CompositeSnapshotError",
+    "CompositeSnapshotResult",
+    "EventSnapshotError",
+    "EventSnapshotResult",
+    "InternalDemoSnapshotPreparer",
+    "LocalParquetMarketDataRepository",
+    "MarketDataAdapterError",
+    "MarketDataCapabilityError",
+    "MarketDataSchemaError",
+    "OnDemandSnapshotMarketDataRepository",
+    "ParquetInstrumentSessionProvider",
+    "ResearchFallbackSessionProvider",
+    "ResearchInstrumentProfile",
+    "SessionFactory",
+    "SessionReferenceAdapterError",
+    "SessionReferenceIntegrityError",
+    "SessionReferenceSchemaError",
+    "SnapshotIntegrityError",
+    "SnapshotPreparationDocumentTextIncompleteError",
+    "SnapshotPreparationError",
+    "SnapshotPreparationFailedError",
+    "SnapshotPreparationIncompleteError",
+    "SnapshotPreparationResult",
+    "SnapshotPreparationUnavailableError",
+    "SnapshotPreparationUnsupportedError",
+    "SnapshotRegistryAmbiguityError",
+    "SnapshotRegistryError",
+    "SnapshotRegistryIntegrityError",
+    "SnapshotRegistryMarketDataRepository",
+    "SnapshotRegistryNoMatchError",
+    "SnapshotRegistryRouteError",
+    "SnapshotScopeError",
+    "build_choice_minute_snapshot",
+    "build_event_snapshot",
+    "build_no_event_required_snapshot",
+    "canonical_payload_sha256",
+    "classify_choice_error",
+    "compare_cmc_prefix",
+    "compose_choice_event_snapshot",
+    "decode_cmc_batch",
+    "decode_csd_batch",
+    "infer_timestamp_semantics",
+    "normalize_instrument_id",
+    "reconcile_minute_daily",
+    "serialize_sdk_result",
+    "to_choice_snapshot_payload",
+    "validate_persisted_acquisition_query_evidence",
+]

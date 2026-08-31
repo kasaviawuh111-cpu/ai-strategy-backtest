@@ -1,0 +1,686 @@
+{
+  "$defs": {
+    "AllCondition": {
+      "additionalProperties": false,
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "maxItems": 16,
+          "minItems": 2,
+          "title": "Children",
+          "type": "array"
+        },
+        "type": {
+          "const": "all",
+          "default": "all",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "children"
+      ],
+      "title": "AllCondition",
+      "type": "object"
+    },
+    "AnyCondition": {
+      "additionalProperties": false,
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/$defs/Condition"
+          },
+          "maxItems": 16,
+          "minItems": 2,
+          "title": "Children",
+          "type": "array"
+        },
+        "type": {
+          "const": "any",
+          "default": "any",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "children"
+      ],
+      "title": "AnyCondition",
+      "type": "object"
+    },
+    "BacktestConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "format": "date",
+          "title": "End",
+          "type": "string"
+        },
+        "initial_cash_cny": {
+          "exclusiveMinimum": 0,
+          "maximum": 1000000000,
+          "title": "Initial Cash Cny",
+          "type": "integer"
+        },
+        "start": {
+          "format": "date",
+          "title": "Start",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "initial_cash_cny"
+      ],
+      "title": "BacktestConfig",
+      "type": "object"
+    },
+    "CatalogRef": {
+      "additionalProperties": false,
+      "properties": {
+        "catalog_id": {
+          "pattern": "^[a-z][a-z0-9_.-]{2,63}$",
+          "title": "Catalog Id",
+          "type": "string"
+        },
+        "release_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "title": "Release Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "catalog_id",
+        "release_version"
+      ],
+      "title": "CatalogRef",
+      "type": "object"
+    },
+    "Condition": {
+      "discriminator": {
+        "mapping": {
+          "all": "#/$defs/AllCondition",
+          "any": "#/$defs/AnyCondition",
+          "event_condition": "#/$defs/EventCondition",
+          "indicator_condition": "#/$defs/IndicatorCondition",
+          "not": "#/$defs/NotCondition"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/IndicatorCondition"
+        },
+        {
+          "$ref": "#/$defs/EventCondition"
+        },
+        {
+          "$ref": "#/$defs/AllCondition"
+        },
+        {
+          "$ref": "#/$defs/AnyCondition"
+        },
+        {
+          "$ref": "#/$defs/NotCondition"
+        }
+      ]
+    },
+    "DailyExecutionPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "data_capability": {
+          "default": "daily_ohlcv",
+          "enum": [
+            "daily_ohlcv",
+            "daily_ohlcv_events"
+          ],
+          "title": "Data Capability",
+          "type": "string"
+        },
+        "entry_policy": {
+          "const": "next_tradable_session_open",
+          "default": "next_tradable_session_open",
+          "title": "Entry Policy",
+          "type": "string"
+        },
+        "evaluation_frequency": {
+          "default": "1d_close",
+          "enum": [
+            "1d_close",
+            "event_available_plus_1d_close"
+          ],
+          "title": "Evaluation Frequency",
+          "type": "string"
+        },
+        "execution_resolution": {
+          "const": "1d",
+          "default": "1d",
+          "title": "Execution Resolution",
+          "type": "string"
+        },
+        "exit_policy": {
+          "const": "next_tradable_session_open",
+          "default": "next_tradable_session_open",
+          "title": "Exit Policy",
+          "type": "string"
+        },
+        "position_policy": {
+          "const": "single_position_no_pyramiding",
+          "default": "single_position_no_pyramiding",
+          "title": "Position Policy",
+          "type": "string"
+        },
+        "t_plus_one": {
+          "const": true,
+          "default": true,
+          "title": "T Plus One",
+          "type": "boolean"
+        },
+        "timezone": {
+          "const": "Asia/Shanghai",
+          "default": "Asia/Shanghai",
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "title": "DailyExecutionPolicy",
+      "type": "object"
+    },
+    "EventCondition": {
+      "additionalProperties": false,
+      "description": "A catalog-coded event publication with bounded deterministic filters.",
+      "properties": {
+        "attributes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonScalar"
+          },
+          "maxProperties": 8,
+          "title": "Attributes",
+          "type": "object"
+        },
+        "definition_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "title": "Definition Version",
+          "type": "string"
+        },
+        "document_text": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EventDocumentTextPredicate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "event_code": {
+          "pattern": "^event\\.[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+          "title": "Event Code",
+          "type": "string"
+        },
+        "trigger": {
+          "const": "published",
+          "default": "published",
+          "title": "Trigger",
+          "type": "string"
+        },
+        "type": {
+          "const": "event_condition",
+          "default": "event_condition",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_code",
+        "definition_version"
+      ],
+      "title": "EventCondition",
+      "type": "object"
+    },
+    "EventDocumentTextPredicate": {
+      "additionalProperties": false,
+      "description": "A reproducible term-count predicate bound to the same event document.\n\nThe document extractor and normalization algorithm are part of the frozen\nevent snapshot.  The strategy stores only the deterministic comparison; an\nLLM is never asked to count or summarize the report.",
+      "properties": {
+        "case_sensitive": {
+          "default": false,
+          "title": "Case Sensitive",
+          "type": "boolean"
+        },
+        "comparator": {
+          "enum": [
+            "gt",
+            "gte"
+          ],
+          "title": "Comparator",
+          "type": "string"
+        },
+        "match_mode": {
+          "enum": [
+            "ascii_token",
+            "literal"
+          ],
+          "title": "Match Mode",
+          "type": "string"
+        },
+        "metric_id": {
+          "const": "document.literal_mention_count",
+          "default": "document.literal_mention_count",
+          "title": "Metric Id",
+          "type": "string"
+        },
+        "metric_version": {
+          "const": "1.0.0",
+          "default": "1.0.0",
+          "title": "Metric Version",
+          "type": "string"
+        },
+        "normalization": {
+          "const": "nfkc",
+          "default": "nfkc",
+          "title": "Normalization",
+          "type": "string"
+        },
+        "term": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Term",
+          "type": "string"
+        },
+        "value": {
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Value",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "term",
+        "match_mode",
+        "comparator",
+        "value"
+      ],
+      "title": "EventDocumentTextPredicate",
+      "type": "object"
+    },
+    "ExitRule": {
+      "discriminator": {
+        "mapping": {
+          "all": "#/$defs/AllCondition",
+          "any": "#/$defs/AnyCondition",
+          "event_condition": "#/$defs/EventCondition",
+          "holding_period_exit": "#/$defs/HoldingPeriodExit",
+          "indicator_condition": "#/$defs/IndicatorCondition",
+          "not": "#/$defs/NotCondition",
+          "position_return_exit": "#/$defs/PositionReturnExit",
+          "trailing_drawdown_exit": "#/$defs/TrailingDrawdownExit"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/IndicatorCondition"
+        },
+        {
+          "$ref": "#/$defs/EventCondition"
+        },
+        {
+          "$ref": "#/$defs/AllCondition"
+        },
+        {
+          "$ref": "#/$defs/AnyCondition"
+        },
+        {
+          "$ref": "#/$defs/NotCondition"
+        },
+        {
+          "$ref": "#/$defs/HoldingPeriodExit"
+        },
+        {
+          "$ref": "#/$defs/PositionReturnExit"
+        },
+        {
+          "$ref": "#/$defs/TrailingDrawdownExit"
+        }
+      ]
+    },
+    "FirstOfExit": {
+      "additionalProperties": false,
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/$defs/ExitRule"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Children",
+          "type": "array"
+        },
+        "op": {
+          "const": "first_of",
+          "default": "first_of",
+          "title": "Op",
+          "type": "string"
+        }
+      },
+      "required": [
+        "children"
+      ],
+      "title": "FirstOfExit",
+      "type": "object"
+    },
+    "HoldingPeriodExit": {
+      "additionalProperties": false,
+      "description": "Exit at the open of the Nth A-share session after the first entry fill.",
+      "properties": {
+        "anchor": {
+          "const": "first_entry_fill",
+          "default": "first_entry_fill",
+          "title": "Anchor",
+          "type": "string"
+        },
+        "count_mode": {
+          "const": "subsequent_trading_sessions",
+          "default": "subsequent_trading_sessions",
+          "title": "Count Mode",
+          "type": "string"
+        },
+        "execution": {
+          "const": "target_session_open_proxy",
+          "default": "target_session_open_proxy",
+          "title": "Execution",
+          "type": "string"
+        },
+        "sessions": {
+          "maximum": 10000,
+          "minimum": 1,
+          "title": "Sessions",
+          "type": "integer"
+        },
+        "type": {
+          "const": "holding_period_exit",
+          "default": "holding_period_exit",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sessions"
+      ],
+      "title": "HoldingPeriodExit",
+      "type": "object"
+    },
+    "IndicatorCondition": {
+      "additionalProperties": false,
+      "properties": {
+        "definition_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "title": "Definition Version",
+          "type": "string"
+        },
+        "evaluation_mode": {
+          "const": "bar_close_confirmed",
+          "default": "bar_close_confirmed",
+          "title": "Evaluation Mode",
+          "type": "string"
+        },
+        "indicator_id": {
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+          "title": "Indicator Id",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonScalar"
+          },
+          "maxProperties": 16,
+          "title": "Params",
+          "type": "object"
+        },
+        "timeframe": {
+          "const": "1d",
+          "default": "1d",
+          "title": "Timeframe",
+          "type": "string"
+        },
+        "trigger": {
+          "pattern": "^[a-z][a-z0-9_]{1,63}$",
+          "title": "Trigger",
+          "type": "string"
+        },
+        "type": {
+          "const": "indicator_condition",
+          "default": "indicator_condition",
+          "title": "Type",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "indicator_id",
+        "definition_version",
+        "trigger"
+      ],
+      "title": "IndicatorCondition",
+      "type": "object"
+    },
+    "Instrument": {
+      "additionalProperties": false,
+      "properties": {
+        "market": {
+          "const": "CN_A",
+          "default": "CN_A",
+          "title": "Market",
+          "type": "string"
+        },
+        "position_mode": {
+          "const": "long_only",
+          "default": "long_only",
+          "title": "Position Mode",
+          "type": "string"
+        },
+        "symbol": {
+          "pattern": "^[0-9]{6}\\.(SH|SZ|BJ)$",
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "title": "Instrument",
+      "type": "object"
+    },
+    "JsonScalar": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        }
+      ]
+    },
+    "NotCondition": {
+      "additionalProperties": false,
+      "properties": {
+        "child": {
+          "$ref": "#/$defs/Condition"
+        },
+        "type": {
+          "const": "not",
+          "default": "not",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "child"
+      ],
+      "title": "NotCondition",
+      "type": "object"
+    },
+    "PositionReturnExit": {
+      "additionalProperties": false,
+      "description": "Exit after a close-confirmed return from the first actual BUY fill.",
+      "properties": {
+        "anchor": {
+          "const": "first_entry_fill",
+          "default": "first_entry_fill",
+          "title": "Anchor",
+          "type": "string"
+        },
+        "evaluation_mode": {
+          "const": "bar_close_confirmed",
+          "default": "bar_close_confirmed",
+          "title": "Evaluation Mode",
+          "type": "string"
+        },
+        "execution": {
+          "const": "next_tradable_session_open",
+          "default": "next_tradable_session_open",
+          "title": "Execution",
+          "type": "string"
+        },
+        "observation": {
+          "const": "back_adjusted_daily_close",
+          "default": "back_adjusted_daily_close",
+          "title": "Observation",
+          "type": "string"
+        },
+        "threshold_pct": {
+          "exclusiveMinimum": 0,
+          "maximum": 10000,
+          "title": "Threshold Pct",
+          "type": "number"
+        },
+        "trigger": {
+          "enum": [
+            "take_profit",
+            "stop_loss"
+          ],
+          "title": "Trigger",
+          "type": "string"
+        },
+        "type": {
+          "const": "position_return_exit",
+          "default": "position_return_exit",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trigger",
+        "threshold_pct"
+      ],
+      "title": "PositionReturnExit",
+      "type": "object"
+    },
+    "TrailingDrawdownExit": {
+      "additionalProperties": false,
+      "description": "Exit after a close-confirmed drawdown from the post-entry close peak.",
+      "properties": {
+        "anchor": {
+          "const": "first_entry_fill",
+          "default": "first_entry_fill",
+          "title": "Anchor",
+          "type": "string"
+        },
+        "evaluation_mode": {
+          "const": "bar_close_confirmed",
+          "default": "bar_close_confirmed",
+          "title": "Evaluation Mode",
+          "type": "string"
+        },
+        "execution": {
+          "const": "next_tradable_session_open",
+          "default": "next_tradable_session_open",
+          "title": "Execution",
+          "type": "string"
+        },
+        "peak_basis": {
+          "const": "back_adjusted_daily_close",
+          "default": "back_adjusted_daily_close",
+          "title": "Peak Basis",
+          "type": "string"
+        },
+        "threshold_pct": {
+          "exclusiveMinimum": 0,
+          "maximum": 100,
+          "title": "Threshold Pct",
+          "type": "number"
+        },
+        "type": {
+          "const": "trailing_drawdown_exit",
+          "default": "trailing_drawdown_exit",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threshold_pct"
+      ],
+      "title": "TrailingDrawdownExit",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.ashare-lab.local/strategy.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "backtest": {
+      "$ref": "#/$defs/BacktestConfig"
+    },
+    "catalog": {
+      "$ref": "#/$defs/CatalogRef"
+    },
+    "entry": {
+      "$ref": "#/$defs/Condition"
+    },
+    "execution": {
+      "$ref": "#/$defs/DailyExecutionPolicy"
+    },
+    "exit": {
+      "$ref": "#/$defs/FirstOfExit"
+    },
+    "instrument": {
+      "$ref": "#/$defs/Instrument"
+    },
+    "schema_version": {
+      "const": "strategy.v1",
+      "default": "strategy.v1",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "catalog",
+    "instrument",
+    "entry",
+    "exit",
+    "backtest"
+  ],
+  "title": "StrategySpec",
+  "type": "object"
+}

@@ -1,0 +1,55 @@
+name: quality
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --locked --extra dev
+      - run: make check
+      - run: uv run alembic heads
+      - run: DATABASE_URL=sqlite+pysqlite:////tmp/ashare-ci.db uv run alembic upgrade head
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.0
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+
+  containers:
+    runs-on: ubuntu-latest
+    env:
+      CODE_REVISION: ${{ github.sha }}
+      MARKET_DATA_PATH: ./var/ci-market-data
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+      - run: docker build --build-arg CODE_REVISION="$CODE_REVISION" --tag ashare-lab/backend:ci .
+      - run: docker build --file deploy/docker/web.Dockerfile --tag ashare-lab/web:ci .

@@ -1,0 +1,1 @@
+"""Coverage Catalog unit tests."""
