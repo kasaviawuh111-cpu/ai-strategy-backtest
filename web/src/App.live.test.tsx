@@ -202,9 +202,9 @@ const expectRecognizedButNotRunnable = async (fetchMock: FetchMock) => {
   expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
   expect(screen.getAllByText('MACD 金叉').length).toBeGreaterThan(0)
   expect(screen.getAllByText('MACD 死叉').length).toBeGreaterThan(0)
-  expect(screen.getByText('真实接口')).toBeVisible()
+  expect(screen.getByText('回测服务')).toBeVisible()
   expect(document.querySelector('.app')).toHaveAttribute('data-api-mode', 'live')
-  expect(screen.queryByText('演示数据')).not.toBeInTheDocument()
+  expect(screen.queryByText('界面预览')).not.toBeInTheDocument()
   expect(screen.queryByText(/固定样例/)).not.toBeInTheDocument()
 
   const start = screen.getByRole('button', { name: '请检查设置' })

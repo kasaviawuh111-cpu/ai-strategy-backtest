@@ -154,8 +154,8 @@ describe('formal main.tsx App journey', () => {
     expectHomeToHideDefaultCapital(container)
 
     await user.click(screen.getByRole('button', { name: '开始回测' }))
-    expect(await screen.findByText(/^演示：/)).toBeInTheDocument()
-    expect(screen.queryByText(/后台返回的真实阶段/)).not.toBeInTheDocument()
+    expect(await screen.findByText(/^预览：/)).toBeInTheDocument()
+    expect(screen.queryByText(/后台返回的处理阶段/)).not.toBeInTheDocument()
     expect(
       await screen.findByText('回测完成。', {}, { timeout: 6_000 }),
     ).toBeInTheDocument()
@@ -229,9 +229,9 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', { name: /成交规则与数据依据/ }))
     expect(screen.getByRole('heading', { name: '成交规则与数据依据' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '信号来源与时间' })).toBeInTheDocument()
-    expect(screen.getByText('演示样例（非真实公告）')).toBeVisible()
+    expect(screen.getByText('固定样例')).toBeVisible()
     expect(screen.getByText(/供应商秒级首次可得/)).toBeInTheDocument()
-    expect(screen.getByText(/仅用于界面演示，未连接真实事件数据/)).toBeVisible()
+    expect(screen.getByText(/仅用于界面预览，未连接事件数据/)).toBeVisible()
     expect(screen.getByText('mock_sample')).not.toBeVisible()
     expect(screen.getByText('demonstration_only')).not.toBeVisible()
     // 没有记录到的身份项不再一行一个「未记录」，合并成一条说明。
@@ -256,7 +256,7 @@ describe('formal main.tsx App journey', () => {
     expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
     expect(screen.getAllByText('年度报告正文中“AI”完整词出现 > 5 次').length).toBeGreaterThan(0)
     expect(screen.getAllByText('实际买入成交后第 3 个交易日卖出').length).toBeGreaterThan(0)
-    expect(screen.getByText(/没有读取真实年报正文，也没有真实计算词频/)).toBeInTheDocument()
+    expect(screen.getByText(/没有读取年报正文，也没有计算词频/)).toBeInTheDocument()
     expectMockPreviewBadge()
 
     await user.click(screen.getByRole('button', { name: '开始回测' }))
@@ -496,7 +496,7 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
     expect(await screen.findByText('已读懂你的规则')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '开始回测' }))
-    expect(await screen.findByText(/^演示：/)).toBeInTheDocument()
+    expect(await screen.findByText(/^预览：/)).toBeInTheDocument()
     await user.click(await screen.findByRole(
       'button',
       { name: '取消回测' },
@@ -527,11 +527,11 @@ describe('formal main.tsx App journey', () => {
     expect(screen.getByRole('button', { name: '换个条件再跑' })).toBeEnabled()
     expect(screen.getByRole('button', { name: '设成盯盘提醒' })).toHaveAttribute(
       'title',
-      '演示入口，暂未接入真实提醒',
+      '功能入口，暂未接入提醒服务',
     )
     expect(screen.getByRole('button', { name: '换只股票试试' })).toHaveAttribute(
       'title',
-      '演示入口，暂未接入股票切换',
+      '功能入口，暂未接入股票切换',
     )
     await user.click(screen.getByRole('button', { name: '查看完整报告' }))
     expect(screen.getByRole('heading', { name: '回测报告' })).toBeInTheDocument()

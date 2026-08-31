@@ -82,14 +82,14 @@ describe('current report screen', () => {
     const { container } = render(<ReportScreen open onBack={vi.fn()} metrics={{
       ...metrics,
       warnings: [
-        '演示数据：收益、交易与事件都是固定样例，不是后端真实回测。',
+        '固定样例：收益、交易与事件用于界面预览，不来自回测服务。',
         '历史表现不代表未来收益。',
       ],
     }}
       series={series} marks={[mark]} trades={trades} evidence={runEvidence}
       onOpenChain={vi.fn()} onOpenExecution={vi.fn()} mode="mock" />)
 
-    expect(screen.queryByText('演示数据')).not.toBeInTheDocument()
+    expect(screen.queryByText('界面预览')).not.toBeInTheDocument()
     expect(screen.getByRole('heading', {
       name: '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，相对少亏 36.69 个百分点。',
     })).toBeInTheDocument()

@@ -610,7 +610,7 @@ export default function App({
   const conditionCount = draft
     ? draft.entry.conditions.length + draft.exit.conditions.length
     : 0
-  const apiLabel = apiMode === 'mock' ? '界面预览' : '真实接口'
+  const apiLabel = apiMode === 'mock' ? '界面预览' : '回测服务'
   const activeOverlay = stack.at(-1)
 
   useEffect(() => {
@@ -705,7 +705,7 @@ export default function App({
                 <Turn>
                   <Say>
                     {instrumentContextError
-                      ? '当前股票信息无法识别。请返回股票页重新选择，或明确使用演示股票。'
+                      ? '当前股票信息无法识别。请返回股票页重新选择，或明确使用示例股票。'
                       : journeyHistory.length > 0
                         ? <>上一次的结果保留在上面。直接说新的买卖规则，我接着往下还原。</>
                         : <>你在看 <b>{instrument.name}</b>。说一句你的交易规则，我把它变成一条能检查、能回测的策略。</>}
@@ -770,7 +770,7 @@ export default function App({
                       ...(apiMode === 'mock'
                         && draft.entry.conditions.some((condition) =>
                           condition.kind === 'event' && condition.documentText)
-                        ? ['演示模式只展示规则识别和界面；没有读取真实年报正文，也没有真实计算词频']
+                        ? ['界面预览只展示规则识别和卡片结构；没有读取年报正文，也没有计算词频']
                         : []),
                     ]}
                   />
@@ -796,8 +796,8 @@ export default function App({
               {runQuery.data && !terminalStates.has(runQuery.data.state) ? (
                 <Turn>
                   <Say>{apiMode === 'mock'
-                    ? '这是演示流程，下面的阶段和结果都来自固定样例数据。'
-                    : '任务已提交。下面显示的是后台返回的真实阶段。'}</Say>
+                    ? '这是界面预览，下面的阶段和结果来自固定样例。'
+                    : '任务已提交。下面显示后台返回的处理阶段。'}</Say>
                   <RunningCard phase={runQuery.data.state} onCancel={() => cancelMutation.mutate()}
                     isCancelling={cancelMutation.isPending} isMock={apiMode === 'mock'} />
                 </Turn>
@@ -816,8 +816,8 @@ export default function App({
                     <Say>接下来：</Say>
                     <Chips>
                       <Chip onClick={startNewCondition}>换个条件再跑</Chip>
-                      <Chip onClick={() => undefined} title="演示入口，暂未接入真实提醒">设成盯盘提醒</Chip>
-                      <Chip onClick={() => undefined} title="演示入口，暂未接入股票切换">换只股票试试</Chip>
+                      <Chip onClick={() => undefined} title="功能入口，暂未接入提醒服务">设成盯盘提醒</Chip>
+                      <Chip onClick={() => undefined} title="功能入口，暂未接入股票切换">换只股票试试</Chip>
                     </Chips>
                   </Turn>
                 </>

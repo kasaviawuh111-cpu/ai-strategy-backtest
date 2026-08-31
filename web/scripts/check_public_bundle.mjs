@@ -14,7 +14,7 @@ const javascript = (await Promise.all(
   javascriptNames.map((name) => readFile(resolve(assetsDirectory, name), 'utf8')),
 )).join('\n')
 
-const requiredMarkers = [expectedOrigin, '真实接口']
+const requiredMarkers = [expectedOrigin, '回测服务']
 for (const marker of requiredMarkers) {
   if (!javascript.includes(marker)) {
     throw new Error(`Public Live bundle is missing required marker: ${marker}`)
@@ -24,8 +24,11 @@ for (const marker of requiredMarkers) {
 const forbiddenMockMarkers = [
   'mock_demo',
   'draft_mock_demo_001',
-  '演示数据：收益、交易与事件都是固定样例',
-  '界面预览',
+  '演示',
+  '真实数据',
+  '正式数据',
+  '真实接口',
+  '真实回测',
 ]
 for (const marker of forbiddenMockMarkers) {
   if (javascript.includes(marker)) {

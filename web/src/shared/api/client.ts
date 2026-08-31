@@ -33,8 +33,8 @@ const requestFailure = (error: unknown): ApiError => {
     title: timedOut ? '接口响应超时' : '无法连接回测服务',
     status: 0,
     detail: timedOut
-      ? '回测服务超过 20 秒没有响应。请稍后重试；系统不会切换成演示数据。'
-      : '浏览器没有连上真实回测接口。请检查网络、API 地址和跨域配置；系统不会切换成演示数据。',
+      ? '回测服务超过 20 秒没有响应，请稍后重试。'
+      : '浏览器没有连上回测服务，请检查网络、API 地址和跨域配置。',
     code: timedOut ? 'api_timeout' : 'api_network_unavailable',
   })
 }
@@ -75,7 +75,7 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
       type: 'about:blank',
       title: '接口响应格式错误',
       status: response.status,
-      detail: '真实回测接口没有返回有效 JSON。请检查 API 网关或服务版本；系统不会切换成演示数据。',
+      detail: '回测服务没有返回有效 JSON，请检查 API 网关或服务版本。',
       code: 'api_invalid_json',
     })
   }

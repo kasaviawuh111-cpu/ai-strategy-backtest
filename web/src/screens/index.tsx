@@ -408,7 +408,7 @@ const providerLabels: Record<string, string> = {
   tushare: 'Tushare',
   web_archive: '网页存档',
   choice: 'Choice 行情快照',
-  mock_sample: '演示样例（非真实公告）',
+  mock_sample: '固定样例',
 }
 
 const timeQualityLabels: Record<string, string> = {
@@ -425,7 +425,7 @@ const validationStatusLabels: Record<string, string> = {
   validated: '已通过来源校验',
   unverified: '未验证，不可交易',
   blocked_time_quality: '时间证据不足，不可交易',
-  demonstration_only: '仅用于界面演示，未连接真实事件数据',
+  demonstration_only: '仅用于界面预览，未连接事件数据',
   quarantined: '已隔离，不进入严格回测',
   rejected: '未通过校验',
 }
@@ -792,7 +792,7 @@ export function ExecutionDetailsScreen(
               <span className="v wrap">
                 {mode === 'live'
                   ? '缺少这些版本与校验值，这次结果只能查看，不能作为可复现的验收证据。'
-                  : '演示数据不带真实版本与校验值。'}
+                  : '界面预览不带版本与校验值。'}
               </span>
             </div>
           ) : null}

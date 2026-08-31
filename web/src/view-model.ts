@@ -269,7 +269,7 @@ export const assessStrategyCapabilities = (
     return {
       canRun: true,
       needsPreparation: false,
-      reason: '这里只播放固定样例，不代表后台理解、数据准备或真实回测可用。',
+      reason: '这里只播放固定样例，不代表后台已完成规则理解、数据准备或回测计算。',
       eventCodes: ids.events,
       events: ids.events.map((eventCode) => ({
         eventCode,
@@ -277,12 +277,12 @@ export const assessStrategyCapabilities = (
         catalog: 'demo',
         preparable: 'demo',
         pinnedSnapshot: 'demo',
-        detail: '固定演示样例，不代表后台已有该事件数据。',
+        detail: '固定样例，不代表后台已有该事件数据。',
       })),
       stages: [
-        { key: 'understand', label: '识别规则', state: 'demo', detail: '演示解析' },
+        { key: 'understand', label: '识别规则', state: 'demo', detail: '界面预览' },
         { key: 'prepare', label: '准备数据', state: 'demo', detail: '固定样例' },
-        { key: 'snapshot', label: '运行回测', state: 'demo', detail: '演示结果' },
+        { key: 'snapshot', label: '运行回测', state: 'demo', detail: '固定样例' },
       ],
     }
   }
@@ -790,7 +790,7 @@ const evidenceProviderLabels: Record<string, string> = {
   tushare: 'Tushare',
   web_archive: '网页存档',
   choice: 'Choice 行情快照',
-  mock_sample: '演示样例（非真实公告）',
+  mock_sample: '固定样例',
 }
 
 const evidenceTimeQualityLabels: Record<string, string> = {
@@ -807,7 +807,7 @@ const validationStatusLabels: Record<string, string> = {
   validated: '已通过来源校验',
   unverified: '未验证，不可交易',
   blocked_time_quality: '时间证据不足，不可交易',
-  demonstration_only: '仅用于界面演示，未连接真实事件数据',
+  demonstration_only: '仅用于界面预览，未连接事件数据',
   quarantined: '已隔离，不进入严格回测',
   rejected: '未通过校验',
 }

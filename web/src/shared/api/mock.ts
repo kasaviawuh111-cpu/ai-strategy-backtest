@@ -427,7 +427,7 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
     ],
     warnings: [
       ...(documentTextStrategy
-        ? ['演示模式仅展示规则识别与卡片结构，没有读取真实年度报告正文，也不代表真实词频或回测结果。']
+        ? ['界面预览仅展示规则识别与卡片结构，没有读取年度报告正文，也不代表已计算词频或回测结果。']
         : []),
       ...(intrabar ? ['当前样例只有日线数据，盘中信号将在正式运行前被能力检查拒绝。'] : []),
     ],
@@ -498,9 +498,9 @@ const baseActivities = (eventStrategy: boolean, documentTermHold: boolean): Back
       ? '年度报告正文词频条件确认'
       : eventStrategy ? '年度报告首次可得' : 'MACD 金叉确认', status: 'confirmed',
     reason: documentTermHold
-      ? '演示样例：先按事件首次可得时间确认，再按固定规则展示“AI”完整词出现 > 5 次。没有读取真实正文。'
+      ? '固定样例：先按事件首次可得时间确认，再按固定规则展示“AI”完整词出现 > 5 次。没有读取正文。'
       : eventStrategy
-      ? '演示样例：按事件首次可得时间触发，不倒填公告日期。'
+      ? '固定样例：按事件首次可得时间触发，不倒填公告日期。'
       : 'DIF 0.318 上穿 DEA 0.301，使用当日收盘数据。',
     evidence: eventStrategy ? [{
       type: 'event_observation',
@@ -544,7 +544,7 @@ const baseActivities = (eventStrategy: boolean, documentTermHold: boolean): Back
       : eventStrategy ? '2024-07-01T15:00:00+08:00' : '2023-02-02T15:00:00+08:00', side: 'sell',
     title: documentTermHold ? '持有 3 个交易日退出' : 'MACD 死叉确认', status: 'confirmed',
     reason: documentTermHold
-      ? '演示样例：从首次实际买入成交后的下一交易日起计，到第 3 个 A 股交易日退出。'
+      ? '固定样例：从首次实际买入成交后的下一交易日起计，到第 3 个 A 股交易日退出。'
       : 'DIF 0.412 下穿 DEA 0.428。',
   },
   {
@@ -661,7 +661,7 @@ export const mockApi = {
         type: 'about:blank',
         title: '无法使用这个补充选项',
         status: 422,
-        detail: '这个补充选项不在当前演示契约内，请返回重新识别。',
+        detail: '这个补充选项不在当前预览契约内，请返回重新识别。',
         code: 'clarification_choice_not_supported',
       })
     }
@@ -716,7 +716,7 @@ export const mockApi = {
       id,
       state: 'queued',
       progress: 8,
-      progressLabel: '演示：准备样例数据',
+      progressLabel: '预览：准备样例数据',
       createdAt: now,
       updatedAt: now,
       fingerprint: 'mock:demo-only:not-replayable',
@@ -746,11 +746,11 @@ export const mockApi = {
 
     stored.pollCount += 1
     const stages: Array<Pick<BacktestRun, 'state' | 'progress' | 'progressLabel'>> = [
-      { state: 'running:data', progress: 22, progressLabel: '演示：载入样例行情' },
-      { state: 'running:signal', progress: 43, progressLabel: `演示：${stored.signalLabel}` },
-      { state: 'running:execution', progress: 68, progressLabel: '演示：生成样例成交' },
-      { state: 'running:report', progress: 88, progressLabel: '演示：整理样例报告' },
-      { state: 'succeeded', progress: 100, progressLabel: '演示完成' },
+      { state: 'running:data', progress: 22, progressLabel: '预览：载入样例行情' },
+      { state: 'running:signal', progress: 43, progressLabel: `预览：${stored.signalLabel}` },
+      { state: 'running:execution', progress: 68, progressLabel: '预览：生成样例成交' },
+      { state: 'running:report', progress: 88, progressLabel: '预览：整理样例报告' },
+      { state: 'succeeded', progress: 100, progressLabel: '预览完成' },
     ]
     const stage = stages[Math.min(stored.pollCount - 1, stages.length - 1)]
     if (stage) stored.run = { ...stored.run, ...stage, updatedAt: new Date().toISOString() }
@@ -765,7 +765,7 @@ export const mockApi = {
     stored.run = {
       ...stored.run,
       state: 'cancelled',
-      progressLabel: '演示已取消',
+      progressLabel: '预览已取消',
       updatedAt: new Date().toISOString(),
     }
     return stored.run
@@ -788,10 +788,10 @@ export const mockApi = {
       finalEquityCny: Number(
         (stored.initialCashCny * (1 + MOCK_TOTAL_RETURN)).toFixed(2),
       ),
-      interpretation: '演示样例中，策略期内小幅亏损，但跌幅小于样例买入持有；最大回撤约 58.2%。',
+      interpretation: '固定样例中，策略期内小幅亏损，但跌幅小于样例买入持有；最大回撤约 58.2%。',
       dataRange: { start: '2021-08-06', end: '2026-08-06', sessions: 1211 },
       warnings: [
-        '演示数据：收益、交易与事件都是固定样例，不是后端真实回测。',
+        '固定样例：收益、交易与事件用于界面预览，不来自回测服务。',
         '历史表现不代表未来收益。',
       ],
       runEvidence: null,

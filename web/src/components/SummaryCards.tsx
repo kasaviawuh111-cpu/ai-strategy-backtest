@@ -80,7 +80,7 @@ const capabilityStateLabel: Record<StrategyCapabilitySummary['stages'][number]['
   conditional: '按请求准备',
   unavailable: '不可用',
   unknown: '待确认',
-  demo: '演示',
+  demo: '预览',
 };
 
 export function CapabilityCard(
@@ -91,7 +91,7 @@ export function CapabilityCard(
     <section className="mcard capability-card" aria-label="策略能力状态">
       <div className="pad">
         <div className="capability-head">
-          <b>{mode === 'mock' ? '演示能力说明' : '这条策略当前能走到哪一步'}</b>
+          <b>{mode === 'mock' ? '界面预览说明' : '这条策略当前能走到哪一步'}</b>
           <span>{mode === 'mock' ? '不代表后台可用' : '来自能力接口'}</span>
         </div>
         <ol className="capability-stages">
@@ -148,7 +148,7 @@ export function PreparationCard(
   return (
     <section className="mcard preparation-card" aria-live="polite">
       <div className="pad">
-        <div className="phase-now"><span>{isMock ? `演示：${title}` : title}</span><code>提交中</code></div>
+        <div className="phase-now"><span>{isMock ? `预览：${title}` : title}</span><code>提交中</code></div>
         <p>{isMock
           ? '这里模拟提交等待，不代表后台正在采集或计算。'
           : needsPreparation
@@ -255,7 +255,7 @@ export function RunningCard(
     <section className="mcard">
       <div className="pad">
         <div className="phase-now">
-          <span>{isMock ? `演示：${RUN_PHASE_LABEL[phase]}` : RUN_PHASE_LABEL[phase]}</span>
+          <span>{isMock ? `预览：${RUN_PHASE_LABEL[phase]}` : RUN_PHASE_LABEL[phase]}</span>
           <code>{step}/{PHASE_ORDER.length}</code>
         </div>
         <div className="prog" role="progressbar" aria-valuenow={step} aria-valuemin={1}
@@ -264,7 +264,7 @@ export function RunningCard(
         </div>
         <p style={{ margin: '10px 0 0', fontSize: 13, lineHeight: '20px', color: 'var(--ink-3)' }}>
           {isMock
-            ? '这里播放固定样例的演示阶段，不代表后台正在计算。'
+            ? '这里播放固定样例的预览阶段，不代表后台正在计算。'
             : '使用固定的历史数据和规则版本，同一任务可以复查。'}
         </p>
       </div>
@@ -327,7 +327,7 @@ export function FailureCard(
     proved: '已验证',
     implemented: '已停止',
     partial: '信息不完整',
-    mock_only: '演示状态',
+    mock_only: '预览状态',
     research_only: '研究模式',
     unavailable: '暂不可用',
     target: '待接入',

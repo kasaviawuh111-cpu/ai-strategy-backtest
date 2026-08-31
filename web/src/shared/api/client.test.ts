@@ -294,7 +294,7 @@ describe('live strategy client', () => {
     await expect(systemApi.capabilities()).rejects.toMatchObject({
       problem: expect.objectContaining({
         code: 'api_network_unavailable',
-        detail: expect.stringContaining('不会切换成演示数据'),
+        detail: expect.stringContaining('没有连上回测服务'),
       }),
     })
   })

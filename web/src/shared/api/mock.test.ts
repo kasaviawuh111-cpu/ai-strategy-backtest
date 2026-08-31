@@ -74,7 +74,7 @@ describe('mock API trust boundary', () => {
       }),
     ])
     expect(outcome.draft.warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining('没有读取真实年度报告正文'),
+      expect.stringContaining('没有读取年度报告正文'),
     ]))
   })
 
@@ -104,11 +104,11 @@ describe('mock API trust boundary', () => {
     const summary = await mockApi.getSummary(run.id)
 
     expect(run.fingerprint).toBe('mock:demo-only:not-replayable')
-    expect(run.progressLabel).toMatch(/^演示：/)
+    expect(run.progressLabel).toMatch(/^预览：/)
     expect(summary.runEvidence).toBeNull()
     expect(summary.warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining('演示数据'),
-      expect.stringContaining('不是后端真实回测'),
+      expect.stringContaining('固定样例'),
+      expect.stringContaining('不来自回测服务'),
     ]))
   })
 
@@ -119,7 +119,7 @@ describe('mock API trust boundary', () => {
 
     for (let poll = 0; poll < 5; poll += 1) {
       const current = await mockApi.getRun(run.id)
-      expect(current.progressLabel).toMatch(/^演示/)
+      expect(current.progressLabel).toMatch(/^预览/)
     }
   })
 })
