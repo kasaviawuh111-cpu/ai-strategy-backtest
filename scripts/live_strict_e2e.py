@@ -22,6 +22,7 @@ _END = "2026-08-06"
 _INITIAL_CASH = 1_000_000
 _PIN_SCHEMA = "local-parquet.market-data.v3"
 _COMPOSITE_SCHEMA = "ashare-lab.composite-research-snapshot.v2"
+_COMPOSITE_ID = re.compile(r"^composite:[0-9a-f]{64}$")
 _STRICT_EVENT_CODES = (
     "event.financial_results.annual_report",
     "event.financial_results.earnings_flash_report",
@@ -194,6 +195,15 @@ def _run_case(
             f"{name} did not use the strict composite v2 producer schema: "
             f"{evidence.get('producerSnapshotSchemaVersion')!r}"
         )
+    producer_snapshot_id = evidence.get("producerSnapshotId")
+    if (
+        not isinstance(producer_snapshot_id, str)
+        or _COMPOSITE_ID.fullmatch(producer_snapshot_id) is None
+    ):
+        raise LiveE2EFailure(
+            f"{name} does not identify the immutable composite producer snapshot: "
+            f"{producer_snapshot_id!r}"
+        )
     if summary.get("initialCashCny") != _INITIAL_CASH:
         raise LiveE2EFailure(f"{name} did not run with 1,000,000 CNY")
     if name == "event" and not _contains_event_provenance(activities):
@@ -232,7 +242,13 @@ def _validate_cross_case_identity(cases: dict[str, dict[str, object]]) -> None:
         _object(_object(case["summary"], "summary").get("runEvidence"), "run evidence")
         for case in cases.values()
     ]
-    for key in ("dataSnapshotId", "dataSnapshotChecksum", "codeRevision", "engineVersion"):
+    for key in (
+        "dataSnapshotId",
+        "dataSnapshotChecksum",
+        "producerSnapshotId",
+        "codeRevision",
+        "engineVersion",
+    ):
         values = {item.get(key) for item in evidence}
         if len(values) != 1 or None in values:
             raise LiveE2EFailure(f"technical/event runs do not share {key}: {values!r}")

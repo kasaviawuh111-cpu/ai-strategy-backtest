@@ -38,6 +38,11 @@ class BacktestRunEvidence(CamelApiModel):
         min_length=1,
         max_length=128,
     )
+    producer_snapshot_id: str | None = Field(
+        default=None,
+        alias="producerSnapshotId",
+        pattern=r"^[a-z][a-z0-9_-]*:[0-9a-f]{64}$",
+    )
     code_revision: str = Field(alias="codeRevision", min_length=1, max_length=128)
     engine_version: str = Field(alias="engineVersion", min_length=1, max_length=128)
     execution_assumptions: dict[str, str] = Field(alias="executionAssumptions")

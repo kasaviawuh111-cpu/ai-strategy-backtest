@@ -21,6 +21,7 @@ MANIFEST = {
         "checksum": "sha256:" + "c" * 64,
         "schema_version": "market-data.v1",
         "producer_schema_version": "producer-snapshot.v2",
+        "producer_snapshot_id": "composite:" + "d" * 64,
     },
     "code_revision": "0123456789abcdef0123456789abcdef01234567",
     "engine_version": "2.0.0a0",
@@ -67,6 +68,7 @@ def test_result_bundle_is_json_safe_and_normalized() -> None:
     assert (
         bundle["summary"]["runEvidence"]["producerSnapshotSchemaVersion"] == "producer-snapshot.v2"
     )
+    assert bundle["summary"]["runEvidence"]["producerSnapshotId"] == "composite:" + "d" * 64
     warnings = bundle["summary"]["warnings"]
     assert any("上一交易日" in warning and "当日收盘后" in warning for warning in warnings)
     assert any(
@@ -118,6 +120,7 @@ def test_result_hash_covers_every_persisted_result_layer() -> None:
         ("robustness", "scenarios", 0, "tradeCount"),
         ("summary", "runEvidence", "engineVersion"),
         ("summary", "runEvidence", "producerSnapshotSchemaVersion"),
+        ("summary", "runEvidence", "producerSnapshotId"),
         ("audit", "openPositionShares"),
     )
     for path in mutations:

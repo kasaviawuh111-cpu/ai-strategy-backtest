@@ -93,6 +93,10 @@ def build_result_bundle(
                     data_snapshot,
                     "producer_schema_version",
                 ),
+                "producerSnapshotId": _optional_text(
+                    data_snapshot,
+                    "producer_snapshot_id",
+                ),
                 "codeRevision": _text(manifest, "code_revision"),
                 "engineVersion": _text(manifest, "engine_version"),
                 "executionAssumptions": {
