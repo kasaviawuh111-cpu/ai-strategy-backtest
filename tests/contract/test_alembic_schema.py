@@ -8,10 +8,10 @@ from alembic.runtime.migration import MigrationContext
 from sqlalchemy import create_engine, text
 
 from alembic import command
-from ashare_lab.adapters.persistence import BACKTEST_RUN_METADATA
+from ashare_lab.adapters.persistence import BACKTEST_RUN_METADATA, PERSISTENCE_METADATA
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-_HEAD_REVISION = "20260830_0002"
+_HEAD_REVISION = "20260831_0003"
 
 
 def test_fresh_database_migration_matches_run_store_metadata(
@@ -35,6 +35,13 @@ def test_fresh_database_migration_matches_run_store_metadata(
 
     assert current_revision == _HEAD_REVISION
     assert set(BACKTEST_RUN_METADATA.tables) == {"backtest_runs"}
+    assert set(PERSISTENCE_METADATA.tables) == {
+        "backtest_runs",
+        "backtest_run_manifests_v2",
+        "strategy_draft_revisions_v2",
+        "strategy_executable_plans_v2",
+        "strategy_validation_receipts_v2",
+    }
 
 
 def test_existing_rows_are_explicitly_migrated_as_legacy_unverified(

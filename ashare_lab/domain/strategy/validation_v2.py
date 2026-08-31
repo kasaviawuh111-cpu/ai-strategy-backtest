@@ -371,7 +371,7 @@ def _validate_capability(strategy: StrategySpecV2, catalog: CatalogSnapshot) -> 
         )
 
     try:
-        validate_strategy_against_catalog(_to_v1_strategy(strategy), catalog)
+        validate_strategy_against_catalog(adapt_technical_strategy_v2_to_v1(strategy), catalog)
     except StrategyCatalogError as error:
         issue = error.issues[0]
         raise _failure(
@@ -611,7 +611,14 @@ def _sign_plan_payload(payload: Mapping[str, object]) -> str:
     return f"hmac-sha256:{digest}"
 
 
-def _to_v1_strategy(strategy: StrategySpecV2) -> StrategySpec:
+def adapt_technical_strategy_v2_to_v1(strategy: StrategySpecV2) -> StrategySpec:
+    """Project a technical-only v2 strategy onto the unchanged v1 runtime DSL.
+
+    This pure conversion is shared by validation and the P0-C execution bridge
+    so capability checks and runtime execution cannot drift into two mappings.
+    Non-technical conditions fail closed with ``TypeError``.
+    """
+
     return StrategySpec(
         catalog=CatalogRef(
             catalog_id=strategy.catalog.catalog_id,
@@ -670,6 +677,7 @@ __all__ = [
     "StrategyV2ValidationError",
     "StrategyV2ValidationIssue",
     "ValidationStage",
+    "adapt_technical_strategy_v2_to_v1",
     "condition_semantics_hash",
     "is_validator_issued_plan",
     "validate_strategy_candidate_v2",

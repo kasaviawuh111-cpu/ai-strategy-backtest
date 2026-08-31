@@ -24,7 +24,7 @@ from ashare_lab.domain.market_data import (
 )
 from ashare_lab.domain.shared import DomainValidationError, InstrumentId, Price
 
-from .local_parquet import normalize_instrument_id
+from .local_parquet import InstrumentNormalizer, normalize_instrument_id
 
 _SCHEMA_VERSION = "parquet-instrument-sessions.v2"
 _HASH_CHUNK_BYTES = 1024 * 1024
@@ -45,8 +45,14 @@ class SessionReferenceSchemaError(SessionReferenceAdapterError):
 class ParquetInstrumentSessionProvider:
     """Resolve canonical A-share session facts from an immutable Parquet file."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        instrument_normalizer: InstrumentNormalizer = normalize_instrument_id,
+    ) -> None:
         self._path = Path(path).expanduser().resolve()
+        self._instrument_normalizer = instrument_normalizer
         if not self._path.is_file():
             raise SessionReferenceIntegrityError(
                 f"instrument-session reference file does not exist: {self._path}"
@@ -116,7 +122,7 @@ class ParquetInstrumentSessionProvider:
 
         if start > end:
             raise SessionReferenceSchemaError("session period start must not exceed end")
-        canonical_instrument = normalize_instrument_id(instrument_id)
+        canonical_instrument = self._instrument_normalizer(instrument_id)
         self._verify_unchanged()
 
         query = """
@@ -199,8 +205,8 @@ class ParquetInstrumentSessionProvider:
                 f"instrument-session reference file content changed: {self._path}"
             )
 
-    @staticmethod
     def _row_to_session(
+        self,
         row: tuple[object, ...],
         expected_instrument: InstrumentId,
     ) -> InstrumentSession:
@@ -223,7 +229,7 @@ class ParquetInstrumentSessionProvider:
             raw_is_st,
         ) = row
         try:
-            row_instrument = normalize_instrument_id(_required_text(raw_code, "stock_code"))
+            row_instrument = self._instrument_normalizer(_required_text(raw_code, "stock_code"))
         except Exception as exc:
             raise SessionReferenceSchemaError("invalid session stock_code") from exc
         if row_instrument != expected_instrument:

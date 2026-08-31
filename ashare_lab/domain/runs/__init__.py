@@ -5,9 +5,25 @@ from .models import (
     RunManifest,
     result_hash,
 )
+from .models_v2 import (
+    DraftRevisionV2,
+    ExecutableStrategyPlanRecordV2,
+    RunManifestV2,
+    SnapshotBindingV2,
+    StoredValidationReceiptV2,
+    ValidationReceiptClaimsV2,
+    canonical_signal_records_json,
+)
 
 __all__ = [
+    "DraftRevisionV2",
+    "ExecutableStrategyPlanRecordV2",
     "ExecutionAssumptions",
     "RunManifest",
+    "RunManifestV2",
+    "SnapshotBindingV2",
+    "StoredValidationReceiptV2",
+    "ValidationReceiptClaimsV2",
+    "canonical_signal_records_json",
     "result_hash",
 ]

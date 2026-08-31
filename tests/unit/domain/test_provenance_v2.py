@@ -20,6 +20,7 @@ HASH_A = "sha256:" + "a" * 64
 HASH_B = "sha256:" + "b" * 64
 HASH_C = "sha256:" + "c" * 64
 PLAN_A = "sha256:" + "d" * 64
+CONDITION_A = "sha256:" + "e" * 64
 GIT_A = "1" * 40
 GIT_B = "2" * 40
 
@@ -73,6 +74,7 @@ def signal(**overrides: object) -> SignalRecord:
     first_input = envelope()
     values: dict[str, object] = {
         "instrument_id": "600519.SH",
+        "condition_id": CONDITION_A,
         "condition_ref": "$.entry",
         "triggered": True,
         "signal_at": moment(2, 15, 0),
@@ -294,6 +296,7 @@ def test_signal_fingerprint_is_order_independent_and_reproducible() -> None:
         {"plan_id": HASH_C},
         {"code_revision": GIT_B},
         {"condition_ref": "$.exit"},
+        {"condition_id": HASH_C},
         {"triggered": False},
     ],
 )
@@ -353,11 +356,20 @@ def test_signal_parser_rejects_embedded_secret_fields() -> None:
         SignalRecord.from_dict(payload)
 
 
+def test_signal_parser_fails_closed_when_condition_id_is_missing() -> None:
+    payload = signal().to_dict()
+    del payload["condition_id"]
+
+    with pytest.raises(DomainValidationError, match="missing fields: condition_id"):
+        SignalRecord.from_dict(payload)
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
         ({"instrument_id": "600519"}, "instrument_id must be a canonical A-share symbol"),
         ({"condition_ref": "entry.conditions[0]"}, "condition_ref must be a Strategy v2 path"),
+        ({"condition_id": "condition:entry"}, "condition_id must be a sha256 content hash"),
         ({"dsl_schema_version": "strategy.v1"}, "dsl_schema_version must be strategy.v2"),
     ],
 )

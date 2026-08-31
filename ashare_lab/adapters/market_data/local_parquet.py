@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
@@ -185,18 +185,22 @@ def normalize_instrument_id(value: InstrumentId | str) -> InstrumentId:
         raise MarketDataSchemaError(str(exc)) from exc
 
 
+type InstrumentNormalizer = Callable[[InstrumentId | str], InstrumentId]
+
+
 def _validate_event_coverage_scope(
     coverage: Mapping[object, object],
     *,
     instruments: tuple[InstrumentId, ...],
     period: DateRange,
     requested_event_codes: tuple[str, ...],
+    instrument_normalizer: InstrumentNormalizer,
 ) -> None:
     instrument_id = coverage.get("instrumentId")
     if not isinstance(instrument_id, str):
         raise SnapshotIntegrityError("composite snapshot event acquisition instrumentId is invalid")
     try:
-        coverage_instrument = normalize_instrument_id(instrument_id)
+        coverage_instrument = instrument_normalizer(instrument_id)
     except MarketDataSchemaError as exc:
         raise SnapshotIntegrityError(
             "composite snapshot event acquisition instrumentId is invalid"
@@ -297,6 +301,7 @@ def _validate_no_event_required_composite_contract(
     row_counts: Mapping[object, object],
     instruments: tuple[InstrumentId, ...],
     period: DateRange,
+    instrument_normalizer: InstrumentNormalizer,
 ) -> None:
     requirement = manifest.get("eventRequirement")
     expected_requirement = {
@@ -330,7 +335,7 @@ def _validate_no_event_required_composite_contract(
     if not isinstance(raw_instrument, str):
         raise SnapshotIntegrityError("technical-only composite instrument coverage is invalid")
     try:
-        coverage_instrument = normalize_instrument_id(raw_instrument)
+        coverage_instrument = instrument_normalizer(raw_instrument)
     except MarketDataSchemaError as exc:
         raise SnapshotIntegrityError(
             "technical-only composite instrument coverage is invalid"
@@ -432,10 +437,12 @@ class LocalParquetMarketDataRepository:
         *,
         session_factory: SessionFactory | None = None,
         profile: MarketDataProfile = "generic_parquet",
+        instrument_normalizer: InstrumentNormalizer = normalize_instrument_id,
     ) -> None:
         self._data_root = Path(data_root).expanduser().resolve()
         self._session_factory = session_factory
         self._profile = profile
+        self._instrument_normalizer = instrument_normalizer
         self._snapshots: dict[str, _PinnedSnapshot] = {}
         self._snapshot_lock = threading.RLock()
 
@@ -450,7 +457,7 @@ class LocalParquetMarketDataRepository:
         requested_datasets = set(requirements.datasets)
         instruments = tuple(
             sorted(
-                {normalize_instrument_id(item) for item in requirements.instruments},
+                {self._instrument_normalizer(item) for item in requirements.instruments},
                 key=str,
             )
         )
@@ -638,7 +645,7 @@ class LocalParquetMarketDataRepository:
             raise SnapshotIntegrityError("composite snapshot event acquisition scope is invalid")
         try:
             period = DateRange(date.fromisoformat(raw_start), date.fromisoformat(raw_end))
-            instrument = normalize_instrument_id(raw_instrument)
+            instrument = self._instrument_normalizer(raw_instrument)
         except (ValueError, DomainValidationError, MarketDataSchemaError) as exc:
             raise SnapshotIntegrityError(
                 "composite snapshot event acquisition scope is invalid"
@@ -970,7 +977,10 @@ class LocalParquetMarketDataRepository:
                 raise SnapshotIntegrityError(
                     "instrument-session reference was not included in the pinned snapshot"
                 )
-            provider = ParquetInstrumentSessionProvider(session_path)
+            provider = ParquetInstrumentSessionProvider(
+                session_path,
+                instrument_normalizer=self._instrument_normalizer,
+            )
             sessions = tuple(
                 provider.sessions_for_period(
                     canonical_instrument,
@@ -1216,7 +1226,7 @@ class LocalParquetMarketDataRepository:
         if snapshot != pinned.ref:
             raise SnapshotIntegrityError("snapshot reference does not match its pin")
 
-        canonical_instrument = normalize_instrument_id(instrument_id)
+        canonical_instrument = self._instrument_normalizer(instrument_id)
         if canonical_instrument not in pinned.instruments:
             raise SnapshotScopeError(
                 f"instrument {canonical_instrument} was not included in the snapshot"
@@ -1394,6 +1404,7 @@ class LocalParquetMarketDataRepository:
                 row_counts=typed_row_counts,
                 instruments=instruments,
                 period=period,
+                instrument_normalizer=self._instrument_normalizer,
             )
         else:
             if (
@@ -1409,6 +1420,7 @@ class LocalParquetMarketDataRepository:
                 instruments=instruments,
                 period=period,
                 requested_event_codes=requested_event_codes,
+                instrument_normalizer=self._instrument_normalizer,
             )
 
         raw_files = manifest.get("files")
@@ -1798,7 +1810,7 @@ class LocalParquetMarketDataRepository:
         if not isinstance(symbol, str):
             raise SnapshotIntegrityError("Choice minute snapshot symbol is invalid")
         try:
-            snapshot_instrument = normalize_instrument_id(symbol)
+            snapshot_instrument = self._instrument_normalizer(symbol)
         except MarketDataSchemaError as exc:
             raise SnapshotIntegrityError("Choice minute snapshot symbol is invalid") from exc
         if any(item != snapshot_instrument for item in instruments):
@@ -2007,7 +2019,7 @@ class LocalParquetMarketDataRepository:
         if not isinstance(raw_symbol, str):
             raise SnapshotIntegrityError("Choice snapshot symbol is invalid")
         try:
-            manifest_instrument = normalize_instrument_id(raw_symbol)
+            manifest_instrument = self._instrument_normalizer(raw_symbol)
         except (DomainValidationError, MarketDataSchemaError) as exc:
             raise SnapshotIntegrityError("Choice snapshot symbol is invalid") from exc
         if instruments != (manifest_instrument,):
@@ -2191,8 +2203,8 @@ class LocalParquetMarketDataRepository:
                     f"pinned dataset file content changed: {expected.path}"
                 )
 
-    @staticmethod
     def _row_to_daily_bar(
+        self,
         row: tuple[object, ...],
         expected_instrument: InstrumentId,
         period: DateRange,
@@ -2211,7 +2223,7 @@ class LocalParquetMarketDataRepository:
             raw_volume,
             raw_amount,
         ) = row
-        row_instrument = normalize_instrument_id(_required_text(raw_code, "stock_code"))
+        row_instrument = self._instrument_normalizer(_required_text(raw_code, "stock_code"))
         if row_instrument != expected_instrument:
             raise MarketDataSchemaError("daily OHLCV query returned a different instrument")
         session_date = _coerce_date(raw_date)
@@ -2236,8 +2248,8 @@ class LocalParquetMarketDataRepository:
             price_basis=price_basis,
         )
 
-    @staticmethod
     def _row_to_minute_bar(
+        self,
         row: tuple[object, ...],
         expected_instrument: InstrumentId,
         period: DateRange,
@@ -2258,7 +2270,7 @@ class LocalParquetMarketDataRepository:
             raw_price_basis,
             raw_interval,
         ) = row
-        row_instrument = normalize_instrument_id(_required_text(raw_code, "stock_code"))
+        row_instrument = self._instrument_normalizer(_required_text(raw_code, "stock_code"))
         if row_instrument != expected_instrument:
             raise MarketDataSchemaError("minute OHLCV query returned a different instrument")
         bar_start = _coerce_epoch_us(raw_start, "bar_start_at")
@@ -2285,8 +2297,8 @@ class LocalParquetMarketDataRepository:
         except DomainValidationError as exc:
             raise MarketDataSchemaError(f"invalid minute execution row: {exc}") from exc
 
-    @staticmethod
     def _row_to_minute_close(
+        self,
         row: tuple[object, ...],
         expected_instrument: InstrumentId,
         period: DateRange,
@@ -2302,7 +2314,7 @@ class LocalParquetMarketDataRepository:
             raw_price_basis,
             raw_interval,
         ) = row
-        row_instrument = normalize_instrument_id(_required_text(raw_code, "stock_code"))
+        row_instrument = self._instrument_normalizer(_required_text(raw_code, "stock_code"))
         if row_instrument != expected_instrument:
             raise MarketDataSchemaError("minute signal query returned a different instrument")
         bar_start = _coerce_epoch_us(raw_start, "bar_start_at")
@@ -2324,8 +2336,8 @@ class LocalParquetMarketDataRepository:
         except DomainValidationError as exc:
             raise MarketDataSchemaError(f"invalid minute signal row: {exc}") from exc
 
-    @staticmethod
     def _row_to_event(
+        self,
         row: tuple[object, ...],
         expected_instrument: InstrumentId,
     ) -> EventEnvelope:
@@ -2369,7 +2381,7 @@ class LocalParquetMarketDataRepository:
             ) = row
         else:
             raise MarketDataSchemaError("event projection returned an unsupported column count")
-        row_instrument = normalize_instrument_id(_required_text(raw_code, "stock_code"))
+        row_instrument = self._instrument_normalizer(_required_text(raw_code, "stock_code"))
         if row_instrument != expected_instrument:
             raise MarketDataSchemaError("event query returned a different instrument")
         try:
@@ -2436,8 +2448,8 @@ class LocalParquetMarketDataRepository:
             validation_status=validation_status,
         )
 
-    @staticmethod
     def _row_to_corporate_action(
+        self,
         row: tuple[object, ...],
         expected_instrument: InstrumentId,
     ) -> CorporateAction:
@@ -2471,7 +2483,7 @@ class LocalParquetMarketDataRepository:
             raw_rights_deadline,
             raw_rights_listing,
         ) = row
-        row_instrument = normalize_instrument_id(_required_text(raw_code, "stock_code"))
+        row_instrument = self._instrument_normalizer(_required_text(raw_code, "stock_code"))
         if row_instrument != expected_instrument:
             raise MarketDataSchemaError("corporate-action query returned a different instrument")
         try:

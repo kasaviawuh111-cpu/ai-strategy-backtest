@@ -33,6 +33,7 @@ from .choice_snapshot import SNAPSHOT_SCHEMA_VERSION as CHOICE_SNAPSHOT_SCHEMA_V
 from .composite_snapshot import COMPOSITE_SNAPSHOT_SCHEMA_VERSION
 from .event_snapshot import EVENT_SNAPSHOT_SCHEMA_VERSION, NO_EVENT_REQUIRED_MODE
 from .local_parquet import (
+    InstrumentNormalizer,
     LocalParquetMarketDataRepository,
     MarketDataAdapterError,
     MarketDataCapabilityError,
@@ -137,6 +138,7 @@ class SnapshotRegistryMarketDataRepository:
         producer_snapshot_id: str | None = None,
         producer_snapshot_path: str | Path | None = None,
         session_factory: SessionFactory | None = None,
+        instrument_normalizer: InstrumentNormalizer = normalize_instrument_id,
     ) -> None:
         self._composite_root = Path(composite_root).expanduser().resolve()
         self._choice_root = (
@@ -146,6 +148,7 @@ class SnapshotRegistryMarketDataRepository:
             Path(technical_root).expanduser().resolve() if technical_root is not None else None
         )
         self._session_factory = session_factory
+        self._instrument_normalizer = instrument_normalizer
         self._explicit_selection = _resolve_explicit_selection(
             composite_root=self._composite_root,
             choice_root=self._choice_root,
@@ -186,7 +189,7 @@ class SnapshotRegistryMarketDataRepository:
         entries = self._scan_entries()
         instruments = tuple(
             sorted(
-                {normalize_instrument_id(item) for item in requirements.instruments},
+                {self._instrument_normalizer(item) for item in requirements.instruments},
                 key=str,
             )
         )
@@ -345,7 +348,7 @@ class SnapshotRegistryMarketDataRepository:
                 raise SnapshotRegistryIntegrityError(
                     "prepared producer snapshot path does not match its content ID"
                 )
-        loader = _entry_loader(selection.profile)
+        loader = _entry_loader(selection.profile, self._instrument_normalizer)
         entry = loader(selection.path)
         if entry.producer_snapshot_id != producer_snapshot_id:
             raise SnapshotRegistryIntegrityError(
@@ -353,7 +356,7 @@ class SnapshotRegistryMarketDataRepository:
             )
         instruments = tuple(
             sorted(
-                {normalize_instrument_id(item) for item in requirements.instruments},
+                {self._instrument_normalizer(item) for item in requirements.instruments},
                 key=str,
             )
         )
@@ -410,6 +413,7 @@ class SnapshotRegistryMarketDataRepository:
                 entry.path,
                 session_factory=self._session_factory,
                 profile=entry.profile,
+                instrument_normalizer=self._instrument_normalizer,
             )
             self._delegates[entry.path] = delegate
         return delegate
@@ -534,7 +538,7 @@ class SnapshotRegistryMarketDataRepository:
     def _scan_entries(self) -> tuple[_RegistryEntry, ...]:
         if self._explicit_selection is not None:
             selection = self._explicit_selection
-            loader = _entry_loader(selection.profile)
+            loader = _entry_loader(selection.profile, self._instrument_normalizer)
             entry = loader(selection.path)
             if (
                 selection.producer_snapshot_id is not None
@@ -549,7 +553,10 @@ class SnapshotRegistryMarketDataRepository:
             _scan_content_root(
                 self._composite_root,
                 label="composite",
-                loader=_load_composite_registry_entry,
+                loader=lambda path: _load_composite_registry_entry(
+                    path,
+                    instrument_normalizer=self._instrument_normalizer,
+                ),
             )
         )
         if self._choice_root is not None:
@@ -557,7 +564,10 @@ class SnapshotRegistryMarketDataRepository:
                 _scan_content_root(
                     self._choice_root,
                     label="Choice",
-                    loader=_load_choice_registry_entry,
+                    loader=lambda path: _load_choice_registry_entry(
+                        path,
+                        instrument_normalizer=self._instrument_normalizer,
+                    ),
                 )
             )
         if self._technical_root is not None:
@@ -565,7 +575,10 @@ class SnapshotRegistryMarketDataRepository:
                 _scan_content_root(
                     self._technical_root,
                     label="technical",
-                    loader=_load_technical_registry_entry,
+                    loader=lambda path: _load_technical_registry_entry(
+                        path,
+                        instrument_normalizer=self._instrument_normalizer,
+                    ),
                 )
             )
         identities: set[str] = set()
@@ -670,12 +683,23 @@ def _validate_distinct_registry_roots(
 
 def _entry_loader(
     profile: _RepositoryProfile,
+    instrument_normalizer: InstrumentNormalizer,
 ) -> Callable[[Path], _RegistryEntry]:
-    return {
-        "composite_snapshot": _load_composite_registry_entry,
-        "choice_snapshot": _load_choice_registry_entry,
-        "technical_snapshot": _load_technical_registry_entry,
-    }[profile]
+    loaders: Mapping[_RepositoryProfile, Callable[[Path], _RegistryEntry]] = {
+        "composite_snapshot": lambda path: _load_composite_registry_entry(
+            path,
+            instrument_normalizer=instrument_normalizer,
+        ),
+        "choice_snapshot": lambda path: _load_choice_registry_entry(
+            path,
+            instrument_normalizer=instrument_normalizer,
+        ),
+        "technical_snapshot": lambda path: _load_technical_registry_entry(
+            path,
+            instrument_normalizer=instrument_normalizer,
+        ),
+    }
+    return loaders[profile]
 
 
 def _validate_explicit_target(path: Path, *, root: Path) -> None:
@@ -713,7 +737,11 @@ def _scan_content_root(
     return tuple(entries)
 
 
-def _load_composite_registry_entry(root: Path) -> _RegistryEntry:
+def _load_composite_registry_entry(
+    root: Path,
+    *,
+    instrument_normalizer: InstrumentNormalizer = normalize_instrument_id,
+) -> _RegistryEntry:
     manifest = _load_json(root / _MANIFEST_FILENAME, "composite snapshot manifest")
     if manifest.get("schemaVersion") != COMPOSITE_SNAPSHOT_SCHEMA_VERSION:
         raise SnapshotRegistryIntegrityError(
@@ -780,7 +808,7 @@ def _load_composite_registry_entry(root: Path) -> _RegistryEntry:
     if not isinstance(raw_symbol, str):
         raise SnapshotRegistryIntegrityError("technical source manifest symbol is invalid")
     try:
-        instrument = normalize_instrument_id(raw_symbol)
+        instrument = instrument_normalizer(raw_symbol)
     except MarketDataAdapterError as exc:
         raise SnapshotRegistryIntegrityError("technical source manifest symbol is invalid") from exc
     technical_period = _choice_period(choice_manifest)
@@ -824,7 +852,7 @@ def _load_composite_registry_entry(root: Path) -> _RegistryEntry:
     if not isinstance(raw_event_instrument, str):
         raise SnapshotRegistryIntegrityError("event acquisition instrumentId is invalid")
     try:
-        event_instrument = normalize_instrument_id(raw_event_instrument)
+        event_instrument = instrument_normalizer(raw_event_instrument)
     except MarketDataAdapterError as exc:
         raise SnapshotRegistryIntegrityError("event acquisition instrumentId is invalid") from exc
     if event_instrument != instrument:
@@ -862,23 +890,33 @@ def _load_composite_registry_entry(root: Path) -> _RegistryEntry:
     )
 
 
-def _load_choice_registry_entry(root: Path) -> _RegistryEntry:
+def _load_choice_registry_entry(
+    root: Path,
+    *,
+    instrument_normalizer: InstrumentNormalizer = normalize_instrument_id,
+) -> _RegistryEntry:
     return _load_daily_registry_entry(
         root,
         expected_schema=CHOICE_SNAPSHOT_SCHEMA_VERSION,
         prefix="choice",
         label="Choice",
         profile="choice_snapshot",
+        instrument_normalizer=instrument_normalizer,
     )
 
 
-def _load_technical_registry_entry(root: Path) -> _RegistryEntry:
+def _load_technical_registry_entry(
+    root: Path,
+    *,
+    instrument_normalizer: InstrumentNormalizer = normalize_instrument_id,
+) -> _RegistryEntry:
     return _load_daily_registry_entry(
         root,
         expected_schema=TECHNICAL_SNAPSHOT_SCHEMA_VERSION,
         prefix="technical",
         label="technical",
         profile="technical_snapshot",
+        instrument_normalizer=instrument_normalizer,
     )
 
 
@@ -889,6 +927,7 @@ def _load_daily_registry_entry(
     prefix: Literal["choice", "technical"],
     label: str,
     profile: Literal["choice_snapshot", "technical_snapshot"],
+    instrument_normalizer: InstrumentNormalizer,
 ) -> _RegistryEntry:
     manifest = _load_json(root / _MANIFEST_FILENAME, f"{label} snapshot manifest")
     if manifest.get("schemaVersion") != expected_schema:
@@ -916,7 +955,7 @@ def _load_daily_registry_entry(
     if not isinstance(raw_symbol, str):
         raise SnapshotRegistryIntegrityError(f"{label} snapshot symbol is invalid")
     try:
-        instrument = normalize_instrument_id(raw_symbol)
+        instrument = instrument_normalizer(raw_symbol)
     except MarketDataAdapterError as exc:
         raise SnapshotRegistryIntegrityError(f"{label} snapshot symbol is invalid") from exc
     technical_period = _choice_period(manifest)

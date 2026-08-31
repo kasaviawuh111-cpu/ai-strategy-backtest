@@ -202,6 +202,7 @@ class SignalRecord:
     """Tamper-evident result of one deterministic DSL condition evaluation."""
 
     instrument_id: str
+    condition_id: str
     condition_ref: str
     triggered: bool
     signal_at: datetime
@@ -222,6 +223,7 @@ class SignalRecord:
             )
         if _INSTRUMENT_ID.fullmatch(self.instrument_id) is None:
             raise DomainValidationError("instrument_id must be a canonical A-share symbol")
+        _require_sha256(self.condition_id, "condition_id")
         if _CONDITION_REF.fullmatch(self.condition_ref) is None:
             raise DomainValidationError("condition_ref must be a Strategy v2 path")
         if self.dsl_schema_version != "strategy.v2":
@@ -259,7 +261,23 @@ class SignalRecord:
 
     @property
     def fingerprint(self) -> str:
+        """Audit fingerprint, including the validator-issued plan identity."""
+
         return _canonical_hash(self._fingerprint_payload())
+
+    @property
+    def semantic_fingerprint(self) -> str:
+        """Deterministic signal identity independent of draft/plan provenance.
+
+        Two independently validated drafts of the same canonical strategy may
+        carry different ``plan_id`` values.  That difference remains visible
+        in :attr:`fingerprint`, while replay equivalence uses this identity.
+        """
+
+        payload = self._fingerprint_payload()
+        del payload["plan_id"]
+        payload["identity_schema_version"] = "signal-semantic.v2"
+        return _canonical_hash(payload)
 
     @property
     def data_snapshot_ids(self) -> tuple[str, ...]:
@@ -270,6 +288,7 @@ class SignalRecord:
     def _fingerprint_payload(self) -> dict[str, object]:
         return {
             "code_revision": self.code_revision,
+            "condition_id": self.condition_id,
             "condition_ref": self.condition_ref,
             "dsl_schema_version": self.dsl_schema_version,
             "input_envelopes": [item.to_dict() for item in self.input_envelopes],
@@ -295,6 +314,7 @@ class SignalRecord:
             payload,
             fields={
                 "code_revision",
+                "condition_id",
                 "condition_ref",
                 "dsl_schema_version",
                 "fingerprint",
@@ -319,6 +339,7 @@ class SignalRecord:
             raise DomainValidationError("producer must be deterministic_runtime") from error
         item = cls(
             instrument_id=_payload_text(values["instrument_id"], "instrument_id"),
+            condition_id=_payload_text(values["condition_id"], "condition_id"),
             condition_ref=_payload_text(values["condition_ref"], "condition_ref"),
             triggered=_payload_bool(values["triggered"], "triggered"),
             signal_at=_payload_datetime(values["signal_at"], "signal_at"),

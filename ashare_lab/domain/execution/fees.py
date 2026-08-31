@@ -80,6 +80,17 @@ class FeeCalculator:
     def policy_version(self) -> FeePolicyVersion:
         return self._policy.version
 
+    @property
+    def policy(self) -> FeePolicy:
+        """Return the immutable policy that determines every calculated fee.
+
+        ``FeePolicy`` is a frozen value object.  Exposing it read-only lets a
+        server attestation derive a content hash from the calculator's real
+        parameters instead of accepting a caller-supplied parallel hash.
+        """
+
+        return self._policy
+
     def calculate(
         self,
         *,
