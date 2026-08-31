@@ -97,7 +97,16 @@ describe('formal main.tsx App journey', () => {
       '贵州茅台 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果',
     )
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    const thinking = screen.getByRole('status', { name: '思考进度' })
+    expect(thinking).toHaveTextContent('正在识别买入、卖出和回测区间')
+    expect(thinking.closest('.thinking-stream')).not.toHaveClass('mcard')
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
+    const completedThinking = screen.getByRole('button', { name: /已完成思考/ })
+    expect(completedThinking.querySelector('b')).toBeNull()
+    expect(completedThinking.querySelector('.think-title')).toHaveTextContent('已完成思考')
+    expect(completedThinking).toHaveAttribute('aria-expanded', 'false')
+    await user.click(completedThinking)
+    expect(completedThinking).toHaveAttribute('aria-expanded', 'true')
     expect(compile).toHaveBeenCalledWith(expect.objectContaining({ instrument }))
   })
 
@@ -516,6 +525,9 @@ describe('formal main.tsx App journey', () => {
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(await screen.findByText(/^预览：/)).toBeInTheDocument()
+    const runProgress = screen.getByRole('status', { name: '回测进度' })
+    expect(runProgress.closest('.thinking-stream')).not.toHaveClass('mcard')
+    expect(runProgress.closest('.thinking-stream')).toHaveTextContent('运行这次历史回测')
     await user.click(await screen.findByRole(
       'button',
       { name: '取消回测' },

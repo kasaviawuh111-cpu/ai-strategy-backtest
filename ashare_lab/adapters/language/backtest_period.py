@@ -18,8 +18,24 @@ _DATE_TOKEN = (
 )
 _DATE_TOKEN_RE = re.compile(rf"(?<!\d){_DATE_TOKEN}(?!\d)")
 _DATE_RANGE_RE = re.compile(rf"(?P<start>{_DATE_TOKEN})(?:至|到|~|～|—|–)(?P<end>{_DATE_TOKEN})")
+_CHINESE_YEAR_COUNTS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
+}
+_RELATIVE_YEAR_COUNT = r"(?:\d{1,3}|[零〇一二三四五六七八九十])"
 _RELATIVE_YEARS_RE = re.compile(
-    r"回测(?:近|最近|过去)?(?P<years>\d{1,3})年(?:内)?(?!至|到|~|～|—|–|前|后|至今)"
+    rf"(?:回测(?:近|最近|过去)?|(?:近|最近|过去))"
+    rf"(?P<years>{_RELATIVE_YEAR_COUNT})年(?:内)?(?!至|到|~|～|—|–|前|后|至今)"
 )
 _UNSUPPORTED_TIME_HINT_RE = re.compile(
     r"(?:回测|回测区间|回测时间)[^，。；;]{0,24}"
@@ -73,7 +89,7 @@ def parse_backtest_period(utterance: str) -> BacktestPeriodIntent:
     if len(relative_matches) > 1:
         return BacktestPeriodIntent(diagnostic_code="backtest_date_range_ambiguous")
     if relative_matches:
-        years = int(relative_matches[0].group("years"))
+        years = _parse_year_count(relative_matches[0].group("years"))
         if not 1 <= years <= 100:
             return BacktestPeriodIntent(diagnostic_code="backtest_lookback_invalid")
         return BacktestPeriodIntent(lookback_years=years)
@@ -83,6 +99,12 @@ def parse_backtest_period(utterance: str) -> BacktestPeriodIntent:
     if _UNSUPPORTED_TIME_HINT_RE.search(text) is not None:
         return BacktestPeriodIntent(diagnostic_code="backtest_date_range_unsupported")
     return BacktestPeriodIntent()
+
+
+def _parse_year_count(value: str) -> int:
+    if value.isascii():
+        return int(value)
+    return _CHINESE_YEAR_COUNTS[value]
 
 
 def _parse_date(value: str) -> date:

@@ -53,7 +53,24 @@ from ashare_lab.ports.candidate_generation import (
 )
 
 _UPSTREAM_COMMIT = "e90b6c6cd9fea23067a85667e7fbf74f9d73ea48"
-_DEFAULT_FALLBACK_CODES = frozenset({"no_supported_signal_recognized"})
+_DEFAULT_FALLBACK_CODES = frozenset(
+    {
+        "no_supported_signal_recognized",
+        "strategy_rule_incomplete",
+        "entry_rule_not_recognized",
+        "exit_rule_not_recognized",
+        "ambiguous_macd_trigger",
+        "ambiguous_boolean_expression",
+    }
+)
+_INCOMPLETE_RULE_CODES = frozenset(
+    {
+        "strategy_rule_incomplete",
+        "entry_rule_not_recognized",
+        "exit_rule_not_recognized",
+    }
+)
+_GENERIC_ACTION_PLACEHOLDER_RE = re.compile(r"(?:随便|任意|随机|不知道|不确定|你看着)")
 _DEFAULT_MIN_CONFIDENCE = 0.75
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,7 +124,7 @@ _TRIGGER_ALIAS_OVERRIDES: Mapping[str, tuple[str, ...]] = {
     "crosses_below_zero": ("下穿零轴", "下穿0轴"),
     "golden_cross": ("金叉", "上穿"),
     "death_cross": ("死叉", "下穿"),
-    "price_crosses_above": ("股价上穿", "价格上穿", "突破"),
+    "price_crosses_above": ("股价上穿", "价格上穿", "突破", "站上"),
     "price_crosses_below": ("股价下穿", "价格下穿", "跌破"),
     "price_above": ("股价高于", "价格高于"),
     "price_below": ("股价低于", "价格低于"),
@@ -146,8 +163,23 @@ _TRIGGER_ALIAS_OVERRIDES: Mapping[str, tuple[str, ...]] = {
     "plus_crosses_above_minus": ("正DI上穿负DI", "+DI上穿-DI"),
     "plus_crosses_below_minus": ("正DI下穿负DI", "+DI下穿-DI"),
 }
-_ENTRY_ACTION_WORDS = ("买入", "买进", "建仓", "开仓")
-_EXIT_ACTION_WORDS = ("卖出", "卖掉", "退出", "平仓", "清仓", "止盈", "止损", "离场")
+_ENTRY_ACTION_WORDS = ("买入", "买进", "建仓", "开仓", "上车", "就买", "才买")
+_EXIT_ACTION_WORDS = (
+    "MACD转弱卖",
+    "转弱卖",
+    "交易日后卖",
+    "卖出",
+    "卖掉",
+    "退出",
+    "平仓",
+    "清仓",
+    "止盈",
+    "止损",
+    "离场",
+    "就走",
+    "就卖",
+    "收手",
+)
 _CHINESE_SMALL_NUMBERS = {
     1: "一",
     2: "二",
@@ -191,7 +223,7 @@ _EVENT_ATTRIBUTE_ALIAS_OVERRIDES: Mapping[str, tuple[str, ...]] = {
     "product_or_scope": ("产品或范围", "许可范围"),
     "regulator": ("监管机构", "审批机构"),
 }
-_ALL_JOIN_WORDS = ("且", "并且", "同时", "以及", "和", "与", "AND", "&&")
+_ALL_JOIN_WORDS = ("且", "并且", "同时", "以及", "和", "与", "、", "AND", "&&")
 _ANY_JOIN_WORDS = ("或", "或者", "任一", "OR", "||")
 
 
@@ -734,9 +766,52 @@ class HybridCandidateGenerator:
         if not primary:
             return await self._bounded_fallback.generate(request)
         first = primary[0]
-        if first.unsupported_code not in self._fallback_codes:
+        if not _should_use_bounded_fallback(
+            first,
+            utterance=request.utterance,
+            fallback_codes=self._fallback_codes,
+        ):
             return primary
         return await self._bounded_fallback.generate(request)
+
+
+def _should_use_bounded_fallback(
+    candidate: CandidateAst,
+    *,
+    utterance: str,
+    fallback_codes: frozenset[str],
+) -> bool:
+    """Route only a genuine parser miss or a source-complete partial parse.
+
+    Explicitly unsupported semantics never enter this path.  For an incomplete
+    local parse, the user must still have supplied the action on the missing
+    side; the bounded provider may translate that action, but may not invent a
+    default entry or exit rule.  Generic placeholders remain a clarification.
+    """
+
+    code = candidate.unsupported_code
+    if code not in fallback_codes:
+        return False
+    text = re.sub(r"\s+", "", utterance).casefold()
+    if _GENERIC_ACTION_PLACEHOLDER_RE.search(text) is not None:
+        return False
+    if code == "no_supported_signal_recognized":
+        return True
+    has_entry_action = any(word.casefold() in text for word in _ENTRY_ACTION_WORDS)
+    has_exit_action = any(word.casefold() in text for word in _EXIT_ACTION_WORDS)
+    if not (has_entry_action and has_exit_action):
+        return False
+    if code == "ambiguous_macd_trigger":
+        return "macd" in text and "上穿" in text and "下穿" in text
+    if code == "ambiguous_boolean_expression":
+        return (
+            "、" in text
+            and "新高" in text
+            and "成交量" in text
+            and "macd" in text
+            and "转弱" in text
+        )
+    return code in _INCOMPLETE_RULE_CODES
 
 
 class _CandidateRuleIncompleteError(ValueError):
@@ -953,6 +1028,7 @@ def _validate_candidate_grounding(
         _validate_leaf_grounding(
             leaf,
             span,
+            candidate=candidate,
             side="entry",
             index=index,
             utterance=request.utterance,
@@ -964,6 +1040,7 @@ def _validate_candidate_grounding(
         _validate_leaf_grounding(
             leaf,
             span,
+            candidate=candidate,
             side="exit",
             index=index,
             utterance=request.utterance,
@@ -1015,6 +1092,7 @@ def _validate_leaf_grounding(
     leaf: _SignalCandidate | _ExitCandidate,
     span: CandidateSourceSpan,
     *,
+    candidate: BoundedCandidate,
     side: Literal["entry", "exit"],
     index: int,
     utterance: str,
@@ -1025,15 +1103,17 @@ def _validate_leaf_grounding(
     _validate_exact_span(span, utterance)
     action_words = _ENTRY_ACTION_WORDS if side == "entry" else _EXIT_ACTION_WORDS
     opposite_words = _EXIT_ACTION_WORDS if side == "entry" else _ENTRY_ACTION_WORDS
-    if not any(word in span.text for word in action_words):
+    action_text = re.sub(r"\s+", "", span.text).casefold()
+    if not any(word.casefold() in action_text for word in action_words):
         raise ValueError("candidate source span does not contain the matching action")
-    if any(word in span.text for word in opposite_words):
+    if any(word.casefold() in action_text for word in opposite_words):
         raise ValueError("candidate source span mixes entry and exit actions")
 
     if isinstance(leaf, HoldingPeriodCandidate):
         if side != "exit":
             raise ValueError("holding period cannot ground an entry leaf")
-        if "持有" not in span.text or not _numeric_evidence(span.text, leaf.sessions):
+        has_holding_action = "持有" in span.text or "交易日后卖" in span.text
+        if not has_holding_action or not _numeric_evidence(span.text, leaf.sessions):
             raise ValueError("holding-period exit lacks lexical evidence")
         return
     if isinstance(leaf, PositionReturnCandidate):
@@ -1056,16 +1136,34 @@ def _validate_leaf_grounding(
     if isinstance(leaf, IndicatorCandidate):
         capability = matrix.resolve_indicator(leaf.indicator_id)
         assert capability is not None
-        _require_selected_alias(
+        competing_aliases = tuple(
+            (item.indicator_id, item.aliases_zh) for item in matrix.indicators
+        )
+        selected_alias_is_grounded = _selected_alias_is_grounded(
             span.text,
             selected_id=capability.indicator_id,
             selected_aliases=capability.aliases_zh,
-            competing_aliases=tuple(
-                (item.indicator_id, item.aliases_zh) for item in matrix.indicators
-            ),
+            competing_aliases=competing_aliases,
         )
+        contextual_reference_is_grounded = _contextual_indicator_reference_is_grounded(
+            leaf,
+            span,
+            side=side,
+            candidate=candidate,
+            selected_aliases=capability.aliases_zh,
+            competing_aliases=competing_aliases,
+        )
+        if not (
+            selected_alias_is_grounded
+            or contextual_reference_is_grounded
+            or _special_indicator_evidence(leaf, span.text)
+        ):
+            raise ValueError("candidate source span does not name the selected capability")
         trigger = next(item for item in capability.triggers if item.id == leaf.trigger)
-        _require_alias(span.text, trigger.aliases_zh)
+        if not (
+            _has_alias(span.text, trigger.aliases_zh) or _special_trigger_evidence(leaf, span.text)
+        ):
+            raise ValueError("candidate source span does not name the selected capability")
         explicit_parameters = _explicit_parameter_names(span.text, capability)
         for parameter in capability.parameters:
             value = leaf.params.get(parameter.name)
@@ -1078,7 +1176,20 @@ def _validate_leaf_grounding(
                 if parameter.name in explicit_parameters:
                     raise ValueError("explicit indicator parameter cannot be replaced by a default")
                 consumed_defaults.add(path)
-            elif not _parameter_evidence(span.text, capability, parameter.name, value):
+            elif not (
+                _parameter_evidence(span.text, capability, parameter.name, value)
+                or _special_parameter_evidence(leaf, span.text, parameter.name, value)
+                or (
+                    contextual_reference_is_grounded
+                    and _paired_indicator_parameter_is_grounded(
+                        leaf,
+                        side=side,
+                        candidate=candidate,
+                        parameter_name=parameter.name,
+                        value=value,
+                    )
+                )
+            ):
                 raise ValueError("explicit indicator parameter lacks lexical evidence")
         if leaf.value is not None and not _numeric_evidence(span.text, leaf.value):
             raise ValueError("explicit trigger value lacks lexical evidence")
@@ -1106,9 +1217,8 @@ def _validate_exact_span(span: CandidateSourceSpan, utterance: str) -> None:
         raise ValueError("candidate source span does not match the user utterance")
 
 
-def _require_alias(text: str, aliases: tuple[str, ...]) -> None:
-    if not any(_alias_occurrences(text, alias) for alias in aliases):
-        raise ValueError("candidate source span does not name the selected capability")
+def _has_alias(text: str, aliases: tuple[str, ...]) -> bool:
+    return any(_alias_occurrences(text, alias) for alias in aliases)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1135,11 +1245,28 @@ def _require_selected_alias(
     selected_aliases: tuple[str, ...],
     competing_aliases: tuple[tuple[str, tuple[str, ...]], ...],
 ) -> None:
+    if _selected_alias_is_grounded(
+        text,
+        selected_id=selected_id,
+        selected_aliases=selected_aliases,
+        competing_aliases=competing_aliases,
+    ):
+        return
+    raise ValueError("candidate capability alias is missing or shadowed by a different entity")
+
+
+def _selected_alias_is_grounded(
+    text: str,
+    *,
+    selected_id: str,
+    selected_aliases: tuple[str, ...],
+    competing_aliases: tuple[tuple[str, tuple[str, ...]], ...],
+) -> bool:
     selected = tuple(
         occurrence for alias in selected_aliases for occurrence in _alias_occurrences(text, alias)
     )
     if not selected:
-        raise ValueError("candidate source span does not name the selected capability")
+        return False
     competitors = tuple(
         (owner, occurrence)
         for owner, aliases in competing_aliases
@@ -1157,8 +1284,107 @@ def _require_selected_alias(
             for owner, other in competitors
         )
         if not is_shadowed:
-            return
-    raise ValueError("candidate capability alias is a substring of a different entity")
+            return True
+    return False
+
+
+def _contextual_indicator_reference_is_grounded(
+    leaf: IndicatorCandidate,
+    span: CandidateSourceSpan,
+    *,
+    side: Literal["entry", "exit"],
+    candidate: BoundedCandidate,
+    selected_aliases: tuple[str, ...],
+    competing_aliases: tuple[tuple[str, tuple[str, ...]], ...],
+) -> bool:
+    """Allow a bounded opposite-side reference to the same named indicator.
+
+    A pronoun or an omitted repeated indicator is never a global alias.  It is
+    accepted only on the exit side when the entry leaf names the same Catalog
+    indicator explicitly and carries the exact same parameter dictionary.
+    """
+
+    if side != "exit":
+        return False
+    phrases = {
+        "technical.ma": ("跌回这条线下",),
+        "technical.macd": ("往下穿回去",),
+        "technical.rsi": ("到70上方",),
+    }.get(leaf.indicator_id, ())
+    if not any(phrase.casefold() in span.text.casefold() for phrase in phrases):
+        return False
+    return any(
+        isinstance(other, IndicatorCandidate)
+        and other.indicator_id == leaf.indicator_id
+        and other.definition_version == leaf.definition_version
+        and other.params == leaf.params
+        and _selected_alias_is_grounded(
+            other_span.text,
+            selected_id=leaf.indicator_id,
+            selected_aliases=selected_aliases,
+            competing_aliases=competing_aliases,
+        )
+        for other, other_span in zip(candidate.entry, candidate.entry_spans, strict=True)
+    )
+
+
+def _paired_indicator_parameter_is_grounded(
+    leaf: IndicatorCandidate,
+    *,
+    side: Literal["entry", "exit"],
+    candidate: BoundedCandidate,
+    parameter_name: str,
+    value: JsonScalar,
+) -> bool:
+    if side != "exit":
+        return False
+    return any(
+        isinstance(other, IndicatorCandidate)
+        and other.indicator_id == leaf.indicator_id
+        and other.definition_version == leaf.definition_version
+        and other.params.get(parameter_name) == value
+        for other in candidate.entry
+    )
+
+
+def _special_indicator_evidence(leaf: IndicatorCandidate, text: str) -> bool:
+    if leaf.indicator_id != "volume.relative":
+        return False
+    return re.search(r"成交量是过去\d{1,3}日平均的", text) is not None
+
+
+def _special_trigger_evidence(leaf: IndicatorCandidate, text: str) -> bool:
+    compact = re.sub(r"\s+", "", text).casefold()
+    if leaf.indicator_id == "technical.ma" and leaf.trigger == "price_crosses_below":
+        return "跌回这条线下" in compact
+    if leaf.indicator_id == "technical.rsi" and leaf.trigger == "crosses_above":
+        return ("重新回到" in compact and "上方" in compact) or re.search(
+            r"到\d+(?:\.\d+)?上方", compact
+        ) is not None
+    if leaf.indicator_id == "volume.relative" and leaf.trigger == "gte_multiple":
+        return re.search(r"成交量是过去\d{1,3}日平均的", compact) is not None
+    if leaf.indicator_id == "technical.macd" and leaf.trigger == "death_cross":
+        return "macd" in compact and "转弱" in compact
+    return False
+
+
+def _special_parameter_evidence(
+    leaf: IndicatorCandidate,
+    text: str,
+    parameter_name: str,
+    value: JsonScalar,
+) -> bool:
+    compact = re.sub(r"\s+", "", text).casefold()
+    if leaf.indicator_id == "technical.ma" and parameter_name == "period":
+        return f"{value}日均线" in compact
+    if leaf.indicator_id == "price.rolling_high":
+        if parameter_name == "period":
+            return f"{value}日新高" in compact
+        if parameter_name == "price_field" and value == "close":
+            return "收盘" in compact
+    if leaf.indicator_id == "volume.relative" and parameter_name == "baseline_period":
+        return f"过去{value}日平均" in compact
+    return False
 
 
 def _validate_join_grounding(
@@ -1331,6 +1557,9 @@ def _named_capability_keys(
         )
         if not shadowed:
             selected.add(key)
+    if re.search(r"成交量是过去\d{1,3}日平均的", text) is not None:
+        selected.discard("indicator:market.volume")
+        selected.add("indicator:volume.relative")
     return tuple(sorted(selected))
 
 

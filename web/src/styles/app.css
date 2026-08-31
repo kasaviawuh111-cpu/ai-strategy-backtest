@@ -69,23 +69,33 @@ button,input,select{font:inherit}
 .bubble{max-width:292px;padding:9px 15px;font-size:17px;line-height:25px;border-radius:var(--r-bubble)}
 .bubble.me{background:var(--bubble-me)}
 .bubble p{margin:0}
-.dots{display:inline-flex;gap:4px;vertical-align:middle;margin-left:6px}
-.dots i{width:5px;height:5px;border-radius:50%;background:var(--color-primary);opacity:.3;animation:blink 1.1s infinite}
+.dots{display:inline-flex;gap:3px;vertical-align:middle;margin-left:6px}
+.dots i{width:4px;height:4px;border-radius:50%;background:var(--ink-4);opacity:.35;animation:blink 1.1s infinite}
 .dots i:nth-child(2){animation-delay:.18s}
 .dots i:nth-child(3){animation-delay:.36s}
 @keyframes blink{0%,60%,100%{opacity:.28;transform:translateY(0)}30%{opacity:1;transform:translateY(-2px)}}
 @media (prefers-reduced-motion:reduce){.dots i{animation:none;opacity:.55}}
-/* 「已完成思考」折叠头 —— 默认只占一行 */
+/* 进行中的思考直接进对话流：两行自然语言，不套卡片。 */
+.thinking-stream{width:100%;padding:2px 0;background:none;border:0;box-shadow:none}
+.thinking-task{margin:0;color:var(--ink-1);font-size:17px;line-height:25px;font-weight:500}
+.thinking-detail{display:flex;align-items:center;gap:12px;margin-top:5px;min-height:22px}
+.thinking-status{display:flex;align-items:center;min-width:0;margin:0;color:var(--ink-4);font-size:13px;line-height:20px}
+.thinking-status>span:first-child{min-width:0;overflow-wrap:anywhere}
+.thinking-action{margin-left:auto;flex:0 0 auto}
+.thinking-cancel{border:0;background:none;padding:2px 0;color:var(--ink-3);font-size:12px;line-height:18px;cursor:pointer}
+.thinking-cancel:hover{color:var(--ink-1)}
+.thinking-cancel:disabled{color:var(--ink-4);cursor:default}
+/* 「已完成思考」是普通黑色正文标题，默认收起不占长页。 */
 .thinkwrap{width:100%;margin-bottom:4px}
 .think{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:2px 0;cursor:pointer;text-align:left}
-.think b{font-size:17px;font-weight:600;line-height:24px}
+.think-title{color:var(--ink-1);font-size:17px;font-weight:500;line-height:25px}
 .think .meta{margin-left:auto;font-size:13px;line-height:18px;color:var(--ink-3);display:flex;align-items:center;gap:4px}
 .think svg{transition:transform .2s;color:var(--ink-4)}
 .think[aria-expanded="true"] svg{transform:rotate(180deg)}
-.thinkbody{display:none;font-size:13px;line-height:21px;color:var(--ink-3);
-  border-left:2px solid var(--hairline-2);padding:2px 0 2px 12px;margin-top:6px}
-.thinkbody.open{display:block;animation:rise .2s ease both}
+.thinkbody{font-size:13px;line-height:21px;color:var(--ink-3);padding:2px 0;margin-top:7px}
+.thinkbody.open{animation:rise .2s ease both}
 .thinkbody div+div{margin-top:4px}
+@media (prefers-reduced-motion:reduce){.think svg{transition:none}.thinkbody.open{animation:none}}
 /* chips */
 .chips{display:flex;flex-wrap:wrap;gap:8px}
 .chip{border:.5px solid var(--color-primary);color:var(--color-primary);background:var(--color-primary-weak);border-radius:17px;

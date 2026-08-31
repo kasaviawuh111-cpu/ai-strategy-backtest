@@ -6,9 +6,19 @@ import pytest
 from ashare_lab.adapters.language import RuleBasedCandidateGenerator
 from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
 from ashare_lab.domain.catalog import load_catalog_directory
-from ashare_lab.ports.candidate_generation import CompileInput
+from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
 
 ROOT = Path(__file__).parents[3]
+
+
+class _CapturingGenerator:
+    def __init__(self) -> None:
+        self.requests: list[CompileInput] = []
+        self._delegate = RuleBasedCandidateGenerator()
+
+    async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]:
+        self.requests.append(request)
+        return await self._delegate.generate(request)
 
 
 @pytest.fixture
@@ -52,21 +62,26 @@ async def test_explicit_backtest_date_range_is_preserved(
 
 
 @pytest.mark.asyncio
-async def test_relative_backtest_years_are_not_replaced_by_default(
+@pytest.mark.parametrize(
+    "period",
+    ("回测近5年", "回测近五年", "近五年", "最近五年"),
+)
+async def test_relative_backtest_years_are_anchored_to_as_of_date(
     compiler: StrategyCompiler,
+    period: str,
 ) -> None:
     outcome = await compiler.compile(
         CompileInput(
-            utterance="MACD金叉买入，死叉卖出，回测近3年",
+            utterance=f"MACD金叉买入，死叉卖出，{period}",
             instrument_context="300059.SZ",
-            as_of_date=date(2026, 8, 29),
+            as_of_date=date(2026, 8, 20),
         )
     )
 
     assert outcome.status is CompileStatus.READY
     assert outcome.strategy is not None
-    assert outcome.strategy.backtest.start == date(2023, 8, 29)
-    assert outcome.strategy.backtest.end == date(2026, 8, 29)
+    assert outcome.strategy.backtest.start == date(2021, 8, 20)
+    assert outcome.strategy.backtest.end == date(2026, 8, 20)
     provenance = {item.path: item.source for item in outcome.provenance}
     assert provenance["/backtest/start"] == "utterance/relative_lookback"
     assert provenance["/backtest/end"] == "request/as_of_date"
@@ -90,7 +105,6 @@ async def test_relative_backtest_years_are_not_replaced_by_default(
         ),
         ("回测2021年至2026年", "backtest_date_range_unsupported"),
         ("回测2021-08至2026-08", "backtest_date_range_unsupported"),
-        ("回测近三年", "backtest_date_range_unsupported"),
         ("回测近0年", "backtest_lookback_invalid"),
         ("回测近101年", "backtest_lookback_invalid"),
     ],
@@ -128,3 +142,32 @@ async def test_explicit_end_after_as_of_date_fails_closed(
     assert outcome.status is CompileStatus.UNSUPPORTED
     assert outcome.strategy is None
     assert outcome.diagnostic_code == "backtest_end_after_as_of_date"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_anchor_replaces_client_date_for_relative_period() -> None:
+    generator = _CapturingGenerator()
+    anchored = StrategyCompiler(
+        generator=generator,
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals",
+        release_version="2026.08.30",
+        trusted_date_provider=lambda: date(2026, 8, 31),
+        backtest_anchor_date=date(2026, 8, 20),
+    )
+
+    outcome = await anchored.compile(
+        CompileInput(
+            utterance="MACD金叉买入，死叉卖出，近五年",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 6),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert outcome.strategy.backtest.start == date(2021, 8, 20)
+    assert outcome.strategy.backtest.end == date(2026, 8, 20)
+    assert generator.requests[0].as_of_date == date(2026, 8, 20)
+    provenance = {item.path: item.source for item in outcome.provenance}
+    assert provenance["/backtest/end"] == "data_snapshot/end"

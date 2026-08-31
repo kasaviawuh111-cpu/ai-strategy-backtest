@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 from ashare_lab.adapters.language.rule_based import RuleBasedCandidateGenerator
 from ashare_lab.adapters.language.vibe_candidates import (
+    CandidateProviderIdentityView,
     CandidateTransportError,
     CandidateTransportRequest,
     CandidateTransportResponse,
@@ -19,6 +21,7 @@ from ashare_lab.adapters.language.vibe_candidates import (
 from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
 from ashare_lab.domain.catalog import load_catalog_directory, load_coverage_catalog_directory
 from ashare_lab.domain.strategy import (
+    AllCondition,
     EventCondition,
     HoldingPeriodExit,
     IndicatorCondition,
@@ -479,6 +482,570 @@ async def test_missing_exit_does_not_bypass_existing_clarification() -> None:
 
     assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
     assert outcome.diagnostic_code == "exit_rule_not_recognized"
+    assert transport.requests == []
+
+
+@pytest.mark.asyncio
+async def test_missing_entry_does_not_bypass_existing_clarification() -> None:
+    transport = _FakeTransport(_macd_batch())
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_bounded(transport),
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance="MACD 死叉卖出",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "entry_rule_not_recognized"
+    assert transport.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "utterance",
+    (
+        "MACD金叉就上车，MACD死叉就走",
+        "MACD金叉买入，MACD死叉就收手",
+    ),
+)
+async def test_source_complete_colloquial_actions_use_bounded_fallback(
+    utterance: str,
+) -> None:
+    transport = _FakeTransport(_macd_batch(utterance=utterance))
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_bounded(transport),
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert len(transport.requests) == 1
+
+
+@dataclass(frozen=True)
+class _ExactFiveCase:
+    utterance: str
+    local_diagnostic: str
+    payload: dict[str, object]
+    expected_entry: tuple[object, ...]
+    expected_exit: tuple[tuple[object, ...], ...]
+
+
+def _indicator_payload(
+    indicator_id: str,
+    trigger: str,
+    params: Mapping[str, object],
+    *,
+    value: float | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "kind": "indicator",
+        "indicator_id": indicator_id,
+        "definition_version": "1.0.0",
+        "trigger": trigger,
+        "params": dict(params),
+    }
+    if value is not None:
+        payload["value"] = value
+    return payload
+
+
+def _five_case_payload(
+    *,
+    utterance: str,
+    entry: list[dict[str, object]],
+    exit: list[dict[str, object]],
+    entry_texts: list[str],
+    exit_texts: list[str],
+    backtest_text: str,
+    defaulted_fields: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "candidates": [
+            {
+                "instrument_symbol": None,
+                "entry": entry,
+                "exit": exit,
+                "entry_spans": [_source_span(utterance, text) for text in entry_texts],
+                "exit_spans": [_source_span(utterance, text) for text in exit_texts],
+                "backtest_lookback_years": 5,
+                "backtest_span": _source_span(utterance, backtest_text),
+                "confidence": 0.91,
+                "defaulted_fields": defaulted_fields or [],
+            }
+        ]
+    }
+
+
+def _condition_signature(condition: object) -> tuple[object, ...]:
+    if isinstance(condition, IndicatorCondition):
+        return (
+            "indicator",
+            condition.indicator_id,
+            condition.trigger,
+            tuple(sorted(condition.params.items())),
+            condition.value,
+        )
+    if isinstance(condition, EventCondition):
+        return ("event", condition.event_code, condition.trigger)
+    if isinstance(condition, HoldingPeriodExit):
+        return ("holding_period", condition.sessions)
+    if isinstance(condition, AllCondition):
+        return ("all", tuple(_condition_signature(child) for child in condition.children))
+    raise AssertionError(f"unexpected strategy node: {type(condition).__name__}")
+
+
+def _exact_five_cases() -> tuple[_ExactFiveCase, ...]:
+    ma_utterance = "东方财富最近五年，价格强势站上20日均线时上车，跌回这条线下就走。"
+    ma_params = {"period": 20, "price_field": "close"}
+    macd_utterance = "东方财富的 MACD 快线往上穿过慢线就买，往下穿回去就卖，回测近五年。"
+    macd_params = {"fast": 12, "slow": 26, "signal": 9}
+    rsi_utterance = "东方财富跌得很猛后，RSI 从30以下重新回到30上方就买，到70上方就收手，回测五年。"
+    rsi_params = {"period": 14}
+    volume_utterance = (
+        "东方财富收盘创20日新高、成交量是过去20日平均的1.5倍才买；MACD 转弱卖，回测五年。"
+    )
+    event_utterance = "东方财富的年报公开以后就买，持有三个交易日后卖，近五年。"
+    return (
+        _ExactFiveCase(
+            utterance=ma_utterance,
+            local_diagnostic="strategy_rule_incomplete",
+            payload=_five_case_payload(
+                utterance=ma_utterance,
+                entry=[_indicator_payload("technical.ma", "price_crosses_above", ma_params)],
+                exit=[_indicator_payload("technical.ma", "price_crosses_below", ma_params)],
+                entry_texts=["价格强势站上20日均线时上车"],
+                exit_texts=["跌回这条线下就走"],
+                backtest_text="最近五年",
+                defaulted_fields=[
+                    "/entry/0/params/price_field",
+                    "/exit/0/params/price_field",
+                ],
+            ),
+            expected_entry=(
+                "indicator",
+                "technical.ma",
+                "price_crosses_above",
+                (("period", 20), ("price_field", "close")),
+                None,
+            ),
+            expected_exit=(
+                (
+                    "indicator",
+                    "technical.ma",
+                    "price_crosses_below",
+                    (("period", 20), ("price_field", "close")),
+                    None,
+                ),
+            ),
+        ),
+        _ExactFiveCase(
+            utterance=macd_utterance,
+            local_diagnostic="ambiguous_macd_trigger",
+            payload=_five_case_payload(
+                utterance=macd_utterance,
+                entry=[_indicator_payload("technical.macd", "golden_cross", macd_params)],
+                exit=[_indicator_payload("technical.macd", "death_cross", macd_params)],
+                entry_texts=["MACD 快线往上穿过慢线就买"],
+                exit_texts=["往下穿回去就卖"],
+                backtest_text="回测近五年",
+                defaulted_fields=[
+                    f"/{side}/0/params/{name}"
+                    for side in ("entry", "exit")
+                    for name in ("fast", "signal", "slow")
+                ],
+            ),
+            expected_entry=(
+                "indicator",
+                "technical.macd",
+                "golden_cross",
+                (("fast", 12), ("signal", 9), ("slow", 26)),
+                None,
+            ),
+            expected_exit=(
+                (
+                    "indicator",
+                    "technical.macd",
+                    "death_cross",
+                    (("fast", 12), ("signal", 9), ("slow", 26)),
+                    None,
+                ),
+            ),
+        ),
+        _ExactFiveCase(
+            utterance=rsi_utterance,
+            local_diagnostic="exit_rule_not_recognized",
+            payload=_five_case_payload(
+                utterance=rsi_utterance,
+                entry=[_indicator_payload("technical.rsi", "crosses_above", rsi_params, value=30)],
+                exit=[_indicator_payload("technical.rsi", "crosses_above", rsi_params, value=70)],
+                entry_texts=["RSI 从30以下重新回到30上方就买"],
+                exit_texts=["到70上方就收手"],
+                backtest_text="回测五年",
+                defaulted_fields=[
+                    "/entry/0/params/period",
+                    "/exit/0/params/period",
+                ],
+            ),
+            expected_entry=(
+                "indicator",
+                "technical.rsi",
+                "crosses_above",
+                (("period", 14),),
+                30.0,
+            ),
+            expected_exit=(
+                (
+                    "indicator",
+                    "technical.rsi",
+                    "crosses_above",
+                    (("period", 14),),
+                    70.0,
+                ),
+            ),
+        ),
+        _ExactFiveCase(
+            utterance=volume_utterance,
+            local_diagnostic="ambiguous_boolean_expression",
+            payload=_five_case_payload(
+                utterance=volume_utterance,
+                entry=[
+                    _indicator_payload(
+                        "price.rolling_high",
+                        "new_high",
+                        {"period": 20, "price_field": "close"},
+                    ),
+                    _indicator_payload(
+                        "volume.relative",
+                        "gte_multiple",
+                        {"baseline_period": 20, "consecutive_days": 3},
+                        value=1.5,
+                    ),
+                ],
+                exit=[_indicator_payload("technical.macd", "death_cross", macd_params)],
+                entry_texts=[
+                    "东方财富收盘创20日新高、成交量是过去20日平均的1.5倍才买",
+                    "东方财富收盘创20日新高、成交量是过去20日平均的1.5倍才买",
+                ],
+                exit_texts=["MACD 转弱卖"],
+                backtest_text="回测五年",
+                defaulted_fields=[
+                    "/entry/1/params/consecutive_days",
+                    "/exit/0/params/fast",
+                    "/exit/0/params/signal",
+                    "/exit/0/params/slow",
+                ],
+            ),
+            expected_entry=(
+                "all",
+                (
+                    (
+                        "indicator",
+                        "price.rolling_high",
+                        "new_high",
+                        (("period", 20), ("price_field", "close")),
+                        None,
+                    ),
+                    (
+                        "indicator",
+                        "volume.relative",
+                        "gte_multiple",
+                        (("baseline_period", 20), ("consecutive_days", 3)),
+                        1.5,
+                    ),
+                ),
+            ),
+            expected_exit=(
+                (
+                    "indicator",
+                    "technical.macd",
+                    "death_cross",
+                    (("fast", 12), ("signal", 9), ("slow", 26)),
+                    None,
+                ),
+            ),
+        ),
+        _ExactFiveCase(
+            utterance=event_utterance,
+            local_diagnostic="exit_rule_not_recognized",
+            payload=_five_case_payload(
+                utterance=event_utterance,
+                entry=[
+                    {
+                        "kind": "event",
+                        "event_code": "event.financial_results.annual_report",
+                        "definition_version": "1.0.0",
+                        "trigger": "published",
+                        "attributes": {},
+                    }
+                ],
+                exit=[{"kind": "holding_period", "sessions": 3}],
+                entry_texts=["东方财富的年报公开以后就买"],
+                exit_texts=["持有三个交易日后卖"],
+                backtest_text="近五年",
+            ),
+            expected_entry=(
+                "event",
+                "event.financial_results.annual_report",
+                "published",
+            ),
+            expected_exit=(("holding_period", 3),),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _exact_five_cases())
+async def test_exact_original_five_route_through_bounded_provider(
+    case: _ExactFiveCase,
+) -> None:
+    snapshot_end = date(2026, 8, 20)
+    input_request = CompileInput(
+        utterance=case.utterance,
+        instrument_context="300059.SZ",
+        as_of_date=date(2026, 8, 30),
+    )
+    local = await RuleBasedCandidateGenerator().generate(
+        CompileInput(
+            utterance=case.utterance,
+            instrument_context="300059.SZ",
+            as_of_date=snapshot_end,
+        )
+    )
+    assert local[0].unsupported_code == case.local_diagnostic
+
+    transport = _FakeTransport(case.payload)
+    bounded = VibeBoundedCandidateGenerator(
+        transport,
+        capability_matrix=CAPABILITY_MATRIX,
+        provider_identity=CandidateProviderIdentityView(
+            provider="fixture-provider",
+            model="fixture-model",
+            prompt_version="fixture-prompt.v1",
+            schema_version="fixture-schema.v1",
+        ),
+    )
+    outcome = await StrategyCompiler(
+        generator=HybridCandidateGenerator(
+            deterministic=RuleBasedCandidateGenerator(),
+            bounded_fallback=bounded,
+        ),
+        catalog=CATALOG,
+        catalog_id="cn_a.signals",
+        release_version=CATALOG_RELEASE,
+        trusted_date_provider=lambda: date(2026, 8, 30),
+        backtest_anchor_date=snapshot_end,
+    ).compile(input_request)
+
+    assert len(transport.requests) == 1
+    assert transport.requests[0].as_of_date == snapshot_end
+    assert outcome.status is CompileStatus.READY
+    assert outcome.candidate_provenance is not None
+    assert outcome.candidate_provenance.source == "bounded_provider"
+    assert outcome.strategy is not None
+    assert outcome.strategy.backtest.start == date(2021, 8, 20)
+    assert outcome.strategy.backtest.end == snapshot_end
+    assert _condition_signature(outcome.strategy.entry) == case.expected_entry
+    assert tuple(_condition_signature(item) for item in outcome.strategy.exit.children) == (
+        case.expected_exit
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "entry", "exit", "entry_text", "exit_text", "defaults"),
+    (
+        (
+            "MACD金叉就买，跌回这条线下就走",
+            _indicator_payload(
+                "technical.macd",
+                "golden_cross",
+                {"fast": 12, "slow": 26, "signal": 9},
+            ),
+            _indicator_payload(
+                "technical.ma",
+                "price_crosses_below",
+                {"period": 20, "price_field": "close"},
+            ),
+            "MACD金叉就买",
+            "跌回这条线下就走",
+            [
+                "/entry/0/params/fast",
+                "/entry/0/params/signal",
+                "/entry/0/params/slow",
+                "/exit/0/params/period",
+                "/exit/0/params/price_field",
+            ],
+        ),
+        (
+            "RSI低于30就买，往下穿回去就卖",
+            _indicator_payload(
+                "technical.rsi",
+                "below",
+                {"period": 14},
+                value=30,
+            ),
+            _indicator_payload(
+                "technical.macd",
+                "death_cross",
+                {"fast": 12, "slow": 26, "signal": 9},
+            ),
+            "RSI低于30就买",
+            "往下穿回去就卖",
+            [
+                "/entry/0/params/period",
+                "/exit/0/params/fast",
+                "/exit/0/params/signal",
+                "/exit/0/params/slow",
+            ],
+        ),
+        (
+            "MACD金叉就买，到70上方就收手",
+            _indicator_payload(
+                "technical.macd",
+                "golden_cross",
+                {"fast": 12, "slow": 26, "signal": 9},
+            ),
+            _indicator_payload(
+                "technical.rsi",
+                "crosses_above",
+                {"period": 14},
+                value=70,
+            ),
+            "MACD金叉就买",
+            "到70上方就收手",
+            [
+                "/entry/0/params/fast",
+                "/entry/0/params/signal",
+                "/entry/0/params/slow",
+                "/exit/0/params/period",
+            ],
+        ),
+    ),
+)
+async def test_contextual_reference_cannot_name_a_different_indicator(
+    utterance: str,
+    entry: dict[str, object],
+    exit: dict[str, object],
+    entry_text: str,
+    exit_text: str,
+    defaults: list[str],
+) -> None:
+    response: dict[str, object] = {
+        "candidates": [
+            {
+                "instrument_symbol": None,
+                "entry": [entry],
+                "exit": [exit],
+                "entry_spans": [_source_span(utterance, entry_text)],
+                "exit_spans": [_source_span(utterance, exit_text)],
+                "confidence": 0.91,
+                "defaulted_fields": defaults,
+            }
+        ]
+    }
+    candidates = await _bounded(_FakeTransport(response)).generate(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert candidates[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+async def test_bounded_grounding_accepts_safe_complete_buy_sell_phrases() -> None:
+    utterance = "MACD金叉才买，MACD死叉转弱 卖"
+    generator = _bounded(_FakeTransport(_macd_batch(utterance=utterance)))
+
+    candidates = await generator.generate(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert candidates[0].unsupported_code is None
+
+
+@pytest.mark.asyncio
+async def test_generic_entry_placeholder_does_not_use_bounded_fallback() -> None:
+    utterance = "随便上车，MACD死叉卖出"
+    transport = _FakeTransport(_macd_batch())
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_bounded(transport),
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "entry_rule_not_recognized"
+    assert transport.requests == []
+
+
+@pytest.mark.asyncio
+async def test_generic_unrecognized_placeholder_does_not_use_bounded_fallback() -> None:
+    transport = _FakeTransport(_macd_batch())
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_bounded(transport),
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance="你看着随便帮我交易",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.diagnostic_code == "no_supported_signal_recognized"
+    assert transport.requests == []
+
+
+@pytest.mark.asyncio
+async def test_explicitly_unsupported_semantics_never_use_bounded_fallback() -> None:
+    utterance = "业绩预告净利润增长超过30%买入，MACD死叉卖出"
+    transport = _FakeTransport(_macd_batch())
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_bounded(transport),
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.diagnostic_code == "event_attribute_filter_not_supported"
     assert transport.requests == []
 
 

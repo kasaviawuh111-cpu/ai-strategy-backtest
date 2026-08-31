@@ -2,7 +2,7 @@
  * 对话内的摘要卡 —— 首屏只放"一眼能读完"的信息，其余全部下沉到二级页。
  * SPEC 4.2：首屏不能出现完整参数表、成交成本表、数据来源长说明或运行证据。
  */
-import { Chevron, Notice, fmtPct, signClass } from './primitives';
+import { Chevron, Notice, ThinkingStream, fmtPct, signClass } from './primitives';
 import { ExcessEquation } from './ExcessEquation';
 import { MiniEquity } from './MiniEquity';
 import { secondaryMetric } from '../view-model';
@@ -19,10 +19,6 @@ import type {
 } from '../types';
 import { RUN_PHASE_LABEL, type RunPhase } from '../types';
 import { numericResultConclusion } from '../result-conclusion';
-
-const PHASE_ORDER: RunPhase[] = [
-  'queued', 'running:data', 'running:signal', 'running:execution', 'running:report',
-];
 
 function CardFoot(
   { actions, settled }:
@@ -251,30 +247,25 @@ export function RunningCard(
   { phase, onCancel, isCancelling, isMock = false }:
   { phase: RunPhase; onCancel: () => void; isCancelling?: boolean; isMock?: boolean },
 ) {
-  const idx = PHASE_ORDER.indexOf(phase);
-  const step = idx < 0 ? PHASE_ORDER.length : idx + 1;
   const canCancel = !['succeeded', 'failed', 'cancelled'].includes(phase);
+  const phaseLabel = RUN_PHASE_LABEL[phase];
+  const status = phase === 'cancel_requested' ? phaseLabel : `正在${phaseLabel}`;
   return (
-    <section className="mcard">
-      <div className="pad">
-        <div className="phase-now">
-          <span>{isMock ? `预览：${RUN_PHASE_LABEL[phase]}` : RUN_PHASE_LABEL[phase]}</span>
-          <code>{step}/{PHASE_ORDER.length}</code>
-        </div>
-        <div className="prog" role="progressbar" aria-valuenow={step} aria-valuemin={1}
-             aria-valuemax={PHASE_ORDER.length} aria-label="回测阶段">
-          <i style={{ width: `${Math.round(step / PHASE_ORDER.length * 100)}%` }} />
-        </div>
-        <p style={{ margin: '10px 0 0', fontSize: 13, lineHeight: '20px', color: 'var(--ink-3)' }}>
-          {isMock
-            ? '这里播放固定样例的预览阶段，不代表后台正在计算。'
-            : '使用固定的历史数据和规则版本，同一任务可以复查。'}
-        </p>
-      </div>
-      <CardFoot actions={[
-        { label: isCancelling || phase === 'cancel_requested' ? '正在取消' : '取消回测', onClick: onCancel, mute: true, disabled: !canCancel || isCancelling },
-      ]} />
-    </section>
+    <ThinkingStream
+      title="运行这次历史回测"
+      status={isMock ? `预览：${status}` : status}
+      label="回测进度"
+      action={(
+        <button
+          type="button"
+          className="thinking-cancel"
+          onClick={onCancel}
+          disabled={!canCancel || isCancelling}
+        >
+          {isCancelling || phase === 'cancel_requested' ? '正在取消' : '取消回测'}
+        </button>
+      )}
+    />
   );
 }
 

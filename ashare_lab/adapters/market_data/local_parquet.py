@@ -652,6 +652,16 @@ class LocalParquetMarketDataRepository:
             period,
         )
 
+    def strict_composite_period(self) -> DateRange:
+        """Return the validated replay interval of the selected Composite."""
+
+        snapshot = self.pin_strict_composite_snapshot()
+        with self._snapshot_lock:
+            pinned = self._snapshots.get(str(snapshot.snapshot_id))
+        if pinned is None:
+            raise SnapshotIntegrityError("strict composite snapshot period is not pinned")
+        return pinned.period
+
     def strict_composite_event_codes(self) -> frozenset[str]:
         """Return only event lanes proven complete by the strict v2 loader.
 

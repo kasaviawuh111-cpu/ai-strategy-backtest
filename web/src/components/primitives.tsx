@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components -- shared visual primitives and formatters */
 /** 基础件：气泡、chip、行、分组、提示、状态徽章、形状图元 */
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ActivityKind, StatusWord } from '../types';
 
@@ -132,12 +132,31 @@ export const DayDivider = ({ children }: { children: ReactNode }) => (
   <div className="daydiv">{children}</div>
 );
 
-export const Typing = ({ children = '正在识别规则' }: { children?: ReactNode }) => (
-  <Say>
-    {children}
-    <span className="dots" aria-hidden><i /><i /><i /></span>
-  </Say>
+const ThinkingDots = () => (
+  <span className="dots" aria-hidden><i /><i /><i /></span>
 );
+
+/**
+ * 对话流内的进行中状态：当前任务是主句，真实进展是次句。
+ *
+ * 不使用独立卡片、进度条或循环文案；调用方只在实际状态变化时更新 status。
+ */
+export function ThinkingStream(
+  { title, status, label = '思考进度', action }:
+  { title: ReactNode; status: ReactNode; label?: string; action?: ReactNode },
+) {
+  return (
+    <div className="thinking-stream">
+      <p className="thinking-task">{title}</p>
+      <div className="thinking-detail">
+        <p className="thinking-status" role="status" aria-live="polite" aria-atomic="true" aria-label={label}>
+          <span>{status}</span><ThinkingDots />
+        </p>
+        {action ? <div className="thinking-action">{action}</div> : null}
+      </div>
+    </div>
+  );
+}
 
 /**
  * 妙想AI 的「已完成思考」折叠头。
@@ -153,13 +172,20 @@ export function ThinkBlock(
   { meta, lines }: { meta: string; lines: string[] },
 ) {
   const [open, setOpen] = useState(false);
+  const bodyId = useId();
   return (
     <div className="thinkwrap">
-      <button type="button" className="think" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <b>{THINK_TITLE}</b>
+      <button
+        type="button"
+        className="think"
+        aria-expanded={open}
+        aria-controls={bodyId}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="think-title">{THINK_TITLE}</span>
         <span className="meta">{meta}<Caret /></span>
       </button>
-      <div className={`thinkbody${open ? ' open' : ''}`}>
+      <div id={bodyId} className={`thinkbody${open ? ' open' : ''}`} hidden={!open}>
         {lines.map((l) => <div key={l}>{l}</div>)}
       </div>
     </div>

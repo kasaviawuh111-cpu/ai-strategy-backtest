@@ -227,6 +227,7 @@ class StrategyCompiler:
         lookback_years: int = 5,
         initial_cash_cny: int = DEFAULT_INITIAL_CASH_CNY,
         trusted_date_provider: Callable[[], date] | None = None,
+        backtest_anchor_date: date | None = None,
     ) -> None:
         self._generator = generator
         self._catalog = catalog
@@ -235,6 +236,7 @@ class StrategyCompiler:
         self._lookback_years = lookback_years
         self._initial_cash_cny = initial_cash_cny
         self._trusted_date_provider = trusted_date_provider or _shanghai_today
+        self._backtest_anchor_date = backtest_anchor_date
 
     async def compile(self, request: CompileInput) -> CompileOutcome:
         if not request.utterance.strip():
@@ -252,6 +254,16 @@ class StrategyCompiler:
                 status=CompileStatus.INVALID,
                 diagnostic_code="request_as_of_date_in_future",
             )
+        effective_as_of_date = self._backtest_anchor_date or request.as_of_date
+        effective_request = (
+            request
+            if effective_as_of_date == request.as_of_date
+            else CompileInput(
+                utterance=request.utterance,
+                instrument_context=request.instrument_context,
+                as_of_date=effective_as_of_date,
+            )
+        )
         source_semantic_diagnostic = _unsupported_source_semantics(request.utterance)
         if source_semantic_diagnostic is not None:
             return CompileOutcome(
@@ -263,7 +275,7 @@ class StrategyCompiler:
                 clarification=_SOURCE_SEMANTIC_EXPLANATIONS[source_semantic_diagnostic],
                 diagnostic_code=source_semantic_diagnostic,
             )
-        candidates = await self._generator.generate(request)
+        candidates = await self._generator.generate(effective_request)
         if not candidates:
             return CompileOutcome(
                 status=CompileStatus.UNSUPPORTED,
@@ -343,12 +355,12 @@ class StrategyCompiler:
                 except AshareInstrumentCodeError:
                     rejection_code = "invalid_a_share_instrument"
                 else:
-                    rejection_code = _period_error(current, request.as_of_date)
+                    rejection_code = _period_error(current, effective_as_of_date)
                     if rejection_code is None:
                         try:
                             current_strategy = self._build_strategy(
                                 current,
-                                request.as_of_date,
+                                effective_as_of_date,
                                 instrument_symbol=instrument_symbol,
                             )
                             validate_strategy_against_catalog(current_strategy, self._catalog)
@@ -453,7 +465,10 @@ class StrategyCompiler:
 
         _candidate_rank, candidate, strategy, strategy_hash = next(iter(unique_valid.values()))
 
-        start_source, end_source = _period_provenance(candidate)
+        start_source, end_source = _period_provenance(
+            candidate,
+            snapshot_anchored=self._backtest_anchor_date is not None,
+        )
         provenance = [
             FieldProvenance(path="/instrument/symbol", source="utterance_or_stock_context"),
             FieldProvenance(path="/backtest/start", source=start_source),
@@ -730,12 +745,17 @@ def _resolve_backtest_period(
     return _subtract_years(as_of_date, lookback_years), as_of_date
 
 
-def _period_provenance(candidate: CandidateAst) -> tuple[str, str]:
+def _period_provenance(
+    candidate: CandidateAst,
+    *,
+    snapshot_anchored: bool = False,
+) -> tuple[str, str]:
     if candidate.backtest_start is not None:
         return "utterance/explicit_date_range", "utterance/explicit_date_range"
+    end_source = "data_snapshot/end" if snapshot_anchored else "request/as_of_date"
     if candidate.backtest_lookback_years is not None:
-        return "utterance/relative_lookback", "request/as_of_date"
-    return "default/lookback_years", "request/as_of_date"
+        return "utterance/relative_lookback", end_source
+    return "default/lookback_years", end_source
 
 
 def _shanghai_today() -> date:

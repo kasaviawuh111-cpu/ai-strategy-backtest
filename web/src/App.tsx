@@ -3,7 +3,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 
 import { FailureCard, ResultCard, RunningCard, StrategyCard } from './components/SummaryCards'
 import {
-  Bubble, Chip, Chips, DayDivider, FollowUp, FollowUps, Say, ThinkBlock, Turn, Typing,
+  Bubble, Chip, Chips, DayDivider, FollowUp, FollowUps, Say, ThinkBlock, ThinkingStream, Turn,
 } from './components/primitives'
 import { ChainScreen, ExecutionDetailsScreen, ParamsScreen, ReportScreen } from './screens'
 import { apiMode, backtestApi, strategyApi, systemApi } from './shared/api/client'
@@ -744,7 +744,14 @@ export default function App({
                 </>
               ) : null}
 
-              {compileMutation.isPending ? <Turn><Typing /></Turn> : null}
+              {compileMutation.isPending ? (
+                <Turn>
+                  <ThinkingStream
+                    title="还原这条交易规则"
+                    status="正在识别买入、卖出和回测区间"
+                  />
+                </Turn>
+              ) : null}
 
               {clarification && !clarificationRecord && !compileMutation.isPending ? (
                 <Turn>
@@ -804,7 +811,14 @@ export default function App({
 
               {runCommand ? <Turn mine><Bubble>{runCommand}</Bubble></Turn> : null}
 
-              {startMutation.isPending ? <Turn><Typing>正在提交回测</Typing></Turn> : null}
+              {startMutation.isPending ? (
+                <Turn>
+                  <ThinkingStream
+                    title="准备这次历史回测"
+                    status="正在固定策略和数据版本"
+                  />
+                </Turn>
+              ) : null}
 
               {runQuery.data && !terminalStates.has(runQuery.data.state) ? (
                 <Turn>
@@ -813,7 +827,14 @@ export default function App({
                 </Turn>
               ) : null}
 
-              {resultLoading ? <Turn><Typing>正在读取结果</Typing></Turn> : null}
+              {resultLoading ? (
+                <Turn>
+                  <ThinkingStream
+                    title="整理这次回测结果"
+                    status="正在读取收益、风险和交易记录"
+                  />
+                </Turn>
+              ) : null}
 
               {draft && metrics && evidence && resultReady ? (
                 <>

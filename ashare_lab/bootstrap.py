@@ -68,6 +68,7 @@ class ExecutionRuntime:
     run_store: SQLAlchemyBacktestRunStore
     executor: BacktestExecutionService
     strict_snapshot: DataSnapshotRef | None
+    backtest_anchor_date: date | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +101,11 @@ def build_execution_runtime(settings: AppSettings | None = None) -> ExecutionRun
     # revision or from a downgraded data profile.  `/ready` remains useful for
     # dependency health, but it is not the authorization boundary.
     strict_snapshot = _validate_strict_replay_configuration(selected, market_data)
+    backtest_anchor_date = (
+        market_data.strict_composite_period().end
+        if strict_snapshot is not None and isinstance(market_data, LocalParquetMarketDataRepository)
+        else None
+    )
     # Validate market-rule provenance before opening databases or starting workers.
     session_reference = _build_session_reference(selected)
     catalog = load_catalog_directory(selected.catalog_root)
@@ -135,6 +141,7 @@ def build_execution_runtime(settings: AppSettings | None = None) -> ExecutionRun
         run_store=store,
         executor=executor,
         strict_snapshot=strict_snapshot,
+        backtest_anchor_date=backtest_anchor_date,
     )
 
 
@@ -250,6 +257,7 @@ def create_configured_app(settings: AppSettings | None = None) -> FastAPI:
         runtime.catalog,
         candidate_transport=candidate_transport,
         capability_matrix=capability_matrix,
+        backtest_anchor_date=runtime.execution.backtest_anchor_date,
     )
     app = create_http_app(
         compiler=compiler,

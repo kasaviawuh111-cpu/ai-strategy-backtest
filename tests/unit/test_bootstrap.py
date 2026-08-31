@@ -432,6 +432,7 @@ def test_composite_readiness_accepts_only_persisted_strict_event_policy(
     )
     app = create_configured_app(settings)
     startup_pin = app.state.runtime.execution.strict_snapshot
+    backtest_anchor_date = app.state.runtime.execution.backtest_anchor_date
     readiness_pin = app.state.runtime.execution.market_data.pin_strict_composite_snapshot()
 
     with TestClient(app) as client:
@@ -445,6 +446,17 @@ def test_composite_readiness_accepts_only_persisted_strict_event_policy(
             Response,
             client.get(  # pyright: ignore[reportUnknownMemberType]
                 "/api/v1/capabilities"
+            ),
+        )
+        draft = cast(
+            Response,
+            client.post(  # pyright: ignore[reportUnknownMemberType]
+                "/api/v1/strategy-drafts",
+                json={
+                    "utterance": "MACD金叉买入，死叉卖出，近五年",
+                    "instrument_context": "300059.SZ",
+                    "as_of_date": "2026-08-06",
+                },
             ),
         )
         (data_root / "events.parquet").write_bytes(b"changed-after-startup")
@@ -464,6 +476,13 @@ def test_composite_readiness_accepts_only_persisted_strict_event_policy(
     assert readiness.status_code == 200
     assert readiness.json()["checks"]["strict_snapshot_pin"] == "ok"
     assert capability.json()["event_backtest_available"] is True
+    assert backtest_anchor_date == date(2025, 1, 2)
+    assert draft.status_code == 201
+    assert draft.json()["strategy"]["backtest"] == {
+        "start": "2020-01-02",
+        "end": "2025-01-02",
+        "initial_cash_cny": 1_000_000,
+    }
     assert {
         item["event_code"] for item in capability.json()["events"] if item["backtest_available"]
     } == {"event.financial_results.annual_report"}

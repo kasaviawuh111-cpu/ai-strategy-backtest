@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from datetime import date
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -142,6 +143,7 @@ def build_hybrid_candidate_compiler(
     *,
     candidate_transport: IdentifiedCandidateJsonTransport,
     capability_matrix: CandidateCapabilityMatrix,
+    backtest_anchor_date: date | None = None,
 ) -> StrategyCompiler:
     """Compose rule-first interpretation with one Catalog-bounded fallback."""
 
@@ -155,12 +157,15 @@ def build_hybrid_candidate_compiler(
                 provider_identity=candidate_transport.identity,
             ),
         ),
+        backtest_anchor_date=backtest_anchor_date,
     )
 
 
 def _compiler_for_generator(
     catalog: CatalogSnapshot,
     generator: RuleBasedCandidateGenerator | HybridCandidateGenerator,
+    *,
+    backtest_anchor_date: date | None = None,
 ) -> StrategyCompiler:
     manifest = next(
         (item for item in catalog.manifests if item.catalog_id == "cn_a.signals"),
@@ -171,6 +176,7 @@ def _compiler_for_generator(
         catalog=catalog,
         catalog_id=manifest.catalog_id,
         release_version=manifest.release_version,
+        backtest_anchor_date=backtest_anchor_date,
     )
 
 
