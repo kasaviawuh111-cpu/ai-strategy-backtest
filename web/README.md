@@ -97,6 +97,25 @@ Choice、数据库等凭据只能保留在服务端，不能写入任何 `VITE_*
 非 JSON 时，页面会明确失败且不会静默切换成 Mock。生成 `dist` 只证明构建配置正确；在公网浏览器
 完成技术与事件旅程前，仍属于 Live-unverified。
 
+拿到真实前后端 HTTPS 地址后，发布前后的可重复门禁是：
+
+```bash
+# 1. 构建并自动检查 dist：必须含真实 API 地址，不得含 Mock 执行标记
+VITE_API_BASE_URL=https://真实-api-域名 \
+VITE_DATA_AS_OF_DATE=2026-08-06 \
+pnpm build:public-live
+
+# 2. 发布后验证技术、事件和不支持策略；默认覆盖 320/390/768/1280
+python scripts/smoke_public.py \
+  --frontend-url https://真实-h5-域名 \
+  --api-url https://真实-api-域名 \
+  --expected-producer-snapshot-id composite:<64位小写十六进制>
+```
+
+若能导出本次后端日志，可追加 `--backend-log-file /绝对路径/backend.log`，把浏览器响应中的
+`X-Request-ID` 与服务端日志逐条核对。公网 smoke 会拒绝 CORS 不匹配、API 返回 `200 text/html`
+的静态 SPA fallback、无效 JSON、Mock 身份、错误快照身份和缺少真实结果接口等情况。
+
 | 页面动作 | API |
 |---|---|
 | 识别规则 | `POST /api/v1/strategy-drafts` |
@@ -124,7 +143,7 @@ pnpm test
 pnpm build
 ```
 
-当前 Vitest 基线为 11 个测试文件、112 个测试；覆盖正式 `main.tsx → src/App.tsx` 入口、动态能力合同、Live 编译与回测能力解耦、Mock、截图原句的年报正文词频策略、一次澄清信息保留、策略确认、连续历史回合、首页本金隐藏、净值/回撤点位和完整因果轨迹。
+当前 Vitest 基线为 13 个测试文件、142 个测试；覆盖正式 `main.tsx → src/App.tsx` 入口、动态能力合同、Live 编译与回测能力解耦、Mock、公网构建门禁、截图原句的年报正文词频策略、一次澄清信息保留、策略确认、连续历史回合、首页本金隐藏、净值/回撤点位和完整因果轨迹。
 
 Mock 浏览器验收让技术策略和截图原句的年报正文词频策略覆盖 320、390、768、1280px；390px 还完整走到结果、交易筛选与因果链。脚本同时覆盖年度报告事件、无法识别和一次澄清，并检查演示标识、Mock 零后端请求、横向溢出和浏览器错误：
 

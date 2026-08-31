@@ -78,12 +78,13 @@ def prepare_bundle(
         repository / "scripts" / "container_healthcheck.py",
         output / "scripts" / "container_healthcheck.py",
     )
-    _copy_dockerfile_with_revision(
+    _copy_dockerfile_with_identity(
         repository / "deploy" / "cloudbase" / "Dockerfile",
         output / "Dockerfile",
         code_revision,
+        snapshot_digest,
     )
-    shutil.copytree(snapshot, output / "deploy-snapshot")
+    shutil.copytree(snapshot, output / "deploy-snapshot" / snapshot_digest)
 
     metadata = {
         "bundleSchemaVersion": "ashare-lab.cloudbase-source-bundle.v1",
@@ -98,21 +99,28 @@ def prepare_bundle(
     return metadata
 
 
-def _copy_dockerfile_with_revision(source: Path, destination: Path, code_revision: str) -> None:
-    """Pin the validated clean revision when the platform cannot pass build args."""
+def _copy_dockerfile_with_identity(
+    source: Path,
+    destination: Path,
+    code_revision: str,
+    snapshot_digest: str,
+) -> None:
+    """Pin both validated identities when the platform cannot pass build args."""
 
     try:
         template = source.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise BundleError("CloudBase Dockerfile template is unreadable") from exc
-    placeholder = "ARG CODE_REVISION"
-    if template.splitlines().count(placeholder) != 1:
-        raise BundleError("CloudBase Dockerfile must contain one unpinned CODE_REVISION argument")
-    rendered = template.replace(
-        placeholder,
-        f"ARG CODE_REVISION={code_revision}",
-        1,
-    )
+    replacements = {
+        "ARG CODE_REVISION": f"ARG CODE_REVISION={code_revision}",
+        "ARG SNAPSHOT_DIGEST": f"ARG SNAPSHOT_DIGEST={snapshot_digest}",
+    }
+    rendered = template
+    for placeholder, pinned in replacements.items():
+        if template.splitlines().count(placeholder) != 1:
+            argument = placeholder.removeprefix("ARG ")
+            raise BundleError(f"CloudBase Dockerfile must contain one unpinned {argument} argument")
+        rendered = rendered.replace(placeholder, pinned, 1)
     destination.write_text(rendered, encoding="utf-8")
 
 

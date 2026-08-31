@@ -8,6 +8,8 @@ import pytest
 
 from scripts.prepare_cloudbase_bundle import BundleError, prepare_bundle
 
+REPOSITORY = Path(__file__).resolve().parents[3]
+
 
 def _repository(tmp_path: Path) -> tuple[Path, str]:
     repository = tmp_path / "repository"
@@ -26,7 +28,12 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     )
     (repository / "deploy" / "cloudbase").mkdir(parents=True)
     (repository / "deploy" / "cloudbase" / "Dockerfile").write_text(
-        "FROM scratch\nARG CODE_REVISION\nENV CODE_REVISION=${CODE_REVISION}\n",
+        (
+            "FROM scratch\n"
+            "ARG CODE_REVISION\n"
+            "ARG SNAPSHOT_DIGEST\n"
+            "ENV CODE_REVISION=${CODE_REVISION} DATA_ROOT=/data/${SNAPSHOT_DIGEST}\n"
+        ),
         encoding="utf-8",
     )
 
@@ -71,21 +78,28 @@ def test_bundle_contains_only_allowlisted_sources_and_selected_snapshot(tmp_path
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
     assert "ARG CODE_REVISION=" + "a" * 40 in dockerfile
     assert "ARG CODE_REVISION\n" not in dockerfile
-    assert (output / "deploy-snapshot" / "daily_ohlcv.parquet").read_bytes() == (
+    assert f"ARG SNAPSHOT_DIGEST={digest}" in dockerfile
+    assert "ARG SNAPSHOT_DIGEST\n" not in dockerfile
+    assert (output / "deploy-snapshot" / digest / "daily_ohlcv.parquet").read_bytes() == (
         b"real parquet bytes"
     )
     assert not (output / ".env").exists()
     assert not (output / "ashare_lab" / "__pycache__").exists()
 
 
-def test_bundle_rejects_dockerfile_without_the_revision_placeholder(tmp_path: Path) -> None:
+@pytest.mark.parametrize("missing", ["CODE_REVISION", "SNAPSHOT_DIGEST"])
+def test_bundle_rejects_dockerfile_without_an_identity_placeholder(
+    tmp_path: Path,
+    missing: str,
+) -> None:
     repository, digest = _repository(tmp_path)
-    (repository / "deploy" / "cloudbase" / "Dockerfile").write_text(
-        "FROM scratch\n",
+    dockerfile = repository / "deploy" / "cloudbase" / "Dockerfile"
+    dockerfile.write_text(
+        dockerfile.read_text(encoding="utf-8").replace(f"ARG {missing}\n", ""),
         encoding="utf-8",
     )
 
-    with pytest.raises(BundleError, match="one unpinned CODE_REVISION"):
+    with pytest.raises(BundleError, match=f"one unpinned {missing}"):
         prepare_bundle(
             repository=repository,
             output=tmp_path / "bundle",
@@ -93,6 +107,21 @@ def test_bundle_rejects_dockerfile_without_the_revision_placeholder(tmp_path: Pa
             code_revision="a" * 40,
             verify_git=False,
         )
+
+
+def test_cloudbase_dockerfile_uses_portable_source_build_contract() -> None:
+    dockerfile = (REPOSITORY / "deploy" / "cloudbase" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "ghcr.io" not in dockerfile
+    assert "RUN --mount=" not in dockerfile
+    assert "python -m pip install --no-cache-dir uv==0.12.1" in dockerfile
+    assert "${PORT:-${APP_PORT:-8000}}" in dockerfile
+    assert "DATA_ROOT=/app/var/snapshots/composite/${SNAPSHOT_DIGEST}" in dockerfile
+    assert "deploy-snapshot/ /app/var/snapshots/composite/" in dockerfile
+    assert (
+        "CORS_ALLOWED_ORIGINS="
+        "https://59ac3319a9594be59fa3034fcae82a8f.app.workbuddy.link" in dockerfile
+    )
 
 
 def test_bundle_rejects_snapshot_tampering_and_nonempty_output(tmp_path: Path) -> None:

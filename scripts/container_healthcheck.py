@@ -16,7 +16,13 @@ class _RedisHealthClient(Protocol):
 
 
 def check_api() -> None:
-    port = os.environ.get("APP_PORT", "8000")
+    raw_port = os.environ.get("PORT") or os.environ.get("APP_PORT", "8000")
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise RuntimeError("API port is not an integer") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError("API port is outside the TCP port range")
     url = f"http://127.0.0.1:{port}/api/v1/ready"
     with urllib.request.urlopen(url, timeout=3) as response:
         if response.status != 200:

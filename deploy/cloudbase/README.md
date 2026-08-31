@@ -9,8 +9,10 @@ research Demo deployment, not the production multi-container topology.
 - Dockerfile: `deploy/cloudbase/Dockerfile`
 - container port: `8000`
 - health path: `/api/v1/ready`
-- required build argument: `CODE_REVISION=<exact clean 40-character Git SHA>`
-- runtime environment: copy `deploy/cloudbase/env.example` and replace the SHA
+- generated bundle pins `CODE_REVISION=<exact clean 40-character Git SHA>` in
+  its root Dockerfile; CloudBase does not need a separate build argument
+- default browser origin: the exact WorkBuddy HTTPS origin; a platform
+  `CORS_ALLOWED_ORIGINS` environment variable may override it
 
 Create a standalone upload directory first. The script accepts only a clean Git
 SHA, validates the content-addressed snapshot and every registered file, and
@@ -25,9 +27,26 @@ caches, test artifacts, or unrelated snapshots.
 ```
 
 Upload the resulting empty-to-new bundle directory as the CloudBase source.
-The build fails if its selected snapshot payload is absent. Application
-startup additionally rejects a mismatched digest, invalid manifest, incomplete
+The bundle preserves the content digest as the snapshot directory name, and the
+rendered Dockerfile pins both that digest and the clean code revision. The build
+fails if its selected snapshot payload is absent. Application startup
+additionally rejects a mismatched digest, invalid manifest, incomplete
 company-action/event coverage, or a non-40-character code revision.
+
+CloudBase CLI 3.8.1 requires the container port on source deployments. Run the
+command from any directory; `--source` must point to the generated bundle, not
+the repository or the tar file. `--install-dependency false` prevents the
+platform from trying a second language-level dependency installation outside
+the Docker build.
+
+```bash
+tcb --env-id <environment-id> cloudrun deploy \
+  --service-name <service-name> \
+  --source /tmp/ashare-cloudbase-bundle \
+  --port 8000 \
+  --install-dependency false \
+  --wait
+```
 
 ## Demo persistence and limits
 
@@ -50,14 +69,7 @@ curl -fsS https://<service>/api/v1/ready
 curl -fsS https://<service>/api/v1/capabilities
 .venv/bin/python scripts/live_strict_e2e.py \
   --base-url https://<service> \
-  --strategy technical \
-  --expected-code-revision <sha> \
-  --expected-producer-snapshot-id composite:<digest>
-.venv/bin/python scripts/live_strict_e2e.py \
-  --base-url https://<service> \
-  --strategy event \
-  --expected-code-revision <sha> \
-  --expected-producer-snapshot-id composite:<digest>
+  --output /tmp/ashare-public-live.json
 ```
 
 The WorkBuddy build must use `VITE_USE_MOCK=false` and the CloudBase HTTPS URL
