@@ -1,0 +1,676 @@
+{
+  "$defs": {
+    "AllConditionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/$defs/ConditionV2"
+          },
+          "maxItems": 16,
+          "minItems": 2,
+          "title": "Children",
+          "type": "array"
+        },
+        "type": {
+          "const": "all",
+          "default": "all",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "children"
+      ],
+      "title": "AllConditionV2",
+      "type": "object"
+    },
+    "AnyConditionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "children": {
+          "items": {
+            "$ref": "#/$defs/ConditionV2"
+          },
+          "maxItems": 16,
+          "minItems": 2,
+          "title": "Children",
+          "type": "array"
+        },
+        "type": {
+          "const": "any",
+          "default": "any",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "children"
+      ],
+      "title": "AnyConditionV2",
+      "type": "object"
+    },
+    "AssetType": {
+      "description": "Asset types that the current product may actually trade.",
+      "enum": [
+        "STOCK",
+        "ETF"
+      ],
+      "title": "AssetType",
+      "type": "string"
+    },
+    "BacktestConfigV2": {
+      "additionalProperties": false,
+      "properties": {
+        "end": {
+          "format": "date",
+          "title": "End",
+          "type": "string"
+        },
+        "initial_cash_cny": {
+          "exclusiveMinimum": 0,
+          "maximum": 1000000000,
+          "title": "Initial Cash Cny",
+          "type": "integer"
+        },
+        "start": {
+          "format": "date",
+          "title": "Start",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "initial_cash_cny"
+      ],
+      "title": "BacktestConfigV2",
+      "type": "object"
+    },
+    "CatalogRefV2": {
+      "additionalProperties": false,
+      "properties": {
+        "catalog_id": {
+          "pattern": "^[a-z][a-z0-9_.-]{2,63}$",
+          "title": "Catalog Id",
+          "type": "string"
+        },
+        "release_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "title": "Release Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "catalog_id",
+        "release_version"
+      ],
+      "title": "CatalogRefV2",
+      "type": "object"
+    },
+    "ConditionGrounding": {
+      "additionalProperties": false,
+      "description": "Maps one DSL node to the exact words that caused it to exist.",
+      "properties": {
+        "dsl_path": {
+          "maxLength": 512,
+          "pattern": "^\\$\\.(entry|exit)(?:\\.children\\[[0-9]+\\]|\\.child)*$",
+          "title": "Dsl Path",
+          "type": "string"
+        },
+        "source_end": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Source End",
+          "type": "integer"
+        },
+        "source_start": {
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Source Start",
+          "type": "integer"
+        },
+        "source_text": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Source Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_start",
+        "source_end",
+        "source_text",
+        "dsl_path"
+      ],
+      "title": "ConditionGrounding",
+      "type": "object"
+    },
+    "ConditionV2": {
+      "discriminator": {
+        "mapping": {
+          "all": "#/$defs/AllConditionV2",
+          "any": "#/$defs/AnyConditionV2",
+          "event": "#/$defs/EventConditionV2",
+          "financial": "#/$defs/FinancialCondition",
+          "not": "#/$defs/NotConditionV2",
+          "technical": "#/$defs/TechnicalConditionV2"
+        },
+        "propertyName": "type"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TechnicalConditionV2"
+        },
+        {
+          "$ref": "#/$defs/FinancialCondition"
+        },
+        {
+          "$ref": "#/$defs/EventConditionV2"
+        },
+        {
+          "$ref": "#/$defs/AllConditionV2"
+        },
+        {
+          "$ref": "#/$defs/AnyConditionV2"
+        },
+        {
+          "$ref": "#/$defs/NotConditionV2"
+        }
+      ]
+    },
+    "EventAttributePredicate": {
+      "additionalProperties": false,
+      "description": "One typed, bounded event-attribute comparison.",
+      "properties": {
+        "attribute_id": {
+          "pattern": "^[a-z][a-z0-9_]{1,63}$",
+          "title": "Attribute Id",
+          "type": "string"
+        },
+        "comparator": {
+          "enum": [
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "eq",
+            "ne"
+          ],
+          "title": "Comparator",
+          "type": "string"
+        },
+        "unit": {
+          "default": "NONE",
+          "enum": [
+            "NONE",
+            "CNY",
+            "PERCENT",
+            "RATIO",
+            "COUNT"
+          ],
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/JsonScalarV2"
+        },
+        "value_type": {
+          "enum": [
+            "text",
+            "integer",
+            "number",
+            "boolean"
+          ],
+          "title": "Value Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "attribute_id",
+        "comparator",
+        "value",
+        "value_type"
+      ],
+      "title": "EventAttributePredicate",
+      "type": "object"
+    },
+    "EventConditionV2": {
+      "additionalProperties": false,
+      "description": "Catalog-coded event predicate; expressible here but not executable yet.",
+      "properties": {
+        "attributes": {
+          "items": {
+            "$ref": "#/$defs/EventAttributePredicate"
+          },
+          "maxItems": 8,
+          "title": "Attributes",
+          "type": "array"
+        },
+        "availability_mode": {
+          "const": "validated_first_available_at",
+          "default": "validated_first_available_at",
+          "title": "Availability Mode",
+          "type": "string"
+        },
+        "definition_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "title": "Definition Version",
+          "type": "string"
+        },
+        "event_code": {
+          "pattern": "^event\\.[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+          "title": "Event Code",
+          "type": "string"
+        },
+        "occurrence_scope": {
+          "default": "initial_validated_publication",
+          "enum": [
+            "initial_validated_publication",
+            "revision",
+            "withdrawal"
+          ],
+          "title": "Occurrence Scope",
+          "type": "string"
+        },
+        "trigger": {
+          "const": "became_available",
+          "default": "became_available",
+          "title": "Trigger",
+          "type": "string"
+        },
+        "type": {
+          "const": "event",
+          "default": "event",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_code",
+        "definition_version"
+      ],
+      "title": "EventConditionV2",
+      "type": "object"
+    },
+    "Exchange": {
+      "description": "Mainland exchange suffixes used by canonical instrument symbols.",
+      "enum": [
+        "SH",
+        "SZ",
+        "BJ"
+      ],
+      "title": "Exchange",
+      "type": "string"
+    },
+    "FinancialCondition": {
+      "additionalProperties": false,
+      "description": "Typed financial predicate; expressible here but not executable yet.",
+      "properties": {
+        "comparator": {
+          "enum": [
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "eq",
+            "ne"
+          ],
+          "title": "Comparator",
+          "type": "string"
+        },
+        "definition_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "title": "Definition Version",
+          "type": "string"
+        },
+        "metric_id": {
+          "pattern": "^financial\\.[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$",
+          "title": "Metric Id",
+          "type": "string"
+        },
+        "period_basis": {
+          "enum": [
+            "instant",
+            "single_quarter",
+            "ytd_cumulative",
+            "full_year",
+            "ttm",
+            "period_end_point"
+          ],
+          "title": "Period Basis",
+          "type": "string"
+        },
+        "report_type": {
+          "enum": [
+            "q1",
+            "semiannual",
+            "q3",
+            "annual"
+          ],
+          "title": "Report Type",
+          "type": "string"
+        },
+        "revision_policy": {
+          "const": "as_known_at_signal",
+          "default": "as_known_at_signal",
+          "title": "Revision Policy",
+          "type": "string"
+        },
+        "statement_scope": {
+          "enum": [
+            "consolidated",
+            "parent_company"
+          ],
+          "title": "Statement Scope",
+          "type": "string"
+        },
+        "type": {
+          "const": "financial",
+          "default": "financial",
+          "title": "Type",
+          "type": "string"
+        },
+        "unit": {
+          "enum": [
+            "CNY",
+            "CNY_PER_SHARE",
+            "PERCENT",
+            "RATIO",
+            "TIMES"
+          ],
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/NumericScalar"
+        }
+      },
+      "required": [
+        "metric_id",
+        "definition_version",
+        "report_type",
+        "period_basis",
+        "statement_scope",
+        "comparator",
+        "value",
+        "unit"
+      ],
+      "title": "FinancialCondition",
+      "type": "object"
+    },
+    "InstrumentRef": {
+      "additionalProperties": false,
+      "description": "A confirmed, executable STOCK or ETF identity.\n\nCreation alone proves structural validity.  ``require_tradable_on`` also\napplies listing-window and master-status gates for a requested date.",
+      "properties": {
+        "asset_type": {
+          "$ref": "#/$defs/AssetType"
+        },
+        "currency": {
+          "const": "CNY",
+          "default": "CNY",
+          "title": "Currency",
+          "type": "string"
+        },
+        "data_source": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Data Source",
+          "type": "string"
+        },
+        "delisting_date": {
+          "anyOf": [
+            {
+              "format": "date",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Delisting Date"
+        },
+        "exchange": {
+          "$ref": "#/$defs/Exchange"
+        },
+        "listing_date": {
+          "format": "date",
+          "title": "Listing Date",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "symbol": {
+          "pattern": "^[0-9]{6}\\.(SH|SZ|BJ)$",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "tradable": {
+          "title": "Tradable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "symbol",
+        "name",
+        "exchange",
+        "listing_date",
+        "tradable",
+        "data_source",
+        "asset_type"
+      ],
+      "title": "InstrumentRef",
+      "type": "object"
+    },
+    "InterpretationCoverage": {
+      "additionalProperties": false,
+      "description": "Candidate-level evidence used by the later semantic completeness gate.",
+      "properties": {
+        "groundings": {
+          "items": {
+            "$ref": "#/$defs/ConditionGrounding"
+          },
+          "maxItems": 128,
+          "title": "Groundings",
+          "type": "array"
+        },
+        "unmapped_material_spans": {
+          "items": {
+            "$ref": "#/$defs/SourceSpan"
+          },
+          "maxItems": 32,
+          "title": "Unmapped Material Spans",
+          "type": "array"
+        }
+      },
+      "title": "InterpretationCoverage",
+      "type": "object"
+    },
+    "JsonScalarV2": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "NotConditionV2": {
+      "additionalProperties": false,
+      "properties": {
+        "child": {
+          "$ref": "#/$defs/ConditionV2"
+        },
+        "type": {
+          "const": "not",
+          "default": "not",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "child"
+      ],
+      "title": "NotConditionV2",
+      "type": "object"
+    },
+    "NumericScalar": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        }
+      ]
+    },
+    "SourceSpan": {
+      "additionalProperties": false,
+      "description": "A literal span in the user's immutable original input.",
+      "properties": {
+        "source_end": {
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Source End",
+          "type": "integer"
+        },
+        "source_start": {
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Source Start",
+          "type": "integer"
+        },
+        "source_text": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Source Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_start",
+        "source_end",
+        "source_text"
+      ],
+      "title": "SourceSpan",
+      "type": "object"
+    },
+    "TechnicalConditionV2": {
+      "additionalProperties": false,
+      "description": "Daily, close-confirmed technical condition aligned with the v1 catalog.",
+      "properties": {
+        "definition_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "title": "Definition Version",
+          "type": "string"
+        },
+        "evaluation_mode": {
+          "const": "bar_close_confirmed",
+          "default": "bar_close_confirmed",
+          "title": "Evaluation Mode",
+          "type": "string"
+        },
+        "indicator_id": {
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+          "title": "Indicator Id",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonScalarV2"
+          },
+          "maxProperties": 16,
+          "title": "Params",
+          "type": "object"
+        },
+        "timeframe": {
+          "const": "1d",
+          "default": "1d",
+          "title": "Timeframe",
+          "type": "string"
+        },
+        "trigger": {
+          "pattern": "^[a-z][a-z0-9_]{1,63}$",
+          "title": "Trigger",
+          "type": "string"
+        },
+        "type": {
+          "const": "technical",
+          "default": "technical",
+          "title": "Type",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NumericScalar"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "indicator_id",
+        "definition_version",
+        "trigger"
+      ],
+      "title": "TechnicalConditionV2",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.ashare-lab.local/strategy.v2.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A bounded candidate DSL; validation does not imply executability.",
+  "properties": {
+    "backtest": {
+      "$ref": "#/$defs/BacktestConfigV2"
+    },
+    "catalog": {
+      "$ref": "#/$defs/CatalogRefV2"
+    },
+    "entry": {
+      "$ref": "#/$defs/ConditionV2"
+    },
+    "exit": {
+      "$ref": "#/$defs/ConditionV2"
+    },
+    "instrument": {
+      "$ref": "#/$defs/InstrumentRef"
+    },
+    "interpretation_coverage": {
+      "$ref": "#/$defs/InterpretationCoverage"
+    },
+    "schema_version": {
+      "const": "strategy.v2",
+      "default": "strategy.v2",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "catalog",
+    "instrument",
+    "entry",
+    "exit",
+    "interpretation_coverage",
+    "backtest"
+  ],
+  "title": "StrategySpecV2",
+  "type": "object"
+}

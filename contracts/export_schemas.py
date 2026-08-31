@@ -8,6 +8,7 @@ from typing import Any
 
 from ashare_lab.domain.catalog.models import CatalogManifest
 from ashare_lab.domain.strategy.models import StrategySpec
+from ashare_lab.domain.strategy.models_v2 import StrategySpecV2
 
 CONTRACTS_DIR = Path(__file__).resolve().parent
 
@@ -15,10 +16,12 @@ CONTRACTS_DIR = Path(__file__).resolve().parent
 def build_schemas() -> dict[str, dict[str, Any]]:
     schemas = {
         "strategy.v1.schema.json": StrategySpec.model_json_schema(),
+        "strategy.v2.schema.json": StrategySpecV2.model_json_schema(),
         "indicator-catalog.v1.schema.json": CatalogManifest.model_json_schema(),
     }
     identifiers = {
         "strategy.v1.schema.json": "https://schemas.ashare-lab.local/strategy.v1.schema.json",
+        "strategy.v2.schema.json": "https://schemas.ashare-lab.local/strategy.v2.schema.json",
         "indicator-catalog.v1.schema.json": (
             "https://schemas.ashare-lab.local/indicator-catalog.v1.schema.json"
         ),
