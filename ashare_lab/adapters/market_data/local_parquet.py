@@ -488,6 +488,11 @@ class LocalParquetMarketDataRepository:
                     _SIGNAL_DAILY_DATASET,
                     _PRODUCER_MANIFEST_DATASET,
                     _CORPORATE_ACTION_DATASET,
+                    # A strict Composite is one immutable replay universe.
+                    # Technical and event strategies over the same stock and
+                    # period must pin the same slice identity rather than
+                    # inventing different selections from the same producer.
+                    _EVENT_DATASET,
                 }
             )
             self._require_composite_snapshot_files()

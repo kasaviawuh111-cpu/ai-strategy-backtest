@@ -746,6 +746,34 @@ def test_strict_document_text_codes_exclude_a_generic_event_only_snapshot(
     assert repository.strict_composite_event_document_text_codes() == frozenset()
 
 
+def test_strict_composite_technical_and_event_requests_share_one_slice_identity(
+    tmp_path: Path,
+) -> None:
+    result = _composite(tmp_path)
+    repository = LocalParquetMarketDataRepository(result.path, profile="composite_snapshot")
+    period = DateRange(date(2025, 1, 2), date(2025, 1, 3))
+
+    technical = repository.pin_snapshot(
+        DataRequirements(
+            instruments=(INSTRUMENT,),
+            datasets=("daily_ohlcv", "corporate_actions"),
+        ),
+        period,
+    )
+    event = repository.pin_snapshot(
+        DataRequirements(
+            instruments=(INSTRUMENT,),
+            datasets=("daily_ohlcv", "corporate_actions", "events"),
+            event_codes=("event.financial_results.annual_report",),
+        ),
+        period,
+    )
+
+    assert technical.snapshot_id == event.snapshot_id
+    assert technical.checksum == event.checksum
+    assert technical.producer_snapshot_id == event.producer_snapshot_id == result.snapshot_id
+
+
 def test_strict_document_text_codes_require_complete_artifacts_for_every_matching_row(
     tmp_path: Path,
 ) -> None:

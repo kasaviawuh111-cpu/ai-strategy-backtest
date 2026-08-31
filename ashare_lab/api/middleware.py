@@ -18,7 +18,10 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 type HeaderList = list[tuple[bytes, bytes]]
 
-_ACCESS_LOG = logging.getLogger("ashare_lab.api.access")
+# Uvicorn configures this logger for container stdout.  Reusing it makes the
+# correlation record observable in local and hosted runs without requiring a
+# second, deployment-specific logging configuration.
+_ACCESS_LOG = logging.getLogger("uvicorn.access")
 
 
 class RequestContextMiddleware:
