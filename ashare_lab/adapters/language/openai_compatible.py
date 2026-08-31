@@ -153,6 +153,43 @@ class OpenAICompatibleCandidateTransport:
             # same contract and the local VibeBounded/Catalog validators remain
             # authoritative; there is deliberately no free-text fallback.
             response_format = {"type": "json_object"}
+        user_payload: dict[str, object] = {
+            "utterance": request.utterance,
+            "instrumentContext": request.instrument_context,
+            "asOfDate": request.as_of_date.isoformat(),
+            "maxCandidates": request.max_candidates,
+            "capabilityProjectionVersion": request.capability_projection_version,
+            "capabilityProjectionHash": request.capability_projection_hash,
+            "capabilityMatrix": request.capability_matrix,
+        }
+        schema_contract = ""
+        if self._response_mode == "json_object":
+            # JSON-object gateways (including DeepSeek) do not receive the
+            # schema through ``response_format``.  Put the existing bounded
+            # schema in the prompt rather than asking the model to guess a DSL.
+            user_payload["responseSchema"] = request.response_schema
+            schema_contract = (
+                " The responseSchema field in the user JSON is authoritative. "
+                "Return exactly one JSON object matching it; do not rename keys, "
+                "add wrapper/action/reasoning fields, or use aliases in place of "
+                "Catalog ids and triggers. Source-span start/end are zero-based "
+                "Unicode character offsets in the complete utterance, and text "
+                "must equal utterance[start:end]. Every entry/exit span must include "
+                "the matching buy/sell action; when multiple leaves share one action, "
+                "repeat the same complete source clause, including that action, for "
+                "every leaf instead of splitting the clause into fragments. The phrase "
+                "'成交量是过去 N 日平均的 M 倍' selects Catalog indicator "
+                "volume.relative with trigger gte_multiple, baseline_period N, value M, "
+                "and every other required Catalog parameter at its declared default; "
+                "it does not select market.volume. When instrumentContext "
+                "is present, set instrument_symbol and instrument_span to null because "
+                "the host context is authoritative. Supply every required parameter; "
+                "use an exact Catalog default only when the utterance omitted it, and "
+                "list only that field in defaulted_fields. In RSI clauses, wording "
+                "such as '回到/到 N 上方' or '回到/到 N 下方' denotes the "
+                "corresponding crosses_above or crosses_below transition, not a static "
+                "above or below state."
+            )
         body = {
             "model": self._identity.model,
             "messages": [
@@ -163,20 +200,13 @@ class OpenAICompatibleCandidateTransport:
                         f"Prompt contract: {self._identity.prompt_version}; "
                         f"candidate schema: {self._identity.schema_version}; "
                         f"return at most {request.max_candidates} candidates."
+                        f"{schema_contract}"
                     ),
                 },
                 {
                     "role": "user",
                     "content": json.dumps(
-                        {
-                            "utterance": request.utterance,
-                            "instrumentContext": request.instrument_context,
-                            "asOfDate": request.as_of_date.isoformat(),
-                            "maxCandidates": request.max_candidates,
-                            "capabilityProjectionVersion": (request.capability_projection_version),
-                            "capabilityProjectionHash": request.capability_projection_hash,
-                            "capabilityMatrix": request.capability_matrix,
-                        },
+                        user_payload,
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),

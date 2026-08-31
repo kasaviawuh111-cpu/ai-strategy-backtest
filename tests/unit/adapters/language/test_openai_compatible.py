@@ -298,7 +298,15 @@ async def test_json_object_mode_is_explicit_and_still_returns_only_local_json() 
 
     assert result == candidate
     assert provider.response_mode == "json_object"
-    assert json.loads(requests[0].content)["response_format"] == {"type": "json_object"}
+    body = json.loads(requests[0].content)
+    assert body["response_format"] == {"type": "json_object"}
+    user_payload = json.loads(body["messages"][1]["content"])
+    assert user_payload["responseSchema"] == _request().response_schema
+    assert (
+        "responseSchema field in the user JSON is authoritative" in (body["messages"][0]["content"])
+    )
+    assert "volume.relative" in body["messages"][0]["content"]
+    assert "instead of splitting the clause into fragments" in body["messages"][0]["content"]
 
 
 @pytest.mark.asyncio

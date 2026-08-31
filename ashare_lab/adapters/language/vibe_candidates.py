@@ -71,6 +71,12 @@ _INCOMPLETE_RULE_CODES = frozenset(
     }
 )
 _GENERIC_ACTION_PLACEHOLDER_RE = re.compile(r"(?:随便|任意|随机|不知道|不确定|你看着)")
+_DEFAULTED_PARAMETER_PATH_RE = re.compile(
+    r"^/(?P<side>entry|exit)/(?P<index>\d+)/params/(?P<name>[A-Za-z0-9_]+)$"
+)
+_RSI_TRANSITION_THRESHOLD_RE = re.compile(
+    r"(?:重新)?(?:回到|到)\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*(?:上方|下方)"
+)
 _DEFAULT_MIN_CONFIDENCE = 0.75
 _LOGGER = logging.getLogger(__name__)
 
@@ -678,73 +684,45 @@ class VibeBoundedCandidateGenerator:
                 "缺关键买入或卖出条件时不要补默认策略。"
             ),
         )
-        try:
-            payload = await self._transport.generate_json(transport_request)
-            batch = _validate_transport_payload(payload)
-            ranked = tuple(
-                sorted(
-                    batch.candidates,
-                    key=lambda item: item.confidence,
-                    reverse=True,
-                )
-            )
-            candidates: list[CandidateAst] = []
-            for rank, item in enumerate(ranked, start=1):
-                provenance = _candidate_provenance(
-                    identity=self._provider_identity,
+        for attempt in range(2):
+            try:
+                payload = await self._transport.generate_json(transport_request)
+                candidates = _translate_transport_payload(
+                    payload,
+                    request=request,
                     matrix=matrix,
-                    candidate_rank=rank,
+                    provider_identity=self._provider_identity,
+                    min_confidence=self._min_confidence,
                 )
-                if item.confidence < self._min_confidence:
-                    candidates.append(
-                        _unsupported(
-                            request.instrument_context,
-                            "candidate_provider_low_confidence",
-                            provenance=provenance,
-                        )
-                    )
+            except _CandidateRuleIncompleteError as exc:
+                return (_unsupported(request.instrument_context, exc.diagnostic_code),)
+            except (TypeError, ValueError, ValidationError):
+                if attempt == 0:
                     continue
-                try:
-                    _validate_candidate_against_matrix(item, matrix)
-                    _validate_candidate_grounding(item, matrix, request)
-                    candidates.append(
-                        _to_candidate_ast(
-                            item,
-                            request,
-                            provenance=provenance,
-                        )
-                    )
-                except _CandidateSemanticRejection as exc:
-                    candidates.append(
-                        _unsupported(
-                            request.instrument_context,
-                            exc.diagnostic_code,
-                            provenance=provenance,
-                        )
-                    )
-                except (TypeError, ValueError, ValidationError):
-                    candidates.append(
-                        _unsupported(
-                            request.instrument_context,
-                            "candidate_provider_invalid_output",
-                            provenance=provenance,
-                        )
-                    )
-            return tuple(candidates)
-        except _CandidateRuleIncompleteError as exc:
-            return (_unsupported(request.instrument_context, exc.diagnostic_code),)
-        except (TypeError, ValueError, ValidationError):
-            return (_unsupported(request.instrument_context, "candidate_provider_invalid_output"),)
-        except CandidateTransportError:
-            return (_unsupported(request.instrument_context, "candidate_provider_unavailable"),)
-        except Exception as exc:
-            # Do not serialize the exception message: an unexpected provider
-            # implementation bug may contain request text or credentials.
-            _LOGGER.error(
-                "unexpected candidate transport exception type=%s",
-                type(exc).__name__,
-            )
-            raise
+                return (
+                    _unsupported(request.instrument_context, "candidate_provider_invalid_output"),
+                )
+            except CandidateTransportError:
+                return (_unsupported(request.instrument_context, "candidate_provider_unavailable"),)
+            except Exception as exc:
+                # Do not serialize the exception message: an unexpected provider
+                # implementation bug may contain request text or credentials.
+                _LOGGER.error(
+                    "unexpected candidate transport exception type=%s",
+                    type(exc).__name__,
+                )
+                raise
+            if (
+                attempt == 0
+                and candidates
+                and all(
+                    item.unsupported_code == "candidate_provider_invalid_output"
+                    for item in candidates
+                )
+            ):
+                continue
+            return candidates
+        return (_unsupported(request.instrument_context, "candidate_provider_invalid_output"),)
 
 
 class HybridCandidateGenerator:
@@ -832,6 +810,178 @@ def _validate_transport_payload(payload: CandidateTransportResponse) -> BoundedC
     if gap is not None:
         raise _CandidateRuleIncompleteError(gap)
     return BoundedCandidateBatch.model_validate(raw)
+
+
+def _translate_transport_payload(
+    payload: CandidateTransportResponse,
+    *,
+    request: CompileInput,
+    matrix: CandidateCapabilityMatrix,
+    provider_identity: CandidateProviderIdentityView | None,
+    min_confidence: float,
+) -> tuple[CandidateAst, ...]:
+    batch = _normalize_transport_batch(
+        _validate_transport_payload(payload),
+        request=request,
+        matrix=matrix,
+    )
+    ranked = tuple(
+        sorted(
+            batch.candidates,
+            key=lambda item: item.confidence,
+            reverse=True,
+        )
+    )
+    candidates: list[CandidateAst] = []
+    for rank, item in enumerate(ranked, start=1):
+        provenance = _candidate_provenance(
+            identity=provider_identity,
+            matrix=matrix,
+            candidate_rank=rank,
+        )
+        if item.confidence < min_confidence:
+            candidates.append(
+                _unsupported(
+                    request.instrument_context,
+                    "candidate_provider_low_confidence",
+                    provenance=provenance,
+                )
+            )
+            continue
+        try:
+            _validate_candidate_against_matrix(item, matrix)
+            _validate_candidate_grounding(item, matrix, request)
+            candidates.append(
+                _to_candidate_ast(
+                    item,
+                    request,
+                    provenance=provenance,
+                )
+            )
+        except _CandidateSemanticRejection as exc:
+            candidates.append(
+                _unsupported(
+                    request.instrument_context,
+                    exc.diagnostic_code,
+                    provenance=provenance,
+                )
+            )
+        except (TypeError, ValueError, ValidationError):
+            candidates.append(
+                _unsupported(
+                    request.instrument_context,
+                    "candidate_provider_invalid_output",
+                    provenance=provenance,
+                )
+            )
+    return tuple(candidates)
+
+
+def _normalize_transport_batch(
+    batch: BoundedCandidateBatch,
+    *,
+    request: CompileInput,
+    matrix: CandidateCapabilityMatrix,
+) -> BoundedCandidateBatch:
+    """Repair only mechanically provable JSON-object transport noise.
+
+    A JSON-object provider can choose the correct existing DSL but miscount
+    Chinese character offsets or mark an explicitly written parameter as a
+    Catalog default.  Both repairs below are derived from the exact utterance;
+    no indicator, trigger, value, condition, or missing span is invented.
+    Everything else continues through the existing fail-closed validators.
+    """
+
+    return batch.model_copy(
+        update={
+            "candidates": tuple(
+                _normalize_transport_candidate(item, request=request, matrix=matrix)
+                for item in batch.candidates
+            )
+        }
+    )
+
+
+def _normalize_transport_candidate(
+    candidate: BoundedCandidate,
+    *,
+    request: CompileInput,
+    matrix: CandidateCapabilityMatrix,
+) -> BoundedCandidate:
+    entry_spans = tuple(
+        _normalize_exact_unique_span(span, request.utterance) for span in candidate.entry_spans
+    )
+    exit_spans = tuple(
+        _normalize_exact_unique_span(span, request.utterance) for span in candidate.exit_spans
+    )
+    normalized = candidate.model_copy(
+        update={
+            "entry_spans": entry_spans,
+            "exit_spans": exit_spans,
+            "instrument_span": (
+                None
+                if candidate.instrument_span is None
+                else _normalize_exact_unique_span(candidate.instrument_span, request.utterance)
+            ),
+            "backtest_span": (
+                None
+                if candidate.backtest_span is None
+                else _normalize_exact_unique_span(candidate.backtest_span, request.utterance)
+            ),
+        }
+    )
+    context = request.instrument_context.strip().upper() if request.instrument_context else None
+    if context is not None and normalized.instrument_symbol == context:
+        # The host page already supplies the authoritative A-share identity.
+        # A provider often repeats that context with a company-name span, but
+        # the name is not proof of the six-digit security code.  Discard only
+        # this redundant pair; a conflicting symbol remains fail-closed.
+        normalized = normalized.model_copy(
+            update={"instrument_symbol": None, "instrument_span": None}
+        )
+    retained_defaults: list[str] = []
+    for path in normalized.defaulted_fields:
+        match = _DEFAULTED_PARAMETER_PATH_RE.fullmatch(path)
+        if match is None:
+            retained_defaults.append(path)
+            continue
+        side = cast(Literal["entry", "exit"], match.group("side"))
+        index = int(match.group("index"))
+        leaves = normalized.entry if side == "entry" else normalized.exit
+        spans = normalized.entry_spans if side == "entry" else normalized.exit_spans
+        if index >= len(leaves) or index >= len(spans):
+            retained_defaults.append(path)
+            continue
+        leaf = leaves[index]
+        if not isinstance(leaf, IndicatorCandidate):
+            retained_defaults.append(path)
+            continue
+        capability = matrix.resolve_indicator(leaf.indicator_id)
+        name = match.group("name")
+        value = leaf.params.get(name)
+        explicit = capability is not None and (
+            name in _explicit_parameter_names(spans[index].text, capability)
+            or (
+                value is not None
+                and _special_parameter_evidence(leaf, spans[index].text, name, value)
+            )
+        )
+        if not explicit:
+            retained_defaults.append(path)
+    return normalized.model_copy(update={"defaulted_fields": tuple(retained_defaults)})
+
+
+def _normalize_exact_unique_span(
+    span: CandidateSourceSpan,
+    utterance: str,
+) -> CandidateSourceSpan:
+    if span.end <= len(utterance) and utterance[span.start : span.end] == span.text:
+        return span
+    starts = tuple(match.start() for match in re.finditer(re.escape(span.text), utterance))
+    if len(starts) != 1:
+        return span
+    start = starts[0]
+    return span.model_copy(update={"start": start, "end": start + len(span.text)})
 
 
 def _raw_critical_rule_gap(raw: object) -> str | None:
@@ -1160,6 +1310,12 @@ def _validate_leaf_grounding(
         ):
             raise ValueError("candidate source span does not name the selected capability")
         trigger = next(item for item in capability.triggers if item.id == leaf.trigger)
+        if (
+            leaf.indicator_id == "technical.rsi"
+            and leaf.trigger in {"above", "below"}
+            and _RSI_TRANSITION_THRESHOLD_RE.search(span.text)
+        ):
+            raise ValueError("RSI transition wording cannot ground a static threshold trigger")
         if not (
             _has_alias(span.text, trigger.aliases_zh) or _special_trigger_evidence(leaf, span.text)
         ):

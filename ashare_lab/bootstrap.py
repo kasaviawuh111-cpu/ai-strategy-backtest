@@ -8,7 +8,7 @@ import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -36,6 +36,7 @@ from ashare_lab.adapters.persistence import SQLAlchemyBacktestRunStore
 from ashare_lab.api import create_app as create_http_app
 from ashare_lab.api.app import build_hybrid_candidate_compiler
 from ashare_lab.application.backtest_submission import (
+    BacktestRunConfig,
     BacktestSubmissionService,
     SubmissionVersions,
 )
@@ -101,8 +102,13 @@ def build_execution_runtime(settings: AppSettings | None = None) -> ExecutionRun
     # revision or from a downgraded data profile.  `/ready` remains useful for
     # dependency health, but it is not the authorization boundary.
     strict_snapshot = _validate_strict_replay_configuration(selected, market_data)
+    # The pinned acquisition range includes the default post-backtest settlement
+    # tail.  Relative natural-language periods must end at the last date that can
+    # still reserve that tail, otherwise every otherwise-valid run is rejected
+    # for asking beyond the immutable snapshot.
     backtest_anchor_date = (
         market_data.strict_composite_period().end
+        - timedelta(days=BacktestRunConfig().settlement_extension_days)
         if strict_snapshot is not None and isinstance(market_data, LocalParquetMarketDataRepository)
         else None
     )

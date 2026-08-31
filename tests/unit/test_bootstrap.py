@@ -476,11 +476,11 @@ def test_composite_readiness_accepts_only_persisted_strict_event_policy(
     assert readiness.status_code == 200
     assert readiness.json()["checks"]["strict_snapshot_pin"] == "ok"
     assert capability.json()["event_backtest_available"] is True
-    assert backtest_anchor_date == date(2025, 1, 2)
+    assert backtest_anchor_date == date(2024, 12, 19)
     assert draft.status_code == 201
     assert draft.json()["strategy"]["backtest"] == {
-        "start": "2020-01-02",
-        "end": "2025-01-02",
+        "start": "2019-12-19",
+        "end": "2024-12-19",
         "initial_cash_cny": 1_000_000,
     }
     assert {

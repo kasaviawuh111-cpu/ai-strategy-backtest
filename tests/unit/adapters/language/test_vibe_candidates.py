@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -54,6 +56,24 @@ class _FakeTransport:
     ) -> CandidateTransportResponse:
         self.requests.append(request)
         return self.response
+
+
+class _SequenceTransport(_FakeTransport):
+    def __init__(self, responses: tuple[CandidateTransportResponse, ...]) -> None:
+        if not responses:
+            raise ValueError("responses must not be empty")
+        super().__init__(responses[0])
+        self.responses = responses
+
+    async def generate_json(
+        self,
+        request: CandidateTransportRequest,
+    ) -> CandidateTransportResponse:
+        response_index = len(self.requests)
+        if response_index >= len(self.responses):
+            raise AssertionError("candidate provider must not make a third attempt")
+        self.requests.append(request)
+        return self.responses[response_index]
 
 
 class _FailingTransport:
@@ -173,6 +193,15 @@ def _macd_batch(
     }
 
 
+def _macd_batch_with_ungrounded_entry(*, utterance: str) -> dict[str, object]:
+    payload = deepcopy(_macd_batch(utterance=utterance))
+    candidates = cast(list[object], payload["candidates"])
+    candidate = cast(dict[str, object], candidates[0])
+    exit_text = utterance.split("，", 1)[1]
+    candidate["entry_spans"] = [_source_span(utterance, exit_text)]
+    return payload
+
+
 def _compiler(generator: HybridCandidateGenerator) -> StrategyCompiler:
     return StrategyCompiler(
         generator=generator,
@@ -212,6 +241,54 @@ async def test_unrecognized_phrase_uses_bounded_json_and_compiles_current_dsl() 
     assert request.capability_projection_version == "candidate-capabilities.v1"
     assert request.capability_projection_hash == CAPABILITY_MATRIX.content_hash
     assert request.upstream_pattern_commit.startswith("e90b6c6")
+
+
+@pytest.mark.asyncio
+async def test_grounding_invalid_first_attempt_retries_once_and_accepts_valid_payload() -> None:
+    transport = _SequenceTransport(
+        (
+            _macd_batch_with_ungrounded_entry(utterance=FALLBACK_UTTERANCE),
+            _macd_batch(utterance=FALLBACK_UTTERANCE),
+        )
+    )
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_bounded(transport),
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance=FALLBACK_UTTERANCE,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert len(transport.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_two_grounding_invalid_attempts_fail_closed_without_third_call() -> None:
+    invalid = _macd_batch_with_ungrounded_entry(utterance=FALLBACK_UTTERANCE)
+    transport = _SequenceTransport((invalid, deepcopy(invalid)))
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_bounded(transport),
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance=FALLBACK_UTTERANCE,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.diagnostic_code == "candidate_provider_invalid_output"
+    assert len(transport.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -862,6 +939,190 @@ async def test_exact_original_five_route_through_bounded_provider(
     assert tuple(_condition_signature(item) for item in outcome.strategy.exit.children) == (
         case.expected_exit
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "deviation",
+    (
+        "catalog_alias_instead_of_id",
+        "chinese_alias_instead_of_trigger",
+        "missing_exact_span",
+        "paraphrased_span",
+        "extra_reasoning_field",
+        "numeric_parameter_as_string",
+        "unclaimed_catalog_defaults",
+        "noncanonical_join",
+    ),
+)
+async def test_common_json_object_semantic_deviations_fail_closed(
+    deviation: str,
+) -> None:
+    payload = deepcopy(_macd_batch())
+    candidates = cast(list[object], payload["candidates"])
+    candidate = cast(dict[str, object], candidates[0])
+    entry = cast(list[object], candidate["entry"])
+    entry_leaf = cast(dict[str, object], entry[0])
+    if deviation == "catalog_alias_instead_of_id":
+        entry_leaf["indicator_id"] = "MACD"
+    elif deviation == "chinese_alias_instead_of_trigger":
+        entry_leaf["trigger"] = "金叉"
+    elif deviation == "missing_exact_span":
+        candidate.pop("entry_spans")
+    elif deviation == "paraphrased_span":
+        entry_spans = cast(list[object], candidate["entry_spans"])
+        entry_span = cast(dict[str, object], entry_spans[0])
+        entry_span["text"] = "MACD向上交叉买入"
+    elif deviation == "extra_reasoning_field":
+        candidate["reasoning"] = "模型的解释不属于受限契约"
+    elif deviation == "numeric_parameter_as_string":
+        params = cast(dict[str, object], entry_leaf["params"])
+        params["fast"] = "12"
+    elif deviation == "unclaimed_catalog_defaults":
+        candidate["defaulted_fields"] = []
+    elif deviation == "noncanonical_join":
+        candidate["entry_join"] = "AND"
+    else:  # pragma: no cover - the parameter table is closed above
+        raise AssertionError(f"unknown deviation: {deviation}")
+
+    generated = await _bounded(_FakeTransport(payload)).generate(
+        CompileInput(
+            utterance=DIRECT_UTTERANCE,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+async def test_json_object_repairs_only_exact_unique_offsets_and_explicit_default_claims() -> None:
+    case = _exact_five_cases()[0]
+    payload = deepcopy(case.payload)
+    candidates = cast(list[object], payload["candidates"])
+    candidate = cast(dict[str, object], candidates[0])
+    for key in ("entry_spans", "exit_spans"):
+        spans = cast(list[object], candidate[key])
+        for raw_span in spans:
+            span = cast(dict[str, object], raw_span)
+            span["start"] = 0
+            span["end"] = len(cast(str, span["text"]))
+    candidate["instrument_symbol"] = "300059.SZ"
+    candidate["instrument_span"] = {
+        "start": 9,
+        "end": 13,
+        "text": "东方财富",
+    }
+    backtest_span = cast(dict[str, object], candidate["backtest_span"])
+    backtest_span.update(start=0, end=4)
+    defaulted_fields = cast(list[object], candidate["defaulted_fields"])
+    defaulted_fields.extend(
+        (
+            "/entry/0/params/period",
+            "/exit/0/params/period",
+        )
+    )
+
+    generated = await _bounded(_FakeTransport(payload)).generate(
+        CompileInput(
+            utterance=case.utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert generated[0].unsupported_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case_index", "deviation"),
+    (
+        (0, "pronoun_changes_indicator_parameters"),
+        (3, "drops_one_and_condition"),
+        (4, "adds_natural_day_unit"),
+    ),
+)
+async def test_exact_five_provider_shortcuts_fail_closed(
+    case_index: int,
+    deviation: str,
+) -> None:
+    case = _exact_five_cases()[case_index]
+    payload = deepcopy(case.payload)
+    candidates = cast(list[object], payload["candidates"])
+    candidate = cast(dict[str, object], candidates[0])
+    if deviation == "pronoun_changes_indicator_parameters":
+        exit_leaves = cast(list[object], candidate["exit"])
+        exit_leaf = cast(dict[str, object], exit_leaves[0])
+        params = cast(dict[str, object], exit_leaf["params"])
+        params["period"] = 10
+    elif deviation == "drops_one_and_condition":
+        entry_leaves = cast(list[object], candidate["entry"])
+        entry_spans = cast(list[object], candidate["entry_spans"])
+        entry_leaves.pop()
+        entry_spans.pop()
+        defaulted_fields = cast(list[object], candidate["defaulted_fields"])
+        candidate["defaulted_fields"] = [
+            item for item in defaulted_fields if not str(item).startswith("/entry/1/")
+        ]
+    elif deviation == "adds_natural_day_unit":
+        exit_leaves = cast(list[object], candidate["exit"])
+        exit_leaf = cast(dict[str, object], exit_leaves[0])
+        exit_leaf["unit"] = "natural_days"
+    else:  # pragma: no cover - the parameter table is closed above
+        raise AssertionError(f"unknown deviation: {deviation}")
+
+    generated = await _bounded(_FakeTransport(payload)).generate(
+        CompileInput(
+            utterance=case.utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+async def test_rsi_recovery_cannot_be_downgraded_to_static_above() -> None:
+    case = _exact_five_cases()[2]
+    payload = deepcopy(case.payload)
+    candidates = cast(list[object], payload["candidates"])
+    candidate = cast(dict[str, object], candidates[0])
+    exit_leaves = cast(list[object], candidate["exit"])
+    exit_leaf = cast(dict[str, object], exit_leaves[0])
+    exit_leaf["trigger"] = "above"
+
+    generated = await _bounded(_FakeTransport(payload)).generate(
+        CompileInput(
+            utterance=case.utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+async def test_context_cannot_silently_discard_unused_instrument_evidence() -> None:
+    utterance = "600519.SH MACD金叉买入，MACD死叉卖出"
+    payload = _macd_batch(utterance=utterance)
+    candidates = cast(list[object], payload["candidates"])
+    candidate = cast(dict[str, object], candidates[0])
+    candidate["instrument_symbol"] = None
+    candidate["instrument_span"] = _source_span(utterance, "600519.SH")
+
+    generated = await _bounded(_FakeTransport(payload)).generate(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
 
 
 @pytest.mark.asyncio
