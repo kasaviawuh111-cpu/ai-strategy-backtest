@@ -14,7 +14,7 @@ def test_success_access_log_contains_response_request_id_without_query_or_body(
     app = create_app()
 
     with (
-        caplog.at_level(logging.INFO, logger="uvicorn.access"),
+        caplog.at_level(logging.INFO, logger="uvicorn.error"),
         TestClient(app) as client,
     ):
         response = client.get(
@@ -24,7 +24,7 @@ def test_success_access_log_contains_response_request_id_without_query_or_body(
 
     assert response.status_code == 200
     assert response.headers["X-Request-ID"] == "browser-run:technical"
-    record = next(item for item in caplog.records if item.name == "uvicorn.access")
+    record = next(item for item in caplog.records if item.name == "uvicorn.error")
     rendered = record.getMessage()
     assert "request_id=browser-run:technical" in rendered
     assert "method=GET" in rendered
@@ -41,7 +41,7 @@ def test_rejected_request_is_also_correlated_in_access_log(
     app = create_app(max_body_bytes=8)
 
     with (
-        caplog.at_level(logging.INFO, logger="uvicorn.access"),
+        caplog.at_level(logging.INFO, logger="uvicorn.error"),
         TestClient(app) as client,
     ):
         response = client.post(
@@ -55,7 +55,7 @@ def test_rejected_request_is_also_correlated_in_access_log(
 
     assert response.status_code == 413
     rendered = "\n".join(
-        item.getMessage() for item in caplog.records if item.name == "uvicorn.access"
+        item.getMessage() for item in caplog.records if item.name == "uvicorn.error"
     )
     assert "request_id=browser-run:rejected" in rendered
     assert "status=413" in rendered

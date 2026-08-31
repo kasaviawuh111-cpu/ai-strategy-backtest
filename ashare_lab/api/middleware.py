@@ -18,10 +18,10 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 type HeaderList = list[tuple[bytes, bytes]]
 
-# Uvicorn configures this logger for container stdout.  Reusing it makes the
-# correlation record observable in local and hosted runs without requiring a
-# second, deployment-specific logging configuration.
-_ACCESS_LOG = logging.getLogger("uvicorn.access")
+# Uvicorn configures this logger for container stdout.  Do not use
+# ``uvicorn.access`` here: its formatter interprets positional arguments as a
+# socket access tuple and would discard our field labels.
+_ACCESS_LOG = logging.getLogger("uvicorn.error")
 
 
 class RequestContextMiddleware:
