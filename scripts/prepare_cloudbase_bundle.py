@@ -78,7 +78,11 @@ def prepare_bundle(
         repository / "scripts" / "container_healthcheck.py",
         output / "scripts" / "container_healthcheck.py",
     )
-    shutil.copy2(repository / "deploy" / "cloudbase" / "Dockerfile", output / "Dockerfile")
+    _copy_dockerfile_with_revision(
+        repository / "deploy" / "cloudbase" / "Dockerfile",
+        output / "Dockerfile",
+        code_revision,
+    )
     shutil.copytree(snapshot, output / "deploy-snapshot")
 
     metadata = {
@@ -91,7 +95,25 @@ def prepare_bundle(
         json.dumps(metadata, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    return cast(dict[str, str], metadata)
+    return metadata
+
+
+def _copy_dockerfile_with_revision(source: Path, destination: Path, code_revision: str) -> None:
+    """Pin the validated clean revision when the platform cannot pass build args."""
+
+    try:
+        template = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise BundleError("CloudBase Dockerfile template is unreadable") from exc
+    placeholder = "ARG CODE_REVISION"
+    if template.splitlines().count(placeholder) != 1:
+        raise BundleError("CloudBase Dockerfile must contain one unpinned CODE_REVISION argument")
+    rendered = template.replace(
+        placeholder,
+        f"ARG CODE_REVISION={code_revision}",
+        1,
+    )
+    destination.write_text(rendered, encoding="utf-8")
 
 
 def _verify_clean_revision(repository: Path, expected: str) -> None:

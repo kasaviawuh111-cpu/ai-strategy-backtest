@@ -26,7 +26,8 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     )
     (repository / "deploy" / "cloudbase").mkdir(parents=True)
     (repository / "deploy" / "cloudbase" / "Dockerfile").write_text(
-        "FROM scratch\n", encoding="utf-8"
+        "FROM scratch\nARG CODE_REVISION\nENV CODE_REVISION=${CODE_REVISION}\n",
+        encoding="utf-8",
     )
 
     payload = b"real parquet bytes"
@@ -67,12 +68,31 @@ def test_bundle_contains_only_allowlisted_sources_and_selected_snapshot(tmp_path
     )
 
     assert metadata["producerSnapshotId"] == f"composite:{digest}"
-    assert (output / "Dockerfile").is_file()
+    dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
+    assert "ARG CODE_REVISION=" + "a" * 40 in dockerfile
+    assert "ARG CODE_REVISION\n" not in dockerfile
     assert (output / "deploy-snapshot" / "daily_ohlcv.parquet").read_bytes() == (
         b"real parquet bytes"
     )
     assert not (output / ".env").exists()
     assert not (output / "ashare_lab" / "__pycache__").exists()
+
+
+def test_bundle_rejects_dockerfile_without_the_revision_placeholder(tmp_path: Path) -> None:
+    repository, digest = _repository(tmp_path)
+    (repository / "deploy" / "cloudbase" / "Dockerfile").write_text(
+        "FROM scratch\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BundleError, match="one unpinned CODE_REVISION"):
+        prepare_bundle(
+            repository=repository,
+            output=tmp_path / "bundle",
+            snapshot_digest=digest,
+            code_revision="a" * 40,
+            verify_git=False,
+        )
 
 
 def test_bundle_rejects_snapshot_tampering_and_nonempty_output(tmp_path: Path) -> None:
