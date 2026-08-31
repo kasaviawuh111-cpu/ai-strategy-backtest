@@ -1,25 +1,30 @@
 # Third-party notices
 
 This file records third-party code under evaluation for the A-share backtest project. It is an
-inventory, not a replacement for an upstream license. As reviewed on 2026-08-30, local glue
+inventory, not a replacement for an upstream license. As reviewed through 2026-08-31, local glue
 adapters cite the reviewed projects, but no upstream source tree is vendored wholesale.
 The adapter files and exact adoption mode are recorded in `THIRD_PARTY.yml`.
 
 ## HKUDS/Vibe-Trading
 
 - Source: <https://github.com/HKUDS/Vibe-Trading>
-- Reviewed revision: [`e90b6c6cd9fea23067a85667e7fbf74f9d73ea48`](https://github.com/HKUDS/Vibe-Trading/tree/e90b6c6cd9fea23067a85667e7fbf74f9d73ea48)
+- Reviewed revisions: [`e90b6c6cd9fea23067a85667e7fbf74f9d73ea48`](https://github.com/HKUDS/Vibe-Trading/tree/e90b6c6cd9fea23067a85667e7fbf74f9d73ea48) for bounded strategy-candidate patterns, and [`1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7`](https://github.com/HKUDS/Vibe-Trading/tree/1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7) for hypothesis-registry and research-autopilot orchestration patterns
 - License: MIT
 - Upstream license: <https://github.com/HKUDS/Vibe-Trading/blob/e90b6c6cd9fea23067a85667e7fbf74f9d73ea48/LICENSE>
 - Archived exact license: [`third_party/licenses/HKUDS-Vibe-Trading-e90b6c6cd9fea23067a85667e7fbf74f9d73ea48/LICENSE`](third_party/licenses/HKUDS-Vibe-Trading-e90b6c6cd9fea23067a85667e7fbf74f9d73ea48/LICENSE)
-- Local glue: bounded candidate generation is optionally runtime-wired and fixture-tested, but its
-  production transport is not configured or Live-verified. The strict daily Mootdx acquisition
-  shape is fixture-only and is not wired to production runtime. No Vibe indicator code is adopted.
+- Local glue: bounded candidate generation and non-executable idea guidance are runtime-wired and
+  fixture-tested, but the current revision is not Live-verified. The idea layer only lets the
+  provider select server-owned strategy templates for the authoritative current A-share context;
+  it cannot emit executable code or bypass the existing compiler. The strict daily Mootdx
+  acquisition shape remains fixture-only and is not wired to production runtime. No Vibe
+  indicator code is adopted.
 - Distribution requirement: when source or a substantial portion is copied, retain the upstream
   copyright and permission notice with the distributed copy. Record local modifications and the
   pinned revision.
 
-Packaging must include the archived exact license above with any distributed Vibe-derived source.
+The MIT license bytes at both reviewed revisions have the same SHA-256 recorded in
+`THIRD_PARTY.yml`. Packaging must include the archived exact license above with any distributed
+Vibe-derived source.
 
 ## moss-site/moss-trade-bot-skills
 

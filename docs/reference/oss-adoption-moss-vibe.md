@@ -8,11 +8,14 @@
 [MOSS](https://github.com/moss-site/moss-trade-bot-skills) 提供指标公式候选、固定数据指纹和
 回放一致性方法。接入只发生在端口与 adapter 层，第三方对象不得成为领域模型或运行清单的真相。
 
-本轮已经有四个窄 adapter，状态统一为 `implemented / fixture-tested / Live-unverified`；其中模型 transport
-和真实行情 client 尚未配置：
+本轮已经有五个窄 adapter；代码、夹具、旧 provider 公网冒烟、当前 Live 和生产状态必须分别描述：
 
-- `ashare_lab/adapters/language/vibe_candidates.py`：受限 JSON 候选与确定性规则快路；尚无正式模型 transport，
-  也没有接入 Live bootstrap；
+- `ashare_lab/adapters/language/vibe_candidates.py`：受限 JSON 策略候选与确定性规则快路；模型
+  transport/bootstrap 配置路径已存在，旧 provider 路径有公网冒烟记录，当前 revision
+  的完整 provenance 与 API/H5 仍为 `Live-unverified`；
+- `ashare_lab/adapters/language/vibe_ideas.py`：借鉴 Vibe 的“模糊需求给 2—3 个方向”与假设工作流，产出
+  不可执行的 `idea-route.v1`。它只把当前权威 A 股页当价格代理，只能选择服务端固定模板，用户选择后再回到
+  原编译器；当前仅 `implemented / fixture-tested`，没有 Live 证据；
 - `ashare_lab/adapters/signals/moss_pandas_backend.py`：真正调用 MOSS 同款 pandas 路径的差分 provider；
   EMA、MACD 已在显式 `1e-12` 容差内通过 A 股口径对拍，RSI 因 seed/零损失语义不同被排除；
 - `ashare_lab/adapters/market_data/vibe_mootdx.py`：严格日线查询形状、单位转换和 coverage 证据；只用 fake
@@ -22,8 +25,9 @@
   AKShare 不作为运行依赖。本地增加 A 股身份、raw hash、量纲、区间、session 与公司行动门禁；直连被
   远端断开，尚无真实 batch、不可变 snapshot 或生产授权。它与研究用 Push2 主力资金不是同一数据集。
 
-四份定向测试在 2026-08-30 fresh 执行为 `85 passed`。这不是 clean-SHA Live E2E，也不证明真实数据、
-前端或生产授权。上游包和源码树没有被整体导入；本地 adapter 只固定引用来源 commit 和窄接口。
+这些 adapter 均有各自的定向夹具；历史 `85 passed` 只对应 2026-08-30 当时的四个 adapter，不能冒充新增
+`idea-route.v1` 或当前 clean-SHA Live E2E。上游包和源码树没有被整体导入；本地 adapter 只固定引用来源
+commit 和窄接口，真实数据、前端与生产授权仍需独立验收。
 
 机器可读清单见仓库根目录的 [`THIRD_PARTY.yml`](../../THIRD_PARTY.yml)，许可证要求摘要见
 [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md)。
@@ -38,14 +42,22 @@
 | [bukosabino/ta](https://pypi.org/project/ta/0.11.0/) | 2023 PyPI sdist `0.11.0` / SHA-256 `de86af…493fd`；另审 2026 master `a8904107`，两者不等同 | MIT | 仅作指标差分 oracle 候选；未安装、未执行、非运行依赖 |
 | [AKShare](https://github.com/akfamily/akshare/tree/8e95744b79ae22326308ccd2b4e62650c5b53c55) | `8e95744b79ae22326308ccd2b4e62650c5b53c55` | MIT | 仅固定 `stock_zh_a_hist` 的 Push2 请求协议；不作为运行时依赖 |
 
-“固定版本”表示本次审计和四个窄 adapter 的来源，不表示两套上游产品已整体采用。升级必须重新做
+“固定版本”表示原四个窄 adapter 的审计来源，不表示两套上游产品已整体采用。升级必须重新做
 许可证、差异和门禁审计。
+
+新增 `vibe_ideas.py` 使用的 hypothesis/autopilot pattern 已固定到
+`1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7`；该 revision、精确上游路径和采用边界已补入
+`THIRD_PARTY.yml` 与 notices。两次审计 revision 的 MIT 许可证字节 SHA-256 相同，继续复用仓库中已归档的
+精确许可证文本。完成 provenance 登记不等于 Live 证据，`idea-route.v1` 仍只标
+`implemented / fixture-tested`。
 
 ## 3. 目标结构
 
 ```text
 用户自然语言
-  -> CandidateGenerator（规则快路 + 已实现但未配置 Live 的 VibeBounded provider）
+  -> 已是完整策略：CandidateGenerator（规则快路 + 已配置但需当前版本复验的 VibeBounded provider）
+  -> 纯观点：IdeaRouter（理解 -> 待检验假设 -> 当前 A 股页价格代理 -> 2—3 个固定模板候选）
+  -> 用户选择候选后重新进入 CandidateGenerator
   -> CandidateAst / StrategySpec（本项目唯一 DSL）
   -> IndicatorBackend（MOSS/pandas adapter 已夹具双跑；仅 EMA/MACD 进入采用白名单）
   -> SnapshotAcquirer（VibeMootdx 与 Push2 日线 adapter 已夹具验证，仅采集期允许联网）
@@ -60,7 +72,8 @@
 
 | 当前责任/位置 | 上游候选 | 采用方式 | 胶水层输出 | 明确不采用 | 替换状态 |
 |---|---|---|---|---|---|
-| 中文常见表达：`rule_based.py` + `vibe_candidates.py` | Vibe `agent/src/skills/strategy-generate/SKILL.md` 的需求提取流程 | 已实现 `HybridCandidateGenerator` 和严格 JSON Schema；规则解析器仍作快路，只有 allowlist miss 才调用 bounded provider | 一个或多个 `CandidateAst`，随后仍经 Catalog、Schema、股票和时间门禁 | Vibe 生成并执行 `signal_engine.py`；任意 Python/SQL；缺参时模型静默默认 | `implemented / fixture-tested / Live-unverified`；transport 未配置 |
+| 中文完整策略：`rule_based.py` + `vibe_candidates.py` | Vibe `agent/src/skills/strategy-generate/SKILL.md` 的需求提取流程 | 已实现 `HybridCandidateGenerator` 和严格 JSON Schema；规则解析器仍作快路，只有 allowlist miss 才调用 bounded provider | 一个或多个 `CandidateAst`，随后仍经 Catalog、Schema、股票和时间门禁 | Vibe 生成并执行 `signal_engine.py`；任意 Python/SQL；缺参时模型静默默认 | `implemented / fixture-tested / Live-unverified`；transport/bootstrap 路径已配置，旧公网冒烟不证明当前 revision |
+| 纯观点：`vibe_ideas.py` + `idea_routing.py` | Vibe 的需求模糊时给 2—3 个方向，以及 hypothesis/research workflow | 模型只复述观点、写待检验假设并选择 2—3 个服务端固定模板 ID；资产只取当前权威 A 股页 symbol | 非执行 `idea-route.v1`；用户选中后生成服务端模板原话并重新走原编译器 | 模型另选股票、自由写规则/参数、生成政治主题事件、自动选择收益最好候选、直接创建 StrategySpec/run | `implemented / fixture-tested`；本轮没有 Live 证据 |
 | 长尾表达的结构化安全 | Vibe `agent/src/shadow_account/codegen.py`、`agent/backtest/runner.py` | 只借 literal-safe、AST 负例和 shape-check 测试方法；主方案仍是受限 JSON DSL | 安全负例语料和 provider contract tests | 把 AST denylist 当完整沙箱；把生成 Python 当正式策略表示 | `reference_only` |
 | 采集源选择 | Vibe `agent/backtest/loaders/registry.py` | 复用 registry/fallback 设计，改成“采集任务内选择并记录来源” | 一个显式 source result，进入本项目 snapshot publisher | 回测执行时联网 fallback；某源失败后不留证据地换源 | `planned` |
 | 通达信日线采集：`vibe_mootdx.py` | Vibe `agent/backtest/loaders/mootdx_loader.py` | 已按固定 commit 重写最小 `get_k_data` Protocol；要求权威 session 列表，lots 转 shares，记录 canonical-frame/raw-byte hash 语义 | 规范 SH/SZ 股票、日线 OHLCV、查询身份和精确 coverage evidence；仍不是已发布 snapshot | 直接把 DataFrame 当正式快照；北交所默默返回空；把 canonical-frame hash 冒充 wire hash | `implemented / fixture-tested / Live-unverified`；真实 client 未配置且法务阻断 |
@@ -129,8 +142,12 @@ ATR；其 Donchian 默认包含当前柱。未来若增加差分测试，必须�
 
 - 用固定中文 corpus 同时运行当前 parser 和候选 provider。
 - 已支持表达必须得到语义等价的 `CandidateAst`：标的、买入、卖出、逻辑组合、参数、时间区间均比较。
-- 未支持、矛盾、缺关键退出条件和非 A 股输入必须 fail closed；只允许一次集中澄清。
+- 有意义但不构成策略的观点必须进入 `idea-route.v1`，得到理解、待检验假设与 2—3 个固定模板候选；选择前不得产生 StrategySpec、hash 或 run。
+- 观点候选只使用当前权威 A 股页 symbol；缺股票时澄清，不能由模型猜股票。没有可靠政治/主题事件快照时只允许价格行为代理，不得生成事件因果回测。
+- 用户一次选择后必须重新运行当前 parser/candidate provider，并重新通过全部硬门禁；引导对象不能直接转成正式策略。
+- 矛盾、缺关键退出条件和非 A 股输入必须在理解后 fail closed 或给出诚实改写；只允许一次集中澄清。空输入和协议错误保持 invalid。
 - 模型输出先做 Schema/Catalog/股票/时间校验；模型置信度不能绕过硬门禁。
+- 模型 transport 暂不可用是可重试服务故障，不得降级成“用户的话无法理解”。
 - 正式 worker 不读取、不生成、不 import `signal_engine.py`。
 
 ### G3：指标黄金样本
@@ -171,17 +188,19 @@ ATR；其 Donchian 默认包含当前柱。未来若增加差分测试，必须�
 
 ## 7. 首批实施顺序
 
-1. 为已实现的 `VibeBoundedCandidateGenerator` 接正式模型 transport、超时/审计和 bootstrap 开关；仍只
-   产出 `CandidateAst`，先在影子模式覆盖现有确定性语义，不替换一次集中澄清。
-2. 先解决 `mootdx` 许可证/README 与底层行情条款冲突；只有获得允许后才注入真实 client。真实取数仍须
+1. 在当前 clean revision 复验已配置的 `VibeBoundedCandidateGenerator` transport/bootstrap，补齐超时、
+   持久化 provenance 与真实 API/H5 证据；仍只产出 `CandidateAst`，旧 provider 公网冒烟不作为当前结论。
+2. 对 `idea-route.v1` 验收“任意有意义输入先被理解 → 观点/假设 → 当前股票价格代理 → 2—3 个固定候选
+   → 用户一次选择 → 原编译器重编译”。以“我讨厌特朗普”为负例证明不会生成政治事件、换股或因果结论。
+3. 先解决 `mootdx` 许可证/README 与底层行情条款冲突；只有获得允许后才注入真实 client。真实取数仍须
    进入本项目 snapshot publisher、通过 session/公司行动/双价格门禁，不把 fallback 带入运行期。若不能
    获得允许，adapter 保留为研究对照，正式链继续使用 Choice/东方财富等已批准来源。
-3. 当前第一方运行时已新增 ATR/NATR、ADX/DMI、BIAS、ROC、Momentum、Stochastic、Williams %R、
+4. 当前第一方运行时已新增 ATR/NATR、ADX/DMI、BIAS、ROC、Momentum、Stochastic、Williams %R、
    Donchian、收益率标准差、历史波动率和 True Range；黄金向量与前缀不变性已由本项目测试固定。MOSS 与
    `bukosabino/ta` 仍只是差分候选，尚未形成已执行的第三方 oracle 证据。KDJ 也不能与 Stochastic K/D
    视为同一定义；任何单项替换仍需先通过对齐、停牌、NaN 和参数边界门禁。
-4. 把 Vibe validation 作为可关闭的附属报告 provider 接入，先固定 seed 和算法版本。
-5. 在 clean integration revision 上重新执行技术策略、事件策略、真实 H5 和结果身份门禁，再决定删除哪些
+5. 把 Vibe validation 作为可关闭的附属报告 provider 接入，先固定 seed 和算法版本。
+6. 在 clean integration revision 上重新执行技术策略、事件策略、真实 H5 和结果身份门禁，再决定删除哪些
    重复实现。
 
 这份顺序刻意先接窄端口、后删旧代码：复用失败时可以退回当前实现，且不会把第三方执行语义带进已经

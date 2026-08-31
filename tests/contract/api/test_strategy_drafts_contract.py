@@ -8,14 +8,50 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from ashare_lab.api import create_app
+from ashare_lab.api.schemas import StrategyDraftResponse
+from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus
 from ashare_lab.domain.strategy import StrategySpec, canonical_hash
+from ashare_lab.ports.idea_routing import IdeaAssetMapping, IdeaProposal, IdeaRoute
 
 
 class _ExplodingCompiler:
     async def compile(self, _request: Any) -> Any:
         raise RuntimeError("internal secret must not leak")
+
+
+class _IdeaCompiler:
+    async def compile(self, _request: Any) -> CompileOutcome:
+        proposals = tuple(
+            IdeaProposal(
+                id=f"idea_{index:012x}",
+                title=f"候选 {index}",
+                hypothesis="仅用价格行为代理检验该观点。",
+                entry_summary="MACD 金叉",
+                exit_summary="MACD 死叉",
+                suggested_utterance="MACD金叉买入，死叉卖出，回测近5年",
+                capability_ids=("technical.macd",),
+                assumptions=("不证明因果关系。",),
+                confidence=0.75,
+            )
+            for index in range(1, 3)
+        )
+        return CompileOutcome(
+            status=CompileStatus.NEEDS_CLARIFICATION,
+            clarification="请选择一个可回测的价格代理。",
+            diagnostic_code="idea_guidance_required",
+            idea_route=IdeaRoute(
+                understanding="用户表达了一个政治态度。",
+                hypothesis="相关不确定性可能与当前股票价格行为同期出现。",
+                asset_mapping=IdeaAssetMapping(
+                    instrument_symbol="300059.SZ",
+                    rationale="只使用当前页面股票作为价格代理。",
+                ),
+                proposals=proposals,
+            ),
+        )
 
 
 def test_ready_draft_returns_canonical_strategy_hash_and_provenance(
@@ -37,6 +73,45 @@ def test_ready_draft_returns_canonical_strategy_hash_and_provenance(
         "/backtest/start",
         "/backtest/end",
     }
+
+
+def test_idea_guidance_is_typed_and_remains_non_executable() -> None:
+    app = create_app()
+    app.state.container = replace(app.state.container, compiler=_IdeaCompiler())
+    with TestClient(app) as idea_client:
+        response = idea_client.post(
+            "/api/v1/strategy-drafts",
+            json={
+                "utterance": "我讨厌特朗普",
+                "instrument_context": "300059.SZ",
+                "as_of_date": "2026-08-30",
+            },
+        )
+    payload: dict[str, Any] = response.json()
+
+    assert response.status_code == 201
+    assert payload["status"] == "needs_clarification"
+    assert payload["diagnostic_code"] == "idea_guidance_required"
+    assert payload["strategy"] is None
+    assert payload["strategy_hash"] is None
+    assert payload["idea_route"]["schema_version"] == "idea-route.v1"
+    assert payload["idea_route"]["asset_mapping"] == {
+        "instrument_symbol": "300059.SZ",
+        "relation": "current_page_proxy",
+        "rationale": "只使用当前页面股票作为价格代理。",
+        "evidence_status": "host_context_only",
+    }
+    assert len(payload["idea_route"]["proposals"]) == 2
+    assert all(
+        item["suggested_utterance"] == "MACD金叉买入，死叉卖出，回测近5年"
+        for item in payload["idea_route"]["proposals"]
+    )
+    with pytest.raises(ValidationError):
+        StrategyDraftResponse.model_validate({**payload, "idea_route": None})
+    with pytest.raises(ValidationError):
+        StrategyDraftResponse.model_validate(
+            {**payload, "diagnostic_code": "strategy_rule_incomplete"}
+        )
 
 
 def test_instrument_context_rejects_a_different_symbol_named_in_the_utterance(

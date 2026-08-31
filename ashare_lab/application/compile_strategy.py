@@ -45,10 +45,49 @@ from ashare_lab.ports.candidate_generation import (
     SignalIntent,
     TrailingDrawdownIntent,
 )
+from ashare_lab.ports.idea_routing import IdeaRoute, IdeaRouter
 
 DEFAULT_INITIAL_CASH_CNY = 1_000_000
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 POSITION_AWARE_EXIT_AND_UNSUPPORTED = "position_aware_exit_and_not_supported"
+_IDEA_ROUTE_DIAGNOSTIC_CODES = frozenset(
+    {"no_supported_signal_recognized", "candidate_provider_invalid_output"}
+)
+_STRATEGY_SYNTAX_MARKERS = (
+    "买入",
+    "买进",
+    "建仓",
+    "开仓",
+    "卖出",
+    "卖掉",
+    "退出",
+    "平仓",
+    "止盈",
+    "止损",
+    "持有",
+    "回测",
+    "macd",
+    "rsi",
+    "kdj",
+    "cci",
+    "boll",
+    "bbi",
+    "ema",
+    "均线",
+    "股价",
+    "价格",
+    "成交量",
+    "成交额",
+    "金叉",
+    "死叉",
+    "年报",
+    "半年报",
+    "季报",
+    "业绩预告",
+    "公告",
+    "中标",
+    "许可",
+)
 _POSITION_AWARE_EXIT_AND_EXPLANATION = (
     "当前回测只支持把持有期、止盈、止损、回撤与其他卖出条件按“任一先触发即卖出”执行，"
     "尚不能正确执行“同时满足才卖出”。请改用“或”，或只保留一个这类卖出条件。"
@@ -214,6 +253,7 @@ class CompileOutcome:
     candidate_grounding: tuple[CandidateGroundingEvidence, ...] = ()
     candidate_rejections: tuple[CandidateRejectionSummary, ...] = ()
     candidate_alternatives: tuple[CandidateAlternativeSummary, ...] = ()
+    idea_route: IdeaRoute | None = None
 
 
 class StrategyCompiler:
@@ -228,6 +268,7 @@ class StrategyCompiler:
         initial_cash_cny: int = DEFAULT_INITIAL_CASH_CNY,
         trusted_date_provider: Callable[[], date] | None = None,
         backtest_anchor_date: date | None = None,
+        idea_router: IdeaRouter | None = None,
     ) -> None:
         self._generator = generator
         self._catalog = catalog
@@ -237,6 +278,7 @@ class StrategyCompiler:
         self._initial_cash_cny = initial_cash_cny
         self._trusted_date_provider = trusted_date_provider or _shanghai_today
         self._backtest_anchor_date = backtest_anchor_date
+        self._idea_router = idea_router
 
     async def compile(self, request: CompileInput) -> CompileOutcome:
         if not request.utterance.strip():
@@ -275,12 +317,24 @@ class StrategyCompiler:
                 clarification=_SOURCE_SEMANTIC_EXPLANATIONS[source_semantic_diagnostic],
                 diagnostic_code=source_semantic_diagnostic,
             )
+        if self._idea_router is not None and _looks_like_broad_viewpoint(
+            effective_request.utterance
+        ):
+            idea_outcome = await self._compile_idea_guidance(effective_request)
+            if idea_outcome is not None:
+                return idea_outcome
         candidates = await self._generator.generate(effective_request)
         if not candidates:
             return CompileOutcome(
                 status=CompileStatus.UNSUPPORTED,
                 diagnostic_code="no_candidate_generated",
             )
+        if self._idea_router is not None and all(
+            item.unsupported_code in _IDEA_ROUTE_DIAGNOSTIC_CODES for item in candidates
+        ):
+            idea_outcome = await self._compile_idea_guidance(effective_request)
+            if idea_outcome is not None:
+                return idea_outcome
         candidate = candidates[0]
         if len(candidates) == 1 and candidate.unsupported_code is not None:
             if candidate.unsupported_code == "natural_day_holding_period_requires_clarification":
@@ -490,6 +544,36 @@ class StrategyCompiler:
             candidate_alternatives=alternatives,
         )
 
+    async def _compile_idea_guidance(
+        self,
+        request: CompileInput,
+    ) -> CompileOutcome | None:
+        if self._idea_router is None:
+            return None
+        if request.instrument_context is None:
+            return CompileOutcome(
+                status=CompileStatus.NEEDS_CLARIFICATION,
+                clarification="我只差股票：请确认要回测哪一只 A 股（6 位代码）？",
+                diagnostic_code="instrument_required",
+            )
+        idea_route = await self._idea_router.route(request)
+        if (
+            idea_route is None
+            or idea_route.asset_mapping.instrument_symbol is None
+            or not 2 <= len(idea_route.proposals) <= 3
+        ):
+            return None
+        return CompileOutcome(
+            status=CompileStatus.NEEDS_CLARIFICATION,
+            clarification=(
+                "我理解这是一个观点，还不是可直接执行的交易规则。"
+                "请从下面的价格行为代理中选一种，选择后仍会通过现有"
+                " DSL 和 Catalog 校验，系统不会自动执行。"
+            ),
+            diagnostic_code="idea_guidance_required",
+            idea_route=idea_route,
+        )
+
     def _build_strategy(
         self,
         candidate: CandidateAst,
@@ -564,6 +648,18 @@ class StrategyCompiler:
                 initial_cash_cny=self._initial_cash_cny,
             ),
         )
+
+
+def _looks_like_broad_viewpoint(utterance: str) -> bool:
+    """Identify a pure viewpoint before asking the strict strategy translator.
+
+    This is only a routing shortcut.  Any sentence containing recognizable
+    strategy syntax still goes through the existing deterministic/provider
+    compiler first, so the idea layer cannot steal or weaken a real rule.
+    """
+
+    normalized = re.sub(r"\s+", "", utterance).casefold()
+    return bool(normalized) and not any(marker in normalized for marker in _STRATEGY_SYNTAX_MARKERS)
 
 
 def _to_condition(intent: SignalIntent) -> Condition:

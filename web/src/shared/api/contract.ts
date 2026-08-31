@@ -9,6 +9,7 @@ import type {
   CapabilityTriggerDefinition,
   Clarification,
   CompileRequest,
+  IdeaRoute,
   Instrument,
   StrategyCondition,
   StrategyDraft,
@@ -71,6 +72,7 @@ export type LiveDraftResponse = {
   candidate_grounding: CandidateGroundingPayload | null
   candidate_alternatives: CandidateAlternativeItem[]
   candidate_rejections: CandidateRejectionItem[]
+  idea_route?: IdeaRoute | null
   created_at: string
 }
 
@@ -250,6 +252,19 @@ export const fromLiveDraftResponse = (
   }
   if (response.status === 'needs_clarification') {
     const diagnosticCode = response.diagnostic_code ?? 'strategy_clarification'
+    const ideaRoute = diagnosticCode === 'idea_guidance_required'
+      ? response.idea_route ?? undefined
+      : undefined
+    if (diagnosticCode === 'idea_guidance_required'
+      && (!ideaRoute || ideaRoute.proposals.length < 2)) {
+      throw new ApiError({
+        type: 'about:blank',
+        title: '观点引导信息不完整',
+        status: 502,
+        detail: '服务没有返回至少两个可供选择的完整策略方向，请稍后重试。',
+        code: 'idea_route_invalid',
+      })
+    }
     const asksForInstrument = diagnosticCode === 'instrument_required'
     const asksForCompleteRule = diagnosticCode === 'strategy_rule_incomplete'
     const asksForEntry = diagnosticCode === 'entry_rule_not_recognized'
@@ -258,15 +273,24 @@ export const fromLiveDraftResponse = (
       draftId: response.draft_id,
       clarification: {
         id: diagnosticCode,
-        question: response.clarification ?? '请补充策略所需的信息。',
-        reason: asksForInstrument
+        question: response.clarification
+          ?? (ideaRoute ? '选一个方向，我会把它变成完整买卖规则再识别。' : '请补充策略所需的信息。'),
+        reason: ideaRoute
+          ? '原话表达的是观点，还不是买卖规则。以下方向都需要你先选定，系统不会替你自动执行。'
+          : asksForInstrument
           ? '补齐股票后，系统才能生成可执行规则。'
           : asksForEntry
             ? '买入条件决定什么时候建立持仓。系统不会替你补一条默认策略。'
           : diagnosticCode === 'exit_rule_not_recognized'
             ? '卖出条件决定何时结束持仓。系统不会替你补一条默认策略。'
             : '请回到原话补齐关键信息，系统不会自行猜测交易规则。',
-        choices: [{
+        choices: ideaRoute ? ideaRoute.proposals.slice(0, 3).map((proposal) => ({
+          id: proposal.id,
+          label: proposal.title,
+          description: `${proposal.hypothesis}；买入：${proposal.entry_summary}；卖出：${proposal.exit_summary}`,
+          action: 'replace_and_compile' as const,
+          suggestedUtterance: proposal.suggested_utterance,
+        })) : [{
           id: asksForInstrument ? 'use-current-instrument' : 'edit-utterance',
           label: asksForInstrument
             ? `使用 ${input.instrument.name}`
@@ -286,6 +310,7 @@ export const fromLiveDraftResponse = (
           action: asksForInstrument ? 'submit_clarification' : 'edit_utterance',
         }],
         recognized: recognizedFragments(input),
+        ideaRoute,
       },
     }
   }

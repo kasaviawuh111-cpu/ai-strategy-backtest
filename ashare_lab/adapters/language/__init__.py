@@ -6,10 +6,12 @@ from .vibe_candidates import (
     HybridCandidateGenerator,
     VibeBoundedCandidateGenerator,
 )
+from .vibe_ideas import VibeIdeaRouter
 
 __all__ = [
     "CandidateJsonTransport",
     "HybridCandidateGenerator",
     "RuleBasedCandidateGenerator",
     "VibeBoundedCandidateGenerator",
+    "VibeIdeaRouter",
 ]

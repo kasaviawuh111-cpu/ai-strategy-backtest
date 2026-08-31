@@ -515,6 +515,15 @@ export default function App({
       resetForEdit()
       return
     }
+    if (choice.action === 'replace_and_compile') {
+      const replacement = choice.suggestedUtterance?.trim()
+      if (!replacement) return
+      setUtterance(replacement)
+      setSubmittedText(replacement)
+      setClarification(undefined)
+      compileMutation.mutate({ text: replacement })
+      return
+    }
     setClarificationRecord({
       question: clarification.question,
       reason: clarification.reason,
@@ -755,11 +764,27 @@ export default function App({
 
               {clarification && !clarificationRecord && !compileMutation.isPending ? (
                 <Turn>
-                  <ThinkBlock meta="只问这一次" lines={[
-                    clarification.reason,
-                    ...(clarification.recognized ?? []).map((item) => `${item.label}：${item.value}`),
-                  ]} />
-                  <Say>{clarification.question}</Say>
+                  <ThinkBlock
+                    meta={clarification.ideaRoute ? `${clarification.ideaRoute.proposals.length} 个可检验方向` : '只问这一次'}
+                    lines={clarification.ideaRoute ? [
+                      clarification.reason,
+                      '我先不假设因果，也不替你换股票。',
+                      '正在把这个观点收敛成当前 A 股上能真正编译的策略方向。',
+                    ] : [
+                      clarification.reason,
+                      ...(clarification.recognized ?? []).map((item) => `${item.label}：${item.value}`),
+                    ]}
+                  />
+                  {clarification.ideaRoute ? (
+                    <>
+                      <Say>
+                        <><b>已理解观点：</b>{clarification.ideaRoute.understanding}<br />
+                          <b>投资假设：</b>{clarification.ideaRoute.hypothesis}<br />
+                          <b>当前 A 股映射：</b>{clarification.ideaRoute.asset_mapping.instrument_symbol}，{clarification.ideaRoute.asset_mapping.rationale}</>
+                      </Say>
+                      <Say>{clarification.question}</Say>
+                    </>
+                  ) : <Say>{clarification.question}</Say>}
                   <Chips>
                     {clarification.choices.map((choice) => {
                       const unavailable = /盘中|分钟/.test(`${choice.label}${choice.description}`)

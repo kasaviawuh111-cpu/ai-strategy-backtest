@@ -161,7 +161,7 @@ def test_configured_provider_is_used_only_after_allowlisted_rule_miss(
         _self: RuleBasedCandidateGenerator,
         request: CompileInput,
     ) -> tuple[CandidateAst, ...]:
-        if request.utterance == "规则快路测试":
+        if request.utterance == "MACD规则快路测试":
             params = (("fast", 12), ("signal", 9), ("slow", 26))
             return (
                 CandidateAst(
@@ -214,7 +214,7 @@ def test_configured_provider_is_used_only_after_allowlisted_rule_miss(
             Response,
             client.post(
                 "/api/v1/strategy-drafts",
-                json=_draft("规则快路测试"),
+                json=_draft("MACD规则快路测试"),
             ),
         )
         long_tail = cast(
@@ -266,3 +266,72 @@ def test_configured_provider_is_used_only_after_allowlisted_rule_miss(
     assert app.state.candidate_provider_response_mode == "json_schema"
     assert secret not in str(app.state.candidate_provider_identity)
     assert secret not in long_tail.text
+
+
+def test_configured_app_routes_a_pure_viewpoint_to_idea_guidance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real composition root must wire both bounded provider stages."""
+
+    calls: list[CandidateTransportRequest] = []
+
+    async def generate_json(
+        _self: OpenAICompatibleCandidateTransport,
+        request: CandidateTransportRequest,
+    ) -> dict[str, object]:
+        calls.append(request)
+        properties = cast(dict[str, object], request.response_schema.get("properties", {}))
+        assert "template_ids" in properties
+        return {
+            "understanding": "用户表达了一个方向性观点，但没有给出可执行条件。",
+            "hypothesis": "可以用不同价格行为代理检验观点是否与后续走势同向。",
+            "mapping_rationale": "只把当前页面股票当作价格行为代理。",
+            "template_ids": ["ma20_trend", "rsi_reversal", "macd_momentum"],
+        }
+
+    monkeypatch.setattr(OpenAICompatibleCandidateTransport, "generate_json", generate_json)
+    settings = _settings(
+        tmp_path,
+        candidate_provider_mode="openai_compatible",
+        candidate_provider_endpoint="https://gateway.example.test/v1/chat/completions",
+        candidate_provider_name="fixture-gateway",
+        candidate_provider_model="fixture-model",
+        candidate_provider_api_key="fixture-secret",
+        candidate_provider_timeout_seconds=1.0,
+    )
+    app = create_configured_app(settings)
+
+    with TestClient(app) as client:
+        response = cast(
+            Response,
+            client.post(
+                "/api/v1/strategy-drafts",
+                json=_draft("我讨厌特朗普"),
+            ),
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["status"] == "needs_clarification"
+    assert payload["diagnostic_code"] == "idea_guidance_required"
+    assert payload["strategy"] is None
+    assert payload["strategy_hash"] is None
+    assert payload["idea_route"]["schema_version"] == "idea-route.v1"
+    assert payload["idea_route"]["asset_mapping"] == {
+        "instrument_symbol": "300059.SZ",
+        "relation": "current_page_proxy",
+        "rationale": (
+            "只使用当前股票页的 300059.SZ 检验价格行为；"
+            "当前没有资产暴露证据，不声称该观点导致该股涨跌。"
+        ),
+        "evidence_status": "host_context_only",
+    }
+    assert len(payload["idea_route"]["proposals"]) == 3
+    assert {item["capability_ids"][0] for item in payload["idea_route"]["proposals"]} == {
+        "technical.ma",
+        "technical.rsi",
+        "technical.macd",
+    }
+    assert len(calls) == 1
+    assert "template_ids" in cast(dict[str, object], calls[0].response_schema["properties"])

@@ -272,12 +272,48 @@ export type CandidateRejectionItem = {
   diagnostic_code: string
 }
 
+export type IdeaRouteProposal = {
+  id: string
+  title: string
+  hypothesis: string
+  entry_summary: string
+  exit_summary: string
+  suggested_utterance: string
+  capability_ids: string[]
+  assumptions: string[]
+  confidence: number
+}
+
+export type IdeaRoute = {
+  schema_version: 'idea-route.v1'
+  understanding: string
+  hypothesis: string
+  asset_mapping: {
+    instrument_symbol: string
+    relation: 'current_page_proxy'
+    rationale: string
+    evidence_status: 'host_context_only'
+  }
+  proposals: IdeaRouteProposal[]
+  provenance?: {
+    source: 'bounded_provider'
+    provider: string
+    model: string
+    prompt_version: string
+    schema_version: string
+    capability_projection_version: string
+    capability_projection_hash: string
+    upstream_pattern_commit: string
+  } | null
+}
+
 export type ClarificationChoice = {
   id: string
   label: string
   description: string
   recommended?: boolean
-  action?: 'submit_clarification' | 'edit_utterance'
+  action?: 'submit_clarification' | 'edit_utterance' | 'replace_and_compile'
+  suggestedUtterance?: string
 }
 
 export type Clarification = {
@@ -287,6 +323,8 @@ export type Clarification = {
   choices: ClarificationChoice[]
   /** 仅用于把已经识别的片段留在卡片里；不等于可执行 StrategySpec。 */
   recognized?: Array<{ label: string; value: string }>
+  /** 观点引导只生成待用户选择的候选；选择前没有 StrategySpec，也不能回测。 */
+  ideaRoute?: IdeaRoute
 }
 
 export type CompileRequest = {

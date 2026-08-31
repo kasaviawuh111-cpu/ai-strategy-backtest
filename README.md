@@ -1,9 +1,10 @@
 # A 股单股自然语言策略回测
 
-一个可运行的 research demo：用户说一句 A 股交易规则，系统把它转换成受限、可编辑的 Strategy DSL，再用统一的 A 股日线引擎回测。
+一个可运行的 research demo：用户可以说一条 A 股交易规则，也可以先说一个观点或问题。完整规则直接转换成受限、可编辑的 Strategy DSL；纯观点先被整理为可检验假设和 2—3 个固定模板候选，用户选定后再进入同一条严格编译与 A 股日线回测链。
 
 ```text
 一句中文
+→ 完整规则直接编译；纯观点先生成非执行候选并由用户选择
 → 策略卡
 → 异步回测
 → 收益 / 风险 / 净值
@@ -32,7 +33,8 @@
 | 范围 | 当前状态 |
 |---|---|
 | 策略 | A 股、单股、只做多、日线 |
-| 开源胶水 | `implemented / fixture-tested / Live-unverified`：Vibe 受限候选、MOSS/pandas 指标差分、Vibe/mootdx 日线接口和 AKShare-shaped 东方财富 Push2 日线请求协议已落地；正式模型/client 未配置，指标未切默认，mootdx 商业与数据条款待审，Push2 直连未取得真实 batch 或 snapshot，公共未文档化接口不视为生产授权 |
+| 自然语言与观点引导 | 完整策略继续走“确定性快路 + 受限 CandidateAst + 现有严格编译”；模型 transport 已配置，只有较早版本的公网冒烟证据，当前 revision 仍为 `Live-unverified`。`idea-route.v1` 已达到 `implemented / fixture-tested`：任意有意义输入先被理解；纯观点只生成“观点 → 可检验假设 → 当前权威 A 股页价格代理 → 2—3 个固定模板候选”，用户一次选择后才重新编译，选择前不可回测 |
+| 其他开源胶水 | `implemented / fixture-tested / Live-unverified`：MOSS/pandas 指标差分、Vibe/mootdx 日线接口和 AKShare-shaped 东方财富 Push2 日线请求协议已落地；指标未切默认，mootdx 商业与数据条款待审，Push2 直连未取得真实 batch 或 snapshot，公共未文档化接口不视为生产授权 |
 | 技术信号 | 35 个透明日线定义：均线/趋势、MACD/RSI/KDJ/CCI/Stochastic/Williams %R、BIAS/ROC/Momentum、BOLL/Donchian、TR/ATR/NATR/波动率、ADX/DMI、价格与量价等；目录可执行不等于任意中文说法都已验收 |
 | 事件信号 | 69 项只达到 Catalog/编译/Adapter/运行时代码路径；当前 strict Composite 只对年报、半年报、季报、业绩预告、业绩快报 5 码提供 pinned coverage，共 26 条东方财富秒级观察；不得写成 69 类真实历史覆盖 |
 | 报告正文词频 | `implemented / fixture-tested / Mock-verified / Live-unverified`：可对“初始完整定期报告正文”做确定性词频，并与“首次实际买入成交后第 N 个 A 股交易日退出”组合；当前 strict Composite 的 26 条 observation 中 `document_text=0`，必须 opt-in 重采正文后才能 Live 运行 |
@@ -106,6 +108,8 @@ Compose 路径见[本地运行手册](docs/runbooks/local-development.md)。
 
 ## 关键语义
 
+- 任何有意义的输入都先被接住，但“理解了”不等于“可回测”。完整策略走原有快路；纯观点进入非执行的 `idea-route.v1`，只使用当前权威 A 股股票页作为价格代理，给出 2—3 个服务端固定模板候选。用户选择后仍要重新经过现有 Catalog、Schema、数据与时间门禁，并再次明确点击开始回测。
+- 例如“我讨厌特朗普”可以被复述为负面观点并转成几个价格行为检验方向，但当前没有可靠的政治/主题事件快照时，不得生成“特朗普事件”或声称该观点导致当前股票涨跌；也不得由模型另猜一只股票。
 - 技术指标按日线收盘确认；日线 MACD 金叉不能按同一收盘价成交。
 - 只说“MACD”等裸指标、只有买入或只有卖出条件时，系统只集中澄清一次缺少的交易方向，不自动补成“金叉买、死叉卖”。
 - 事件只能在 `available_at` 后触发。通用研究文件仍可把日期级记录按收盘后处理；

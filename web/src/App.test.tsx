@@ -399,6 +399,95 @@ describe('formal main.tsx App journey', () => {
     expect(screen.queryByText('MACD 金叉')).not.toBeInTheDocument()
   })
 
+  it('guides an opinion into explicit A-share strategy choices before allowing a backtest', async () => {
+    const originalCompile = strategyApi.compile
+    const compile = vi.spyOn(strategyApi, 'compile')
+      .mockResolvedValueOnce({
+        status: 'needs_clarification',
+        draftId: 'idea-route-draft',
+        clarification: {
+          id: 'idea_guidance_required',
+          question: '选一个方向，我会把它变成完整买卖规则再识别。',
+          reason: '原话表达的是观点，还不是买卖规则。以下方向都需要你先选定，系统不会替你自动执行。',
+          ideaRoute: {
+            schema_version: 'idea-route.v1',
+            understanding: '你在表达对特朗普相关政策的不认同。',
+            hypothesis: '先把观点转换成当前股票可检验的价格代理。',
+            asset_mapping: {
+              instrument_symbol: '300059.SZ',
+              relation: 'current_page_proxy',
+              rationale: '当前页面是东方财富，只围绕这只 A 股提出候选。',
+              evidence_status: 'host_context_only',
+            },
+            proposals: [{
+              id: 'trend-confirmation',
+              title: '等趋势确认',
+              hypothesis: '价格与趋势同时转强后再进入。',
+              entry_summary: 'MACD 金叉且站上 20 日均线',
+              exit_summary: 'MACD 死叉',
+              suggested_utterance: 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年',
+              capability_ids: ['technical.macd', 'technical.ma'],
+              assumptions: ['仅使用价格代理'],
+              confidence: 0.82,
+            }, {
+              id: 'oversold-rebound',
+              title: '等超跌反弹',
+              hypothesis: '仅在超跌后恢复时进入。',
+              entry_summary: 'RSI 低于 30',
+              exit_summary: 'RSI 高于 70',
+              suggested_utterance: 'RSI 低于 30 买入，RSI 高于 70 卖出，回测近 5 年',
+              capability_ids: ['technical.rsi'],
+              assumptions: ['仅使用价格代理'],
+              confidence: 0.75,
+            }],
+          },
+          choices: [{
+            id: 'trend-confirmation',
+            label: '等趋势确认',
+            description: '价格与趋势同时转强后再进入。',
+            action: 'replace_and_compile',
+            suggestedUtterance: 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年',
+          }, {
+            id: 'oversold-rebound',
+            label: '等超跌反弹',
+            description: '仅在超跌后恢复时进入。',
+            action: 'replace_and_compile',
+            suggestedUtterance: 'RSI 低于 30 买入，RSI 高于 70 卖出，回测近 5 年',
+          }],
+        },
+      })
+      .mockImplementationOnce((input) => originalCompile(input))
+    const revise = vi.spyOn(strategyApi, 'revise')
+    const user = userEvent.setup()
+    renderApp()
+
+    const input = screen.getByLabelText('交易规则')
+    await user.clear(input)
+    await user.type(input, '我讨厌特朗普')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+
+    expect(await screen.findByRole('button', { name: '等趋势确认' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '等超跌反弹' })).toBeInTheDocument()
+    expect(screen.getByText('已理解观点：')).toBeInTheDocument()
+    expect(screen.getByText('投资假设：')).toBeInTheDocument()
+    expect(screen.getByText('当前 A 股映射：')).toBeInTheDocument()
+    expect(screen.getAllByText(/当前页面是东方财富/).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(revise).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: '等趋势确认' }))
+
+    expect(input).toHaveValue('MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年')
+    expect(compile).toHaveBeenCalledTimes(2)
+    expect(compile).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      utterance: 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年',
+      clarification: undefined,
+    }))
+    expect(await screen.findByRole('button', { name: '开始回测' })).toBeInTheDocument()
+    expect(revise).not.toHaveBeenCalled()
+  })
+
   it('does not present uncovered catalog events as runnable event strategies', async () => {
     const user = userEvent.setup()
     renderApp()

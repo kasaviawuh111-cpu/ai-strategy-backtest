@@ -99,6 +99,45 @@ class CandidateAlternativeItem(ApiModel):
     strategy_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+class IdeaRouteProvenancePayload(ApiModel):
+    source: Literal["bounded_provider"]
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=128)
+    prompt_version: str = Field(min_length=1, max_length=64)
+    schema_version: str = Field(min_length=1, max_length=64)
+    capability_projection_version: str = Field(min_length=1, max_length=64)
+    capability_projection_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    upstream_pattern_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+class IdeaAssetMappingPayload(ApiModel):
+    instrument_symbol: str = Field(pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$")
+    relation: Literal["current_page_proxy"]
+    rationale: str = Field(min_length=1, max_length=512)
+    evidence_status: Literal["host_context_only"]
+
+
+class IdeaProposalPayload(ApiModel):
+    id: str = Field(pattern=r"^idea_[0-9a-f]{12}$")
+    title: str = Field(min_length=1, max_length=96)
+    hypothesis: str = Field(min_length=1, max_length=512)
+    entry_summary: str = Field(min_length=1, max_length=160)
+    exit_summary: str = Field(min_length=1, max_length=160)
+    suggested_utterance: str = Field(min_length=1, max_length=512)
+    capability_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
+    assumptions: tuple[str, ...] = Field(max_length=8)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class IdeaRoutePayload(ApiModel):
+    schema_version: Literal["idea-route.v1"]
+    understanding: str = Field(min_length=1, max_length=240)
+    hypothesis: str = Field(min_length=1, max_length=320)
+    asset_mapping: IdeaAssetMappingPayload
+    proposals: tuple[IdeaProposalPayload, ...] = Field(min_length=2, max_length=3)
+    provenance: IdeaRouteProvenancePayload | None = None
+
+
 class StrategyDraftResponse(ApiModel):
     draft_id: UUID
     revision: int = Field(ge=1)
@@ -112,6 +151,7 @@ class StrategyDraftResponse(ApiModel):
     candidate_grounding: CandidateGroundingPayload | None = None
     candidate_rejections: tuple[CandidateRejectionItem, ...] = ()
     candidate_alternatives: tuple[CandidateAlternativeItem, ...] = ()
+    idea_route: IdeaRoutePayload | None = None
     created_at: datetime
 
     @model_validator(mode="after")
@@ -119,8 +159,14 @@ class StrategyDraftResponse(ApiModel):
         if self.status is CompileStatus.READY:
             if self.strategy is None or self.strategy_hash is None:
                 raise ValueError("ready draft must contain a strategy and strategy_hash")
+            if self.idea_route is not None:
+                raise ValueError("ready draft cannot contain idea guidance")
         elif self.strategy is not None or self.strategy_hash is not None:
             raise ValueError("non-ready draft cannot contain a strategy or strategy_hash")
+        if self.idea_route is not None and self.status is not CompileStatus.NEEDS_CLARIFICATION:
+            raise ValueError("idea guidance must require clarification")
+        if (self.diagnostic_code == "idea_guidance_required") != (self.idea_route is not None):
+            raise ValueError("idea_guidance_required and idea_route must be present together")
         return self
 
 

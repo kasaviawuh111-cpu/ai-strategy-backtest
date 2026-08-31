@@ -20,10 +20,11 @@
 
 ## 2. 用户结果与范围
 
-用户在一只股票页面说一句规则，系统能够：
+用户在一只股票页面说一句规则、观点或问题，系统能够：
 
 ```text
-中文规则
+有意义的中文输入
+→ 完整规则直接编译；纯观点先生成不可执行的假设候选并由用户选择
 → 可解释、可编辑的受限 Strategy DSL
 → 版本化数据与执行假设
 → A 股约束回测
@@ -60,7 +61,10 @@
 - [x] `implemented / fixture-tested`：正文词频只接受冻结在 Event/Composite v2 中的初始完整主文档及逐页可重放文本证据。正文先做 NFKC；ASCII 词按 token 边界且默认不区分大小写，中文按 literal 子串匹配；只开放 `gt/gte`，`eq/lt/lte` fail closed；不展开同义词，不调用 OCR，不让 LLM 估算。摘要、英文/外文版、更正、修订、取消/撤回/撤销、更新和补充版本均排除；同一事件码和报告期出现两个候选初始完整版本时整批 fail closed。runtime、Composite 发布和 strict loader pin/readiness 复用同一 validator 校验 source format、抽取器身份/版本、连续页码、逐页 hash/字符数、源文档 hash 与正文重建，坏正文在 Worker 前拒绝。现有 `complete_text_layer` 是历史 wire value，只能证明每个 provider page 有非空嵌入文本并通过抽取器/逐页 hash 重放，不能证明语义全文完整；生产状态仍为 unavailable。
 - [x] `implemented / fixture-tested`：持有期退出以首次真实买入 fill 为锚点，成交 session 不计数，按运行时 pinned A 股交易 session 固定第 N 日，并在目标 session 使用日线开盘价代理尝试卖出；受停牌、跌停或容量限制时继续服从统一撮合，不虚构成交，区间结束不强制平仓。
 - [x] `implemented / fixture-tested / Live-unverified`：自然语言采用“确定性快路 + Vibe 风格受限 JSON CandidateAst + 服务端硬校验”；最多 3 个候选、置信度门槛、provider fail closed 与一次集中澄清已有夹具验证。
-- [ ] `Live-unverified`：尚未配置正式模型 transport、bootstrap、完整 provenance 与真实 API/H5；当前不能宣称理解任意表达。
+- [x] `implemented / Live-unverified`：模型 transport/bootstrap 配置路径已存在，较早 provider 路径曾做公网冒烟；当前 revision 的完整 provenance 与真实 API/H5 仍需复验，旧冒烟不能证明当前版本。
+- [x] `implemented / fixture-tested`：`idea-route.v1` 把纯观点限制为“观点 → 待检验假设 → 当前权威 A 股页价格代理 → 2—3 个服务端固定模板候选”。模型不能发明股票、事件、参数或交易规则；用户选择前没有 StrategySpec、strategy hash 或 run，选择后必须重新走现有严格编译。
+- [x] `fixture-tested`：`“我讨厌特朗普”` 等有意义但不完整的观点不会落入通用“无法识别”；系统中性复述观点并提供价格行为候选。没有可靠政治/主题事件快照时，不创建主题事件、不宣称因果回测。
+- [ ] `Live-unverified`：当前 revision 尚未完成 `idea-route.v1` 的真实 API/H5 复验；不能把 `implemented / fixture-tested` 或旧 provider 冒烟写成 Live。
 - [x] `implemented / fixture-tested / Live-unverified`：东方财富 Push2 日线 adapter 按固定 AKShare commit 的请求协议实现，AKShare 不作为运行依赖；A 股身份、raw hash、量纲、区间、session 和公司行动交叉校验已有夹具。
 - [ ] `Live-unverified`：Push2 直连被远端断开，尚无真实 batch、不可变 snapshot 或生产授权；不得与只作研究的 Push2 主力资金序列混为一谈。
 - [x] `implemented`：预设执行压力场景按完整配置 hash 去重；默认 base 与 5% 参与率相同时只保留一份结果，不挑最优场景。
@@ -93,7 +97,7 @@
 - [x] `implemented / fixture-tested`：只有携带受支持 `hashSchemaVersion`、且状态/摘要/曲线/交易读取及完成态幂等重放对完整持久化 bundle 重算一致的 `resultHash` 才构成完整性证据。legacy 无 schema 且无 hash 可按无证据路径读取并返回 `resultHash=null`；legacy 带 hash、未知 schema、缺失 modern hash 或内容不一致均 fail closed。
 - [x] `implemented / fixture-tested`：需要 `document_text` 的策略若遇到扫描页无可提取文本、页数不符等结构化正文质量失败，返回可操作的 `422 event_document_text_data_unavailable`；技术策略或普通事件的 incomplete 仍为 503，正文供应商网络、SDK、解析器、子进程和超时故障也保持 503，不按异常文案猜测类型。
 - [x] `fixture-tested`：后端自动化、Ruff/format、Pyright、Catalog、schema export、Alembic 与 diff check 已有本轮 fresh 记录；精确测试数不在本文档中固化，最终以 clean integration SHA 下同批重跑的证据包为准。
-- [x] `fixture-tested`：前端唯一入口仍为 `src/main.tsx → src/App.tsx`；TypeScript、ESLint、149 个 Vitest、diff check 与 production build 已有本轮 fresh 记录，最终仍须在 clean integration SHA 同批重跑。
+- [x] `fixture-tested`：前端唯一入口仍为 `src/main.tsx → src/App.tsx`；TypeScript、ESLint、154 个 Vitest、diff check 与 production build 已有本轮 fresh 记录，最终仍须在 clean integration SHA 同批重跑。
 - [x] `Mock-verified`：技术旅程覆盖 320/390/768/1280；年度报告、unsupported、一次澄清覆盖 390；所有已执行旅程无横向溢出，console/page error 为 0。
 - [x] `Mock-verified`：Mock 以“界面预览”和 `data-api-mode=mock` 明确隔离，不会显示“身份已记录”，事件演示不伪造正式 snapshot 身份。
 - [x] `Mock-verified`：年度报告正文词频 + 首次实际成交后 3 个 A 股交易日退出可以走完策略确认卡；Mock 只证明交互与文案，不证明已获取真实正文、算出真实次数或完成真实成交。
@@ -114,6 +118,8 @@
 - [ ] `Live-unverified`：两条 run 均保存 strategy/catalog/config/data/engine/Git identity、summary、series、trades、受支持 `hashSchemaVersion` 与经四个读取接口重算一致的 result hash，以及去重后的压力场景。
 - [ ] `Live-unverified`：H5 显式 `VITE_USE_MOCK=false`，在 320/390/768/1280 完成技术与年报双旅程，控制台和 page error 为 0。
 - [ ] `Live-unverified`：老板在公网入口用常见口语化问句随机试用时，Network 全部指向真实 HTTPS API；页面不显示“演示数据/界面预览”、不返回预设 Mock 收益，API 失败也不静默回退。
+- [ ] `Live-unverified`：公网入口输入纯观点时先返回 `idea-route.v1` 的理解、假设、当前股票价格代理说明和 2—3 个固定候选；选择前没有策略/run，选择后重新编译并仍需用户显式开始回测。模型服务暂不可用时返回可重试服务状态，不误写成“无法理解”。
+- [ ] `Live-unverified`：以“我讨厌特朗普”为负例证明系统不会生成政治事件或因果结论；只在当前权威 A 股页面上提供价格行为代理候选，且不会另猜股票。
 - [ ] `Live-unverified`：只输入“MACD”“RSI”等裸指标时只集中澄清一次买入和卖出方向；不得自动套用金叉买、死叉卖等默认策略。
 - [ ] `Live-unverified`：Live 缺股票澄清能写入 `instrument_context`；不得把 Mock 的 MACD 时间澄清冒充 Live 能力。
 - [ ] `Live-unverified`：若把正文词频策略纳入 Live 演示，必须先 opt-in 重采正文、发布新 Event/Composite v2，并保存正文 hash、抽取元数据、策略/运行身份和真实因果轨迹；当前没有可满足该项的 strict pins。

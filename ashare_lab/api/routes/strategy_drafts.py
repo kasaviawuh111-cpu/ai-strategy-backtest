@@ -15,6 +15,7 @@ from ashare_lab.domain.strategy import (
     validate_strategy_against_catalog,
 )
 from ashare_lab.ports.candidate_generation import CompileInput
+from ashare_lab.ports.idea_routing import IdeaRoute
 
 from ..container import ApiContainer, get_container
 from ..errors import ApiProblem
@@ -25,6 +26,10 @@ from ..schemas import (
     CandidateGroundingPayload,
     CandidateProvenanceItem,
     CandidateRejectionItem,
+    IdeaAssetMappingPayload,
+    IdeaProposalPayload,
+    IdeaRoutePayload,
+    IdeaRouteProvenancePayload,
     ProvenanceItem,
     StrategyDraftRequest,
     StrategyDraftResponse,
@@ -130,6 +135,7 @@ def _compile_input(body: StrategyDraftRequest) -> CompileInput:
 def _to_response(stored: StoredDraftRevision) -> StrategyDraftResponse:
     outcome: CompileOutcome = stored.outcome
     candidate_provenance = outcome.candidate_provenance
+    idea_route = outcome.idea_route
     grounding_spans = tuple(
         CandidateGroundingItem(
             path=item.path,
@@ -187,7 +193,53 @@ def _to_response(stored: StoredDraftRevision) -> StrategyDraftResponse:
             )
             for item in outcome.candidate_alternatives
         ),
+        idea_route=None if idea_route is None else _to_idea_route_payload(idea_route),
         created_at=stored.created_at,
+    )
+
+
+def _to_idea_route_payload(idea_route: IdeaRoute) -> IdeaRoutePayload:
+    instrument_symbol = idea_route.asset_mapping.instrument_symbol
+    if instrument_symbol is None:
+        raise ValueError("idea guidance cannot be exposed without an instrument")
+    return IdeaRoutePayload(
+        schema_version=idea_route.schema_version,
+        understanding=idea_route.understanding,
+        hypothesis=idea_route.hypothesis,
+        asset_mapping=IdeaAssetMappingPayload(
+            instrument_symbol=instrument_symbol,
+            relation=idea_route.asset_mapping.relation,
+            rationale=idea_route.asset_mapping.rationale,
+            evidence_status=idea_route.asset_mapping.evidence_status,
+        ),
+        proposals=tuple(
+            IdeaProposalPayload(
+                id=item.id,
+                title=item.title,
+                hypothesis=item.hypothesis,
+                entry_summary=item.entry_summary,
+                exit_summary=item.exit_summary,
+                suggested_utterance=item.suggested_utterance,
+                capability_ids=item.capability_ids,
+                assumptions=item.assumptions,
+                confidence=item.confidence,
+            )
+            for item in idea_route.proposals
+        ),
+        provenance=(
+            None
+            if idea_route.provenance is None
+            else IdeaRouteProvenancePayload(
+                source=idea_route.provenance.source,
+                provider=idea_route.provenance.provider,
+                model=idea_route.provenance.model,
+                prompt_version=idea_route.provenance.prompt_version,
+                schema_version=idea_route.provenance.schema_version,
+                capability_projection_version=(idea_route.provenance.capability_projection_version),
+                capability_projection_hash=(idea_route.provenance.capability_projection_hash),
+                upstream_pattern_commit=idea_route.provenance.upstream_pattern_commit,
+            )
+        ),
     )
 
 

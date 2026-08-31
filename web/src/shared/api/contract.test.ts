@@ -233,6 +233,95 @@ describe('live API contract adapter', () => {
     })
   })
 
+  it('maps an idea route into user-confirmed replacement choices without creating a strategy', () => {
+    const outcome = fromLiveDraftResponse({
+      ...response,
+      status: 'needs_clarification',
+      strategy: null,
+      strategy_hash: null,
+      clarification: '选一个方向，我会把它变成完整买卖规则再识别。',
+      diagnostic_code: 'idea_guidance_required',
+      idea_route: {
+        schema_version: 'idea-route.v1',
+        understanding: '你在表达对特朗普相关政策的不认同。',
+        hypothesis: '把观点转换成当前股票可检验的价格代理，而不是假设观点直接导致股价变化。',
+        asset_mapping: {
+          instrument_symbol: '300059.SZ',
+          relation: 'current_page_proxy',
+          rationale: '当前页面是东方财富，因此只围绕这只 A 股提出候选。',
+          evidence_status: 'host_context_only',
+        },
+        proposals: [{
+          id: 'trend-confirmation',
+          title: '等趋势确认',
+          hypothesis: '价格与趋势同时转强后再进入。',
+          entry_summary: 'MACD 金叉且站上 20 日均线',
+          exit_summary: 'MACD 死叉',
+          suggested_utterance: 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年',
+          capability_ids: ['technical.macd', 'technical.ma'],
+          assumptions: ['仅使用价格代理'],
+          confidence: 0.82,
+        }, {
+          id: 'oversold-rebound',
+          title: '等超跌反弹',
+          hypothesis: '仅在超跌后恢复时进入。',
+          entry_summary: 'RSI 低于 30',
+          exit_summary: 'RSI 高于 70',
+          suggested_utterance: 'RSI 低于 30 买入，RSI 高于 70 卖出，回测近 5 年',
+          capability_ids: ['technical.rsi'],
+          assumptions: ['仅使用价格代理'],
+          confidence: 0.75,
+        }],
+      },
+    }, request)
+
+    expect(outcome).toMatchObject({
+      status: 'needs_clarification',
+      clarification: {
+        id: 'idea_guidance_required',
+        ideaRoute: {
+          schema_version: 'idea-route.v1',
+          asset_mapping: { instrument_symbol: '300059.SZ' },
+        },
+        choices: [{
+          id: 'trend-confirmation',
+          label: '等趋势确认',
+          action: 'replace_and_compile',
+          suggestedUtterance: 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年',
+        }, {
+          id: 'oversold-rebound',
+          label: '等超跌反弹',
+          action: 'replace_and_compile',
+          suggestedUtterance: 'RSI 低于 30 买入，RSI 高于 70 卖出，回测近 5 年',
+        }],
+      },
+    })
+    expect(outcome).not.toHaveProperty('draft')
+  })
+
+  it('fails closed when idea guidance has fewer than two complete directions', () => {
+    expect(() => fromLiveDraftResponse({
+      ...response,
+      status: 'needs_clarification',
+      strategy: null,
+      strategy_hash: null,
+      clarification: null,
+      diagnostic_code: 'idea_guidance_required',
+      idea_route: {
+        schema_version: 'idea-route.v1',
+        understanding: '一个观点',
+        hypothesis: '一个待检验假设',
+        asset_mapping: {
+          instrument_symbol: '300059.SZ',
+          relation: 'current_page_proxy',
+          rationale: '仅使用当前股票页上下文。',
+          evidence_status: 'host_context_only',
+        },
+        proposals: [],
+      },
+    }, request)).toThrow('服务没有返回至少两个可供选择的完整策略方向')
+  })
+
   it('fails closed for clarification choices that the backend v2 request cannot represent', () => {
     expect(() => toLiveCompileBody({
       ...request,

@@ -9,7 +9,8 @@
 
 | 能力 | 事实状态 | 已有证据 | 尚缺证据 |
 |---|---|---|---|
-| 自然语言胶水 | `implemented / fixture-tested / Live-unverified` | 确定性解析器仍为默认快路；Vibe 风格的严格 JSON CandidateAst adapter、最多 3 个候选、置信度门槛和 fail-closed 错误已有夹具 | 正式模型 transport、bootstrap、完整 provenance 与真实 API/H5；不能称任意表达已支持 |
+| 完整策略自然语言胶水 | `implemented / fixture-tested / Live-unverified` | 确定性解析器仍为默认快路；严格 JSON CandidateAst、最多 3 个候选、置信度门槛、模型 transport/bootstrap 配置路径和 fail-closed 错误已有实现；较早 provider 路径做过公网冒烟 | 当前 revision 的完整 provenance 与真实 API/H5 复验；旧冒烟不证明当前版本 |
+| 观点假设引导 `idea-route.v1` | `implemented / fixture-tested` | 任意有意义输入先被理解；纯观点只生成“观点 → 待检验假设 → 当前权威 A 股页价格代理 → 2—3 个服务端固定模板候选”，选择后重新进入现有严格编译 | 当前 revision 的真实 API/H5；本轮没有 Live 证据，不能声称政治/主题事件因果回测 |
 | 开源指标与采集 adapter | `implemented / fixture-tested / Live-unverified` | MOSS/pandas `IndicatorBackend` 的 EMA/MACD 已对拍，RSI 明确不兼容；Vibe/mootdx 接口已用 fake client 验证；Push2 请求协议已按固定 AKShare commit 补齐 | 指标未成为 Live 默认；mootdx 商业与数据条款待审；2026-08-30 Push2 直连被远端断开，未发布新快照 |
 | 日线策略与 A 股撮合 | `implemented / fixture-tested / Live-unverified` | 35 个透明指标；PIT 容量、T+1、停牌、涨跌停、费用、部分成交、过期均有代码和测试 | 最终 clean SHA 技术 run |
 | 事件策略 | `implemented / fixture-tested / local-real-data-verified / Live-unverified` | 五类定期报告的采集/覆盖门禁、26 条秒级观察和 strict Composite 已通过当前 loader | final clean-SHA 事件 run 与 Live H5 |
@@ -61,7 +62,7 @@ Registry 显式选择语义仍为 `implemented / fixture-tested`：只校验指�
 | pytest | 当前工作树已有 fresh 通过记录；精确数字留待最终 integration SHA 同批刷新 | `fixture-tested / Live-unverified` |
 | Ruff / Pyright / Catalog | Makefile 定义范围 `ashare_lab tests scripts alembic` 的 Ruff check/format fresh 通过；Pyright 0 errors/0 warnings；Catalog check 通过。对整个 checkout 运行 `ruff check .` 仍会命中旧 `astock_backtest`/examples 等不在 Makefile 门禁内的 184 项历史债务 | `fixture-tested / Live-unverified` |
 | Alembic | 临时空 SQLite fresh upgrade 到 `20260828_0001 (head)`，current/check 通过且无新增 upgrade operations；最终 integration SHA 仍须重跑 | `fixture-tested / Live-unverified` |
-| Web 类型、规范、测试与构建 | TypeScript、ESLint、149 个 Vitest、diff check 与 production build 已有 fresh 通过记录；最终 SHA 仍须同批重跑 | `fixture-tested` |
+| Web 类型、规范、测试与构建 | TypeScript、ESLint、154 个 Vitest、diff check 与 production build 已有 fresh 通过记录；最终 SHA 仍须同批重跑 | `fixture-tested` |
 | Mock 浏览器 | 技术旅程覆盖 320/390/768/1280；年报、unsupported、一次澄清覆盖 390；所有已执行旅程无横向溢出，console/page error 0 | `Mock-verified` |
 | strict dirty gate | dirty/伪 revision 会 fail closed | `fixture-tested` |
 
@@ -98,6 +99,9 @@ Registry 显式选择语义仍为 `implemented / fixture-tested`：只校验指�
 - Mock 永久显示“界面预览”并标记 `data-api-mode=mock`，不得显示“身份已记录”或伪造完整运行身份。
 - Live 前端每次编译、修订和提交前都读取 `/capabilities`。固定快照按逐事件码 `backtest_available` 开放；on-demand 只在后端明确返回 `preparation_available + request_preparation` 时允许进入按需生成并 pin 的提交链。两者都为 false 时 fail closed。Mock 主演示仍只开放年度报告并持续标注“界面预览”；Live 则根据当前 pinned coverage 开放五类定期报告。
 - 只说“MACD”等名称、只有买入条件或只有卖出条件时，分别只集中澄清一次缺失的方向并返回编辑原话；系统没有默认金叉买、死叉卖等交易策略，只有版本化执行默认。
+- 纯观点不显示通用“无法识别”。`idea-route.v1` 先中性复述观点，再提供 2—3 个不可执行固定模板候选；用户一次选择后才重新编译。选择前不生成 StrategySpec、hash 或 run，选择后仍需显式开始回测。
+- 首版资产映射只信任当前权威 A 股页的规范 symbol，并明确只是价格代理。模型、页面展示名或观点不得换股；缺股票时继续走现有澄清。没有可靠政治/主题事件快照时不创建主题事件、不宣称因果关系。
+- 模型 transport/bootstrap 配置路径已存在，但 `idea-route.v1` 只有 `implemented / fixture-tested`；模型服务暂不可用应显示可重试服务状态，不应误报为用户的话无法理解。
 - 股票页可通过 `instrument_context|symbol` 注入规范 A 股代码；非法、非 A 股或交易所后缀错配 fail closed。URL 的 `instrument_name|name` 不经证券主数据校验时不可信，不能决定证券身份；当前没有可信名称时展示规范 symbol。东方财富只保留为 standalone 默认和验收 fixture。
 - Live 的缺股票澄清可写入 `instrument_context`；“MACD 收盘/盘中”目前只是 Mock 交互。分钟链路未闭环前，盘中选项保持禁用。
 
@@ -109,6 +113,7 @@ Registry 显式选择语义仍为 `implemented / fixture-tested`：只校验指�
 - 保存新双 run 的 run ID、受支持 hash schema 下读时重算一致的 result hash、snapshot/checksum、strategy/catalog/config/data/engine/Git identity。
 - 用 `VITE_USE_MOCK=false` 在 320/390/768/1280 完成技术与年报真实 H5，console/page error 为 0。
 - 用老板可访问的公网 Live 入口抽测常见口语化问句；浏览器 Network 必须命中真实 HTTPS API，页面不能出现 Mock/预设结果或静默回退。
+- 在 final clean SHA 上复验 `idea-route.v1`：输入纯观点得到理解、假设、当前股票价格代理说明和 2—3 个固定候选；选择前无 run，选择后重新走现有严格编译。以“我讨厌特朗普”为负例证明不会生成政治事件、因果结论或另一只股票。
 - 修完并验收裸指标 P0：只说“MACD”“RSI”等名称时集中澄清一次买入和卖出方向，不能擅自补默认策略。
 - 在最终 SHA 上重跑后端、前端、Catalog、Migration、diff 和 strict smoke 全部门禁。
 - 要把正文词频策略升级为 Live，需显式 opt-in 重采完整报告、发布 `document_text>0` 的新 Event/Composite v2，并用新 pins 完成 API/H5 因果链；当前 `1f26…` 不包含正文。
