@@ -1,6 +1,7 @@
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 from ashare_lab.api.result_schemas import BacktestResultBundle
@@ -11,7 +12,15 @@ from ashare_lab.application.result_views import (
 )
 from ashare_lab.domain.signals import SignalEvidence
 
-from .test_daily_backtest import START, TZ, bars, run, sessions
+from .test_daily_backtest import (
+    START,
+    TZ,
+    bars,
+    event_strategy,
+    holding_strategy,
+    run,
+    sessions,
+)
 
 MANIFEST = {
     "strategy_hash": "sha256:" + "a" * 64,
@@ -58,6 +67,7 @@ def test_result_bundle_is_json_safe_and_normalized() -> None:
     assert bundle["summary"]["initialCashCny"] == 100_000.0
     assert bundle["summary"]["finalEquityCny"] > 0
     assert bundle["summary"]["benchmarkReturn"] is None
+    assert bundle["summary"]["benchmarkComparisonStatus"] == "benchmark_unavailable"
     assert bundle["series"][0]["equity"] == 100.0
     assert bundle["series"][0]["benchmark"] is None
     assert bundle["audit"]["resultHash"] == calculate_result_bundle_hash(bundle)
@@ -88,6 +98,91 @@ def test_result_bundle_is_json_safe_and_normalized() -> None:
     assert fill_activity["timeQuality"] == "daily_bar_open_proxy"
     assert "不代表" in fill_activity["timeSemantics"]
     BacktestResultBundle.model_validate(bundle)
+
+
+def test_result_bundle_with_no_strategy_entry_does_not_claim_excess_return() -> None:
+    source = bars()
+    funded = tuple(
+        (bar.session_date, Decimal("100000") + Decimal(index * 1000))
+        for index, bar in enumerate(source)
+    )
+    result = run(
+        source_bars=source,
+        source_sessions=sessions(source),
+        spec=event_strategy(),
+        benchmark_equity=funded,
+        benchmark_initial_equity=Decimal("100000"),
+        benchmark_entry_filled=True,
+    )
+
+    bundle = build_result_bundle(
+        result,
+        run_id="run:no-entry",
+        period_start=START,
+        period_end=START + timedelta(days=5),
+        manifest=MANIFEST,
+    )
+
+    summary = bundle["summary"]
+    assert result.fills == ()
+    assert summary["totalReturn"] == 0.0
+    assert summary["benchmarkReturn"] > 0
+    assert summary["benchmarkComparisonStatus"] == "strategy_entry_not_filled"
+    assert summary["interpretation"] == "策略没有产生已成交买入，无法比较超额收益。"
+    assert any("仅作参考，不计算超额收益" in item for item in summary["warnings"])
+    BacktestResultBundle.model_validate(bundle)
+
+
+def test_open_strategy_position_can_still_be_compared_to_funded_benchmark() -> None:
+    source = bars(closes=("10", "9", "11", "12", "12", "12"))
+    funded = tuple(
+        (bar.session_date, Decimal("100000") + Decimal(index * 500))
+        for index, bar in enumerate(source)
+    )
+    result = run(
+        source_bars=source,
+        source_sessions=sessions(source),
+        spec=holding_strategy(holding_sessions=20, end=source[-1].session_date),
+        benchmark_equity=funded,
+        benchmark_initial_equity=Decimal("100000"),
+        benchmark_entry_filled=True,
+    )
+
+    bundle = build_result_bundle(
+        result,
+        run_id="run:open-position",
+        period_start=START,
+        period_end=source[-1].session_date,
+        manifest=MANIFEST,
+    )
+
+    assert result.metrics.trade_count == 0
+    assert any(fill.side.value == "buy" for fill in result.fills)
+    assert bundle["summary"]["benchmarkComparisonStatus"] == "comparable"
+
+
+def test_unfilled_benchmark_is_not_presented_as_buy_and_hold() -> None:
+    source = bars()
+    funded = tuple((bar.session_date, Decimal("100000")) for bar in source)
+    result = run(
+        source_bars=source,
+        source_sessions=sessions(source),
+        benchmark_equity=funded,
+        benchmark_initial_equity=Decimal("100000"),
+        benchmark_entry_filled=False,
+    )
+
+    bundle = build_result_bundle(
+        result,
+        run_id="run:benchmark-no-entry",
+        period_start=START,
+        period_end=START + timedelta(days=5),
+        manifest=MANIFEST,
+    )
+
+    summary = bundle["summary"]
+    assert summary["benchmarkComparisonStatus"] == "benchmark_entry_not_filled"
+    assert summary["interpretation"] == "买入持有基准未按同一成交规则成交，无法比较超额收益。"
 
 
 def test_result_hash_covers_every_persisted_result_layer() -> None:
@@ -121,6 +216,7 @@ def test_result_hash_covers_every_persisted_result_layer() -> None:
 
     mutations = (
         ("summary", "totalReturn"),
+        ("summary", "benchmarkComparisonStatus"),
         ("series", 0, "equity"),
         ("activities", 0, "reason"),
         ("robustness", "scenarios", 0, "tradeCount"),

@@ -510,10 +510,16 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
 export const toBacktestMetrics = (summary: BacktestSummary): BacktestMetrics => {
   const total = percent(summary.totalReturn)
   const bench = percent(summary.benchmarkReturn)
+  // Old persisted results predate the audited comparison field.  Treat them
+  // as unavailable instead of reconstructing an excess return on the client.
+  const benchmarkComparisonStatus = summary.benchmarkComparisonStatus ?? 'benchmark_unavailable'
   return {
     total,
     bench,
-    excess: total != null && bench != null ? total - bench : null,
+    excess: benchmarkComparisonStatus === 'comparable' && total != null && bench != null
+      ? total - bench
+      : null,
+    benchmarkComparisonStatus,
     mdd: percent(summary.maxDrawdown),
     trips: summary.tradeCount,
     win: percent(summary.winRate),

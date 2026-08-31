@@ -219,6 +219,10 @@ class DailyBacktestInput:
     config: DailyBacktestConfig = field(default_factory=DailyBacktestConfig)
     benchmark_equity: tuple[tuple[date, Decimal], ...] = ()
     benchmark_initial_equity: Decimal | None = None
+    # A funded benchmark is only a buy-and-hold account when its own entry
+    # order filled.  Its equity path cannot prove that fact (a flat path could
+    # result from either a fill or no fill), so retain it as a run input.
+    benchmark_entry_filled: bool | None = None
     # Compatibility-only input for callers that have not migrated to a funded
     # equity path. New production runs must use ``benchmark_equity`` plus the
     # explicit pre-entry ``benchmark_initial_equity``.
@@ -256,6 +260,7 @@ class DailyBacktestResult:
     round_trips: tuple[RoundTrip, ...]
     metrics: BacktestMetrics
     final_portfolio: PortfolioState
+    benchmark_entry_filled: bool | None
     content_hash: str
 
 
@@ -711,6 +716,7 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         round_trips=round_trips,
         metrics=metrics,
         final_portfolio=portfolio,
+        benchmark_entry_filled=request.benchmark_entry_filled,
     )
     return DailyBacktestResult(
         decisions=tuple(decisions),
@@ -721,6 +727,7 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         round_trips=tuple(round_trips),
         metrics=metrics,
         final_portfolio=portfolio,
+        benchmark_entry_filled=request.benchmark_entry_filled,
         content_hash=result_hash(payload),
     )
 
@@ -1378,6 +1385,15 @@ def _validate_and_select_inputs(
     tuple[InstrumentSession, ...],
     int,
 ]:
+    if (
+        request.benchmark_entry_filled is not None
+        and type(request.benchmark_entry_filled) is not bool
+    ):
+        raise DailyBacktestInputError("benchmark_entry_filled must be a boolean or None")
+    if request.benchmark_entry_filled is not None and not request.benchmark_equity:
+        raise DailyBacktestInputError(
+            "benchmark_entry_filled requires a funded benchmark equity path"
+        )
     if not request.bars:
         raise DailyBacktestInputError("daily backtest requires bars")
     instrument_id = InstrumentId(request.strategy.instrument.symbol)
@@ -1470,8 +1486,10 @@ def _result_payload(
     round_trips: Sequence[RoundTrip],
     metrics: BacktestMetrics,
     final_portfolio: PortfolioState,
+    benchmark_entry_filled: bool | None,
 ) -> dict[str, object]:
     return {
+        "benchmark_entry_filled": benchmark_entry_filled,
         "decisions": [
             {
                 "attempts": item.attempts,

@@ -412,6 +412,7 @@ export type BacktestSummary = {
   runId: string
   totalReturn: number | null
   benchmarkReturn: number | null
+  benchmarkComparisonStatus: 'comparable' | 'strategy_entry_not_filled' | 'benchmark_entry_not_filled' | 'benchmark_unavailable'
   annualizedReturn: number | null
   maxDrawdown: number | null
   sharpeRatio: number | null

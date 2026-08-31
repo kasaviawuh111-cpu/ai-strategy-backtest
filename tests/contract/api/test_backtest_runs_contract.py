@@ -361,6 +361,7 @@ def test_completed_result_bundle_is_split_without_fabricating_nullable_metrics(
     assert summary.status_code == series.status_code == activities.status_code == 200
     assert summary.json()["runId"] == run_id
     assert summary.json()["benchmarkReturn"] is None
+    assert summary.json()["benchmarkComparisonStatus"] == "benchmark_unavailable"
     assert summary.json()["annualizedReturn"] is None
     assert summary.json()["sharpeRatio"] is None
     assert summary.json()["winRate"] is None

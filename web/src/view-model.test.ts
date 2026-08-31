@@ -119,7 +119,7 @@ const activities: BacktestActivity[] = [
 ]
 
 const metrics: BacktestMetrics = {
-  total: -2.5, bench: -39, excess: 36.5, mdd: -12, trips: 1, win: null,
+  total: -2.5, bench: -39, excess: 36.5, benchmarkComparisonStatus: 'comparable', mdd: -12, trips: 1, win: null,
   sharpe: null, ann: null, initialCashCny: 1_000_000, finalEquityCny: 975_000,
   interpretation: '样本不足', dataRange: { start: '2024-01-01', end: '2024-12-31', sessions: 2 },
   warnings: [], openShares: null,

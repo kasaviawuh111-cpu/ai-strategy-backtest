@@ -170,6 +170,7 @@ def result_bundle_json(run_id: str) -> str:
             "runId": run_id,
             "totalReturn": 0.12,
             "benchmarkReturn": None,
+            "benchmarkComparisonStatus": "benchmark_unavailable",
             "annualizedReturn": None,
             "maxDrawdown": -0.08,
             "sharpeRatio": None,

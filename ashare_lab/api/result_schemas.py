@@ -52,6 +52,12 @@ class BacktestSummaryView(CamelApiModel):
     run_id: str = Field(alias="runId", min_length=1, max_length=128)
     total_return: float | None = Field(alias="totalReturn")
     benchmark_return: float | None = Field(alias="benchmarkReturn")
+    benchmark_comparison_status: Literal[
+        "comparable",
+        "strategy_entry_not_filled",
+        "benchmark_entry_not_filled",
+        "benchmark_unavailable",
+    ] = Field(default="benchmark_unavailable", alias="benchmarkComparisonStatus")
     annualized_return: float | None = Field(alias="annualizedReturn")
     max_drawdown: float | None = Field(alias="maxDrawdown", ge=-1, le=0)
     sharpe_ratio: float | None = Field(alias="sharpeRatio")

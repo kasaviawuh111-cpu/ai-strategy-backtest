@@ -21,7 +21,7 @@ const draft = {
 } as StrategyDraft
 
 const metrics: BacktestMetrics = {
-  total: -2.54, bench: -39.23, excess: 36.69, mdd: -58.19, trips: 1,
+  total: -2.54, bench: -39.23, excess: 36.69, benchmarkComparisonStatus: 'comparable', mdd: -58.19, trips: 1,
   win: null, sharpe: null, ann: null, initialCashCny: 1_000_000,
   finalEquityCny: 974_600, interpretation: '样本不足，不能证明策略有效。',
   dataRange: { start: '2024-01-01', end: '2024-12-31', sessions: 241 },

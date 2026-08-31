@@ -617,7 +617,12 @@ export function ReportScreen(
               <span className="lb">策略总收益</span>
             </div>
             {/* 超额不再是一个孤立的 KPI：拆成等式，用户能看出它和上面那个数字的关系。 */}
-            <ExcessEquation total={metrics.total} bench={metrics.bench} excess={metrics.excess} />
+            <ExcessEquation
+              total={metrics.total}
+              bench={metrics.bench}
+              excess={metrics.excess}
+              comparisonStatus={metrics.benchmarkComparisonStatus}
+            />
             <div className="kpis kpis--pair" aria-label="风险与胜率">
               <div className="kpi"><b>{fmtPct(metrics.mdd)}</b><span>最大回撤<small>从最高点往下跌最多的一段</small></span></div>
               <div className="kpi"><b>{secondary.value}</b><span>{secondary.label}<small>{secondary.note}</small></span></div>
@@ -630,6 +635,7 @@ export function ReportScreen(
               <EquityChart
                 series={series}
                 marks={marks}
+                comparisonAvailable={metrics.benchmarkComparisonStatus === 'comparable'}
                 selectedMarkId={selectedMarkId}
                 onSelectMark={(mark) => focusOrder(mark.activityId)}
               />

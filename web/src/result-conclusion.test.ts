@@ -7,6 +7,7 @@ const metrics = (changes: Partial<BacktestMetrics>): BacktestMetrics => ({
   total: -2.54,
   bench: -39.23,
   excess: 36.69,
+  benchmarkComparisonStatus: 'comparable',
   mdd: -58.19,
   trips: 37,
   win: null,
@@ -41,9 +42,22 @@ describe('numericResultConclusion', () => {
       total: 0,
       bench: null,
       excess: null,
+      benchmarkComparisonStatus: 'benchmark_unavailable',
       trips: 0,
     }))).toBe(
-      '策略收益 0.00%，同样的钱买入后一直持有收益未记录，相对收益未记录；完整买卖 0 回合。',
+      '策略收益 0.00%，没有可审计的买入持有基准，无法比较超额收益；完整买卖 0 回合。',
+    )
+  })
+
+  it('does not call an all-cash strategy outperformance when no buy filled', () => {
+    expect(numericResultConclusion(metrics({
+      total: 0,
+      bench: 8.7,
+      excess: null,
+      trips: 0,
+      benchmarkComparisonStatus: 'strategy_entry_not_filled',
+    }))).toBe(
+      '策略收益 0.00%，本次没有已成交买入，无法比较超额收益（同样的钱买入后一直持有盈利 8.70%，仅作参考）；完整买卖 0 回合。',
     )
   })
 })

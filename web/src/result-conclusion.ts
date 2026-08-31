@@ -20,6 +20,18 @@ export function numericResultConclusion(metrics: BacktestMetrics) {
   const conclude = (body: string) =>
     `${body}${metrics.trips === 0 ? '；完整买卖 0 回合' : ''}。`
 
+  if (metrics.benchmarkComparisonStatus === 'strategy_entry_not_filled') {
+    return conclude(
+      `${strategy}，本次没有已成交买入，无法比较超额收益${metrics.bench == null ? '' : `（${benchmark}，仅作参考）`}`,
+    )
+  }
+  if (metrics.benchmarkComparisonStatus === 'benchmark_entry_not_filled') {
+    return conclude(`${strategy}，买入持有基准未按同一成交规则成交，无法比较超额收益`)
+  }
+  if (metrics.benchmarkComparisonStatus === 'benchmark_unavailable') {
+    return conclude(`${strategy}，没有可审计的买入持有基准，无法比较超额收益`)
+  }
+
   if (metrics.total == null || metrics.bench == null || metrics.excess == null) {
     return conclude(`${strategy}，${benchmark}，相对收益未记录`)
   }

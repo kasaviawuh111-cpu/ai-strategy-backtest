@@ -239,6 +239,7 @@ def run(
     benchmark_close: tuple[tuple[date, Decimal], ...] = (),
     benchmark_equity: tuple[tuple[date, Decimal], ...] = (),
     benchmark_initial_equity: Decimal | None = None,
+    benchmark_entry_filled: bool | None = None,
     source_calendar_dates: tuple[date, ...] | None = None,
 ):
     actual_bars = source_bars or bars()
@@ -260,6 +261,7 @@ def run(
             benchmark_close=benchmark_close,
             benchmark_equity=benchmark_equity,
             benchmark_initial_equity=benchmark_initial_equity,
+            benchmark_entry_filled=benchmark_entry_filled,
             config=config
             or DailyBacktestConfig(
                 participation_rate=Decimal("1"),
@@ -885,6 +887,7 @@ def test_funded_benchmark_keeps_pre_entry_cash_as_the_return_base() -> None:
     result = run(
         benchmark_equity=funded,
         benchmark_initial_equity=Decimal("100000"),
+        benchmark_entry_filled=True,
     )
 
     assert result.equity_curve[0].benchmark == Decimal("100000")

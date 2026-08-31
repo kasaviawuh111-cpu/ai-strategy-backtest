@@ -339,6 +339,7 @@ def test_submitted_work_item_runs_to_a_stable_result(tmp_path: Path) -> None:
     result = json.loads(completed.result_json or "{}")
     assert result["summary"]["runId"] == created.record.run_id.value
     assert result["summary"]["tradeCount"] == 1
+    assert result["summary"]["benchmarkComparisonStatus"] == "comparable"
     assert {item["kind"] for item in result["activities"]} >= {
         "signal",
         "order",

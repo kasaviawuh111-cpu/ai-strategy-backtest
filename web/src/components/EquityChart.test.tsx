@@ -103,4 +103,11 @@ describe('EquityChart', () => {
     render(<EquityChart series={[]} marks={[]} />)
     expect(screen.getByText(/请重新读取结果/)).toBeInTheDocument()
   })
+
+  it('keeps the buy-and-hold line but hides excess when the strategy never bought', () => {
+    render(<EquityChart series={series} marks={[]} comparisonAvailable={false} />)
+
+    expect(screen.getByText(/买入后一直持有/)).toBeInTheDocument()
+    expect(screen.queryByText(/^超额/)).not.toBeInTheDocument()
+  })
 })

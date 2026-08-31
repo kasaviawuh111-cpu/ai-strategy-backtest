@@ -920,6 +920,7 @@ export const mockApi = {
       runId,
       totalReturn: MOCK_TOTAL_RETURN,
       benchmarkReturn: -0.3923,
+      benchmarkComparisonStatus: 'comparable',
       annualizedReturn: -0.005,
       maxDrawdown: -0.5819,
       sharpeRatio: 0.16,

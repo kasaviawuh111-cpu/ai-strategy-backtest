@@ -307,7 +307,13 @@ export function ResultCard(
           label={`策略累计收益 ${fmtPct(metrics.total)}，区间内 ${filledMarks.length} 个买卖点，点开可看每一笔`}
         />
 
-        <ExcessEquation total={metrics.total} bench={metrics.bench} excess={metrics.excess} compact />
+        <ExcessEquation
+          total={metrics.total}
+          bench={metrics.bench}
+          excess={metrics.excess}
+          comparisonStatus={metrics.benchmarkComparisonStatus}
+          compact
+        />
 
         <div className="kpis kpis--pair">
           {/* 最大回撤是风险量，不套涨跌色，避免绿色被读成“好消息” */}

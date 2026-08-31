@@ -330,6 +330,7 @@ class BacktestExecutionService:
                 config=engine_config,
                 benchmark_equity=benchmark.funded_equity_path,
                 benchmark_initial_equity=benchmark.initial_cash.amount,
+                benchmark_entry_filled=benchmark.entry_fill is not None,
             )
             result = run_daily_backtest(engine_input)
 

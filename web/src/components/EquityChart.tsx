@@ -45,8 +45,9 @@ const formatTime = (value: string | null) => {
 }
 
 export function EquityChart(
-  { series, marks, selectedMarkId = null, onSelectMark }:
+  { series, marks, comparisonAvailable = true, selectedMarkId = null, onSelectMark }:
   { series: SeriesPoint[]; marks: ChartMark[];
+    comparisonAvailable?: boolean;
     /** 选中状态由报告页持有：图上的点和下面的委托列表是同一个选中。 */
     selectedMarkId?: string | null;
     onSelectMark?: (mark: ChartMark) => void },
@@ -59,11 +60,13 @@ export function EquityChart(
     const strategy = series.map((point) => point.strategy)
     const hasBenchmark = series.some((point) => point.benchmark != null)
     const benchmark = series.map((point) => point.benchmark ?? 0)
-    const excess = series.map((point) => point.benchmark == null
+    const excess = series.map((point) => !comparisonAvailable || point.benchmark == null
       ? 0
       : +(point.strategy - point.benchmark).toFixed(2))
     const drawdown = series.map((point) => Math.min(0, point.drawdown))
-    const allReturns = hasBenchmark ? strategy.concat(benchmark, excess) : strategy
+    const allReturns = hasBenchmark
+      ? strategy.concat(benchmark, comparisonAvailable ? excess : [])
+      : strategy
     const minimum = allReturns.length > 0 ? Math.min(...allReturns) : 0
     const maximum = allReturns.length > 0 ? Math.max(...allReturns) : 0
     const lo = Math.floor(minimum / 10) * 10 - 5
@@ -81,10 +84,10 @@ export function EquityChart(
     const grid: number[] = []
     for (let value = lo; value <= hi; value += 10) grid.push(value)
     return {
-      strategy, benchmark, excess, drawdown, hasBenchmark, lo, hi, drawdownLo,
+      strategy, benchmark, excess, drawdown, hasBenchmark, comparisonAvailable, lo, hi, drawdownLo,
       X, returnY, drawdownY, line, grid,
     }
-  }, [series])
+  }, [comparisonAvailable, series])
 
   const last = Math.max(0, series.length - 1)
   const selectedMark = marks.find((mark) => mark.activityId === selectedMarkId) ?? null
@@ -129,7 +132,7 @@ export function EquityChart(
       <div className="legend">
         <span><i style={{ borderColor: C.strategy }} />本策略 {fmtPct(lastStrategy)}</span>
         {geo.hasBenchmark ? <span><i style={{ borderColor: C.benchmark, borderTopStyle: 'dashed' }} />{BENCHMARK_LABEL} {fmtPct(lastBenchmark)}</span> : null}
-        {geo.hasBenchmark ? <span><i style={{ borderColor: C.excess }} />超额 {fmtPct(lastExcess)}</span> : null}
+        {geo.hasBenchmark && geo.comparisonAvailable ? <span><i style={{ borderColor: C.excess }} />超额 {fmtPct(lastExcess)}</span> : null}
         <span><i style={{ borderColor: C.drawdown }} />回撤 {fmtPct(geo.drawdown[last] ?? 0)}</span>
         <label className="toggle">
           <input type="checkbox" checked={showMarks} onChange={(event) => setShowMarks(event.target.checked)} />
@@ -167,9 +170,11 @@ export function EquityChart(
 
           {geo.hasBenchmark ? (
             <>
-              <path d={`${geo.line(geo.excess, geo.returnY)} L ${geo.X(last).toFixed(1)} ${geo.returnY(0).toFixed(1)} L ${PL} ${geo.returnY(0).toFixed(1)} Z`}
-                fill="rgba(59,132,255,.14)" />
-              <path d={geo.line(geo.excess, geo.returnY)} fill="none" stroke={C.excess} strokeWidth={1.4} strokeOpacity={0.7} />
+              {geo.comparisonAvailable ? <>
+                <path d={`${geo.line(geo.excess, geo.returnY)} L ${geo.X(last).toFixed(1)} ${geo.returnY(0).toFixed(1)} L ${PL} ${geo.returnY(0).toFixed(1)} Z`}
+                  fill="rgba(59,132,255,.14)" />
+                <path d={geo.line(geo.excess, geo.returnY)} fill="none" stroke={C.excess} strokeWidth={1.4} strokeOpacity={0.7} />
+              </> : null}
               <path d={geo.line(geo.benchmark, geo.returnY)} fill="none" stroke={C.benchmark} strokeWidth={2}
                 strokeDasharray="5 4" strokeLinecap="round" />
             </>
@@ -247,7 +252,7 @@ export function EquityChart(
             <div className="d">{series[activeIndex]?.date ?? ''}</div>
             <div className="r"><em><i style={{ borderColor: C.strategy }} />本策略</em><b className={signClass(activeStrategy)}>{fmtPct(activeStrategy)}</b></div>
             {geo.hasBenchmark ? <div className="r"><em><i style={{ borderColor: C.benchmark }} />{BENCHMARK_LABEL}</em><b className={signClass(activeBenchmark)}>{fmtPct(activeBenchmark)}</b></div> : null}
-            {geo.hasBenchmark ? <div className="r"><em><i style={{ borderColor: C.excess }} />超额</em><b className={signClass(activeExcess)}>{fmtPct(activeExcess)}</b></div> : null}
+            {geo.hasBenchmark && geo.comparisonAvailable ? <div className="r"><em><i style={{ borderColor: C.excess }} />超额</em><b className={signClass(activeExcess)}>{fmtPct(activeExcess)}</b></div> : null}
             <div className="r"><em><i style={{ borderColor: C.drawdown }} />回撤</em><b className="down">{fmtPct(activeDrawdown)}</b></div>
           </div>
         ) : null}

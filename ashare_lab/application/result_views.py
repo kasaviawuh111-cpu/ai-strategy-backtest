@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from ashare_lab.application.daily_backtest import DailyBacktestResult
 from ashare_lab.domain.execution import MatchOutcome
-from ashare_lab.domain.orders import OrderStatus
+from ashare_lab.domain.orders import OrderSide, OrderStatus
 from ashare_lab.domain.runs import result_hash
 from ashare_lab.domain.shared import OrderId
 
@@ -61,14 +61,16 @@ def build_result_bundle(
         )
 
     metrics = result.metrics
+    benchmark_comparison_status = _benchmark_comparison_status(result)
     data_snapshot = _mapping(manifest, "data_snapshot")
     assumptions = _mapping(manifest, "assumptions")
-    warnings = _warnings(result, assumptions)
+    warnings = _warnings(result, assumptions, benchmark_comparison_status)
     bundle: dict[str, Any] = {
         "summary": {
             "runId": run_id,
             "totalReturn": _optional_metric(metrics.total_return),
             "benchmarkReturn": _optional_metric(metrics.benchmark_return),
+            "benchmarkComparisonStatus": benchmark_comparison_status,
             "annualizedReturn": _optional_metric(metrics.annualized_return),
             "maxDrawdown": _optional_metric(metrics.maximum_drawdown),
             "sharpeRatio": _optional_metric(metrics.sharpe_ratio),
@@ -286,6 +288,7 @@ def _activities(result: DailyBacktestResult) -> list[dict[str, object]]:
 def _warnings(
     result: DailyBacktestResult,
     assumptions: Mapping[str, object],
+    benchmark_comparison_status: str,
 ) -> list[str]:
     warnings = [
         "日线回测只能证明价格区间和成交量，不能证明涨跌停队列中的实际排队位置。",
@@ -331,6 +334,10 @@ def _warnings(
         warnings.append("完整交易不足 30 次，胜率、夏普等统计结论不稳健。")
     if result.metrics.benchmark_return is None:
         warnings.append("本次数据快照未包含可比基准，未计算超额收益。")
+    elif benchmark_comparison_status == "strategy_entry_not_filled":
+        warnings.append("策略没有已成交买入；买入持有收益仅作参考，不计算超额收益。")
+    elif benchmark_comparison_status == "benchmark_entry_not_filled":
+        warnings.append("买入持有基准未按同一成交规则成交，无法比较超额收益。")
     if result.final_portfolio.lots:
         warnings.append("回测结束时仍有持仓，完整交易次数不包含这笔未平仓交易。")
     return warnings
@@ -338,6 +345,13 @@ def _warnings(
 
 def _interpretation(result: DailyBacktestResult) -> str:
     metrics = result.metrics
+    comparison_status = _benchmark_comparison_status(result)
+    if comparison_status == "strategy_entry_not_filled":
+        return "策略没有产生已成交买入，无法比较超额收益。"
+    if comparison_status == "benchmark_entry_not_filled":
+        return "买入持有基准未按同一成交规则成交，无法比较超额收益。"
+    if comparison_status == "benchmark_unavailable":
+        return "本次没有可审计的买入持有基准，无法比较超额收益。"
     if metrics.trade_count == 0:
         return "这段时间没有形成一笔完整买卖，暂时不能评价策略是否有效。"
     direction = "盈利" if metrics.total_return > 0 else "亏损"
@@ -348,6 +362,25 @@ def _interpretation(result: DailyBacktestResult) -> str:
         excess = metrics.total_return - metrics.benchmark_return
         comparison = "跑赢同资金同规则买入持有" if excess > 0 else "未跑赢同资金同规则买入持有"
     return f"策略期内{direction}，{comparison}；最大回撤约 {drawdown:.1f}%。"
+
+
+def _benchmark_comparison_status(result: DailyBacktestResult) -> str:
+    """Return the only status under which excess return is meaningful.
+
+    An all-cash strategy and a rising buy-and-hold reference are both useful
+    observations, but their arithmetic difference is not an investment edge:
+    the strategy never entered the market.  Likewise, a reference whose own
+    entry did not fill is not a buy-and-hold account.  Neither fact can be
+    inferred from a flat equity curve, so both come from audited run artifacts.
+    """
+
+    if result.metrics.benchmark_return is None or result.benchmark_entry_filled is None:
+        return "benchmark_unavailable"
+    if result.benchmark_entry_filled is False:
+        return "benchmark_entry_not_filled"
+    if not any(fill.side is OrderSide.BUY for fill in result.fills):
+        return "strategy_entry_not_filled"
+    return "comparable"
 
 
 def _optional_metric(value: float | None) -> float | None:
