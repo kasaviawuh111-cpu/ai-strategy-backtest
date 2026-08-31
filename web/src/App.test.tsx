@@ -91,8 +91,8 @@ describe('formal main.tsx App journey', () => {
     }
     renderApp(instrument)
 
-    expect(screen.getByText(/说出买卖规则/).closest('.say'))
-      .toHaveTextContent('贵州茅台 · 说出买卖规则')
+    expect(screen.getByText('想怎么交易？用一句话告诉我，我来帮你把它变成可回测的策略。').closest('.say'))
+      .toBeInTheDocument()
     expect(screen.getByLabelText('交易规则')).toHaveValue(
       '贵州茅台 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果',
     )
@@ -241,15 +241,16 @@ describe('formal main.tsx App journey', () => {
     expect(screen.queryByText('Backtest run was not found')).not.toBeInTheDocument()
   }, 8_000)
 
-  it('runs the earnings-forecast and MACD composite example without fake event parameters', async () => {
+  it('runs the volume-breakout example as two technical entry conditions', async () => {
     const user = userEvent.setup()
     renderApp()
 
-    await user.click(screen.getByRole('button', { name: '业绩预告 + MACD' }))
+    await user.click(screen.getByRole('button', { name: '放量突破' }))
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
-    expect(screen.getAllByText('业绩预告发布').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('MACD 金叉').length).toBeGreaterThan(0)
-    expect(screen.queryByText('年度报告发布')).not.toBeInTheDocument()
+    expect(screen.getAllByText('创 20 日新高').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('放量 1.5 倍').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('MACD 死叉').length).toBeGreaterThan(0)
+    expect(screen.queryByText('业绩预告发布')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(
@@ -258,21 +259,6 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', { name: '查看完整报告' }))
     expect(screen.getByRole('heading', { name: '回测报告' })).toBeInTheDocument()
     expect(screen.queryByText(/^proved$/i)).not.toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /成交规则与数据依据/ }))
-    expect(screen.getByRole('heading', { name: '成交规则与数据依据' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: '信号来源与时间' })).toBeInTheDocument()
-    expect(screen.getByText('固定样例')).toBeVisible()
-    expect(screen.getByText(/供应商记录的首次可得时间/)).toBeInTheDocument()
-    expect(screen.getByText(/时间精度：秒级/)).toBeInTheDocument()
-    expect(screen.getByText(/仅用于界面预览，未连接事件数据/)).toBeVisible()
-    expect(screen.getByText('mock_sample')).not.toBeVisible()
-    expect(screen.getByText('demonstration_only')).not.toBeVisible()
-    // 没有记录到的身份项不再一行一个「未记录」，合并成一条说明。
-    expect(screen.queryByText('数据快照')).not.toBeInTheDocument()
-    expect(screen.getByText('还没有记录的项').closest('.grow')).toHaveTextContent('数据快照')
-    await user.click(within(document.querySelector('#pg-execution') as HTMLElement)
-      .getByRole('button', { name: '返回' }))
-    expect(screen.getByRole('heading', { name: '回测报告' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '净值与回撤' })).toBeInTheDocument()
   }, 9_000)
 

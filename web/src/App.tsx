@@ -715,7 +715,7 @@ export default function App({
                       ? '未能识别当前股票。请返回股票页重新选择，或使用示例股票。'
                       : journeyHistory.length > 0
                         ? <>说出新的买卖规则，继续回测。</>
-                        : <><b>{instrument.name}</b> · 说出买卖规则，转成可回测的策略。</>}
+                        : <>想怎么交易？用一句话告诉我，我来帮你把它变成可回测的策略。</>}
                   </Say>
                   {/*
                     示例只在冷启动时出现：它的作用是告诉第一次来的人「一句话可以写成什么样」。
@@ -727,7 +727,7 @@ export default function App({
                       <Chips>
                         <Chip onClick={() => submitText(defaultUtterance)}>趋势共振</Chip>
                         <Chip onClick={() => submitText(`${instrument.name} RSI 低于 30 我就买入，RSI 高于 70 我就卖出，看看近 5 年`)}>超跌反转</Chip>
-                        <Chip onClick={() => submitText(`${instrument.name} 业绩预告发布且 MACD 金叉时买入，MACD 死叉卖出，回测近 5 年`)}>业绩预告 + MACD</Chip>
+                        <Chip onClick={() => submitText('股价创20日新高并且放量1.5倍买入，MACD死叉卖出，回测近5年')}>放量突破</Chip>
                       </Chips>
                     </div>
                   ) : null}

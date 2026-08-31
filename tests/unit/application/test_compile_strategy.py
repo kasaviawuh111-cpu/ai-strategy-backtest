@@ -653,6 +653,22 @@ async def test_five_periodic_report_entries_preserve_event_lane_and_technical_ex
             "event_attribute_filter_not_supported",
         ),
         (
+            "业绩预告利润大于1000万元后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
+            "业绩预告利润增长超过30%后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
+            "业绩快报净利润下降不少于20%后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
+            "定期报告利润超过2亿元后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
             "2024年报发布后买入，MACD死叉卖出",
             "event_report_period_filter_not_supported",
         ),

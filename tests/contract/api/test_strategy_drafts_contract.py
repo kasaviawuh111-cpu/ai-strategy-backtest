@@ -181,6 +181,14 @@ def test_unsupported_position_aware_exit_and_is_explicit_in_http_contract(
             "event_attribute_filter_not_supported",
         ),
         (
+            "业绩预告利润大于1000万元后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
+            "定期报告净利润增长超过30%后买入，MACD死叉卖出",
+            "event_attribute_filter_not_supported",
+        ),
+        (
             "一季报发布后买入，MACD死叉卖出",
             "event_report_period_filter_not_supported",
         ),

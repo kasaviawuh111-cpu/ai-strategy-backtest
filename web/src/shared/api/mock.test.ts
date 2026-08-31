@@ -32,26 +32,32 @@ describe('mock API trust boundary', () => {
     ])
   })
 
-  it('keeps the earnings-forecast example as an event and MACD conjunction', async () => {
+  it('keeps the volume-breakout example as a 20-day-high and relative-volume conjunction', async () => {
     const outcome = await mockApi.compile(request(
-      '东方财富 业绩预告发布且 MACD 金叉时买入，MACD 死叉卖出，回测近 5 年',
+      '股价创20日新高并且放量1.5倍买入，MACD死叉卖出，回测近5年',
     ))
     expect(outcome.status).toBe('compiled')
-    if (outcome.status !== 'compiled') throw new Error('expected a compiled earnings strategy')
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled volume-breakout strategy')
 
     expect(outcome.draft.strategySpec.entry).toMatchObject({
       type: 'all',
       children: [
-        { type: 'event_condition', event_code: 'event.financial_results.earnings_forecast_published' },
-        { type: 'indicator_condition', indicator_id: 'technical.macd', trigger: 'golden_cross' },
+        {
+          type: 'indicator_condition', indicator_id: 'price.rolling_high',
+          trigger: 'new_high', params: { period: 20, price_field: 'close' },
+        },
+        {
+          type: 'indicator_condition', indicator_id: 'volume.relative',
+          trigger: 'gte_multiple', value: 1.5, params: { baseline_period: 20 },
+        },
       ],
     })
     expect(outcome.draft.entry.conditions.map((condition) => condition.label)).toEqual([
-      '业绩预告发布',
-      'MACD 金叉',
+      '创 20 日新高',
+      '放量 1.5 倍',
     ])
     expect(outcome.draft.entry.conditions).not.toEqual(expect.arrayContaining([
-      expect.objectContaining({ eventCode: 'event.financial_results.annual_report' }),
+      expect.objectContaining({ kind: 'event' }),
     ]))
   })
 

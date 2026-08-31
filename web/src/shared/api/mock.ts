@@ -21,9 +21,10 @@ type MockRunRecord = {
   run: BacktestRun
   pollCount: number
   signalLabel: string
+  entrySignalTitle: string
+  entrySignalReason: string
   initialCashCny: number
   eventStrategy: boolean
-  eventCode: string | null
   documentTermHold: boolean
 }
 
@@ -34,7 +35,7 @@ const MOCK_TOTAL_RETURN = -0.0254315
 type MockStrategyKind =
   | 'annual_report'
   | 'annual_report_term_hold'
-  | 'earnings_forecast_macd'
+  | 'volume_breakout'
   | 'trend_combo'
   | 'moving_average'
   | 'rsi'
@@ -76,11 +77,9 @@ const isTrendComboRequest = (request: CompileRequest) =>
   && /(站上|突破|上穿)/.test(request.utterance)
   && request.utterance.includes('死叉')
 
-const isEarningsForecastMacdRequest = (request: CompileRequest) =>
-  request.utterance.includes('业绩预告')
-  && isMacdRequest(request)
-  && request.utterance.includes('金叉')
-  && request.utterance.includes('死叉')
+const isVolumeBreakoutRequest = (request: CompileRequest) =>
+  /(?:创|创新)\s*20\s*日新高/.test(request.utterance)
+  && /放量\s*1\.5\s*倍/.test(request.utterance)
 
 const isAnnualReportTermCountRequest = (request: CompileRequest) => {
   const normalized = request.utterance.normalize('NFKC')
@@ -119,7 +118,6 @@ const strategyKind = (request: CompileRequest): MockStrategyKind | null => {
     && ['close', 'intrabar'].includes(request.clarification.choiceId)
     && isMacdRequest(request)
   if (!hasCompleteTradeRule(request) && !clarifiedMacd) return null
-  if (isEarningsForecastMacdRequest(request)) return 'earnings_forecast_macd'
   if (looksLikeUnsupportedEventRequest(request)) return null
   if (isEventRequest(request)) {
     if (isAnnualReportTermCountRequest(request) && isThreeSessionExitRequest(request)) {
@@ -129,6 +127,7 @@ const strategyKind = (request: CompileRequest): MockStrategyKind | null => {
       ? 'annual_report'
       : null
   }
+  if (isVolumeBreakoutRequest(request)) return 'volume_breakout'
   if (isTrendComboRequest(request)) return 'trend_combo'
   if (isSupportedMovingAverageRule(request)) return 'moving_average'
   if (isSupportedRsiRule(request)) return 'rsi'
@@ -144,24 +143,27 @@ const makeStrategySpec = (request: CompileRequest, kind: MockStrategyKind): Stra
     symbol: request.instrument.symbol,
     position_mode: 'long_only',
   },
-  entry: kind === 'earnings_forecast_macd'
+  entry: kind === 'volume_breakout'
     ? {
         type: 'all',
         children: [{
-          type: 'event_condition',
-          event_code: 'event.financial_results.earnings_forecast_published',
-          definition_version: '1.0.0',
-          trigger: 'published',
-          attributes: {},
-        }, {
           type: 'indicator_condition',
-          indicator_id: 'technical.macd',
+          indicator_id: 'price.rolling_high',
           definition_version: '1.0.0',
-          params: { fast: 12, slow: 26, signal: 9 },
+          params: { period: 20, price_field: 'close' },
           timeframe: '1d',
           evaluation_mode: 'bar_close_confirmed',
-          trigger: 'golden_cross',
+          trigger: 'new_high',
           value: null,
+        }, {
+          type: 'indicator_condition',
+          indicator_id: 'volume.relative',
+          definition_version: '1.0.0',
+          params: { baseline_period: 20, consecutive_days: 3 },
+          timeframe: '1d',
+          evaluation_mode: 'bar_close_confirmed',
+          trigger: 'gte_multiple',
+          value: 1.5,
         }],
       }
     : kind === 'trend_combo'
@@ -289,12 +291,10 @@ const makeStrategySpec = (request: CompileRequest, kind: MockStrategyKind): Stra
     entry_policy: 'next_tradable_session_open',
     exit_policy: 'next_tradable_session_open',
     data_capability: kind === 'annual_report' || kind === 'annual_report_term_hold'
-      || kind === 'earnings_forecast_macd'
       ? 'daily_ohlcv_events'
       : 'daily_ohlcv',
     execution_resolution: '1d',
     evaluation_frequency: kind === 'annual_report' || kind === 'annual_report_term_hold'
-      || kind === 'earnings_forecast_macd'
       ? 'event_available_plus_1d_close'
       : '1d_close',
     position_policy: 'single_position_no_pyramiding',
@@ -309,10 +309,9 @@ const makeStrategySpec = (request: CompileRequest, kind: MockStrategyKind): Stra
 
 const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDraft => {
   const intrabar = request.clarification?.choiceId === 'intrabar'
-  const earningsForecastStrategy = kind === 'earnings_forecast_macd'
+  const volumeBreakoutStrategy = kind === 'volume_breakout'
   const trendComboStrategy = kind === 'trend_combo'
   const eventStrategy = kind === 'annual_report' || kind === 'annual_report_term_hold'
-    || earningsForecastStrategy
   const documentTextStrategy = kind === 'annual_report_term_hold'
   const movingAverageStrategy = kind === 'moving_average'
   const rsiStrategy = kind === 'rsi'
@@ -323,12 +322,12 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
     strategyHash: 'sha256:mock-demo-strategy-not-live-evidence',
     sourceText: request.utterance,
     title: eventStrategy
-      ? earningsForecastStrategy
-        ? '业绩预告 + MACD 共振 · 日线'
-        : documentTextStrategy
+      ? documentTextStrategy
         ? '年度报告正文词频 + 持有期退出 · 日线'
         : '年度报告 + MACD 规则 · 日线'
-      : trendComboStrategy
+      : volumeBreakoutStrategy
+        ? '20 日新高 + 放量突破 · 日线'
+        : trendComboStrategy
         ? 'MACD + MA20 趋势共振 · 日线'
         : movingAverageStrategy
         ? '20 日均线突破 · 日线'
@@ -339,26 +338,29 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
     confidence: null,
     entry: {
       operator: 'all',
-      conditions: earningsForecastStrategy
+      conditions: volumeBreakoutStrategy
         ? [{
-            id: 'entry_earnings_forecast',
-            kind: 'event',
-            eventCode: 'event.financial_results.earnings_forecast_published',
-            label: '业绩预告发布',
-            trigger: '按首次可获得时间确认',
-            attributes: {},
-          }, {
-            id: 'entry_macd_cross',
+            id: 'entry_rolling_high',
             kind: 'indicator',
-            indicatorId: 'technical.macd',
-            label: 'MACD 金叉',
-            trigger: 'DIF 由下向上穿过 DEA',
+            indicatorId: 'price.rolling_high',
+            label: '创 20 日新高',
+            trigger: '当日收盘严格高于此前 20 个完整交易日的最高价',
             timeframe: '1d',
             evaluationMode: 'bar_close_confirmed',
             parameters: [
-              { key: 'fast', label: '快线', value: 12, min: 2, max: 60 },
-              { key: 'slow', label: '慢线', value: 26, min: 3, max: 120 },
-              { key: 'signal', label: '信号线', value: 9, min: 2, max: 60 },
+              { key: 'period', label: '观察周期', value: 20, min: 2, max: 5_000 },
+            ],
+          }, {
+            id: 'entry_relative_volume',
+            kind: 'indicator',
+            indicatorId: 'volume.relative',
+            label: '放量 1.5 倍',
+            trigger: '当日成交量至少为此前 20 个正成交量交易日均量的 1.5 倍',
+            timeframe: '1d',
+            evaluationMode: 'bar_close_confirmed',
+            parameters: [
+              { key: 'baseline_period', label: '前序基准周期', value: 20, min: 1, max: 1_000 },
+              { key: '$value', label: '放量倍数', value: 1.5, min: 0.01, max: 100 },
             ],
           }]
         : trendComboStrategy
@@ -610,29 +612,25 @@ const makeSeries = (): EquityPoint[] => {
 const baseActivities = (
   eventStrategy: boolean,
   documentTermHold: boolean,
-  eventCode: string | null,
+  entrySignalTitle: string,
+  entrySignalReason: string,
 ): BacktestActivity[] => {
-  const earningsForecast = eventCode === 'event.financial_results.earnings_forecast_published'
   const activities: BacktestActivity[] = [
   {
     id: 'sig_01', chainId: 'decision_buy_01', decisionId: 'decision_buy_01', kind: 'signal',
     occurredAt: eventStrategy ? '2024-03-14T20:57:33+08:00' : '2022-05-13T15:00:00+08:00', side: 'buy',
     title: documentTermHold
       ? '年度报告正文词频条件确认'
-      : earningsForecast
-        ? '业绩预告发布且 MACD 金叉'
-        : eventStrategy ? '年度报告首次可得' : 'MACD 金叉确认', status: 'confirmed',
+      : eventStrategy ? '年度报告首次可得' : entrySignalTitle, status: 'confirmed',
     reason: documentTermHold
       ? '固定样例：先按事件首次可得时间确认，再按固定规则展示“AI”完整词出现 > 5 次。没有读取正文。'
       : eventStrategy
       ? '固定样例：按事件首次可得时间触发，不倒填公告日期。'
-      : 'DIF 0.318 上穿 DEA 0.301，使用当日收盘数据。',
+      : entrySignalReason,
     evidence: eventStrategy ? [{
       type: 'event_observation',
-      id: earningsForecast ? 'mock:earnings-forecast-example' : 'mock:annual-report-example',
-      sourceEventId: earningsForecast
-        ? 'mock:earnings-forecast-example'
-        : 'mock:annual-report-example',
+      id: 'mock:annual-report-example',
+      sourceEventId: 'mock:annual-report-example',
       provider: 'mock_sample',
       sourceUrl: null,
       availableAt: '2024-03-14T20:57:33+08:00',
@@ -766,9 +764,15 @@ const activitiesForCapital = (
   initialCashCny: number,
   eventStrategy: boolean,
   documentTermHold: boolean,
-  eventCode: string | null,
+  entrySignalTitle: string,
+  entrySignalReason: string,
 ): BacktestActivity[] =>
-  baseActivities(eventStrategy, documentTermHold, eventCode).map((activity) => {
+  baseActivities(
+    eventStrategy,
+    documentTermHold,
+    entrySignalTitle,
+    entrySignalReason,
+  ).map((activity) => {
     if (activity.quantity == null) return activity
     const scaled = Math.floor(
       activity.quantity * initialCashCny / MOCK_REFERENCE_INITIAL_CASH_CNY / 100,
@@ -852,18 +856,24 @@ export const mockApi = {
       error: null,
       resultAvailable: false,
     }
-    const entryIndicator = draft.entry.conditions.find((condition) => condition.kind === 'indicator')
-    const entryEvent = draft.entry.conditions.find((condition) => condition.kind === 'event')
+    const entryIndicators = draft.entry.conditions.filter((condition) => condition.kind === 'indicator')
     const signalLabel = draft.entry.conditions.some((condition) => condition.kind === 'event')
       ? '生成事件与技术样例信号'
-      : `生成${entryIndicator?.label ?? '技术指标'}样例信号`
+      : `生成${entryIndicators.map((condition) => condition.label).join('且') || '技术指标'}样例信号`
+    const entrySignalTitle = entryIndicators.length > 0
+      ? `${entryIndicators.map((condition) => condition.label).join('且')}确认`
+      : '技术信号确认'
+    const entrySignalReason = entryIndicators.length > 0
+      ? entryIndicators.map((condition) => condition.trigger).join('；')
+      : '技术条件满足，使用日线收盘确认。'
     runs.set(id, {
       run,
       pollCount: 0,
       signalLabel,
+      entrySignalTitle,
+      entrySignalReason,
       initialCashCny: draft.backtest.initialCashCny,
       eventStrategy: draft.entry.conditions.some((condition) => condition.kind === 'event'),
-      eventCode: entryEvent?.eventCode ?? null,
       documentTermHold: draft.exit.conditions.some((condition) => condition.kind === 'holding_period'),
     })
     return run
@@ -943,7 +953,8 @@ export const mockApi = {
       stored.initialCashCny,
       stored.eventStrategy,
       stored.documentTermHold,
-      stored.eventCode,
+      stored.entrySignalTitle,
+      stored.entrySignalReason,
     )
   },
 }
