@@ -35,6 +35,19 @@ export type StrategySpecEventCondition = {
   document_text?: StrategySpecDocumentTextPredicate | null
 }
 
+export type StrategySpecFinancialCondition = {
+  type: 'financial_condition'
+  metric_id: string
+  definition_version: '1.0.0'
+  report_type: 'q1' | 'semiannual' | 'q3' | 'annual' | null
+  period_basis: 'single_quarter' | 'ytd_cumulative' | 'full_year' | 'ttm' | 'mrq' | 'point_in_time' | null
+  statement_scope: 'consolidated' | 'parent_company' | null
+  revision_policy: 'as_known_at_signal'
+  comparator: 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'ne'
+  value: number | string
+  unit: 'CNY' | 'CNY_PER_SHARE' | 'PERCENT' | 'RATIO' | 'TIMES'
+}
+
 export type StrategySpecDocumentTextPredicate = {
   metric_id: 'document.literal_mention_count'
   metric_version: '1.0.0'
@@ -75,6 +88,7 @@ export type StrategySpecTrailingDrawdownExit = {
 
 export type StrategySpecCondition =
   | StrategySpecIndicatorCondition
+  | StrategySpecFinancialCondition
   | StrategySpecEventCondition
   | { type: 'all' | 'any'; children: StrategySpecCondition[] }
   | { type: 'not'; child: StrategySpecCondition }
@@ -105,9 +119,17 @@ export type StrategySpec = {
     timezone: 'Asia/Shanghai'
     entry_policy: 'next_tradable_session_open'
     exit_policy: 'next_tradable_session_open'
-    data_capability: 'daily_ohlcv' | 'daily_ohlcv_events'
+    data_capability:
+      | 'daily_ohlcv'
+      | 'daily_ohlcv_events'
+      | 'daily_ohlcv_financials'
+      | 'daily_ohlcv_events_financials'
     execution_resolution: '1d'
-    evaluation_frequency: '1d_close' | 'event_available_plus_1d_close'
+    evaluation_frequency:
+      | '1d_close'
+      | 'event_available_plus_1d_close'
+      | 'financial_available_plus_1d_close'
+      | 'event_financial_available_plus_1d_close'
     position_policy: 'single_position_no_pyramiding'
     t_plus_one: true
   }
@@ -137,6 +159,16 @@ export type StrategyEventCondition = StrategyConditionBase & {
   eventCode: string
   attributes: Record<string, string | number | boolean>
   documentText?: StrategySpecDocumentTextPredicate | null
+}
+
+export type StrategyFinancialCondition = StrategyConditionBase & {
+  kind: 'financial'
+  metricId: string
+  comparator: 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'ne'
+  value: number | string
+  unit: 'CNY' | 'CNY_PER_SHARE' | 'PERCENT' | 'RATIO' | 'TIMES'
+  reportType: 'q1' | 'semiannual' | 'q3' | 'annual' | null
+  periodBasis: 'single_quarter' | 'ytd_cumulative' | 'full_year' | 'ttm' | 'mrq' | 'point_in_time' | null
 }
 
 export type StrategyHoldingPeriodCondition = StrategyConditionBase & {
@@ -170,6 +202,7 @@ export type StrategyTrailingDrawdownCondition = StrategyConditionBase & {
 
 export type StrategyCondition =
   | StrategyIndicatorCondition
+  | StrategyFinancialCondition
   | StrategyEventCondition
   | StrategyHoldingPeriodCondition
   | StrategyPositionReturnCondition
@@ -192,8 +225,16 @@ export type ExecutionPolicy = {
   exitPolicy: 'next_tradable_session_open'
   priceLimitMode: PriceLimitMode
   tPlusOne: true
-  dataCapability: 'daily_ohlcv' | 'daily_ohlcv_events'
-  evaluationFrequency: '1d_close' | 'event_available_plus_1d_close'
+  dataCapability:
+    | 'daily_ohlcv'
+    | 'daily_ohlcv_events'
+    | 'daily_ohlcv_financials'
+    | 'daily_ohlcv_events_financials'
+  evaluationFrequency:
+    | '1d_close'
+    | 'event_available_plus_1d_close'
+    | 'financial_available_plus_1d_close'
+    | 'event_financial_available_plus_1d_close'
   capacityMode: CapacityMode
   participationRate: number
   allocationRatio: number

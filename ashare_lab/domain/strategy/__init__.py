@@ -18,11 +18,16 @@ from .models import (
     StrategySpec,
     TrailingDrawdownExit,
     iter_event_conditions,
+    iter_financial_conditions,
     iter_holding_period_exits,
     iter_indicator_conditions,
     iter_position_return_exits,
     iter_trailing_drawdown_exits,
     strategy_requires_events,
+    strategy_requires_financials,
+)
+from .models import (
+    FinancialCondition as FinancialConditionV1,
 )
 from .models_v2 import (
     AllConditionV2,
@@ -73,6 +78,7 @@ __all__ = [
     "EventDocumentTextPredicate",
     "ExecutableStrategyPlan",
     "FinancialCondition",
+    "FinancialConditionV1",
     "FirstOfExit",
     "HoldingPeriodExit",
     "IndicatorCondition",
@@ -97,11 +103,13 @@ __all__ = [
     "canonical_json_v2",
     "iter_condition_leaf_paths",
     "iter_event_conditions",
+    "iter_financial_conditions",
     "iter_holding_period_exits",
     "iter_indicator_conditions",
     "iter_position_return_exits",
     "iter_trailing_drawdown_exits",
     "strategy_requires_events",
+    "strategy_requires_financials",
     "validate_strategy_against_catalog",
     "validate_strategy_candidate_v2",
 ]

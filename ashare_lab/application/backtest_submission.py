@@ -19,6 +19,7 @@ from ashare_lab.domain.strategy import (
     iter_event_conditions,
     iter_indicator_conditions,
     strategy_requires_events,
+    strategy_requires_financials,
 )
 from ashare_lab.ports.backtest_runs import (
     BacktestJobQueue,
@@ -27,6 +28,7 @@ from ashare_lab.ports.backtest_runs import (
     BacktestRunStore,
     CreateRunResult,
 )
+from ashare_lab.ports.financial_data import FinancialFactLoader, PinnedFinancialFacts
 from ashare_lab.ports.market_data import DataRequirements, DateRange, MarketDataRepository
 
 from .corporate_action_timeline import (
@@ -46,6 +48,10 @@ MAX_WARMUP_CALENDAR_DAYS = 3_650
 
 class EventDataUnavailableError(RuntimeError):
     """Raised before pinning when an event strategy has no executable dataset."""
+
+
+class FinancialDataUnavailableError(RuntimeError):
+    """Raised before queueing when financial facts cannot be pinned safely."""
 
 
 def _event_data_available_by_default() -> bool:
@@ -165,6 +171,7 @@ class BacktestSubmissionService:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         run_id_factory: Callable[[], RunId] = lambda: RunId(f"run:{uuid4().hex}"),
         event_data_available: Callable[[], bool] = _event_data_available_by_default,
+        financial_fact_loader: FinancialFactLoader | None = None,
     ) -> None:
         self._market_data = market_data
         self._run_store = run_store
@@ -173,6 +180,7 @@ class BacktestSubmissionService:
         self._clock = clock
         self._run_id_factory = run_id_factory
         self._event_data_available = event_data_available
+        self._financial_fact_loader = financial_fact_loader
 
     def submit(
         self,
@@ -180,6 +188,7 @@ class BacktestSubmissionService:
         config: BacktestRunConfig,
     ) -> CreateRunResult:
         requires_events = strategy_requires_events(strategy)
+        requires_financials = strategy_requires_financials(strategy)
         requires_event_document_text = any(
             condition.document_text is not None for condition in iter_event_conditions(strategy)
         )
@@ -193,6 +202,19 @@ class BacktestSubmissionService:
             start=strategy.backtest.start - timedelta(days=effective_warmup),
             end=strategy.backtest.end + timedelta(days=config.settlement_extension_days),
         )
+        created_at = self._clock()
+        financial_bundle: PinnedFinancialFacts | None = None
+        if requires_financials:
+            if self._financial_fact_loader is None:
+                raise FinancialDataUnavailableError("financial_data_loader_unavailable")
+            try:
+                financial_bundle = self._financial_fact_loader.load(
+                    strategy,
+                    period,
+                    retrieved_at=created_at,
+                )
+            except Exception as exc:
+                raise FinancialDataUnavailableError(str(exc)) from exc
         snapshot = self._market_data.pin_snapshot(
             DataRequirements(
                 instruments=(instrument_id,),
@@ -214,11 +236,17 @@ class BacktestSubmissionService:
             ),
             period,
         )
-        created_at = self._clock()
         config_payload = config.as_dict(
             snapshot_period=period,
             effective_warmup_calendar_days=effective_warmup,
         )
+        financial_snapshot_payload: dict[str, object] | None = None
+        if financial_bundle is not None:
+            financial_snapshot_payload = _financial_snapshot_payload(financial_bundle)
+            config_payload["financial_snapshot"] = financial_snapshot_payload
+            config_payload["financial_facts"] = [
+                item.model_dump(mode="json") for item in financial_bundle.facts
+            ]
         manifest = RunManifest(
             run_id=self._run_id_factory(),
             strategy_hash=canonical_hash(strategy),
@@ -261,7 +289,12 @@ class BacktestSubmissionService:
             run_id=manifest.run_id,
             fingerprint=manifest.fingerprint,
             strategy_json=canonical_json(strategy),
-            manifest_json=canonical_json(_manifest_payload(manifest)),
+            manifest_json=canonical_json(
+                _manifest_payload(
+                    manifest,
+                    financial_snapshot=financial_snapshot_payload,
+                )
+            ),
             config_json=canonical_json(config_payload),
             state=BacktestJobState.QUEUED,
             progress_percent=0,
@@ -275,7 +308,11 @@ class BacktestSubmissionService:
         return result
 
 
-def _manifest_payload(manifest: RunManifest) -> dict[str, object]:
+def _manifest_payload(
+    manifest: RunManifest,
+    *,
+    financial_snapshot: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     snapshot_payload: dict[str, object] = {
         "checksum": manifest.data_snapshot.checksum,
         "created_at": manifest.data_snapshot.created_at.isoformat(),
@@ -285,7 +322,7 @@ def _manifest_payload(manifest: RunManifest) -> dict[str, object]:
     }
     if manifest.data_snapshot.producer_snapshot_id is not None:
         snapshot_payload["producer_snapshot_id"] = manifest.data_snapshot.producer_snapshot_id
-    return {
+    payload: dict[str, object] = {
         "assumptions": manifest.assumptions.as_dict(),
         "catalog_hash": manifest.catalog_hash,
         "code_revision": manifest.code_revision,
@@ -301,6 +338,21 @@ def _manifest_payload(manifest: RunManifest) -> dict[str, object]:
         "run_id": str(manifest.run_id),
         "strategy_hash": manifest.strategy_hash,
         "strategy_schema_version": manifest.strategy_schema_version,
+    }
+    if financial_snapshot is not None:
+        payload["financial_snapshot"] = dict(financial_snapshot)
+    return payload
+
+
+def _financial_snapshot_payload(bundle: PinnedFinancialFacts) -> dict[str, object]:
+    return {
+        "checksum": bundle.checksum,
+        "coverage_end": bundle.coverage_end.isoformat(),
+        "coverage_start": bundle.coverage_start.isoformat(),
+        "identity_basis": bundle.identity_basis,
+        "provider": bundle.provider,
+        "schema_version": bundle.schema_version,
+        "snapshot_id": bundle.snapshot_id,
     }
 
 

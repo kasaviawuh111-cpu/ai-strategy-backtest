@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import cast
 from zoneinfo import ZoneInfo
 
 from ashare_lab.domain.catalog import CatalogSnapshot
 from ashare_lab.domain.events.runtime import EventRuntimeError, evaluate_event_condition_aligned
+from ashare_lab.domain.financials import FinancialFactRecord
 from ashare_lab.domain.market_data import DailyBar, EventEnvelope
 from ashare_lab.domain.strategy import (
     AllCondition,
     AnyCondition,
     EventCondition,
+    FinancialConditionV1,
     IndicatorCondition,
 )
 from ashare_lab.domain.strategy.models import Condition
@@ -133,11 +135,14 @@ class SignalRuntime:
         condition: Condition,
         bars: Sequence[DailyBar],
         events: Sequence[EventEnvelope] = (),
+        financial_facts: Sequence[FinancialFactRecord] = (),
     ) -> tuple[SignalFact, ...]:
         """Return facts in session order, omitting bars still in warmup."""
 
         return tuple(
-            fact for fact in self.evaluate_aligned(condition, bars, events) if fact is not None
+            fact
+            for fact in self.evaluate_aligned(condition, bars, events, financial_facts)
+            if fact is not None
         )
 
     def evaluate_aligned(
@@ -145,20 +150,27 @@ class SignalRuntime:
         condition: Condition,
         bars: Sequence[DailyBar],
         events: Sequence[EventEnvelope] = (),
+        financial_facts: Sequence[FinancialFactRecord] = (),
     ) -> tuple[SignalFact | None, ...]:
         """Return one slot per input bar; ``None`` means insufficient history."""
 
         canonical_bars = tuple(bars)
         _validate_bars(canonical_bars)
-        return self._evaluate_node(condition, canonical_bars, tuple(events))
+        return self._evaluate_node(
+            condition,
+            canonical_bars,
+            tuple(events),
+            tuple(financial_facts),
+        )
 
     def evaluate_latest(
         self,
         condition: Condition,
         bars: Sequence[DailyBar],
         events: Sequence[EventEnvelope] = (),
+        financial_facts: Sequence[FinancialFactRecord] = (),
     ) -> SignalFact | None:
-        aligned = self.evaluate_aligned(condition, bars, events)
+        aligned = self.evaluate_aligned(condition, bars, events, financial_facts)
         return aligned[-1] if aligned else None
 
     def _evaluate_node(
@@ -166,9 +178,12 @@ class SignalRuntime:
         condition: Condition,
         bars: tuple[DailyBar, ...],
         events: tuple[EventEnvelope, ...],
+        financial_facts: tuple[FinancialFactRecord, ...],
     ) -> tuple[SignalFact | None, ...]:
         if isinstance(condition, IndicatorCondition):
             return _evaluate_indicator(condition, bars)
+        if isinstance(condition, FinancialConditionV1):
+            return _evaluate_financial(condition, bars, financial_facts)
         if isinstance(condition, EventCondition):
             try:
                 points = evaluate_event_condition_aligned(condition, bars, events)
@@ -193,11 +208,120 @@ class SignalRuntime:
             )
         if isinstance(condition, (AllCondition, AnyCondition)):
             child_timelines = tuple(
-                self._evaluate_node(child, bars, events) for child in condition.children
+                self._evaluate_node(child, bars, events, financial_facts)
+                for child in condition.children
             )
             return _combine(condition.type, child_timelines, bars)
-        child_timeline = self._evaluate_node(condition.child, bars, events)
+        child_timeline = self._evaluate_node(condition.child, bars, events, financial_facts)
         return _combine("not", (child_timeline,), bars)
+
+
+def _evaluate_financial(
+    condition: FinancialConditionV1,
+    bars: tuple[DailyBar, ...],
+    financial_facts: tuple[FinancialFactRecord, ...],
+) -> tuple[SignalFact | None, ...]:
+    """Evaluate only the latest direct provider fact knowable at each close."""
+
+    matching = tuple(
+        fact
+        for fact in financial_facts
+        if fact.metric_id is condition.metric_id
+        and (condition.period_basis is None or fact.period_basis is condition.period_basis)
+        and (condition.report_type is None or fact.report_type is condition.report_type)
+        and fact.statement_scope is condition.statement_scope
+        and fact.unit is condition.unit
+    )
+    timeline: list[SignalFact | None] = []
+    for bar in bars:
+        as_of = max(_observed_at(bar), bar.available_at)
+        available = tuple(
+            fact
+            for fact in matching
+            if fact.instrument_id == str(bar.instrument_id)
+            and fact.availability.is_available_at(as_of)
+        )
+        if not available:
+            timeline.append(None)
+            continue
+        latest = max(
+            available,
+            key=_financial_fact_sort_key,
+        )
+        if latest.value is None:
+            timeline.append(None)
+            continue
+        triggered = _evaluate_financial_comparator(
+            condition.comparator,
+            latest.value,
+            condition.value,
+        )
+        result_word = "true" if triggered else "false"
+        first_available_at = latest.availability.first_available_at
+        assert first_available_at is not None
+        timeline.append(
+            SignalFact(
+                instrument_id=bar.instrument_id,
+                session_date=bar.session_date,
+                condition_ref=(
+                    f"{condition.metric_id.value}@{condition.definition_version}:"
+                    f"{condition.comparator}"
+                ),
+                triggered=triggered,
+                observed_at=_observed_at(bar),
+                available_at=max(_observed_at(bar), bar.available_at, first_available_at),
+                reason=(
+                    f"{condition.metric_id.value}={_format_decimal(latest.value)} "
+                    f"{condition.comparator} threshold={_format_decimal(condition.value)} "
+                    f"=> {result_word}"
+                ),
+                left_value=latest.value,
+                right_value=condition.value,
+                evidence=(
+                    SignalEvidence(
+                        evidence_type="financial_fact",
+                        evidence_id=(
+                            f"{latest.snapshot_id}:{latest.source_dataset}:"
+                            f"{latest.source_field}:{latest.revision_id}"
+                        ),
+                        available_at=first_available_at,
+                        provider=latest.provider,
+                        raw_response_sha256=latest.raw_response_sha256,
+                    ),
+                ),
+            )
+        )
+    return tuple(timeline)
+
+
+def _financial_fact_sort_key(
+    fact: FinancialFactRecord,
+) -> tuple[date, datetime, str]:
+    observed_at = fact.availability.observed_at
+    first_available_at = fact.availability.first_available_at
+    assert observed_at is not None
+    assert first_available_at is not None
+    return (fact.report_period or observed_at.date(), first_available_at, fact.revision_id)
+
+
+def _evaluate_financial_comparator(
+    comparator: str,
+    left: Decimal,
+    right: Decimal,
+) -> bool:
+    if comparator == "gt":
+        return left > right
+    if comparator == "gte":
+        return left >= right
+    if comparator == "lt":
+        return left < right
+    if comparator == "lte":
+        return left <= right
+    if comparator == "eq":
+        return left == right
+    if comparator == "ne":
+        return left != right
+    raise SignalRuntimeError(f"unsupported financial comparator: {comparator!r}")
 
 
 def _evaluate_indicator(

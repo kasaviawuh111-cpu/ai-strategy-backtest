@@ -190,7 +190,7 @@ const expectLiveCompileRequest = (fetchMock: FetchMock) => {
   const init = draftCalls[0]?.[1] as RequestInit
   expect(init.method).toBe('POST')
   expect(JSON.parse(String(init.body))).toEqual({
-    utterance: '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果',
+    utterance: '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果',
     instrument_context: '300059.SZ',
     as_of_date: '2026-08-06',
   })

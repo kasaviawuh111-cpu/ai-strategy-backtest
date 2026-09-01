@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import make_url
 
 from ashare_lab.adapters.event_sources.eastmoney import eastmoney_preparable_event_codes
+from ashare_lab.adapters.financial_sources import EastmoneyOperatorFinancialFactLoader
 from ashare_lab.adapters.jobs import RQBacktestJobQueue, ThreadBacktestJobQueue
 from ashare_lab.adapters.language.openai_compatible import (
     DisabledCandidateJsonTransport,
@@ -408,6 +409,7 @@ def build_api_runtime(
         job_queue=queue,
         versions=execution.versions,
         event_data_available=event_backtest_probe,
+        financial_fact_loader=EastmoneyOperatorFinancialFactLoader(),
     )
     return ApiRuntime(
         execution=execution,

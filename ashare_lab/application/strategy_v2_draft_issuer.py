@@ -136,7 +136,7 @@ class GroundedStrategyV2Issuer:
         snapshot_resolver: TrustedStrategyV2SnapshotResolver | None = None,
         code_revision: str,
         initial_cash_cny: int = 1_000_000,
-        default_lookback_years: int = 5,
+        default_lookback_years: int = 1,
         draft_id_factory: Callable[[], str] = lambda: f"draft:{uuid.uuid4().hex}",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:

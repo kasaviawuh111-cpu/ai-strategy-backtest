@@ -172,6 +172,7 @@ const failureFor = (
   }
   if (
     normalized.includes('event_not_available_for_backtest')
+    || normalized.includes('financial_data_unavailable')
     || normalized.includes('backtest_service_unavailable')
     || normalized.includes('capability')
   ) {
@@ -287,7 +288,7 @@ export default function App({
   const queryClient = useQueryClient()
   const defaultUtterance = instrumentContextError
     ? ''
-    : `${instrument.name} MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果`
+    : `${instrument.name} MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果`
   const [utterance, setUtterance] = useState(defaultUtterance)
   const [submittedText, setSubmittedText] = useState<string>()
   const [draft, setDraft] = useState<StrategyDraft>()
@@ -735,8 +736,8 @@ export default function App({
                     <div className="home-examples" aria-label="策略示例">
                       <Chips>
                         <Chip onClick={() => submitText(defaultUtterance)}>趋势共振</Chip>
-                        <Chip onClick={() => submitText(`${instrument.name} RSI 低于 30 我就买入，RSI 高于 70 我就卖出，看看近 5 年`)}>超跌反转</Chip>
-                        <Chip onClick={() => submitText('股价创20日新高并且放量1.5倍买入，MACD死叉卖出，回测近5年')}>放量突破</Chip>
+                        <Chip onClick={() => submitText(`${instrument.name} RSI 低于 30 我就买入，RSI 高于 70 我就卖出，看看近 1 年`)}>超跌反转</Chip>
+                        <Chip onClick={() => submitText('股价创20日新高并且放量1.5倍买入，MACD死叉卖出，回测近1年')}>放量突破</Chip>
                       </Chips>
                     </div>
                   ) : null}

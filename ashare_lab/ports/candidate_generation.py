@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from typing import Literal, Protocol
 
+from ashare_lab.domain.financials import (
+    FinancialMetricId,
+    FinancialPeriodBasis,
+    FinancialReportType,
+    FinancialStatementScope,
+    FinancialUnit,
+)
 from ashare_lab.domain.strategy.models import JsonScalar
 
 
@@ -40,7 +48,19 @@ class EventIntent:
         return dict(self.attributes)
 
 
-type SignalIntent = IndicatorIntent | EventIntent
+@dataclass(frozen=True, slots=True)
+class FinancialIntent:
+    metric_id: FinancialMetricId
+    comparator: Literal["gt", "gte", "lt", "lte", "eq", "ne"]
+    value: Decimal
+    unit: FinancialUnit
+    report_type: FinancialReportType | None = None
+    period_basis: FinancialPeriodBasis | None = None
+    statement_scope: FinancialStatementScope | None = None
+    definition_version: Literal["1.0.0"] = "1.0.0"
+
+
+type SignalIntent = IndicatorIntent | EventIntent | FinancialIntent
 type ExitIntent = SignalIntent | HoldingPeriodIntent | PositionReturnIntent | TrailingDrawdownIntent
 type ConditionJoin = Literal["all", "any"]
 

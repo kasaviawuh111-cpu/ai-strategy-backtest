@@ -428,7 +428,7 @@ async def test_ready_draft_and_validation_restore_without_recalling_provider(
     assert created.status == "ready"
     assert created.strategy is not None
     assert created.strategy.instrument.symbol == "300059.SZ"
-    assert created.strategy.backtest.start == date(2021, 8, 31)
+    assert created.strategy.backtest.start == date(2025, 8, 31)
     assert created.strategy.backtest.end == date(2026, 8, 31)
     assert created.strategy.backtest.initial_cash_cny == 1_000_000
     assert transport.calls == 1

@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -26,20 +27,32 @@ from ashare_lab.application.execute_backtest import (
     BacktestExecutionService,
     WorkerRuntimeIdentity,
 )
+from ashare_lab.domain.financials import (
+    FinancialFactRecord,
+    FinancialMetricId,
+    FinancialPeriodBasis,
+    FinancialUnit,
+    FinancialValueOrigin,
+)
 from ashare_lab.domain.market_data import DataSnapshotRef, InstrumentSession
+from ashare_lab.domain.provenance import SourceKind, SourceRef
 from ashare_lab.domain.shared import InstrumentId, RunId
 from ashare_lab.domain.strategy import (
     BacktestConfig,
     CatalogRef,
     DailyExecutionPolicy,
     EventCondition,
+    FinancialConditionV1,
     FirstOfExit,
     IndicatorCondition,
     Instrument,
     StrategySpec,
+    canonical_hash,
 )
 from ashare_lab.domain.strategy.models import JsonScalar
+from ashare_lab.domain.time import PointInTimeAvailability
 from ashare_lab.ports.backtest_runs import BacktestJobState
+from ashare_lab.ports.financial_data import PinnedFinancialFacts
 from ashare_lab.ports.market_data import DataRequirements, DateRange
 
 HASH = "sha256:" + "a" * 64
@@ -218,6 +231,98 @@ def _event_strategy() -> StrategySpec:
     )
 
 
+def _financial_strategy() -> StrategySpec:
+    params: dict[str, JsonScalar] = {"period": 2, "source": "close"}
+    return StrategySpec(
+        catalog=CatalogRef(catalog_id="cn_a.signals", release_version="test"),
+        instrument=Instrument(symbol="300059.SZ"),
+        entry=FinancialConditionV1(
+            metric_id=FinancialMetricId.PE,
+            comparator="lt",
+            value=Decimal("20"),
+            unit=FinancialUnit.TIMES,
+            period_basis=FinancialPeriodBasis.POINT_IN_TIME,
+        ),
+        exit=FirstOfExit(
+            children=(
+                IndicatorCondition(
+                    indicator_id="technical.rsi",
+                    definition_version="1.0.0",
+                    params=params,
+                    trigger="crosses_above",
+                    value=100,
+                ),
+            )
+        ),
+        execution=DailyExecutionPolicy(
+            data_capability="daily_ohlcv_financials",
+            evaluation_frequency="financial_available_plus_1d_close",
+        ),
+        backtest=BacktestConfig(
+            start=date(2025, 1, 2),
+            end=date(2025, 1, 10),
+            initial_cash_cny=100_000,
+        ),
+    )
+
+
+def _financial_bundle() -> PinnedFinancialFacts:
+    identity_basis: dict[str, object] = {"provider": "eastmoney", "series": [HASH]}
+    checksum = canonical_hash(identity_basis)
+    snapshot_id = "financial:" + checksum.removeprefix("sha256:")
+    available_at = datetime(2025, 1, 2, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+    revision_id = "eastmoney:valuation.pe:2025-01-02"
+    return PinnedFinancialFacts(
+        snapshot_id=snapshot_id,
+        checksum=checksum,
+        provider="eastmoney",
+        schema_version="test.v1",
+        coverage_start=date(2025, 1, 2),
+        coverage_end=date(2025, 1, 2),
+        identity_basis=identity_basis,
+        facts=(
+            FinancialFactRecord(
+                instrument_id="300059.SZ",
+                metric_id=FinancialMetricId.PE,
+                value=Decimal("18"),
+                value_origin=FinancialValueOrigin.PROVIDER_RAW,
+                provider="eastmoney",
+                source_dataset="RPT_CUSTOM_DMSK_TREND",
+                source_field="INDICATOR_VALUE",
+                report_period=None,
+                report_type=None,
+                period_basis=FinancialPeriodBasis.POINT_IN_TIME,
+                statement_scope=None,
+                unit=FinancialUnit.TIMES,
+                availability=PointInTimeAvailability(
+                    observed_at=available_at,
+                    announced_at=None,
+                    first_available_at=available_at,
+                    signal_at=None,
+                    execution_at=None,
+                    retrieved_at=available_at,
+                    timezone="Asia/Shanghai",
+                    source="eastmoney",
+                    revision_id=revision_id,
+                ),
+                revision_id=revision_id,
+                raw_response_sha256=HASH,
+                snapshot_id=snapshot_id,
+                source_refs=(
+                    SourceRef(
+                        provider="eastmoney",
+                        source_id="valuation.pe:2025-01-02",
+                        snapshot_id=snapshot_id,
+                        schema_version="test.v1",
+                        content_sha256=HASH,
+                        source_kind=SourceKind.PROVIDER_RECORD,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
 def _write_bars(root: Path) -> None:
     start = date(2024, 12, 30)
     closes = [10, 9, 11, 12, 8, 7, 7, 8, 9, 6, 5, 5]
@@ -345,6 +450,50 @@ def test_submitted_work_item_runs_to_a_stable_result(tmp_path: Path) -> None:
         "order",
         "fill",
     }
+
+
+def test_pinned_financial_fact_runs_through_the_existing_worker(tmp_path: Path) -> None:
+    _write_bars(tmp_path)
+    repository = CapturingLocalParquetRepository(tmp_path)
+    store = InMemoryBacktestRunStore()
+    bundle = _financial_bundle()
+
+    class Loader:
+        def load(self, _strategy, _period, *, retrieved_at):
+            assert retrieved_at == datetime(2025, 1, 1, tzinfo=UTC)
+            return bundle
+
+    created = BacktestSubmissionService(
+        market_data=repository,
+        run_store=store,
+        job_queue=CapturingQueue(),
+        versions=_versions(),
+        clock=lambda: datetime(2025, 1, 1, tzinfo=UTC),
+        financial_fact_loader=Loader(),
+    ).submit(
+        _financial_strategy(),
+        BacktestRunConfig(
+            participation_rate=Decimal("1"),
+            slippage_bps=Decimal("0"),
+            run_robustness=False,
+        ),
+    )
+
+    completed = BacktestExecutionService(
+        market_data=repository,
+        session_reference=ResearchFallbackSessionProvider(),
+        run_store=store,
+        runtime_identity=_runtime_identity(),
+    ).execute(created.record.run_id)
+
+    assert completed.state is BacktestJobState.SUCCEEDED
+    result = json.loads(completed.result_json or "{}")
+    financial_signals = [
+        item
+        for item in result["activities"]
+        if item["kind"] == "signal" and "valuation.pe" in item["reason"]
+    ]
+    assert financial_signals
 
 
 def test_worker_can_read_market_rules_from_the_same_pinned_snapshot(tmp_path: Path) -> None:

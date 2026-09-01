@@ -78,7 +78,7 @@ _TEMPLATES: tuple[_IdeaTemplate, ...] = (
         title="等趋势确认后参与",
         entry_summary="股价上穿 20 日均线",
         exit_summary="股价跌破 20 日均线",
-        suggested_utterance="股价上穿20日均线买入，跌破20日均线卖出，回测近5年",
+        suggested_utterance="股价上穿20日均线买入，跌破20日均线卖出，回测近1年",
         capability_ids=("technical.ma",),
     ),
     _IdeaTemplate(
@@ -86,7 +86,7 @@ _TEMPLATES: tuple[_IdeaTemplate, ...] = (
         title="检验超跌后的反转",
         entry_summary="RSI 低于 30",
         exit_summary="RSI 高于 70",
-        suggested_utterance="RSI低于30买入，高于70卖出，回测近5年",
+        suggested_utterance="RSI低于30买入，高于70卖出，回测近1年",
         capability_ids=("technical.rsi",),
     ),
     _IdeaTemplate(
@@ -94,7 +94,7 @@ _TEMPLATES: tuple[_IdeaTemplate, ...] = (
         title="用动量转强确认",
         entry_summary="MACD 金叉",
         exit_summary="MACD 死叉",
-        suggested_utterance="MACD金叉买入，死叉卖出，回测近5年",
+        suggested_utterance="MACD金叉买入，死叉卖出，回测近1年",
         capability_ids=("technical.macd",),
     ),
 )
@@ -354,7 +354,7 @@ def _to_proposal(
         assumptions=(
             "候选只是价格行为代理，不证明原观点与股价存在因果关系。",
             "仅使用当前 A 股页面标的，模型不能替换股票。",
-            "候选为日线、只做多、近 5 年；选择后仍需通过现有 DSL 与 Catalog 校验。",
+            "候选为日线、只做多、近 1 年；选择后仍需通过现有 DSL 与 Catalog 校验。",
         ),
         confidence=_PROPOSAL_CONFIDENCE,
     )

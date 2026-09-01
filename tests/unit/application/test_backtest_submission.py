@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,15 +15,29 @@ from ashare_lab.application.backtest_submission import (
     SubmissionVersions,
     _effective_warmup_calendar_days,
 )
+from ashare_lab.application.execute_backtest import (
+    BacktestWorkItemError,
+    _financial_facts_from_work_item,
+)
 from ashare_lab.domain.execution import CapacityMode
+from ashare_lab.domain.financials import (
+    FinancialFactRecord,
+    FinancialMetricId,
+    FinancialPeriodBasis,
+    FinancialUnit,
+    FinancialValueOrigin,
+)
+from ashare_lab.domain.provenance import SourceKind, SourceRef
 from ashare_lab.domain.shared import DomainValidationError
-from ashare_lab.domain.strategy import StrategySpec
+from ashare_lab.domain.strategy import StrategySpec, canonical_hash
+from ashare_lab.domain.time import PointInTimeAvailability
 from ashare_lab.ports.backtest_runs import (
     BacktestJobState,
     BacktestResultIntegrityPolicy,
     BacktestRunRecord,
     CreateRunResult,
 )
+from ashare_lab.ports.financial_data import PinnedFinancialFacts
 
 HASH = "sha256:" + "a" * 64
 
@@ -188,6 +202,107 @@ def test_submission_pins_data_and_reenqueues_a_still_queued_replay(
     assert replay.replayed is True
     assert queue.run_ids == [str(first.record.run_id), str(first.record.run_id)]
     assert '"snapshot_start"' in first.record.config_json
+
+
+def test_financial_submission_pins_facts_and_worker_rejects_tampering(
+    tmp_path: Path,
+    macd_strategy: StrategySpec,
+) -> None:
+    write_daily(tmp_path)
+    payload = macd_strategy.model_dump(mode="python")
+    payload["entry"] = {
+        "type": "financial_condition",
+        "metric_id": "valuation.pe",
+        "comparator": "lt",
+        "value": 20,
+        "unit": "TIMES",
+        "period_basis": "point_in_time",
+    }
+    payload["execution"] = {
+        "data_capability": "daily_ohlcv_financials",
+        "evaluation_frequency": "financial_available_plus_1d_close",
+    }
+    strategy = StrategySpec.model_validate(payload)
+    identity_basis: dict[str, object] = {"provider": "eastmoney", "series": [HASH]}
+    checksum = canonical_hash(identity_basis)
+    snapshot_id = "financial:" + checksum.removeprefix("sha256:")
+    available_at = datetime(2025, 1, 2, 15, tzinfo=UTC)
+    revision_id = "eastmoney:valuation.pe:2025-01-02"
+    fact = FinancialFactRecord(
+        instrument_id="300059.SZ",
+        metric_id=FinancialMetricId.PE,
+        value=Decimal("18"),
+        value_origin=FinancialValueOrigin.PROVIDER_RAW,
+        provider="eastmoney",
+        source_dataset="RPT_CUSTOM_DMSK_TREND",
+        source_field="INDICATOR_VALUE",
+        report_period=None,
+        report_type=None,
+        period_basis=FinancialPeriodBasis.POINT_IN_TIME,
+        statement_scope=None,
+        unit=FinancialUnit.TIMES,
+        availability=PointInTimeAvailability(
+            observed_at=available_at,
+            announced_at=None,
+            first_available_at=available_at,
+            signal_at=None,
+            execution_at=None,
+            retrieved_at=available_at,
+            timezone="UTC",
+            source="eastmoney",
+            revision_id=revision_id,
+        ),
+        revision_id=revision_id,
+        raw_response_sha256=HASH,
+        snapshot_id=snapshot_id,
+        source_refs=(
+            SourceRef(
+                provider="eastmoney",
+                source_id="valuation.pe:2025-01-02",
+                snapshot_id=snapshot_id,
+                schema_version="test.v1",
+                content_sha256=HASH,
+                source_kind=SourceKind.PROVIDER_RECORD,
+            ),
+        ),
+    )
+
+    class Loader:
+        def load(self, _strategy, _period, *, retrieved_at):
+            assert retrieved_at == available_at
+            return PinnedFinancialFacts(
+                snapshot_id=snapshot_id,
+                checksum=checksum,
+                provider="eastmoney",
+                schema_version="test.v1",
+                coverage_start=date(2025, 1, 2),
+                coverage_end=date(2025, 1, 2),
+                identity_basis=identity_basis,
+                facts=(fact,),
+            )
+
+    created = BacktestSubmissionService(
+        market_data=LocalParquetMarketDataRepository(tmp_path),
+        run_store=MemoryStore(),
+        job_queue=CapturingQueue(),
+        versions=SubmissionVersions(
+            catalog_hash=HASH,
+            engine_version="2.0.0a0",
+            code_revision="git:test",
+        ),
+        clock=lambda: available_at,
+        financial_fact_loader=Loader(),
+    ).submit(strategy, BacktestRunConfig())
+    config = json.loads(created.record.config_json)
+    manifest = json.loads(created.record.manifest_json)
+
+    restored = _financial_facts_from_work_item(strategy, manifest, config)
+    assert restored == (fact,)
+    assert manifest["financial_snapshot"] == config["financial_snapshot"]
+
+    config["financial_snapshot"]["identity_basis"]["provider"] = "tampered"
+    with pytest.raises(BacktestWorkItemError, match="manifest_mismatch"):
+        _financial_facts_from_work_item(strategy, manifest, config)
 
 
 def test_enqueue_failure_is_recovered_by_replaying_the_queued_submission(

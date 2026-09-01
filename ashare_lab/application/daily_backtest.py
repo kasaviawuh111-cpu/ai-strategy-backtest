@@ -32,6 +32,7 @@ from ashare_lab.domain.execution import (
     PointInTimeVolume,
     previous_session_volume_proxy,
 )
+from ashare_lab.domain.financials import FinancialFactRecord
 from ashare_lab.domain.market_data import (
     CorporateAction,
     CorporateActionKind,
@@ -78,6 +79,7 @@ from ashare_lab.domain.strategy.models import (
     AnyCondition,
     Condition,
     EventCondition,
+    FinancialCondition,
     HoldingPeriodExit,
     IndicatorCondition,
     PositionReturnExit,
@@ -215,6 +217,7 @@ class DailyBacktestInput:
     fee_calculator: FeeQuoteProvider
     signal_bars: tuple[DailyBar, ...] | None = None
     events: tuple[EventEnvelope, ...] = ()
+    financial_facts: tuple[FinancialFactRecord, ...] = ()
     corporate_actions: tuple[CorporateAction, ...] = ()
     config: DailyBacktestConfig = field(default_factory=DailyBacktestConfig)
     benchmark_equity: tuple[tuple[date, Decimal], ...] = ()
@@ -301,6 +304,7 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         request.strategy.entry,
         signal_bars,
         request.events,
+        request.financial_facts,
     )
     market_exit_condition = _exit_condition(request.strategy)
     exit_timeline: tuple[SignalFact | None, ...] = (
@@ -308,6 +312,7 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
             market_exit_condition,
             signal_bars,
             request.events,
+            request.financial_facts,
         )
         if market_exit_condition is not None
         else (None,) * len(signal_bars)
@@ -992,6 +997,8 @@ def _entry_signal_semantics(condition: Condition) -> EntrySignalSemantics:
 
     if isinstance(condition, EventCondition):
         return EntrySignalSemantics.EVENT
+    if isinstance(condition, FinancialCondition):
+        return EntrySignalSemantics.STATE
     if isinstance(condition, IndicatorCondition):
         if "cross" in condition.trigger or condition.trigger in _EDGE_TRIGGER_IDS:
             return EntrySignalSemantics.EDGE
@@ -1455,6 +1462,8 @@ def _validate_and_select_inputs(
         raise DailyBacktestInputError("all sessions must match the strategy instrument")
     if any(item.event.instrument_id != instrument_id for item in request.events):
         raise DailyBacktestInputError("all events must match the strategy instrument")
+    if any(item.instrument_id != str(instrument_id) for item in request.financial_facts):
+        raise DailyBacktestInputError("all financial facts must match the strategy instrument")
     event_revision_keys = [(item.event.event_id.value, item.revision_no) for item in request.events]
     if len(event_revision_keys) != len(set(event_revision_keys)):
         raise DailyBacktestInputError("events must have unique event_id and revision_no pairs")

@@ -87,9 +87,9 @@ async def test_provider_only_selects_templates_and_server_builds_utterances(
     assert route.asset_mapping.evidence_status == "host_context_only"
     assert len(route.proposals) == 3
     assert {item.suggested_utterance for item in route.proposals} == {
-        "股价上穿20日均线买入，跌破20日均线卖出，回测近5年",
-        "RSI低于30买入，高于70卖出，回测近5年",
-        "MACD金叉买入，死叉卖出，回测近5年",
+        "股价上穿20日均线买入，跌破20日均线卖出，回测近1年",
+        "RSI低于30买入，高于70卖出，回测近1年",
+        "MACD金叉买入，死叉卖出，回测近1年",
     }
     assert all("300059.SZ" not in item.suggested_utterance for item in route.proposals)
     assert all("绕过系统" not in item.suggested_utterance for item in route.proposals)

@@ -8,10 +8,12 @@ from ashare_lab.adapters.language.rule_based import _ANNOUNCEMENT_EVENT_DEFINITI
 from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.events.catalog import EXECUTABLE_EVENT_DEFINITIONS
+from ashare_lab.domain.financials import FinancialMetricId, FinancialUnit
 from ashare_lab.domain.strategy import (
     AllCondition,
     AnyCondition,
     EventCondition,
+    FinancialConditionV1,
     HoldingPeriodExit,
     IndicatorCondition,
 )
@@ -46,8 +48,40 @@ async def test_macd_sentence_compiles_without_unnecessary_question(
     assert outcome.clarification is None
     assert outcome.strategy is not None
     assert outcome.strategy.instrument.symbol == "300059.SZ"
-    assert outcome.strategy.backtest.start == date(2021, 8, 27)
+    assert outcome.strategy.backtest.start == date(2025, 8, 27)
     assert outcome.strategy.backtest.initial_cash_cny == 1_000_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "metric_id", "value"),
+    [
+        ("营收同比超过20%买入，MACD死叉卖出", FinancialMetricId.REVENUE_YOY, "0.2"),
+        ("ROE高于10%买入，MACD死叉卖出", FinancialMetricId.ROE, "0.1"),
+        ("市盈率低于20倍买入，MACD死叉卖出", FinancialMetricId.PE, "20"),
+    ],
+)
+async def test_operator_reading_financial_language_compiles_to_direct_fact_condition(
+    compiler: StrategyCompiler,
+    utterance: str,
+    metric_id: FinancialMetricId,
+    value: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, FinancialConditionV1)
+    assert outcome.strategy.entry.metric_id is metric_id
+    assert str(outcome.strategy.entry.value) == value
+    assert outcome.strategy.entry.unit in {FinancialUnit.RATIO, FinancialUnit.TIMES}
+    assert outcome.strategy.execution.data_capability == "daily_ohlcv_financials"
 
 
 @pytest.mark.asyncio

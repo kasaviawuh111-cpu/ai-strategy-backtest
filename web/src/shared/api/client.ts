@@ -164,7 +164,7 @@ const requireExecutionCapability = (capabilities: CapabilitiesResponse): void =>
 
 const eventCodesFromCondition = (condition: StrategySpecCondition): string[] => {
   if (condition.type === 'event_condition') return [condition.event_code]
-  if (condition.type === 'indicator_condition') return []
+  if (condition.type === 'indicator_condition' || condition.type === 'financial_condition') return []
   if (condition.type === 'not') return eventCodesFromCondition(condition.child)
   return condition.children.flatMap(eventCodesFromCondition)
 }
@@ -183,7 +183,7 @@ const documentTextEventCodesFromCondition = (condition: StrategySpecCondition): 
   if (condition.type === 'event_condition') {
     return condition.document_text ? [condition.event_code] : []
   }
-  if (condition.type === 'indicator_condition') return []
+  if (condition.type === 'indicator_condition' || condition.type === 'financial_condition') return []
   if (condition.type === 'not') return documentTextEventCodesFromCondition(condition.child)
   return condition.children.flatMap(documentTextEventCodesFromCondition)
 }

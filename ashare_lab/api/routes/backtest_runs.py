@@ -16,7 +16,10 @@ from ashare_lab.adapters.market_data.on_demand_snapshot import (
     SnapshotPreparationIncompleteError,
     SnapshotPreparationUnsupportedError,
 )
-from ashare_lab.application.backtest_submission import EventDataUnavailableError
+from ashare_lab.application.backtest_submission import (
+    EventDataUnavailableError,
+    FinancialDataUnavailableError,
+)
 from ashare_lab.application.result_views import (
     RESULT_HASH_SCHEMA_VERSION,
     calculate_result_bundle_hash,
@@ -108,6 +111,8 @@ def create_backtest_run(
         result = submitter.submit(body.strategy, body.config.to_application_config())
     except EventDataUnavailableError as exc:
         raise _event_data_unavailable() from exc
+    except FinancialDataUnavailableError as exc:
+        raise _financial_data_unavailable(str(exc)) from exc
     except SnapshotPreparationUnsupportedError as exc:
         raise _backtest_data_request_unsupported() from exc
     except SnapshotPreparationDocumentTextIncompleteError as exc:
@@ -241,6 +246,17 @@ def _event_data_unavailable() -> ApiProblem:
         message=(
             "Event backtesting requires EVENT_DATA_REQUIRED=true and an available "
             "events.parquet dataset"
+        ),
+    )
+
+
+def _financial_data_unavailable(reason: str) -> ApiProblem:
+    return ApiProblem(
+        status_code=422,
+        code="financial_data_unavailable",
+        message=(
+            "The requested direct financial metric is not available with "
+            f"revision-safe history: {reason[:160]}"
         ),
     )
 

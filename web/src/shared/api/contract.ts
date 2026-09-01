@@ -14,6 +14,7 @@ import type {
   StrategyCondition,
   StrategyDraft,
   StrategyEventCondition,
+  StrategyFinancialCondition,
   StrategyHoldingPeriodCondition,
   StrategyIndicatorCondition,
   StrategyLeg,
@@ -23,6 +24,7 @@ import type {
   StrategySpecCondition,
   StrategySpecExitRule,
   StrategySpecEventCondition,
+  StrategySpecFinancialCondition,
   StrategySpecHoldingPeriodExit,
   StrategySpecIndicatorCondition,
   StrategySpecPositionReturnExit,
@@ -511,6 +513,9 @@ function flattenConditions(
   if (condition.type === 'event_condition') {
     return [toUiEventCondition(condition, path)]
   }
+  if (condition.type === 'financial_condition') {
+    return [toUiFinancialCondition(condition, path)]
+  }
   if (condition.type === 'not') {
     return flattenConditions(condition.child, `${path}-not`, capabilities)
   }
@@ -623,6 +628,47 @@ function toUiEventCondition(
   }
 }
 
+const FINANCIAL_METRIC_LABELS: Record<string, string> = {
+  'valuation.pe': '市盈率 PE',
+  'valuation.pb': '市净率 PB',
+  'valuation.ps': '市销率 PS',
+  'valuation.pcf': '市现率 PCF',
+  'valuation.pe_ttm': '滚动市盈率 PE-TTM',
+  'valuation.pb_mrq': '市净率 PB-MRQ',
+  'valuation.dividend_yield_ttm': '股息率 TTM',
+  'financial.revenue': '营业收入',
+  'financial.net_profit_parent': '归母净利润',
+  'financial.revenue_yoy': '营收同比',
+  'financial.net_profit_parent_yoy': '归母净利润同比',
+  'financial.roe': '净资产收益率 ROE',
+  'financial.gross_margin': '毛利率',
+  'financial.net_margin': '净利率',
+}
+
+function financialMetricLabel(metricId: string): string {
+  return FINANCIAL_METRIC_LABELS[metricId] ?? readableIdentifier(metricId)
+}
+
+function toUiFinancialCondition(
+  condition: StrategySpecFinancialCondition,
+  id: string,
+): StrategyFinancialCondition {
+  const name = financialMetricLabel(condition.metric_id)
+  const comparison = `${comparatorLabel(condition.comparator)} ${condition.value}`
+  return {
+    id,
+    kind: 'financial',
+    metricId: condition.metric_id,
+    label: `${name} ${comparison}`,
+    trigger: '只使用历史当时已可得的接口原始值，日线收盘确认',
+    comparator: condition.comparator,
+    value: condition.value,
+    unit: condition.unit,
+    reportType: condition.report_type,
+    periodBasis: condition.period_basis,
+  }
+}
+
 function comparatorLabel(comparator: string): string {
   return ({ gt: '>', gte: '≥', eq: '=', lte: '≤', lt: '<' } as Record<string, string>)[comparator]
     ?? comparator
@@ -697,6 +743,7 @@ function strategyTitle(conditions: StrategyCondition[]): string {
     if (condition.kind === 'event') {
       return condition.label.split('正文')[0]?.replace(/发布$/, '') || readableEventCode(condition.eventCode)
     }
+    if (condition.kind === 'financial') return financialMetricLabel(condition.metricId)
     return readableIdentifier(condition.indicatorId)
   }))]
   return `${names.join(' + ')} 规则 · 日线`
@@ -724,7 +771,11 @@ function applyLegEdits(
 ): StrategySpecCondition {
   let cursor = 0
   const visit = (node: StrategySpecCondition): StrategySpecCondition => {
-    if (node.type === 'indicator_condition' || node.type === 'event_condition') {
+    if (
+      node.type === 'indicator_condition'
+      || node.type === 'financial_condition'
+      || node.type === 'event_condition'
+    ) {
       const edit = edits[cursor]
       cursor += 1
       return node.type === 'indicator_condition' && edit?.kind === 'indicator'
@@ -743,7 +794,11 @@ function applyConditionList(
 ): StrategySpecExitRule[] {
   let cursor = 0
   const visitCondition = (node: StrategySpecCondition): StrategySpecCondition => {
-    if (node.type === 'indicator_condition' || node.type === 'event_condition') {
+    if (
+      node.type === 'indicator_condition'
+      || node.type === 'financial_condition'
+      || node.type === 'event_condition'
+    ) {
       const edit = edits[cursor]
       cursor += 1
       return node.type === 'indicator_condition' && edit?.kind === 'indicator'

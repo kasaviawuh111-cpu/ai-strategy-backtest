@@ -10,9 +10,19 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Literal
+from decimal import Decimal
+from typing import Literal, cast
 
 from ashare_lab.adapters.language.backtest_period import parse_backtest_period
+from ashare_lab.domain.financials import (
+    FIRST_FINANCIAL_METRIC_CATALOG,
+    FinancialDataKind,
+    FinancialMetricId,
+    FinancialPeriodBasis,
+    FinancialReportType,
+    FinancialStatementScope,
+    FinancialUnit,
+)
 from ashare_lab.domain.market_data import AshareInstrumentCodeError, normalize_a_share_instrument
 from ashare_lab.ports.candidate_generation import (
     CandidateAst,
@@ -21,6 +31,7 @@ from ashare_lab.ports.candidate_generation import (
     DocumentTextIntent,
     EventIntent,
     ExitIntent,
+    FinancialIntent,
     HoldingPeriodIntent,
     IndicatorIntent,
     PositionReturnIntent,
@@ -35,6 +46,42 @@ _SYMBOL_RE = re.compile(
 )
 _NUMBER = r"(\d+(?:\.\d+)?)"
 _SIGNED_NUMBER = r"(-?\d+(?:\.\d+)?)"
+_FINANCIAL_COMPARISON_RE = re.compile(
+    r"(?P<op>不低于|不少于|至少|大于等于|不超过|至多|小于等于|"
+    r"超过|高于|大于|低于|小于|>=|<=|>|<)\s*"
+    r"(?P<percent_prefix>百分之)?\s*(?P<number>-?\d+(?:\.\d+)?)\s*"
+    r"(?P<percent>[%％])?\s*(?P<scale>亿|万)?"
+)
+_FINANCIAL_METRIC_ALIASES: tuple[tuple[re.Pattern[str], FinancialMetricId], ...] = (
+    (re.compile(r"(?:营业总?收入|营收).{0,8}(?:同比|增长率)"), FinancialMetricId.REVENUE_YOY),
+    (
+        re.compile(r"扣非(?:归母)?净利润.{0,8}(?:同比|增长率)"),
+        FinancialMetricId.DEDUCTED_NET_PROFIT_YOY,
+    ),
+    (
+        re.compile(r"(?:归母)?(?:净利润).{0,8}(?:同比|增长率)"),
+        FinancialMetricId.NET_PROFIT_PARENT_YOY,
+    ),
+    (re.compile(r"每股经营现金流"), FinancialMetricId.OPERATING_CASH_FLOW_PER_SHARE),
+    (re.compile(r"每股净资产"), FinancialMetricId.BOOK_VALUE_PER_SHARE),
+    (re.compile(r"(?:每股收益|(?<![a-z])eps(?![a-z]))", re.I), FinancialMetricId.BASIC_EPS),
+    (re.compile(r"每股资本公积"), FinancialMetricId.CAPITAL_RESERVE_PER_SHARE),
+    (re.compile(r"每股未分配利润"), FinancialMetricId.UNASSIGNED_PROFIT_PER_SHARE),
+    (re.compile(r"(?:营业总?收入|营收)"), FinancialMetricId.REVENUE),
+    (re.compile(r"扣非(?:归母)?净利润"), FinancialMetricId.DEDUCTED_NET_PROFIT),
+    (re.compile(r"(?:归母)?净利润"), FinancialMetricId.NET_PROFIT_PARENT),
+    (re.compile(r"毛利率"), FinancialMetricId.GROSS_MARGIN),
+    (re.compile(r"净利率"), FinancialMetricId.NET_MARGIN),
+    (re.compile(r"(?<![a-z])roe(?![a-z])|净资产收益率", re.I), FinancialMetricId.ROE),
+    (re.compile(r"(?<![a-z])rota(?![a-z])|总资产报酬率", re.I), FinancialMetricId.ROTA),
+    (re.compile(r"总资产周转率"), FinancialMetricId.TOTAL_ASSETS_TURNOVER),
+    (re.compile(r"存货周转率"), FinancialMetricId.INVENTORY_TURNOVER),
+    (re.compile(r"应收账款周转率"), FinancialMetricId.ACCOUNTS_RECEIVABLE_TURNOVER),
+    (re.compile(r"(?:市盈率|(?<![a-z])pe(?![a-z]))", re.I), FinancialMetricId.PE),
+    (re.compile(r"(?:市净率|(?<![a-z])pb(?![a-z]))", re.I), FinancialMetricId.PB),
+    (re.compile(r"(?:市销率|(?<![a-z])ps(?![a-z]))", re.I), FinancialMetricId.PS),
+    (re.compile(r"(?:市现率|(?<![a-z])pcf(?![a-z]))", re.I), FinancialMetricId.PCF),
+)
 _ACTION_RE = re.compile(r"(?<!超)(?:买入|卖出|买进|卖掉|(?<!购)买|卖)")
 _BOOLEAN_AND_RE = re.compile(r"(?:并且|而且|同时|以及|且)")
 _BOOLEAN_OR_RE = re.compile(r"(?:或者|或是|任一|任意(?:一个|一项)?|或)")
@@ -600,7 +647,9 @@ class RuleBasedCandidateGenerator:
                 if any(isinstance(item, HoldingPeriodIntent) for item in intents):
                     return (_unsupported(symbol, "holding_period_entry_not_supported", 1.0),)
                 signal_intents = tuple(
-                    item for item in intents if isinstance(item, (IndicatorIntent, EventIntent))
+                    item
+                    for item in intents
+                    if isinstance(item, (IndicatorIntent, EventIntent, FinancialIntent))
                 )
                 if signal_intents:
                     entry_rule_clause_count += 1
@@ -686,6 +735,12 @@ def _parse_clause(
     intents: list[ExitIntent] = []
     defaulted: list[str] = []
     clause_families = _explicit_families(text)
+
+    financial_intent, financial_error = _financial_intent(text)
+    if financial_error is not None:
+        return [], [], financial_error
+    if financial_intent is not None:
+        intents.append(financial_intent)
 
     event_intent = _event_intent(text)
     if event_intent is not None:
@@ -1297,6 +1352,92 @@ def _parse_clause(
         )
 
     return intents, defaulted, None
+
+
+def _financial_intent(text: str) -> tuple[FinancialIntent | None, str | None]:
+    metric_id = next(
+        (metric for pattern, metric in _FINANCIAL_METRIC_ALIASES if pattern.search(text)),
+        None,
+    )
+    if metric_id is None:
+        return None, None
+    comparison = _FINANCIAL_COMPARISON_RE.search(text)
+    if comparison is None:
+        return None, "financial_comparison_required"
+    comparator = cast(
+        Literal["gt", "gte", "lt", "lte", "eq", "ne"],
+        {
+            "不低于": "gte",
+            "不少于": "gte",
+            "至少": "gte",
+            "大于等于": "gte",
+            ">=": "gte",
+            "超过": "gt",
+            "高于": "gt",
+            "大于": "gt",
+            ">": "gt",
+            "不超过": "lte",
+            "至多": "lte",
+            "小于等于": "lte",
+            "<=": "lte",
+            "低于": "lt",
+            "小于": "lt",
+            "<": "lt",
+        }[comparison.group("op")],
+    )
+    value = Decimal(comparison.group("number"))
+    definition = FIRST_FINANCIAL_METRIC_CATALOG.definition_for(metric_id)
+    unit = definition.unit
+    if unit is FinancialUnit.RATIO:
+        if (
+            comparison.group("percent_prefix") is not None
+            or comparison.group("percent") is not None
+            or value.copy_abs() > 1
+        ):
+            value /= Decimal("100")
+    elif unit is FinancialUnit.CNY:
+        scale = comparison.group("scale")
+        if scale == "亿":
+            value *= Decimal("100000000")
+        elif scale == "万":
+            value *= Decimal("10000")
+    elif comparison.group("percent_prefix") is not None or comparison.group("percent") is not None:
+        return None, "financial_unit_mismatch"
+
+    report_type = _financial_report_type(text)
+    period_basis = (
+        FinancialPeriodBasis.POINT_IN_TIME
+        if definition.data_kind is FinancialDataKind.VALUATION
+        else None
+    )
+    return (
+        FinancialIntent(
+            metric_id=metric_id,
+            comparator=comparator,
+            value=value,
+            unit=unit,
+            report_type=report_type,
+            period_basis=period_basis,
+            statement_scope=(
+                FinancialStatementScope.CONSOLIDATED
+                if definition.data_kind is FinancialDataKind.STATEMENT
+                else None
+            ),
+        ),
+        None,
+    )
+
+
+def _financial_report_type(text: str) -> FinancialReportType | None:
+    if re.search(r"(?:年度报告|年报)", text):
+        return FinancialReportType.ANNUAL
+    if re.search(r"(?:半年度报告|半年报|中报)", text):
+        return FinancialReportType.SEMIANNUAL
+    if re.search(r"(?:一季度报告|一季报)", text):
+        return FinancialReportType.Q1
+    if re.search(r"(?:三季度报告|三季报)", text):
+        return FinancialReportType.Q3
+    return None
 
 
 def _intent(

@@ -20,6 +20,7 @@ from ashare_lab.domain.strategy import (
     DailyExecutionPolicy,
     EventCondition,
     EventDocumentTextPredicate,
+    FinancialConditionV1,
     FirstOfExit,
     HoldingPeriodExit,
     IndicatorCondition,
@@ -40,6 +41,7 @@ from ashare_lab.ports.candidate_generation import (
     CompileInput,
     EventIntent,
     ExitIntent,
+    FinancialIntent,
     HoldingPeriodIntent,
     PositionReturnIntent,
     SignalIntent,
@@ -78,6 +80,17 @@ _STRATEGY_SYNTAX_MARKERS = (
     "价格",
     "成交量",
     "成交额",
+    "营收",
+    "营业收入",
+    "净利润",
+    "毛利率",
+    "净利率",
+    "roe",
+    "rota",
+    "市盈率",
+    "市净率",
+    "市销率",
+    "市现率",
     "金叉",
     "死叉",
     "年报",
@@ -264,7 +277,7 @@ class StrategyCompiler:
         catalog: CatalogSnapshot,
         catalog_id: str,
         release_version: str,
-        lookback_years: int = 5,
+        lookback_years: int = 1,
         initial_cash_cny: int = DEFAULT_INITIAL_CASH_CNY,
         trusted_date_provider: Callable[[], date] | None = None,
         backtest_anchor_date: date | None = None,
@@ -624,6 +637,30 @@ class StrategyCompiler:
             as_of_date=as_of_date,
             default_lookback_years=self._lookback_years,
         )
+        has_events = any(
+            isinstance(item, EventIntent) for item in (*candidate.entry, *candidate.exit)
+        )
+        has_financials = any(
+            isinstance(item, FinancialIntent) for item in (*candidate.entry, *candidate.exit)
+        )
+        execution = (
+            DailyExecutionPolicy(
+                data_capability="daily_ohlcv_events_financials",
+                evaluation_frequency="event_financial_available_plus_1d_close",
+            )
+            if has_events and has_financials
+            else DailyExecutionPolicy(
+                data_capability="daily_ohlcv_events",
+                evaluation_frequency="event_available_plus_1d_close",
+            )
+            if has_events
+            else DailyExecutionPolicy(
+                data_capability="daily_ohlcv_financials",
+                evaluation_frequency="financial_available_plus_1d_close",
+            )
+            if has_financials
+            else DailyExecutionPolicy()
+        )
         return StrategySpec(
             catalog=CatalogRef(
                 catalog_id=self._catalog_id,
@@ -632,16 +669,7 @@ class StrategyCompiler:
             instrument=Instrument(symbol=instrument_symbol),
             entry=entry,
             exit=FirstOfExit(children=exit_children),
-            execution=(
-                DailyExecutionPolicy(
-                    data_capability="daily_ohlcv_events",
-                    evaluation_frequency="event_available_plus_1d_close",
-                )
-                if any(
-                    isinstance(item, EventIntent) for item in (*candidate.entry, *candidate.exit)
-                )
-                else DailyExecutionPolicy()
-            ),
+            execution=execution,
             backtest=BacktestConfig(
                 start=start,
                 end=end,
@@ -663,6 +691,17 @@ def _looks_like_broad_viewpoint(utterance: str) -> bool:
 
 
 def _to_condition(intent: SignalIntent) -> Condition:
+    if isinstance(intent, FinancialIntent):
+        return FinancialConditionV1(
+            metric_id=intent.metric_id,
+            definition_version=intent.definition_version,
+            report_type=intent.report_type,
+            period_basis=intent.period_basis,
+            statement_scope=intent.statement_scope,
+            comparator=intent.comparator,
+            value=intent.value,
+            unit=intent.unit,
+        )
     if isinstance(intent, EventIntent):
         return EventCondition(
             event_code=intent.event_code,

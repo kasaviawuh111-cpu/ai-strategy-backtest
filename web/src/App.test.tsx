@@ -94,7 +94,7 @@ describe('formal main.tsx App journey', () => {
     expect(screen.getByText('想怎么交易？用一句话告诉我，我来帮你把它变成可回测的策略。').closest('.say'))
       .toBeInTheDocument()
     expect(screen.getByLabelText('交易规则')).toHaveValue(
-      '贵州茅台 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果',
+      '贵州茅台 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果',
     )
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
     const thinking = screen.getByRole('status', { name: '思考进度' })
@@ -148,7 +148,7 @@ describe('formal main.tsx App journey', () => {
     const { container } = renderApp()
 
     expect(screen.getByLabelText('交易规则')).toHaveValue(
-      '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果',
+      '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果',
     )
     const examples = within(screen.getByLabelText('策略示例'))
     expect(examples.getAllByRole('button')).toHaveLength(3)

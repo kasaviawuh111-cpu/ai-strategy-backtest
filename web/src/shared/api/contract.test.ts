@@ -948,6 +948,53 @@ describe('live API contract adapter', () => {
     expect(toLiveBacktestBody(saved).strategy).toEqual(revisionBody.strategy)
   })
 
+  it('keeps a direct financial condition intact in the live strategy card', () => {
+    const financialStrategy: StrategySpec = {
+      ...strategy,
+      entry: {
+        type: 'financial_condition',
+        metric_id: 'valuation.pe',
+        definition_version: '1.0.0',
+        report_type: null,
+        period_basis: 'point_in_time',
+        statement_scope: null,
+        revision_policy: 'as_known_at_signal',
+        comparator: 'lt',
+        value: '20',
+        unit: 'TIMES',
+      },
+      execution: {
+        ...strategy.execution,
+        data_capability: 'daily_ohlcv_financials',
+        evaluation_frequency: 'financial_available_plus_1d_close',
+      },
+    }
+    const outcome = fromLiveDraftResponse(
+      { ...response, strategy: financialStrategy },
+      { ...request, utterance: '东方财富市盈率低于 20 买入，MACD 死叉卖出' },
+    )
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled financial strategy')
+
+    expect(outcome.draft.title).toBe('市盈率 PE + MACD 规则 · 日线')
+    expect(outcome.draft.execution).toMatchObject({
+      dataCapability: 'daily_ohlcv_financials',
+      evaluationFrequency: 'financial_available_plus_1d_close',
+    })
+    expect(outcome.draft.entry.conditions).toEqual([{
+      id: 'entry',
+      kind: 'financial',
+      metricId: 'valuation.pe',
+      label: '市盈率 PE < 20',
+      trigger: '只使用历史当时已可得的接口原始值，日线收盘确认',
+      comparator: 'lt',
+      value: '20',
+      unit: 'TIMES',
+      reportType: null,
+      periodBasis: 'point_in_time',
+    }])
+    expect(toLiveRevisionBody(outcome.draft).strategy.entry).toEqual(financialStrategy.entry)
+  })
+
   it('maps report text count and fill-anchored trading-session exit without losing the DSL', () => {
     const documentStrategy: StrategySpec = {
       ...strategy,

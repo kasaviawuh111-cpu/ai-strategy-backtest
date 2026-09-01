@@ -32,7 +32,9 @@ from ashare_lab.domain.execution import (
     LimitHandling,
     TradingCalendar,
 )
+from ashare_lab.domain.financials import FinancialFactRecord
 from ashare_lab.domain.market_data import DataSnapshotRef
+from ashare_lab.domain.provenance import SourceRef
 from ashare_lab.domain.runs import ExecutionAssumptions, RunManifest
 from ashare_lab.domain.shared import InstrumentId, Money, RunId, StrongId
 from ashare_lab.domain.strategy import (
@@ -41,7 +43,9 @@ from ashare_lab.domain.strategy import (
     canonical_json,
     iter_event_conditions,
     strategy_requires_events,
+    strategy_requires_financials,
 )
+from ashare_lab.domain.time import PointInTimeAvailability
 from ashare_lab.ports.backtest_runs import (
     BacktestJobState,
     BacktestRunRecord,
@@ -185,6 +189,7 @@ class BacktestExecutionService:
             )
             instrument_id = InstrumentId(strategy.instrument.symbol)
             requires_events = strategy_requires_events(strategy)
+            requires_financials = strategy_requires_financials(strategy)
             requires_event_document_text = any(
                 condition.document_text is not None for condition in iter_event_conditions(strategy)
             )
@@ -252,6 +257,11 @@ class BacktestExecutionService:
                 if requires_events
                 else ()
             )
+            financial_facts = _financial_facts_from_work_item(
+                strategy,
+                manifest,
+                config,
+            )
             corporate_actions = tuple(
                 self.market_data.load_corporate_actions(snapshot, instrument_id, period)
             )
@@ -260,7 +270,15 @@ class BacktestExecutionService:
                 record,
                 BacktestJobState.RUNNING_SIGNAL,
                 progress=35,
-                label="计算技术与事件信号" if requires_events else "计算技术信号",
+                label=(
+                    "计算技术、财务与事件信号"
+                    if requires_events and requires_financials
+                    else "计算技术与事件信号"
+                    if requires_events
+                    else "计算技术与财务信号"
+                    if requires_financials
+                    else "计算技术信号"
+                ),
             )
             if record.state.is_terminal:
                 return record
@@ -326,6 +344,7 @@ class BacktestExecutionService:
                 calendar=calendar,
                 fee_calculator=fees,
                 events=events,
+                financial_facts=financial_facts,
                 corporate_actions=active_actions,
                 config=engine_config,
                 benchmark_equity=benchmark.funded_equity_path,
@@ -438,6 +457,70 @@ _RUNNING_RANK = {
     BacktestJobState.RUNNING_EXECUTION: 3,
     BacktestJobState.RUNNING_REPORT: 4,
 }
+
+
+def _financial_facts_from_work_item(
+    strategy: StrategySpec,
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+) -> tuple[FinancialFactRecord, ...]:
+    requires_financials = strategy_requires_financials(strategy)
+    raw_facts = config.get("financial_facts")
+    raw_snapshot = config.get("financial_snapshot")
+    manifest_snapshot = manifest.get("financial_snapshot")
+    if not requires_financials:
+        if raw_facts is not None or raw_snapshot is not None or manifest_snapshot is not None:
+            raise BacktestWorkItemError("unexpected_financial_payload")
+        return ()
+    if not isinstance(raw_facts, list) or not raw_facts:
+        raise BacktestWorkItemError("financial_facts_missing")
+    if not isinstance(raw_snapshot, dict) or not isinstance(manifest_snapshot, dict):
+        raise BacktestWorkItemError("financial_snapshot_missing")
+    snapshot = cast(dict[str, Any], raw_snapshot)
+    persisted_snapshot = cast(dict[str, Any], manifest_snapshot)
+    if persisted_snapshot != snapshot:
+        raise BacktestWorkItemError("financial_snapshot_manifest_mismatch")
+    identity_basis = snapshot.get("identity_basis")
+    if not isinstance(identity_basis, dict):
+        raise BacktestWorkItemError("financial_snapshot_identity_basis_invalid")
+    checksum = _text(snapshot, "checksum")
+    if canonical_hash(cast(dict[str, object], identity_basis)) != checksum:
+        raise BacktestWorkItemError("financial_snapshot_checksum_mismatch")
+    snapshot_id = _text(snapshot, "snapshot_id")
+    if snapshot_id != "financial:" + checksum.removeprefix("sha256:"):
+        raise BacktestWorkItemError("financial_snapshot_id_mismatch")
+
+    facts: list[FinancialFactRecord] = []
+    for raw_fact in cast(list[object], raw_facts):
+        if not isinstance(raw_fact, dict):
+            raise BacktestWorkItemError("financial_fact_must_be_an_object")
+        item = cast(dict[str, Any], raw_fact)
+        try:
+            availability = PointInTimeAvailability.from_dict(item.get("availability"))
+            raw_sources = item.get("source_refs")
+            if not isinstance(raw_sources, list) or not raw_sources:
+                raise ValueError("source_refs_missing")
+            source_refs = tuple(
+                SourceRef.from_dict(value) for value in cast(list[object], raw_sources)
+            )
+            raw_value = item.get("value")
+            value = None if raw_value is None else Decimal(str(raw_value))
+            fact = FinancialFactRecord.model_validate(
+                {
+                    **item,
+                    "availability": availability,
+                    "source_refs": source_refs,
+                    "value": value,
+                }
+            )
+        except Exception as exc:
+            raise BacktestWorkItemError("financial_fact_invalid") from exc
+        if fact.snapshot_id != snapshot_id:
+            raise BacktestWorkItemError("financial_fact_snapshot_mismatch")
+        if fact.instrument_id != strategy.instrument.symbol:
+            raise BacktestWorkItemError("financial_fact_instrument_mismatch")
+        facts.append(fact)
+    return tuple(facts)
 
 
 def _engine_config(config: dict[str, Any]) -> DailyBacktestConfig:

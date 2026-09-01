@@ -4,10 +4,20 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import date
+from decimal import Decimal
 from math import isfinite
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from ashare_lab.domain.financials import (
+    FIRST_FINANCIAL_METRIC_CATALOG,
+    FinancialMetricId,
+    FinancialPeriodBasis,
+    FinancialReportType,
+    FinancialStatementScope,
+    FinancialUnit,
+)
 
 type JsonScalar = str | int | float | bool
 
@@ -60,6 +70,56 @@ class IndicatorCondition(FrozenModel):
             if isinstance(value, float) and not isfinite(value):
                 raise ValueError(f"parameter {name!r} must be finite")
         return params
+
+
+class FinancialCondition(FrozenModel):
+    """A direct provider financial fact evaluated as known at each bar close."""
+
+    type: Literal["financial_condition"] = "financial_condition"
+    metric_id: FinancialMetricId
+    definition_version: Literal["1.0.0"] = "1.0.0"
+    report_type: FinancialReportType | None = None
+    period_basis: FinancialPeriodBasis | None = None
+    statement_scope: FinancialStatementScope | None = None
+    revision_policy: Literal["as_known_at_signal"] = "as_known_at_signal"
+    comparator: Literal["gt", "gte", "lt", "lte", "eq", "ne"]
+    value: Decimal
+    unit: FinancialUnit
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def value_is_numeric_and_finite(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("financial comparison value must be numeric")
+        if isinstance(value, float) and not isfinite(value):
+            raise ValueError("financial comparison value must be finite")
+        return value
+
+    @field_validator("value")
+    @classmethod
+    def decimal_value_is_finite(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("financial comparison value must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def shape_matches_metric_catalog(self) -> FinancialCondition:
+        definition = FIRST_FINANCIAL_METRIC_CATALOG.definition_for(self.metric_id)
+        if (
+            self.period_basis is not None
+            and self.period_basis not in definition.allowed_period_bases
+        ):
+            raise ValueError("period_basis is not allowed for metric")
+        if self.unit is not definition.unit:
+            raise ValueError("unit does not match metric catalog")
+        if definition.data_kind.value == "statement":
+            if self.statement_scope is None:
+                raise ValueError("statement condition requires statement_scope")
+            if self.statement_scope not in definition.allowed_statement_scopes:
+                raise ValueError("statement_scope is not allowed for metric")
+        elif self.report_type is not None or self.statement_scope is not None:
+            raise ValueError("valuation condition cannot declare report shape")
+        return self
 
 
 class EventCondition(FrozenModel):
@@ -141,7 +201,12 @@ class NotCondition(FrozenModel):
 
 
 type Condition = Annotated[
-    IndicatorCondition | EventCondition | AllCondition | AnyCondition | NotCondition,
+    IndicatorCondition
+    | FinancialCondition
+    | EventCondition
+    | AllCondition
+    | AnyCondition
+    | NotCondition,
     Field(discriminator="type"),
 ]
 
@@ -216,6 +281,7 @@ class TrailingDrawdownExit(FrozenModel):
 
 type ExitRule = Annotated[
     IndicatorCondition
+    | FinancialCondition
     | EventCondition
     | AllCondition
     | AnyCondition
@@ -231,9 +297,19 @@ class DailyExecutionPolicy(FrozenModel):
     timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
     entry_policy: Literal["next_tradable_session_open"] = "next_tradable_session_open"
     exit_policy: Literal["next_tradable_session_open"] = "next_tradable_session_open"
-    data_capability: Literal["daily_ohlcv", "daily_ohlcv_events"] = "daily_ohlcv"
+    data_capability: Literal[
+        "daily_ohlcv",
+        "daily_ohlcv_events",
+        "daily_ohlcv_financials",
+        "daily_ohlcv_events_financials",
+    ] = "daily_ohlcv"
     execution_resolution: Literal["1d"] = "1d"
-    evaluation_frequency: Literal["1d_close", "event_available_plus_1d_close"] = "1d_close"
+    evaluation_frequency: Literal[
+        "1d_close",
+        "event_available_plus_1d_close",
+        "financial_available_plus_1d_close",
+        "event_financial_available_plus_1d_close",
+    ] = "1d_close"
     position_policy: Literal["single_position_no_pyramiding"] = "single_position_no_pyramiding"
     t_plus_one: Literal[True] = True
 
@@ -281,11 +357,24 @@ class StrategySpec(FrozenModel):
         if max_depth > 8:
             raise ValueError("strategy condition tree exceeds depth 8")
         has_events = any(_contains_event(root) for root in roots)
-        if has_events and (
-            self.execution.data_capability != "daily_ohlcv_events"
-            or self.execution.evaluation_frequency != "event_available_plus_1d_close"
-        ):
-            raise ValueError("event strategy must declare daily_ohlcv_events execution data")
+        has_financials = any(_contains_financial(root) for root in roots)
+        expected_execution = (
+            ("daily_ohlcv_events_financials", "event_financial_available_plus_1d_close")
+            if has_events and has_financials
+            else ("daily_ohlcv_events", "event_available_plus_1d_close")
+            if has_events
+            else ("daily_ohlcv_financials", "financial_available_plus_1d_close")
+            if has_financials
+            else ("daily_ohlcv", "1d_close")
+        )
+        if (
+            self.execution.data_capability,
+            self.execution.evaluation_frequency,
+        ) != expected_execution:
+            raise ValueError(
+                "strategy execution data declaration does not match its condition types; "
+                f"expected {expected_execution[0]} / {expected_execution[1]}"
+            )
         return self
 
 
@@ -309,6 +398,12 @@ def _condition_depth(condition: Condition) -> int:
 def _contains_event(condition: Condition) -> bool:
     return isinstance(condition, EventCondition) or any(
         _contains_event(child) for child in _children(condition)
+    )
+
+
+def _contains_financial(condition: Condition) -> bool:
+    return isinstance(condition, FinancialCondition) or any(
+        _contains_financial(child) for child in _children(condition)
     )
 
 
@@ -350,6 +445,25 @@ def iter_event_conditions(spec: StrategySpec) -> Iterator[EventCondition]:
             yield from walk(exit_condition)
 
 
+def iter_financial_conditions(spec: StrategySpec) -> Iterator[FinancialCondition]:
+    """Yield direct-provider financial leaves in deterministic document order."""
+
+    def walk(condition: Condition) -> Iterator[FinancialCondition]:
+        if isinstance(condition, FinancialCondition):
+            yield condition
+            return
+        for child in _children(condition):
+            yield from walk(child)
+
+    yield from walk(spec.entry)
+    for exit_condition in spec.exit.children:
+        if not isinstance(
+            exit_condition,
+            (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit),
+        ):
+            yield from walk(exit_condition)
+
+
 def iter_holding_period_exits(spec: StrategySpec) -> Iterator[HoldingPeriodExit]:
     """Yield the bounded position-aware exit rules in document order."""
 
@@ -372,6 +486,10 @@ def iter_trailing_drawdown_exits(spec: StrategySpec) -> Iterator[TrailingDrawdow
 
 def strategy_requires_events(spec: StrategySpec) -> bool:
     return next(iter_event_conditions(spec), None) is not None
+
+
+def strategy_requires_financials(spec: StrategySpec) -> bool:
+    return next(iter_financial_conditions(spec), None) is not None
 
 
 AllCondition.model_rebuild()

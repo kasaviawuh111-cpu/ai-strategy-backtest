@@ -7,6 +7,10 @@ from .eastmoney_operator import (
     OperatorReadingBatch,
     OperatorRequestAudit,
 )
+from .operator_loader import (
+    EastmoneyOperatorFinancialFactLoader,
+    OperatorFinancialDataUnavailableError,
+)
 from .operator_normalize import (
     FinancialPublicationTime,
     OperatorReadingNormalizationError,
@@ -15,10 +19,12 @@ from .operator_normalize import (
 )
 
 __all__ = [
+    "EastmoneyOperatorFinancialFactLoader",
     "EastmoneyOperatorReadingError",
     "EastmoneyOperatorReadingSource",
     "FinancialPublicationTime",
     "OperatorDataset",
+    "OperatorFinancialDataUnavailableError",
     "OperatorReadingBatch",
     "OperatorReadingNormalizationError",
     "OperatorRequestAudit",

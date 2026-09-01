@@ -68,6 +68,13 @@ const parameterText = (condition: StrategyCondition): string[] => {
       '当前参数只读；修改请返回原话重新识别',
     ]
   }
+  if (condition.kind === 'financial') {
+    const unit = condition.unit === 'PERCENT' ? '%' : ''
+    return [
+      `条件 ${condition.comparator} ${condition.value}${unit}`,
+      '历史当时可得的接口原始值',
+    ]
+  }
   const attributes = Object.entries(condition.attributes).map(([key, value]) =>
     `${eventAttributeLabels[key] ?? key.replaceAll('_', ' ')}：${String(value)}`)
   if (condition.documentText) {
@@ -96,7 +103,7 @@ const leafNode = (
   label: condition.label,
   detail: condition.trigger,
   tone: condition.kind === 'event' ? 'event'
-    : condition.kind === 'indicator' ? 'indicator' : 'holding',
+    : condition.kind === 'indicator' || condition.kind === 'financial' ? 'indicator' : 'holding',
   parameters: parameterText(condition),
 } : fallbackLeaf(fallbackLabel, '完整定义保留在服务端最终策略规则中。', id)
 
@@ -106,12 +113,19 @@ const buildConditionRule = (
   cursor: { value: number },
   path: string,
 ): StrategyRuleNode => {
-  if (condition.type === 'indicator_condition' || condition.type === 'event_condition') {
+  if (
+    condition.type === 'indicator_condition'
+    || condition.type === 'financial_condition'
+    || condition.type === 'event_condition'
+  ) {
     const leaf = leaves[cursor.value]
     cursor.value += 1
-    return leafNode(leaf, path, condition.type === 'event_condition'
+    const fallback = condition.type === 'event_condition'
       ? condition.event_code
-      : condition.indicator_id)
+      : condition.type === 'financial_condition'
+        ? condition.metric_id
+        : condition.indicator_id
+    return leafNode(leaf, path, fallback)
   }
   if (condition.type === 'not') {
     return {
@@ -235,6 +249,9 @@ const collectSpecIds = (condition: StrategySpecCondition): CollectedSpecIds => {
       events: [condition.event_code],
       documentTextEvents: condition.document_text ? [condition.event_code] : [],
     }
+  }
+  if (condition.type === 'financial_condition') {
+    return { indicators: [], events: [], documentTextEvents: [] }
   }
   if (condition.type === 'not') return collectSpecIds(condition.child)
   return condition.children.reduce((result, child) => {
@@ -984,7 +1001,13 @@ export const buildChain = (
   const normalized = [
     `买入：${summarizeRule(rules.entry)}`,
     `卖出：${summarizeRule(rules.exit)}`,
-    `确认：${draft.execution.evaluationFrequency === '1d_close' ? '日线收盘' : '事件首次可得'}`,
+    `确认：${draft.execution.evaluationFrequency === '1d_close'
+      ? '日线收盘'
+      : draft.execution.evaluationFrequency === 'financial_available_plus_1d_close'
+        ? '财务数据首次可得后的日线收盘'
+        : draft.execution.evaluationFrequency === 'event_financial_available_plus_1d_close'
+          ? '事件与财务数据均可得后的日线收盘'
+          : '事件首次可得'}`,
   ].join(' · ')
   const activityNodes: ChainNode[] = []
   const emittedDecisions = new Set<string>()
