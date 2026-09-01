@@ -265,6 +265,14 @@ describe('result view model', () => {
     expect(summarizeRule(rules.entry)).toBe(
       '（年度报告发布 且 （RSI 低于 30 或 非（收盘高于 20 日均线）））',
     )
+    const card = toStrategySummary(compound)
+    expect(card.rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        label: '买入',
+        value: '年度报告发布 且 （RSI 低于 30 或 非（收盘高于 20 日均线））',
+      }),
+      expect.objectContaining({ label: '区间', value: '近一年' }),
+    ]))
   })
 
   it('separates a compiled StrategySpec from preparation and pinned-snapshot availability', () => {

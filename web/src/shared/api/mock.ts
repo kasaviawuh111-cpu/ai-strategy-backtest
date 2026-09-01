@@ -23,6 +23,8 @@ type MockRunRecord = {
   signalLabel: string
   entrySignalTitle: string
   entrySignalReason: string
+  exitSignalTitle: string
+  exitSignalReason: string
   initialCashCny: number
   eventStrategy: boolean
   documentTermHold: boolean
@@ -35,6 +37,7 @@ const MOCK_TOTAL_RETURN = -0.0254315
 type MockStrategyKind =
   | 'annual_report'
   | 'annual_report_term_hold'
+  | 'financial_pe_macd'
   | 'volume_breakout'
   | 'trend_combo'
   | 'moving_average'
@@ -80,6 +83,18 @@ const isTrendComboRequest = (request: CompileRequest) =>
 const isVolumeBreakoutRequest = (request: CompileRequest) =>
   /(?:创|创新)\s*20\s*日新高/.test(request.utterance)
   && /放量\s*1\.5\s*倍/.test(request.utterance)
+
+const isMovingAverageExitRequest = (request: CompileRequest) =>
+  /(?:跌破|下穿)\s*20\s*日(?:均)?线/.test(request.utterance)
+
+const isFinancialPeMacdRequest = (request: CompileRequest) =>
+  /(?:PE|市盈率)\s*(?:低于|小于|<)\s*35/i.test(request.utterance)
+  && isMacdRequest(request)
+  && request.utterance.includes('金叉')
+  && request.utterance.includes('死叉')
+
+const looksLikeFinancialRequest = (request: CompileRequest) =>
+  /(?:PE|PB|PS|PCF|市盈率|市净率|市销率|市现率)/i.test(request.utterance)
 
 const isAnnualReportTermCountRequest = (request: CompileRequest) => {
   const normalized = request.utterance.normalize('NFKC')
@@ -127,6 +142,8 @@ const strategyKind = (request: CompileRequest): MockStrategyKind | null => {
       ? 'annual_report'
       : null
   }
+  if (isFinancialPeMacdRequest(request)) return 'financial_pe_macd'
+  if (looksLikeFinancialRequest(request)) return null
   if (isVolumeBreakoutRequest(request)) return 'volume_breakout'
   if (isTrendComboRequest(request)) return 'trend_combo'
   if (isSupportedMovingAverageRule(request)) return 'moving_average'
@@ -166,7 +183,32 @@ const makeStrategySpec = (request: CompileRequest, kind: MockStrategyKind): Stra
           value: 1.5,
         }],
       }
-    : kind === 'trend_combo'
+    : kind === 'financial_pe_macd'
+      ? {
+          type: 'all',
+          children: [{
+            type: 'financial_condition',
+            metric_id: 'valuation.pe',
+            definition_version: '1.0.0',
+            report_type: null,
+            period_basis: 'point_in_time',
+            statement_scope: null,
+            revision_policy: 'as_known_at_signal',
+            comparator: 'lt',
+            value: 35,
+            unit: 'TIMES',
+          }, {
+            type: 'indicator_condition',
+            indicator_id: 'technical.macd',
+            definition_version: '1.0.0',
+            params: { fast: 12, slow: 26, signal: 9 },
+            timeframe: '1d',
+            evaluation_mode: 'bar_close_confirmed',
+            trigger: 'golden_cross',
+            value: null,
+          }],
+        }
+      : kind === 'trend_combo'
       ? {
           type: 'all',
           children: [{
@@ -254,6 +296,7 @@ const makeStrategySpec = (request: CompileRequest, kind: MockStrategyKind): Stra
           execution: 'target_session_open_proxy',
         }
       : kind === 'moving_average'
+        || (kind === 'volume_breakout' && isMovingAverageExitRequest(request))
       ? {
           type: 'indicator_condition',
           indicator_id: 'technical.ma',
@@ -292,11 +335,15 @@ const makeStrategySpec = (request: CompileRequest, kind: MockStrategyKind): Stra
     exit_policy: 'next_tradable_session_open',
     data_capability: kind === 'annual_report' || kind === 'annual_report_term_hold'
       ? 'daily_ohlcv_events'
-      : 'daily_ohlcv',
+      : kind === 'financial_pe_macd'
+        ? 'daily_ohlcv_financials'
+        : 'daily_ohlcv',
     execution_resolution: '1d',
     evaluation_frequency: kind === 'annual_report' || kind === 'annual_report_term_hold'
       ? 'event_available_plus_1d_close'
-      : '1d_close',
+      : kind === 'financial_pe_macd'
+        ? 'financial_available_plus_1d_close'
+        : '1d_close',
     position_policy: 'single_position_no_pyramiding',
     t_plus_one: true,
   },
@@ -310,10 +357,13 @@ const makeStrategySpec = (request: CompileRequest, kind: MockStrategyKind): Stra
 const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDraft => {
   const intrabar = request.clarification?.choiceId === 'intrabar'
   const volumeBreakoutStrategy = kind === 'volume_breakout'
+  const financialStrategy = kind === 'financial_pe_macd'
   const trendComboStrategy = kind === 'trend_combo'
   const eventStrategy = kind === 'annual_report' || kind === 'annual_report_term_hold'
   const documentTextStrategy = kind === 'annual_report_term_hold'
   const movingAverageStrategy = kind === 'moving_average'
+  const movingAverageExit = movingAverageStrategy
+    || (volumeBreakoutStrategy && isMovingAverageExitRequest(request))
   const rsiStrategy = kind === 'rsi'
 
   return {
@@ -327,13 +377,15 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
         : '年度报告 + MACD 规则 · 日线'
       : volumeBreakoutStrategy
         ? '20 日新高 + 放量突破 · 日线'
-        : trendComboStrategy
-        ? 'MACD + MA20 趋势共振 · 日线'
-        : movingAverageStrategy
-        ? '20 日均线突破 · 日线'
-        : rsiStrategy
-          ? 'RSI 超卖反转 · 日线'
-          : 'MACD 趋势跟随 · 日线',
+        : financialStrategy
+          ? 'PE + MACD 估值趋势 · 日线'
+          : trendComboStrategy
+            ? 'MACD + MA20 趋势共振 · 日线'
+            : movingAverageStrategy
+              ? '20 日均线突破 · 日线'
+              : rsiStrategy
+                ? 'RSI 超卖反转 · 日线'
+                : 'MACD 趋势跟随 · 日线',
     instrument: request.instrument,
     confidence: null,
     entry: {
@@ -363,7 +415,33 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
               { key: '$value', label: '放量倍数', value: 1.5, min: 0.01, max: 100 },
             ],
           }]
-        : trendComboStrategy
+        : financialStrategy
+          ? [{
+              id: 'entry_pe_below',
+              kind: 'financial',
+              metricId: 'valuation.pe',
+              label: '市盈率 < 35',
+              trigger: '只使用历史当时已可得的接口原始市盈率，日线收盘确认',
+              comparator: 'lt',
+              value: 35,
+              unit: 'TIMES',
+              reportType: null,
+              periodBasis: 'point_in_time',
+            }, {
+              id: 'entry_macd_cross',
+              kind: 'indicator',
+              indicatorId: 'technical.macd',
+              label: 'MACD 金叉',
+              trigger: 'DIF 由下向上穿过 DEA',
+              timeframe: '1d',
+              evaluationMode: 'bar_close_confirmed',
+              parameters: [
+                { key: 'fast', label: '快线', value: 12, min: 2, max: 60 },
+                { key: 'slow', label: '慢线', value: 26, min: 3, max: 120 },
+                { key: 'signal', label: '信号线', value: 9, min: 2, max: 60 },
+              ],
+            }]
+          : trendComboStrategy
           ? [{
               id: 'entry_macd_cross',
               kind: 'indicator',
@@ -469,7 +547,7 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
             countMode: 'subsequent_trading_sessions',
             execution: 'target_session_open_proxy',
           }]
-        : movingAverageStrategy
+        : movingAverageExit
         ? [{
             id: 'exit_ma20_cross',
             kind: 'indicator',
@@ -516,8 +594,16 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
       exitPolicy: 'next_tradable_session_open',
       priceLimitMode: 'wait_for_unlock',
       tPlusOne: true,
-      dataCapability: eventStrategy ? 'daily_ohlcv_events' : 'daily_ohlcv',
-      evaluationFrequency: eventStrategy ? 'event_available_plus_1d_close' : '1d_close',
+      dataCapability: eventStrategy
+        ? 'daily_ohlcv_events'
+        : financialStrategy
+          ? 'daily_ohlcv_financials'
+          : 'daily_ohlcv',
+      evaluationFrequency: eventStrategy
+        ? 'event_available_plus_1d_close'
+        : financialStrategy
+          ? 'financial_available_plus_1d_close'
+          : '1d_close',
       capacityMode: 'point_in_time_volume',
       participationRate: 0.05,
       allocationRatio: 1,
@@ -538,6 +624,8 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
     assumptions: [
       eventStrategy
         ? '事件按首次可获得时间确认，不倒填公告日期；成交只使用日线开盘价代理，时间非精确'
+        : financialStrategy
+          ? '市盈率只使用历史当时已可得的接口原始值；日线收盘确认，下一交易日使用开盘价代理'
         : intrabar
           ? '盘中触发；需要分钟级数据验证信号时点'
           : '日线收盘确认信号，下一交易日只使用开盘价代理，时间非精确',
@@ -614,6 +702,8 @@ const baseActivities = (
   documentTermHold: boolean,
   entrySignalTitle: string,
   entrySignalReason: string,
+  exitSignalTitle: string,
+  exitSignalReason: string,
 ): BacktestActivity[] => {
   const activities: BacktestActivity[] = [
   {
@@ -668,10 +758,10 @@ const baseActivities = (
     occurredAt: documentTermHold
       ? '2024-03-20T09:15:00+08:00'
       : eventStrategy ? '2024-07-01T15:00:00+08:00' : '2023-02-02T15:00:00+08:00', side: 'sell',
-    title: documentTermHold ? '持有 3 个交易日退出' : 'MACD 死叉确认', status: 'confirmed',
+    title: documentTermHold ? '持有 3 个交易日退出' : exitSignalTitle, status: 'confirmed',
     reason: documentTermHold
       ? '固定样例：从首次实际买入成交后的下一交易日起计，到第 3 个 A 股交易日退出。'
-      : 'DIF 0.412 下穿 DEA 0.428。',
+      : exitSignalReason,
   },
   {
     id: 'ord_02', chainId: 'decision_sell_01', decisionId: 'decision_sell_01', orderId: 'order_sell_01',
@@ -681,7 +771,7 @@ const baseActivities = (
     title: '提交卖出委托', price: 25.18, quantity: 4300, status: 'submitted',
     reason: documentTermHold
       ? '达到持有期退出日后提交卖出委托。'
-      : 'MACD 死叉确认后的下一可交易日提交卖出委托。',
+      : `${exitSignalTitle}后的下一可交易日提交卖出委托。`,
   },
   {
     id: 'fill_02', chainId: 'decision_sell_01', decisionId: 'decision_sell_01', orderId: 'order_sell_01', fillId: 'fill_sell_01',
@@ -766,12 +856,16 @@ const activitiesForCapital = (
   documentTermHold: boolean,
   entrySignalTitle: string,
   entrySignalReason: string,
+  exitSignalTitle: string,
+  exitSignalReason: string,
 ): BacktestActivity[] =>
   baseActivities(
     eventStrategy,
     documentTermHold,
     entrySignalTitle,
     entrySignalReason,
+    exitSignalTitle,
+    exitSignalReason,
   ).map((activity) => {
     if (activity.quantity == null) return activity
     const scaled = Math.floor(
@@ -856,22 +950,33 @@ export const mockApi = {
       error: null,
       resultAvailable: false,
     }
-    const entryIndicators = draft.entry.conditions.filter((condition) => condition.kind === 'indicator')
+    const entrySignals = draft.entry.conditions.filter(
+      (condition) => condition.kind === 'indicator' || condition.kind === 'financial',
+    )
     const signalLabel = draft.entry.conditions.some((condition) => condition.kind === 'event')
       ? '生成事件与技术样例信号'
-      : `生成${entryIndicators.map((condition) => condition.label).join('且') || '技术指标'}样例信号`
-    const entrySignalTitle = entryIndicators.length > 0
-      ? `${entryIndicators.map((condition) => condition.label).join('且')}确认`
+      : `生成${entrySignals.map((condition) => condition.label).join('且') || '技术指标'}样例信号`
+    const entrySignalTitle = entrySignals.length > 0
+      ? `${entrySignals.map((condition) => condition.label).join('且')}确认`
       : '技术信号确认'
-    const entrySignalReason = entryIndicators.length > 0
-      ? entryIndicators.map((condition) => condition.trigger).join('；')
+    const entrySignalReason = entrySignals.length > 0
+      ? entrySignals.map((condition) => condition.trigger).join('；')
       : '技术条件满足，使用日线收盘确认。'
+    const exitSignals = draft.exit.conditions.filter((condition) => condition.kind === 'indicator')
+    const exitSignalTitle = exitSignals.length > 0
+      ? `${exitSignals.map((condition) => condition.label).join('或')}确认`
+      : '退出条件确认'
+    const exitSignalReason = exitSignals.length > 0
+      ? exitSignals.map((condition) => condition.trigger).join('；')
+      : '退出条件满足。'
     runs.set(id, {
       run,
       pollCount: 0,
       signalLabel,
       entrySignalTitle,
       entrySignalReason,
+      exitSignalTitle,
+      exitSignalReason,
       initialCashCny: draft.backtest.initialCashCny,
       eventStrategy: draft.entry.conditions.some((condition) => condition.kind === 'event'),
       documentTermHold: draft.exit.conditions.some((condition) => condition.kind === 'holding_period'),
@@ -956,6 +1061,8 @@ export const mockApi = {
       stored.documentTermHold,
       stored.entrySignalTitle,
       stored.entrySignalReason,
+      stored.exitSignalTitle,
+      stored.exitSignalReason,
     )
   },
 }

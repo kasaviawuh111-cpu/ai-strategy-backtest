@@ -29,6 +29,9 @@ describe('append-only strategy conversation', () => {
     const user = userEvent.setup()
     const { container } = renderApp()
 
+    await user.click(screen.getByRole('button', {
+      name: '东方财富创20日新高且放量1.5倍买入，跌破20日线卖出',
+    }))
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '开始回测' }))

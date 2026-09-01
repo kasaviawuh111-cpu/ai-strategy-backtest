@@ -197,6 +197,13 @@ export const summarizeRule = (rule: StrategyRuleNode): string => {
   return `（${text.join(joiner)}）`
 }
 
+const summarizeCardRule = (rule: StrategyRuleNode): string => {
+  const summary = summarizeRule(rule)
+  return summary.startsWith('（') && summary.endsWith('）')
+    ? summary.slice(1, -1)
+    : summary
+}
+
 const attributeString = (
   attributes: Record<string, string | number | boolean>,
   keys: string[],
@@ -470,6 +477,7 @@ export const describeBacktestWindow = (start: string, end: string) => {
   }
   const days = (to - from) / 86_400_000
   if (days < 60) return { value: `${Math.round(days)} 天`, sub: exact }
+  if (days >= 330 && days <= 400) return { value: '近一年', sub: exact }
   const months = days / 30.44
   if (months < 22) return { value: `近 ${Math.round(months)} 个月`, sub: exact }
   const years = days / 365.25
@@ -504,8 +512,8 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
   return {
     title: draft.title.replace(/\s*·\s*日线$/, ''),
     rows: [
-    { key: 'entry', label: '买入', value: summarizeRule(rules.entry), kind: 'buy' },
-    { key: 'exit', label: '卖出', value: summarizeRule(rules.exit), kind: 'sell' },
+    { key: 'entry', label: '买入', value: summarizeCardRule(rules.entry), kind: 'buy' },
+    { key: 'exit', label: '卖出', value: summarizeCardRule(rules.exit), kind: 'sell' },
     {
       key: 'range',
       label: '区间',

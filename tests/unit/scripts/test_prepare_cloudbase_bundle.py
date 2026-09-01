@@ -291,7 +291,8 @@ def test_cloudbase_dockerfile_uses_portable_source_build_contract() -> None:
     assert (
         "CORS_ALLOWED_ORIGINS="
         "https://59ac3319a9594be59fa3034fcae82a8f.app.workbuddy.link,"
-        "https://8ae96e06a2b3404ea1b9470810cccd7c.app.workbuddy.link" in dockerfile
+        "https://8ae96e06a2b3404ea1b9470810cccd7c.app.workbuddy.link,"
+        "https://test-d6gwxiamcd87743af-1330091763.tcloudbaseapp.com" in dockerfile
     )
 
 

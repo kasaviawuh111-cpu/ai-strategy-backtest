@@ -183,6 +183,12 @@ const renderLiveApp = async () => {
   )
 }
 
+const submitLiveRule = async (utterance: string) => {
+  const user = userEvent.setup()
+  await user.type(screen.getByLabelText('交易规则'), utterance)
+  await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+}
+
 const expectLiveCompileRequest = (fetchMock: FetchMock) => {
   const draftCalls = fetchMock.mock.calls.filter(([path]) =>
     String(path) === '/api/v1/strategy-drafts')
@@ -240,7 +246,7 @@ describe('Live App capability boundary', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await renderLiveApp()
-    await userEvent.setup().click(screen.getByRole('button', { name: '识别交易规则' }))
+    await submitLiveRule('东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果')
 
     await expectRecognizedButNotRunnable(fetchMock)
     expect(screen.getAllByText(
@@ -270,7 +276,7 @@ describe('Live App capability boundary', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await renderLiveApp()
-    await userEvent.setup().click(screen.getByRole('button', { name: '识别交易规则' }))
+    await submitLiveRule('东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果')
 
     await expectRecognizedButNotRunnable(fetchMock)
     expect(screen.getAllByText(/暂时读不到后端能力说明/).length).toBeGreaterThan(0)
@@ -295,7 +301,7 @@ describe('Live App capability boundary', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await renderLiveApp()
-    await userEvent.setup().click(screen.getByRole('button', { name: '识别交易规则' }))
+    await submitLiveRule('东方财富季度报告发布后买入，收益33%止盈或高点回撤3%卖出')
 
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expect(screen.getAllByText('季度报告发布').length).toBeGreaterThan(0)

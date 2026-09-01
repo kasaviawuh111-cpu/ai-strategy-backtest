@@ -37,6 +37,8 @@ const expectMockPreviewBadge = () => {
 }
 
 const HOME_CAPITAL_PATTERN = /(?:本金|初始资金|起始本金|100\s*万|1,000,000|1000000)/
+const VOLUME_EXAMPLE = '东方财富创20日新高且放量1.5倍买入，跌破20日线卖出'
+const FINANCIAL_EXAMPLE = '东方财富PE低于35且MACD金叉买入，MACD死叉卖出'
 
 const expectHomeToHideDefaultCapital = (container: HTMLElement) => {
   const home = container.querySelector<HTMLElement>('#pg-chat')
@@ -93,10 +95,13 @@ describe('formal main.tsx App journey', () => {
 
     expect(screen.getByText('想怎么交易？用一句话告诉我，我来帮你把它变成可回测的策略。').closest('.say'))
       .toBeInTheDocument()
-    expect(screen.getByLabelText('交易规则')).toHaveValue(
-      '贵州茅台 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果',
-    )
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(screen.getByLabelText('交易规则')).toHaveValue('')
+    expect(screen.getByRole('button', {
+      name: '贵州茅台创20日新高且放量1.5倍买入，跌破20日线卖出',
+    })).toBeVisible()
+    await user.click(screen.getByRole('button', {
+      name: '贵州茅台创20日新高且放量1.5倍买入，跌破20日线卖出',
+    }))
     const thinking = screen.getByRole('status', { name: '思考进度' })
     expect(thinking).toHaveTextContent('正在识别买入、卖出和回测区间')
     expect(thinking.closest('.thinking-stream')).not.toHaveClass('mcard')
@@ -118,7 +123,7 @@ describe('formal main.tsx App journey', () => {
     expectMockPreviewBadge()
     expect(screen.queryByText(/^proved$/i)).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(screen.getByRole('button', { name: VOLUME_EXAMPLE }))
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expectMockPreviewBadge()
     expect(screen.queryByText(/^proved$/i)).not.toBeInTheDocument()
@@ -147,17 +152,17 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     const { container } = renderApp()
 
-    expect(screen.getByLabelText('交易规则')).toHaveValue(
-      '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果',
-    )
+    expect(screen.getByLabelText('交易规则')).toHaveValue('')
     const examples = within(screen.getByLabelText('策略示例'))
-    expect(examples.getAllByRole('button')).toHaveLength(3)
+    expect(examples.getAllByRole('button')).toHaveLength(2)
+    expect(examples.getByRole('button', { name: VOLUME_EXAMPLE })).toBeVisible()
+    expect(examples.getByRole('button', { name: FINANCIAL_EXAMPLE })).toBeVisible()
     expectHomeToHideDefaultCapital(container)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(examples.getByRole('button', { name: VOLUME_EXAMPLE }))
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
-    expect(screen.getAllByText('MACD 金叉').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('收盘突破 20 日均线').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('MACD 死叉').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('创 20 日新高').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('放量 1.5 倍').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('收盘跌破 20 日均线').length).toBeGreaterThan(0)
     expectHomeToHideDefaultCapital(container)
 
     await user.click(screen.getByRole('button', { name: /区间/ }))
@@ -231,7 +236,7 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     const { client } = renderApp()
 
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(screen.getByRole('button', { name: VOLUME_EXAMPLE }))
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(await screen.findByText('回测结果', {}, { timeout: 6_000 })).toBeInTheDocument()
@@ -254,11 +259,11 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
 
-    await user.click(screen.getByRole('button', { name: '放量突破' }))
+    await user.click(screen.getByRole('button', { name: VOLUME_EXAMPLE }))
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expect(screen.getAllByText('创 20 日新高').length).toBeGreaterThan(0)
     expect(screen.getAllByText('放量 1.5 倍').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('MACD 死叉').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('收盘跌破 20 日均线').length).toBeGreaterThan(0)
     expect(screen.queryByText('业绩预告发布')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '开始回测' }))
@@ -595,22 +600,22 @@ describe('formal main.tsx App journey', () => {
     expect(compile).toHaveBeenCalledTimes(1)
   })
 
-  it('renders RSI as RSI instead of falling back to MACD', async () => {
+  it('runs the financial example without dropping its PE condition', async () => {
     const user = userEvent.setup()
     renderApp()
 
-    await user.click(screen.getByRole('button', { name: '超跌反转' }))
+    await user.click(screen.getByRole('button', { name: FINANCIAL_EXAMPLE }))
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
-    expect(screen.getAllByText('RSI 低于 30').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('RSI 高于 70').length).toBeGreaterThan(0)
-    expect(screen.queryByText('MACD 金叉')).not.toBeInTheDocument()
+    expect(screen.getAllByText('市盈率 < 35').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('MACD 金叉').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('MACD 死叉').length).toBeGreaterThan(0)
   })
 
   it('exposes a user-cancelled run as an actionable terminal state', async () => {
     const user = userEvent.setup()
     renderApp()
 
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(screen.getByRole('button', { name: VOLUME_EXAMPLE }))
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '开始回测' }))
     expect(await screen.findByText(/^预览：/)).toBeInTheDocument()
@@ -633,7 +638,7 @@ describe('formal main.tsx App journey', () => {
     const { container } = renderApp()
 
     expectHomeToHideDefaultCapital(container)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(screen.getByRole('button', { name: VOLUME_EXAMPLE }))
     expect(await screen.findByText('已完成思考')).toBeInTheDocument()
     expectHomeToHideDefaultCapital(container)
     await user.click(screen.getByRole('button', { name: '开始回测' }))

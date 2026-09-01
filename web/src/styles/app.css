@@ -277,6 +277,7 @@ button.grow:hover{background:rgba(255,119,0,.05)}
 .grow .v{margin-left:auto;font-family:var(--font-num);font-variant-numeric:tabular-nums;font-size:16px;line-height:24px;
   text-align:right;color:var(--ink-1);white-space:nowrap}
 .grow .v.wrap{font-size:12px;line-height:18px;color:var(--ink-3);white-space:normal;word-break:break-all;max-width:58%}
+.grow>.chev{margin-left:auto;margin-right:-2px;align-self:center}
 .setting-row{align-items:center}
 .settings-input,.settings-select{max-width:150px;min-width:0;border:1px solid var(--hairline-2);border-radius:8px;
   background:var(--surface);color:var(--ink-1);padding:8px 9px;font-family:var(--font-num);text-align:right}

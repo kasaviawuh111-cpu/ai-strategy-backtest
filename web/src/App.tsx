@@ -286,10 +286,9 @@ export default function App({
   },
 }: AppProps) {
   const queryClient = useQueryClient()
-  const defaultUtterance = instrumentContextError
-    ? ''
-    : `${instrument.name} MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果`
-  const [utterance, setUtterance] = useState(defaultUtterance)
+  const volumeBreakoutExample = `${instrument.name}创20日新高且放量1.5倍买入，跌破20日线卖出`
+  const financialTrendExample = `${instrument.name}PE低于35且MACD金叉买入，MACD死叉卖出`
+  const [utterance, setUtterance] = useState('')
   const [submittedText, setSubmittedText] = useState<string>()
   const [draft, setDraft] = useState<StrategyDraft>()
   const [baselineDraft, setBaselineDraft] = useState<StrategyDraft>()
@@ -621,7 +620,7 @@ export default function App({
       || (failure?.key === 'compile_failed' && index === 1)
       || (failure?.key === 'run_failed' && index === 1)
     ) {
-      submitText(defaultUtterance)
+      submitText(volumeBreakoutExample)
     } else resetForEdit()
   }
 
@@ -729,15 +728,14 @@ export default function App({
                   </Say>
                   {/*
                     示例只在冷启动时出现：它的作用是告诉第一次来的人「一句话可以写成什么样」。
-                    跑过一轮之后用户已经知道怎么写，再把同样三条推一遍既占地方，
+                    跑过一轮之后用户已经知道怎么写，再把同样两条推一遍既占地方，
                     也像是在暗示「你应该选我给的这几个」。
                   */}
                   {!instrumentContextError && journeyHistory.length === 0 ? (
                     <div className="home-examples" aria-label="策略示例">
                       <Chips>
-                        <Chip onClick={() => submitText(defaultUtterance)}>趋势共振</Chip>
-                        <Chip onClick={() => submitText(`${instrument.name} RSI 低于 30 我就买入，RSI 高于 70 我就卖出，看看近 1 年`)}>超跌反转</Chip>
-                        <Chip onClick={() => submitText('股价创20日新高并且放量1.5倍买入，MACD死叉卖出，回测近1年')}>放量突破</Chip>
+                        <Chip onClick={() => submitText(volumeBreakoutExample)}>{volumeBreakoutExample}</Chip>
+                        <Chip onClick={() => submitText(financialTrendExample)}>{financialTrendExample}</Chip>
                       </Chips>
                     </div>
                   ) : null}

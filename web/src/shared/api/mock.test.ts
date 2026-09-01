@@ -34,7 +34,7 @@ describe('mock API trust boundary', () => {
 
   it('keeps the volume-breakout example as a 20-day-high and relative-volume conjunction', async () => {
     const outcome = await mockApi.compile(request(
-      '股价创20日新高并且放量1.5倍买入，MACD死叉卖出，回测近5年',
+      '东方财富创20日新高且放量1.5倍买入，跌破20日线卖出',
     ))
     expect(outcome.status).toBe('compiled')
     if (outcome.status !== 'compiled') throw new Error('expected a compiled volume-breakout strategy')
@@ -59,6 +59,34 @@ describe('mock API trust boundary', () => {
     expect(outcome.draft.entry.conditions).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'event' }),
     ]))
+    expect(outcome.draft.strategySpec.exit.children).toEqual([
+      expect.objectContaining({
+        type: 'indicator_condition', indicator_id: 'technical.ma', trigger: 'price_crosses_below',
+      }),
+    ])
+  })
+
+  it('keeps the financial example as a direct PE value plus MACD conjunction', async () => {
+    const outcome = await mockApi.compile(request(
+      '东方财富PE低于35且MACD金叉买入，MACD死叉卖出',
+    ))
+    expect(outcome.status).toBe('compiled')
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled financial strategy')
+
+    expect(outcome.draft.strategySpec.entry).toMatchObject({
+      type: 'all',
+      children: [
+        {
+          type: 'financial_condition', metric_id: 'valuation.pe', comparator: 'lt',
+          value: 35, unit: 'TIMES', period_basis: 'point_in_time',
+        },
+        { type: 'indicator_condition', indicator_id: 'technical.macd', trigger: 'golden_cross' },
+      ],
+    })
+    expect(outcome.draft.entry.conditions.map((condition) => condition.label)).toEqual([
+      '市盈率 < 35',
+      'MACD 金叉',
+    ])
   })
 
   it('rejects arbitrary language instead of silently creating a MACD strategy', async () => {
