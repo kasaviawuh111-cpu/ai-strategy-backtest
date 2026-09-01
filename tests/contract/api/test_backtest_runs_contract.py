@@ -199,6 +199,52 @@ def test_submit_is_async_shaped_and_fingerprint_idempotent(
     )
 
 
+def test_financial_draft_strategy_must_be_submitted_without_rebuilding_execution(
+    configured_api: tuple[TestClient, FakeRunStore, FakeSubmitter],
+) -> None:
+    client, _store, submitter = configured_api
+    compiled = client.post(
+        "/api/v1/strategy-drafts",
+        json={
+            "utterance": "东方财富市盈率低于20倍买入，MACD死叉卖出，回测近1年",
+            "instrument_context": "300059.SZ",
+            "as_of_date": "2026-08-06",
+        },
+    )
+
+    assert compiled.status_code == 201
+    draft = compiled.json()
+    assert draft["status"] == "ready"
+    strategy = draft["strategy"]
+    assert strategy["entry"]["metric_id"] == "valuation.pe"
+    assert strategy["execution"] == {
+        "timezone": "Asia/Shanghai",
+        "entry_policy": "next_tradable_session_open",
+        "exit_policy": "next_tradable_session_open",
+        "data_capability": "daily_ohlcv_financials",
+        "execution_resolution": "1d",
+        "evaluation_frequency": "financial_available_plus_1d_close",
+        "position_policy": "single_position_no_pyramiding",
+        "t_plus_one": True,
+    }
+
+    accepted = client.post(
+        "/api/v1/backtest-runs",
+        json={"strategy": strategy, "config": {"runRobustness": False}},
+    )
+    assert accepted.status_code == 202
+    assert len(submitter.configs) == 1
+
+    rebuilt = deepcopy(strategy)
+    rebuilt["execution"]["evaluation_frequency"] = "1d_close"
+    rejected = client.post(
+        "/api/v1/backtest-runs",
+        json={"strategy": rebuilt, "config": {"runRobustness": False}},
+    )
+    _assert_error(rejected, status_code=422, code="request_validation_failed")
+    assert len(submitter.configs) == 1
+
+
 def test_completed_submission_replay_revalidates_result_integrity(
     configured_api: tuple[TestClient, FakeRunStore, FakeSubmitter],
     strategy_payload: dict[str, Any],

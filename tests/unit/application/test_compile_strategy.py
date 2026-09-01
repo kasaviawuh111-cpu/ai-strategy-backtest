@@ -82,6 +82,7 @@ async def test_operator_reading_financial_language_compiles_to_direct_fact_condi
     assert str(outcome.strategy.entry.value) == value
     assert outcome.strategy.entry.unit in {FinancialUnit.RATIO, FinancialUnit.TIMES}
     assert outcome.strategy.execution.data_capability == "daily_ohlcv_financials"
+    assert outcome.strategy.execution.evaluation_frequency == "financial_available_plus_1d_close"
 
 
 @pytest.mark.asyncio

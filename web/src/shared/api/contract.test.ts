@@ -992,7 +992,8 @@ describe('live API contract adapter', () => {
       reportType: null,
       periodBasis: 'point_in_time',
     }])
-    expect(toLiveRevisionBody(outcome.draft).strategy.entry).toEqual(financialStrategy.entry)
+    expect(toLiveRevisionBody(outcome.draft).strategy).toEqual(financialStrategy)
+    expect(toLiveBacktestBody(outcome.draft).strategy).toEqual(financialStrategy)
   })
 
   it('maps report text count and fill-anchored trading-session exit without losing the DSL', () => {

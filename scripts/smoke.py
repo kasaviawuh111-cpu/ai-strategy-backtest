@@ -103,11 +103,11 @@ def run_smoke(
             "POST",
             "/api/v1/strategy-drafts",
             {
-                "utterance": (
-                    "年报发布后买入，MACD死叉卖出"
-                    if strategy_mode == "event"
-                    else "MACD金叉买入，死叉卖出"
-                ),
+                "utterance": {
+                    "event": "年报发布后买入，MACD死叉卖出",
+                    "financial": "东方财富市盈率低于20倍买入，MACD死叉卖出，回测近1年",
+                    "technical": "MACD金叉买入，死叉卖出",
+                }[strategy_mode],
                 "instrument_context": "300059.SZ",
                 "as_of_date": as_of_date.isoformat(),
             },
@@ -136,6 +136,24 @@ def run_smoke(
     }
     if require_backtest:
         strategy = _object(draft.get("strategy"), "compiled strategy")
+        if strategy_mode == "financial":
+            entry = _object(strategy.get("entry"), "financial entry")
+            execution = _object(strategy.get("execution"), "financial execution")
+            if entry.get("type") != "financial_condition" or entry.get("metric_id") != (
+                "valuation.pe"
+            ):
+                raise SmokeFailure("financial smoke did not compile valuation.pe")
+            expected_execution = (
+                "daily_ohlcv_financials",
+                "financial_available_plus_1d_close",
+            )
+            if (
+                execution.get("data_capability"),
+                execution.get("evaluation_frequency"),
+            ) != expected_execution:
+                raise SmokeFailure(
+                    "financial smoke compiler returned an inconsistent execution declaration"
+                )
         created = _object(
             client.request(
                 "POST",
@@ -207,7 +225,11 @@ def main() -> int:
     parser.add_argument("--wait-seconds", type=float, default=30)
     parser.add_argument("--backtest-wait-seconds", type=float, default=120)
     parser.add_argument("--require-backtest", action="store_true")
-    parser.add_argument("--strategy", choices=("technical", "event"), default="technical")
+    parser.add_argument(
+        "--strategy",
+        choices=("technical", "financial", "event"),
+        default="technical",
+    )
     parser.add_argument("--as-of-date", type=date.fromisoformat, default=date.today())
     args = parser.parse_args()
     if args.timeout <= 0 or args.wait_seconds < 0 or args.backtest_wait_seconds <= 0:
