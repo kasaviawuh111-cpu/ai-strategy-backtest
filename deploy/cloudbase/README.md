@@ -94,6 +94,12 @@ This profile is suitable only for current public HTTP smoke testing. Container
 replacement may lose drafts, receipts, runs, and newly acquired snapshots.
 Cross-process and cross-restart recovery are not acceptance claims.
 
+The image-bundled Composite v2 seed is the first lookup target and is reused
+when it already covers the submitted instrument and period. Only requests not
+covered by a trusted seed enter on-demand acquisition; this avoids needless
+provider calls without allowing stale or partial data to satisfy another
+instrument or period.
+
 ## PostgreSQL migration gate (deferred TODO)
 
 The CloudBase `ExecutePGSql` control-plane API accepts one statement per call;

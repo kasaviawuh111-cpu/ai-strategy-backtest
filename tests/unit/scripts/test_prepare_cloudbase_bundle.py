@@ -280,9 +280,11 @@ def test_cloudbase_dockerfile_uses_portable_source_build_contract() -> None:
     assert "RESTART_RECOVERY_VERIFIED=false" in dockerfile
     assert "/app/var/ephemeral/snapshots/composite" in dockerfile
     assert "MARKET_DATA_PROFILE=on_demand_snapshot" in dockerfile
+    assert "ON_DEMAND_REFRESH_EACH_SUBMISSION=false" in dockerfile
     assert "SNAPSHOT_STORAGE_MODE=ephemeral_local" in dockerfile
     assert "SNAPSHOT_STORAGE_MARKER=" not in dockerfile
     assert "DATA_ROOT=/app/var/snapshots/composite/${SNAPSHOT_DIGEST}" in dockerfile
+    assert "COMPOSITE_SNAPSHOT_ROOT=/app/var/snapshots/composite" in dockerfile
     assert "deploy-snapshot/ /app/var/snapshots/composite/" in dockerfile
     assert "COPY --chown=app:app scripts ./scripts" in dockerfile
     assert 'CMD ["python", "deploy/cloudbase/deployment_entrypoint.py"]' in dockerfile
