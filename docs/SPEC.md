@@ -1578,8 +1578,8 @@ flowchart LR
 
 | 项目 | 当前实际值 | localhost / VPN 依赖 |
 |---|---|---|
-| 前端 | `https://59ac3319a9594be59fa3034fcae82a8f.app.workbuddy.link/`；当前线上仍是上一版 H5，新 UI 尚未重新发布 | 线上运行不依赖 localhost；服务设计不依赖 VPN |
-| API | `https://ashare-backtest-api-305722-11-1330091763.sh.run.tcloudbase.com`；FastAPI/Uvicorn，CORS 只开放上述 WorkBuddy origin | 线上运行不依赖 localhost；服务设计不依赖 VPN |
+| 前端 | `https://8ae96e06a2b3404ea1b9470810cccd7c.app.workbuddy.link/`；已发布 Live `web/dist`；原 `59ac…` 链接由于平台绑定限制未能覆盖 | 线上运行不依赖 localhost；服务设计不依赖 VPN |
+| API | `https://ashare-backtest-api-305722-11-1330091763.sh.run.tcloudbase.com`；FastAPI/Uvicorn；CORS 仅开放明确列出的新旧 WorkBuddy origins | 线上运行不依赖 localhost；服务设计不依赖 VPN |
 | 回测数据 | 容器镜像内固定 `composite:1f26afb8…`，由 Choice 日线和东方财富公告/公司行动离线组成；运行时禁止联网和自动回退 | 不依赖 localhost/VPN；运行时不调用 Choice、Push2 或公告 API |
 | 数据库 / 队列 | 当前是容器 `/tmp/ashare-demo.db` 的 SQLite 与进程内 thread queue；容器重建后不保证保留 run | 不依赖 localhost/VPN，但不是持久化生产形态 |
 | 已创建的 PostgreSQL | CloudBase 环境已创建，但尚无证据表明当前 FastAPI 服务已连接它 | 当前不在请求链路中 |

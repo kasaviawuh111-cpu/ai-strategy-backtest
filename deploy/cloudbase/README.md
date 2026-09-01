@@ -216,7 +216,7 @@ Container contract:
 - explicit `DEPLOYMENT_PROFILE=strict_production`;
 - `APP_ENV=production`, `INITIALIZE_SCHEMA=false`;
 - exact `CODE_REVISION` and strict snapshot identities;
-- exact WorkBuddy HTTPS origin in `CORS_ALLOWED_ORIGINS`;
+- exact active WorkBuddy HTTPS origins in `CORS_ALLOWED_ORIGINS`;
 - one API worker for the current in-process thread queue.
 
 The WorkBuddy frontend may use the candidate only with `VITE_USE_MOCK=false`
