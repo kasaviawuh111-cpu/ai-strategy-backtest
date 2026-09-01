@@ -5,12 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 from ashare_lab.domain.financials import (
     FIRST_FINANCIAL_METRIC_CATALOG,
     FinancialDataKind,
     FinancialMetricId,
 )
+from ashare_lab.domain.shared import require_aware
 from ashare_lab.domain.strategy import StrategySpec, canonical_hash, iter_financial_conditions
 from ashare_lab.ports.financial_data import PinnedFinancialFacts
 from ashare_lab.ports.market_data import DateRange
@@ -31,6 +33,7 @@ _EXECUTABLE_VALUATION_METRICS = frozenset(
         FinancialMetricId.PCF,
     }
 )
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class OperatorFinancialDataUnavailableError(RuntimeError):
@@ -65,6 +68,8 @@ class EastmoneyOperatorFinancialFactLoader:
         *,
         retrieved_at: datetime,
     ) -> PinnedFinancialFacts:
+        require_aware(retrieved_at, "retrieved_at")
+        provider_retrieved_at = retrieved_at.astimezone(_SHANGHAI)
         conditions = tuple(iter_financial_conditions(strategy))
         requested = frozenset(item.metric_id for item in conditions)
         if not requested:
@@ -90,7 +95,7 @@ class EastmoneyOperatorFinancialFactLoader:
         try:
             batches = source.fetch_valuation_trends(
                 strategy.instrument.symbol,
-                retrieved_at=retrieved_at,
+                retrieved_at=provider_retrieved_at,
                 statistics_cycle=4,
             )
         finally:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -52,6 +52,7 @@ class FakeSource:
     ) -> tuple[OperatorReadingBatch, ...]:
         assert instrument_id == "300059.SZ"
         assert retrieved_at == RETRIEVED_AT
+        assert retrieved_at.tzinfo == SHANGHAI
         assert statistics_cycle == 4
         return self.batches
 
@@ -139,7 +140,7 @@ def test_valuation_loader_pins_direct_provider_rows_and_hashes() -> None:
     bundle = loader.load(
         _strategy(FinancialMetricId.PE),
         DateRange(start=date(2024, 12, 1), end=date(2026, 1, 14)),
-        retrieved_at=RETRIEVED_AT,
+        retrieved_at=RETRIEVED_AT.astimezone(UTC),
     )
 
     assert source.closed is True
