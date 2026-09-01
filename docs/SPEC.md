@@ -1596,6 +1596,8 @@ flowchart LR
 
 当前有 Dockerfile、Compose、Alembic 和 CI 材料；公网容器已部署，但 PostgreSQL/Redis、持久化备份恢复、final clean-SHA Live H5 仍未完成，不得写成生产可用。
 
+阶段决定（2026-08-31）：云端持久 PostgreSQL/CFS、数据库不可变 ACL/trigger 与云端重启恢复验收延期到后续生产化阶段。本轮继续验证服务端按需取数、固定快照和回测链路，但不得把本地持久化或容器内 SQLite 写成生产级跨重启恢复；该延期项不阻塞本轮功能收口。
+
 ---
 
 ## 10. 当前实现矩阵

@@ -93,7 +93,9 @@ def _strategy() -> StrategySpecV2:
 def _snapshot(kind: str, suffix: str) -> SnapshotBindingV2:
     return SnapshotBindingV2(
         kind=kind,
-        snapshot_id=f"{kind}:{suffix * 64}",
+        snapshot_id=(
+            f"composite:{suffix * 64}" if kind == "composite_snapshot" else f"{kind}:{suffix * 64}"
+        ),
         provider="choice" if kind != "trading_calendar" else "sse_szse",
         schema_version=f"{kind}.v2",
         content_hash="sha256:" + suffix * 64,
@@ -106,6 +108,14 @@ def _snapshot(kind: str, suffix: str) -> SnapshotBindingV2:
 def test_plan_record_and_manifest_are_canonical_and_tamper_evident() -> None:
     strategy = _strategy()
     strategy_json = canonical_json(strategy)
+    producer_children = (
+        _snapshot("producer_child", "1").model_copy(
+            update={"snapshot_id": "choice:" + "1" * 64, "provider": "Choice Quant API"}
+        ),
+        _snapshot("producer_child", "2").model_copy(
+            update={"snapshot_id": "events:" + "2" * 64, "provider": "eastmoney"}
+        ),
+    )
     record = ExecutableStrategyPlanRecordV2(
         plan_id=HASH_A,
         draft_id="draft:p0c",
@@ -116,6 +126,8 @@ def test_plan_record_and_manifest_are_canonical_and_tamper_evident() -> None:
         security_master=_snapshot("security_master", "c"),
         trading_calendar=_snapshot("trading_calendar", "d"),
         market_data=_snapshot("market_data", "e"),
+        composite_snapshot=_snapshot("composite_snapshot", "f"),
+        producer_children=producer_children,
         provider="deepseek",
         validator_version="strategy-v2-gate.2",
         code_revision=GIT_SHA,
@@ -149,8 +161,12 @@ def test_plan_record_and_manifest_are_canonical_and_tamper_evident() -> None:
     )
 
     assert claims.market_data == record.market_data
+    assert claims.composite_snapshot == record.composite_snapshot
+    assert claims.producer_children == producer_children
     assert manifest.original_input == draft.original_input
     assert manifest.plan_id == record.plan_id
+    assert manifest.composite_snapshot == record.composite_snapshot
+    assert manifest.producer_children == producer_children
     assert manifest.engine_run_key == "p0c-engine-run-key"
     assert manifest.final_strategy_json == strategy_json
     assert manifest.manifest_hash == canonical_hash(manifest.canonical_payload())

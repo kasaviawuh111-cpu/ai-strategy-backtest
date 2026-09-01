@@ -40,6 +40,7 @@ class PriceBasis(StrEnum):
 
 class Board(StrEnum):
     MAIN = "main"
+    STOCK_ETF = "stock_etf"
     CHINEXT = "chinext"
     STAR = "star"
     BSE = "bse"
@@ -47,6 +48,7 @@ class Board(StrEnum):
 
 _BOARD_BUY_QUANTITY_RULES: dict[Board, tuple[int, int]] = {
     Board.MAIN: (100, 100),
+    Board.STOCK_ETF: (100, 100),
     Board.CHINEXT: (100, 100),
     Board.STAR: (200, 1),
     Board.BSE: (100, 1),
@@ -173,6 +175,12 @@ class InstrumentSession:
             )
         if self.price_tick <= 0:
             raise DomainValidationError("price_tick must be positive")
+        if self.board is Board.STOCK_ETF and self.price_tick != Decimal("0.001"):
+            raise DomainValidationError("stock_etf requires price_tick=0.001")
+        if self.board is Board.STOCK_ETF and not self.t_plus_one:
+            raise DomainValidationError("stock_etf requires T+1 settlement")
+        if self.board is Board.STOCK_ETF and self.is_st:
+            raise DomainValidationError("stock_etf cannot use stock ST rules")
 
     def is_valid_buy_quantity(self, quantity: int) -> bool:
         """Whether a submitted buy order satisfies this session's rule."""

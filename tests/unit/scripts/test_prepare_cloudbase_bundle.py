@@ -42,18 +42,24 @@ def _canonical_sha256(value: object) -> str:
 def _repository(tmp_path: Path) -> tuple[Path, str]:
     repository = tmp_path / "repository"
     repository.mkdir()
-    for name in ("pyproject.toml", "uv.lock", "README.md", "LICENSE"):
+    for name in ("pyproject.toml", "uv.lock", "README.md", "LICENSE", "alembic.ini"):
         (repository / name).write_text(name, encoding="utf-8")
-    for name in ("ashare_lab", "astock_backtest", "catalogs", "contracts"):
+    for name in ("ashare_lab", "astock_backtest", "catalogs", "contracts", "alembic"):
         directory = repository / name
         directory.mkdir()
         (directory / "kept.txt").write_text(name, encoding="utf-8")
         (directory / "__pycache__").mkdir()
         (directory / "__pycache__" / "ignored.pyc").write_bytes(b"cache")
     (repository / "scripts").mkdir()
-    (repository / "scripts" / "container_healthcheck.py").write_text(
-        "print('ok')\n", encoding="utf-8"
-    )
+    for name in (
+        "container_healthcheck.py",
+        "prepare_baostock_reference.py",
+        "prepare_choice_snapshot.py",
+        "prepare_eastmoney_corporate_actions.py",
+        "prepare_eastmoney_snapshot.py",
+        "prepare_event_snapshot.py",
+    ):
+        (repository / "scripts" / name).write_text("print('ok')\n", encoding="utf-8")
     (repository / "deploy" / "cloudbase").mkdir(parents=True)
     (repository / "deploy" / "cloudbase" / "Dockerfile").write_text(
         (
@@ -64,6 +70,16 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
         ),
         encoding="utf-8",
     )
+    for name in (
+        "deployment_entrypoint.py",
+        "runtime_entrypoint.py",
+        "production_db.py",
+        "tc3_database_release.py",
+        "README.md",
+        "env.example",
+        "ephemeral.env.example",
+    ):
+        (repository / "deploy" / "cloudbase" / name).write_text(name, encoding="utf-8")
 
     instrument = InstrumentId("300059.SZ")
     start = date(2025, 1, 2)
@@ -142,9 +158,29 @@ def _republish_with_semantically_invalid_source_evidence(
     return invalid_digest
 
 
+def _republish_with_new_composed_at(repository: Path, digest: str) -> str:
+    source = repository / "var" / "snapshots" / "composite" / digest
+    manifest = cast(
+        dict[str, Any],
+        json.loads((source / "snapshot_manifest.json").read_text(encoding="utf-8")),
+    )
+    manifest["composedAt"] = "2025-01-04T10:00:01+08:00"
+    manifest.pop("snapshotId", None)
+    new_digest = _canonical_sha256(manifest)
+    manifest["snapshotId"] = f"composite:{new_digest}"
+    destination = source.parent / new_digest
+    shutil.copytree(source, destination)
+    (destination / "snapshot_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return new_digest
+
+
 def test_bundle_contains_only_allowlisted_sources_and_selected_snapshot(tmp_path: Path) -> None:
     repository, digest = _repository(tmp_path)
     (repository / ".env").write_text("SECRET=do-not-copy", encoding="utf-8")
+    (repository / "EmQuantAPI.py").write_text("SECRET = 'do-not-copy'", encoding="utf-8")
     output = tmp_path / "bundle"
 
     metadata = prepare_bundle(
@@ -156,6 +192,23 @@ def test_bundle_contains_only_allowlisted_sources_and_selected_snapshot(tmp_path
     )
 
     assert metadata["producerSnapshotId"] == f"composite:{digest}"
+    assert metadata["bundleSchemaVersion"] == "ashare-lab.cloudbase-source-bundle.v2"
+    assert metadata["deploymentProfiles"] == {
+        "ephemeral_candidate": {
+            "persistence": "ephemeral",
+            "restartRecoveryVerified": False,
+        },
+        "strict_production": {
+            "persistence": "postgresql_and_durable_mount_required",
+            "restartRecoveryVerified": "required_before_traffic",
+        },
+    }
+    assert metadata["snapshotRegistry"] == {
+        "contractVersion": "ashare-lab.durable-snapshot-store.v1",
+        "mode": "external_durable_mount",
+        "requiredMountPath": "/mnt/ashare-snapshots",
+        "writePolicy": "content_addressed_append_only",
+    }
     dockerfile = (output / "Dockerfile").read_text(encoding="utf-8")
     assert "ARG CODE_REVISION=" + "a" * 40 in dockerfile
     assert "ARG CODE_REVISION\n" not in dockerfile
@@ -165,7 +218,29 @@ def test_bundle_contains_only_allowlisted_sources_and_selected_snapshot(tmp_path
         repository / "var" / "snapshots" / "composite" / digest / "daily_ohlcv.parquet"
     ).read_bytes()
     assert not (output / ".env").exists()
+    assert not (output / "EmQuantAPI.py").exists()
     assert not (output / "ashare_lab" / "__pycache__").exists()
+    assert (output / "alembic.ini").is_file()
+    assert (output / "alembic" / "kept.txt").is_file()
+    assert (output / "scripts" / "prepare_event_snapshot.py").is_file()
+    assert (output / "deploy" / "cloudbase" / "production_db.py").is_file()
+
+
+def test_bundle_keeps_multiple_content_addressed_seed_snapshots(tmp_path: Path) -> None:
+    repository, first = _repository(tmp_path)
+    second = _republish_with_new_composed_at(repository, first)
+
+    metadata = prepare_bundle(
+        repository=repository,
+        output=tmp_path / "bundle",
+        snapshot_digests=(first, second),
+        code_revision="a" * 40,
+        verify_git=False,
+    )
+
+    assert metadata["producerSnapshotIds"] == [f"composite:{first}", f"composite:{second}"]
+    assert (tmp_path / "bundle" / "deploy-snapshot" / first).is_dir()
+    assert (tmp_path / "bundle" / "deploy-snapshot" / second).is_dir()
 
 
 @pytest.mark.parametrize("missing", ["CODE_REVISION", "SNAPSHOT_DIGEST"])
@@ -196,9 +271,17 @@ def test_cloudbase_dockerfile_uses_portable_source_build_contract() -> None:
     assert "ghcr.io" not in dockerfile
     assert "RUN --mount=" not in dockerfile
     assert "python -m pip install --no-cache-dir uv==0.12.1" in dockerfile
-    assert "${PORT:-${APP_PORT:-8000}}" in dockerfile
+    assert dockerfile.count("uv sync --locked --extra demo") == 2
+    assert "import baostock, pypdfium2" in dockerfile
+    assert "DEPLOYMENT_PROFILE=unconfigured" in dockerfile
+    assert "/app/var/ephemeral/snapshots/composite" in dockerfile
+    assert "MARKET_DATA_PROFILE=on_demand_snapshot" in dockerfile
+    assert "SNAPSHOT_STORAGE_MODE=durable_mount" in dockerfile
+    assert "SNAPSHOT_STORAGE_MARKER=/mnt/ashare-snapshots/" in dockerfile
     assert "DATA_ROOT=/app/var/snapshots/composite/${SNAPSHOT_DIGEST}" in dockerfile
     assert "deploy-snapshot/ /app/var/snapshots/composite/" in dockerfile
+    assert "COPY --chown=app:app scripts ./scripts" in dockerfile
+    assert 'CMD ["python", "deploy/cloudbase/deployment_entrypoint.py"]' in dockerfile
     assert (
         "CORS_ALLOWED_ORIGINS="
         "https://59ac3319a9594be59fa3034fcae82a8f.app.workbuddy.link" in dockerfile

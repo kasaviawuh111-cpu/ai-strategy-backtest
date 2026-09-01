@@ -8,6 +8,7 @@ from ashare_lab.domain.runs.models_v2 import (
     DraftRevisionV2,
     ExecutableStrategyPlanRecordV2,
     RunManifestV2,
+    StoredRunResultV2,
     StoredValidationReceiptV2,
 )
 
@@ -30,9 +31,25 @@ class StrategyV2ArtifactStore(Protocol):
         receipt_id: str,
     ) -> StoredValidationReceiptV2 | None: ...
 
+    def get_validation_receipt_for_draft_revision(
+        self,
+        draft_id: str,
+        revision: int,
+    ) -> StoredValidationReceiptV2 | None: ...
+
     def append_run_manifest(self, manifest: RunManifestV2) -> None: ...
 
     def get_run_manifest(self, run_id: str) -> RunManifestV2 | None: ...
+
+    def append_run_result(self, result: StoredRunResultV2) -> None: ...
+
+    def append_completed_run(
+        self,
+        manifest: RunManifestV2,
+        result: StoredRunResultV2,
+    ) -> None: ...
+
+    def get_run_result(self, run_id: str) -> StoredRunResultV2 | None: ...
 
 
 __all__ = ["StrategyV2ArtifactStore"]

@@ -67,3 +67,23 @@ def test_legacy_main_board_first_session_uses_asymmetric_band() -> None:
 
     assert session.upper_limit == Price(Decimal("14.44"))
     assert session.lower_limit == Price(Decimal("6.42"))
+
+
+def test_stock_etf_uses_exchange_tick_t_plus_one_and_ten_percent_band() -> None:
+    session = HistoricalAshareRuleBook().build_session(
+        rule_input(
+            instrument_id=InstrumentId("510300.SH"),
+            board=Board.STOCK_ETF,
+            previous_close=Price(Decimal("4.003")),
+            listing_date=date(2012, 5, 28),
+            listing_session_number=3000,
+        )
+    )
+
+    assert session.upper_limit == Price(Decimal("4.403"))
+    assert session.lower_limit == Price(Decimal("3.603"))
+    assert session.price_tick == Decimal("0.001")
+    assert session.minimum_buy_quantity == 100
+    assert session.buy_quantity_increment == 100
+    assert session.t_plus_one is True
+    assert session.is_st is False

@@ -19,6 +19,7 @@ from ashare_lab.adapters.language.vibe_candidates import (
 )
 from ashare_lab.adapters.language.vibe_ideas import VibeIdeaRouter
 from ashare_lab.application.compile_strategy import StrategyCompiler
+from ashare_lab.application.strategy_v2_http import StrategyV2HttpService
 from ashare_lab.domain.catalog import (
     CatalogSnapshot,
     CoverageCatalogSnapshot,
@@ -33,6 +34,7 @@ from .errors import install_exception_handlers
 from .middleware import RequestContextMiddleware
 from .routes.backtest_runs import router as backtest_runs_router
 from .routes.strategy_drafts import router as strategy_drafts_router
+from .routes.strategy_v2 import router as strategy_v2_router
 from .routes.system import router as system_router
 from .store import InMemoryDraftStore
 
@@ -60,7 +62,9 @@ def create_app(
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     backtest_submission: BacktestSubmitter | None = None,
     run_store: BacktestRunStore | None = None,
+    strategy_v2_service: StrategyV2HttpService | None = None,
     readiness_probe: Callable[[], Mapping[str, bool]] | None = None,
+    readiness_reasons_probe: Callable[[], Mapping[str, str]] | None = None,
     event_backtest_probe: Callable[[], bool] | None = None,
     event_backtest_codes_probe: Callable[[], frozenset[str]] | None = None,
     event_preparable_codes_probe: Callable[[], frozenset[str]] | None = None,
@@ -106,7 +110,9 @@ def create_app(
         ),
         backtest_submission=backtest_submission,
         run_store=run_store,
+        strategy_v2_service=strategy_v2_service,
         readiness_probe=readiness_probe,
+        readiness_reasons_probe=readiness_reasons_probe,
     )
 
     app = FastAPI(
@@ -132,6 +138,7 @@ def create_app(
     app.include_router(system_router)
     app.include_router(strategy_drafts_router)
     app.include_router(backtest_runs_router)
+    app.include_router(strategy_v2_router)
     return app
 
 

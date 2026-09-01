@@ -48,7 +48,13 @@ class _FrozenV2Artifact(BaseModel):
 class SnapshotBindingV2(_FrozenV2Artifact):
     """Content identity of one server-loaded trusted snapshot."""
 
-    kind: Literal["security_master", "trading_calendar", "market_data"]
+    kind: Literal[
+        "security_master",
+        "trading_calendar",
+        "market_data",
+        "composite_snapshot",
+        "producer_child",
+    ]
     snapshot_id: str = Field(min_length=1, max_length=160)
     provider: str = Field(min_length=1, max_length=128)
     schema_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -69,6 +75,8 @@ class SnapshotBindingV2(_FrozenV2Artifact):
     def validate_identity(self) -> Self:
         if _CONTENT_ID.fullmatch(self.snapshot_id) is None:
             raise ValueError("snapshot_id must be a content-addressed identity")
+        if self.kind == "composite_snapshot" and not self.snapshot_id.startswith("composite:"):
+            raise ValueError("composite snapshot binding must use a composite content id")
         _require_hash(self.content_hash, "content_hash")
         if self.coverage_start > self.coverage_end:
             raise ValueError("snapshot coverage_start cannot follow coverage_end")
@@ -84,6 +92,41 @@ class DraftRevisionV2(_FrozenV2Artifact):
     revision: int = Field(ge=1, le=1_000_000)
     original_input: str = Field(min_length=1, max_length=20_000)
     provider: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    # ``legacy`` keeps P0-C rows readable. New P0-D drafts always persist one
+    # terminal interpretation state and, when ready, the exact candidate DSL.
+    # A restarted service therefore never re-runs the language model to
+    # reconstruct authority-bearing strategy intent.
+    draft_status: Literal[
+        "legacy",
+        "ready",
+        "needs_clarification",
+        "unsupported",
+        "invalid",
+    ] = "legacy"
+    requested_instrument: str | None = Field(default=None, min_length=1, max_length=128)
+    as_of_date: date | None = None
+    # New P0-D drafts pin the server-selected outer Composite here so a
+    # restart never reacquires data or lets a client choose a producer.  None
+    # remains readable for pre-P0-D persisted rows.
+    producer_snapshot_id: str | None = Field(
+        default=None,
+        pattern=r"^composite:[0-9a-f]{64}$",
+    )
+    # New P0-D drafts also pin the exact security-master object that proved
+    # the instrument identity.  This is deliberately independent from the
+    # market Composite: neither a restart nor a client may swap one while
+    # keeping the other fixed.  None remains readable for pre-P0-D rows.
+    security_master_snapshot_id: str | None = Field(
+        default=None,
+        pattern=r"^security_master:[0-9a-f]{64}$",
+    )
+    candidate_strategy_json: str | None = Field(default=None, min_length=2, max_length=1_000_000)
+    candidate_strategy_hash: str | None = None
+    diagnostic_code: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_]{1,127}$",
+    )
+    clarification: str | None = Field(default=None, min_length=1, max_length=2_000)
     created_at: datetime
 
     @model_validator(mode="after")
@@ -93,8 +136,53 @@ class DraftRevisionV2(_FrozenV2Artifact):
         if not self.original_input.strip():
             raise ValueError("original_input cannot be blank")
         _reject_sensitive_text(self.original_input, "original_input")
+        if self.requested_instrument is not None:
+            _reject_sensitive_text(self.requested_instrument, "requested_instrument")
+        if self.clarification is not None:
+            _reject_sensitive_text(self.clarification, "clarification")
         require_aware(self.created_at, "created_at")
+        ready_fields = (
+            self.requested_instrument,
+            self.as_of_date,
+            self.candidate_strategy_json,
+            self.candidate_strategy_hash,
+        )
+        if self.draft_status == "ready":
+            if any(value is None for value in ready_fields):
+                raise ValueError("ready draft revision requires a recoverable candidate")
+            strategy = _parse_strategy(cast(str, self.candidate_strategy_json))
+            if canonical_json(strategy) != self.candidate_strategy_json:
+                raise ValueError("candidate_strategy_json must be canonical JSON")
+            _require_hash(cast(str, self.candidate_strategy_hash), "candidate_strategy_hash")
+            if canonical_hash(strategy) != self.candidate_strategy_hash:
+                raise ValueError("candidate_strategy_hash does not match candidate_strategy_json")
+            if self.diagnostic_code is not None or self.clarification is not None:
+                raise ValueError("ready draft revision cannot carry a rejection")
+        elif self.draft_status == "legacy":
+            if any(value is not None for value in ready_fields):
+                raise ValueError("legacy draft revision cannot carry P0-D candidate fields")
+            if self.producer_snapshot_id is not None:
+                raise ValueError("legacy draft revision cannot carry a producer snapshot")
+            if self.security_master_snapshot_id is not None:
+                raise ValueError("legacy draft revision cannot carry a security master")
+            if self.diagnostic_code is not None or self.clarification is not None:
+                raise ValueError("legacy draft revision cannot carry a rejection")
+        else:
+            if self.candidate_strategy_json is not None or self.candidate_strategy_hash is not None:
+                raise ValueError("non-ready draft revision cannot carry a candidate strategy")
+            if self.producer_snapshot_id is not None:
+                raise ValueError("non-ready draft revision cannot carry a producer snapshot")
+            if self.security_master_snapshot_id is not None:
+                raise ValueError("non-ready draft revision cannot carry a security master")
+            if self.diagnostic_code is None:
+                raise ValueError("non-ready draft revision requires a diagnostic_code")
         return self
+
+    @property
+    def candidate_strategy(self) -> StrategySpecV2 | None:
+        if self.candidate_strategy_json is None:
+            return None
+        return _parse_strategy(self.candidate_strategy_json)
 
 
 class ExecutableStrategyPlanRecordV2(_FrozenV2Artifact):
@@ -117,6 +205,10 @@ class ExecutableStrategyPlanRecordV2(_FrozenV2Artifact):
     security_master: SnapshotBindingV2
     trading_calendar: SnapshotBindingV2
     market_data: SnapshotBindingV2
+    # None is accepted only so already persisted P0-C records remain readable.
+    # P0-D issuance/execution requires the server-loaded outer composite binding.
+    composite_snapshot: SnapshotBindingV2 | None = None
+    producer_children: tuple[SnapshotBindingV2, ...] = ()
     provider: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
     validator_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
     code_revision: str
@@ -138,6 +230,11 @@ class ExecutableStrategyPlanRecordV2(_FrozenV2Artifact):
             raise ValueError("trading_calendar binding has the wrong kind")
         if self.market_data.kind != "market_data":
             raise ValueError("market_data binding has the wrong kind")
+        if self.composite_snapshot is not None and self.composite_snapshot.kind != (
+            "composite_snapshot"
+        ):
+            raise ValueError("composite_snapshot binding has the wrong kind")
+        _validate_producer_children(self.producer_children)
         strategy = _parse_strategy(self.strategy_json)
         if canonical_json(strategy) != self.strategy_json:
             raise ValueError("strategy_json must be canonical JSON")
@@ -151,7 +248,13 @@ class ExecutableStrategyPlanRecordV2(_FrozenV2Artifact):
 
     @property
     def snapshot_bindings(self) -> tuple[SnapshotBindingV2, ...]:
-        return (self.security_master, self.trading_calendar, self.market_data)
+        base = (
+            self.security_master,
+            self.trading_calendar,
+            self.market_data,
+            *self.producer_children,
+        )
+        return base if self.composite_snapshot is None else (*base, self.composite_snapshot)
 
 
 class ValidationReceiptClaimsV2(_FrozenV2Artifact):
@@ -166,6 +269,8 @@ class ValidationReceiptClaimsV2(_FrozenV2Artifact):
     security_master: SnapshotBindingV2
     trading_calendar: SnapshotBindingV2
     market_data: SnapshotBindingV2
+    composite_snapshot: SnapshotBindingV2 | None = None
+    producer_children: tuple[SnapshotBindingV2, ...] = ()
     provider: str
     validator_version: str
     code_revision: str
@@ -185,6 +290,7 @@ class ValidationReceiptClaimsV2(_FrozenV2Artifact):
         require_aware(self.expires_at, "expires_at")
         if self.expires_at <= self.issued_at:
             raise ValueError("receipt expires_at must follow issued_at")
+        _validate_producer_children(self.producer_children)
         return self
 
     @classmethod
@@ -204,6 +310,8 @@ class ValidationReceiptClaimsV2(_FrozenV2Artifact):
             security_master=plan.security_master,
             trading_calendar=plan.trading_calendar,
             market_data=plan.market_data,
+            composite_snapshot=plan.composite_snapshot,
+            producer_children=plan.producer_children,
             provider=plan.provider,
             validator_version=plan.validator_version,
             code_revision=plan.code_revision,
@@ -213,7 +321,13 @@ class ValidationReceiptClaimsV2(_FrozenV2Artifact):
 
     @property
     def snapshot_bindings(self) -> tuple[SnapshotBindingV2, ...]:
-        return (self.security_master, self.trading_calendar, self.market_data)
+        base = (
+            self.security_master,
+            self.trading_calendar,
+            self.market_data,
+            *self.producer_children,
+        )
+        return base if self.composite_snapshot is None else (*base, self.composite_snapshot)
 
 
 class StoredValidationReceiptV2(_FrozenV2Artifact):
@@ -268,6 +382,8 @@ class RunManifestV2(_FrozenV2Artifact):
     security_master: SnapshotBindingV2
     trading_calendar: SnapshotBindingV2
     market_data: SnapshotBindingV2
+    composite_snapshot: SnapshotBindingV2 | None = None
+    producer_children: tuple[SnapshotBindingV2, ...] = ()
     code_revision: str
     engine_run_key: str = Field(min_length=1, max_length=256)
     backtest_config_json: str = Field(min_length=2, max_length=1_000_000)
@@ -311,6 +427,7 @@ class RunManifestV2(_FrozenV2Artifact):
             raise ValueError("backtest_config_hash does not match backtest_config_json")
         _reject_sensitive_text(self.engine_run_key, "engine_run_key")
         records = _validate_signal_records_json(self.signal_records_json)
+        _validate_producer_children(self.producer_children)
         for record in records:
             if record.plan_id != self.plan_id:
                 raise ValueError("signal record plan_id does not match manifest")
@@ -364,6 +481,8 @@ class RunManifestV2(_FrozenV2Artifact):
             security_master=plan.security_master,
             trading_calendar=plan.trading_calendar,
             market_data=plan.market_data,
+            composite_snapshot=plan.composite_snapshot,
+            producer_children=plan.producer_children,
             code_revision=plan.code_revision,
             engine_run_key=engine_run_key,
             backtest_config_json=backtest_config_json,
@@ -386,6 +505,61 @@ class RunManifestV2(_FrozenV2Artifact):
     def signal_records(self) -> tuple[SignalRecord, ...]:
         raw = cast(list[object], json.loads(self.signal_records_json))
         return tuple(SignalRecord.from_dict(item) for item in raw)
+
+
+class StoredRunResultV2(_FrozenV2Artifact):
+    """Canonical completed-result projection bound to one immutable manifest."""
+
+    schema_version: Literal["stored-backtest-result.v2"] = "stored-backtest-result.v2"
+    run_id: str = Field(min_length=1, max_length=128)
+    manifest_hash: str
+    engine_result_hash: str
+    result_json: str = Field(min_length=2, max_length=20_000_000)
+    result_hash: str
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def validate_result(self) -> Self:
+        for value, field_name in (
+            (self.manifest_hash, "manifest_hash"),
+            (self.engine_result_hash, "engine_result_hash"),
+            (self.result_hash, "result_hash"),
+        ):
+            _require_hash(value, field_name)
+        require_aware(self.created_at, "created_at")
+        payload = _parse_canonical_object_json(self.result_json, "result_json")
+        if canonical_hash(payload) != self.result_hash:
+            raise ValueError("result_hash does not match result_json")
+        audit = payload.get("audit")
+        typed_audit = cast(Mapping[object, object], audit) if isinstance(audit, Mapping) else None
+        if typed_audit is None or typed_audit.get("engineResultHash") != self.engine_result_hash:
+            raise ValueError("result_json audit does not bind engine_result_hash")
+        _reject_sensitive_payload(payload, "result_json")
+        return self
+
+    @classmethod
+    def from_payload(
+        cls,
+        *,
+        run_id: str,
+        manifest_hash: str,
+        engine_result_hash: str,
+        payload: Mapping[str, object],
+        created_at: datetime,
+    ) -> StoredRunResultV2:
+        normalized = dict(payload)
+        return cls(
+            run_id=run_id,
+            manifest_hash=manifest_hash,
+            engine_result_hash=engine_result_hash,
+            result_json=canonical_json(normalized),
+            result_hash=canonical_hash(normalized),
+            created_at=created_at,
+        )
+
+    @property
+    def payload(self) -> dict[str, object]:
+        return _parse_canonical_object_json(self.result_json, "result_json")
 
 
 def canonical_signal_records_json(records: tuple[SignalRecord, ...]) -> str:
@@ -471,6 +645,18 @@ def _reject_sensitive_payload(value: object, path: str) -> None:
 def _require_hash(value: object, field_name: str) -> None:
     if type(value) is not str or _SHA256.fullmatch(value) is None:
         raise ValueError(f"{field_name} must be a sha256 content hash")
+
+
+def _validate_producer_children(values: tuple[SnapshotBindingV2, ...]) -> None:
+    if type(values) is not tuple or any(type(item) is not SnapshotBindingV2 for item in values):
+        raise ValueError("producer_children must contain SnapshotBindingV2 values")
+    if any(item.kind != "producer_child" for item in values):
+        raise ValueError("producer child binding has the wrong kind")
+    ordered = tuple(sorted(values, key=lambda item: item.snapshot_id))
+    if len({item.snapshot_id for item in ordered}) != len(ordered):
+        raise ValueError("producer child snapshot identities must be unique")
+    if values != ordered:
+        raise ValueError("producer child bindings must be snapshot-id ordered")
 
 
 __all__ = [

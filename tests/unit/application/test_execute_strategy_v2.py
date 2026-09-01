@@ -22,7 +22,10 @@ from ashare_lab.application.execute_strategy_v2 import (
 from ashare_lab.application.technical_v2 import (
     bind_stock_fee_provider,
 )
-from ashare_lab.application.validation_receipts_v2 import ValidationReceiptServiceV2
+from ashare_lab.application.validation_receipts_v2 import (
+    ValidationReceiptServiceV2,
+    snapshot_bindings_hash,
+)
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.execution import AshareExchange, FeeCalculator, FeePolicy, TradingCalendar
 from ashare_lab.domain.instruments import (
@@ -196,6 +199,14 @@ def _technical(*, content_suffix: str = "e") -> TrustedTechnicalSnapshot:
         signal_bars=signal_bars,
         sessions=sessions,
         corporate_actions=(),
+        producer_metadata=TrustedSnapshotMetadata(
+            snapshot_id=PRODUCER_ID,
+            provider="ashare-lab composite snapshot",
+            schema_version="ashare-lab.composite-research-snapshot.v2",
+            content_hash="sha256:" + "f" * 64,
+            coverage=DateRange(START, END),
+            generated_at=NOW,
+        ),
     )
 
 
@@ -318,6 +329,16 @@ def _issue(
         dataset_coverage=(contracts.dataset_coverage,),
         grounding_expectations=_expectations(strategy),
         code_revision=GIT_SHA,
+        trading_calendar_snapshot_id=contracts.trading_calendar.snapshot_id,
+        composite_snapshot_id=contracts.composite_snapshot.snapshot_id,
+        snapshot_bindings_hash=snapshot_bindings_hash(
+            (
+                contracts.security_master,
+                contracts.trading_calendar,
+                contracts.market_data,
+                contracts.composite_snapshot,
+            )
+        ),
     )
     plan = validate_strategy_candidate_v2(
         StrategyCandidateV2(
@@ -350,6 +371,7 @@ def _issue(
             contracts.security_master,
             contracts.trading_calendar,
             contracts.market_data,
+            contracts.composite_snapshot,
         ),
     )
     return _Issued(receipt_id=receipt.receipt_id, plan_id=plan.plan_id)
@@ -432,11 +454,25 @@ def test_receipt_only_service_recovers_after_restart_and_persists_trace(
     )
     completed = service.execute(issued.receipt_id)
     persisted = restarted_store.get_run_manifest(completed.run_id)
+    persisted_result = restarted_store.get_run_result(completed.run_id)
     stored_plan = restarted_store.get_plan(issued.plan_id)
 
     assert persisted == completed.manifest
+    assert persisted_result is not None
+    assert persisted_result.payload["summary"]["runId"] == completed.run_id
+    assert persisted_result.engine_result_hash == completed.result.content_hash
+    assert persisted_result.manifest_hash == completed.manifest.manifest_hash
     assert persisted is not None
     assert stored_plan is not None
+    assert stored_plan.composite_snapshot is not None
+    assert stored_plan.composite_snapshot.snapshot_id == PRODUCER_ID
+    assert (
+        restarted_store.get_validation_receipt_for_draft_revision(
+            stored_plan.draft_id,
+            stored_plan.revision,
+        )
+        is not None
+    )
     assert persisted.original_input == ORIGINAL_INPUT
     assert persisted.final_strategy_json == stored_plan.strategy_json
     assert persisted.engine_run_key.startswith("v2_")
@@ -483,6 +519,7 @@ def test_integrated_result_is_deterministic_and_identical_to_direct_v1(tmp_path:
             contracts.security_master,
             contracts.trading_calendar,
             contracts.market_data,
+            contracts.composite_snapshot,
         ),
         code_revision=plan_record.code_revision,
         backtest_config=_config(),
@@ -524,6 +561,7 @@ def test_integrated_result_is_deterministic_and_identical_to_direct_v1(tmp_path:
                 contracts.security_master,
                 contracts.trading_calendar,
                 contracts.market_data,
+                contracts.composite_snapshot,
             ),
             code_revision=plan_record.code_revision,
             backtest_config=replace(_config(), slippage_bps=Decimal("1")),
@@ -538,6 +576,7 @@ def test_integrated_result_is_deterministic_and_identical_to_direct_v1(tmp_path:
                 contracts.security_master,
                 contracts.trading_calendar,
                 contracts.market_data,
+                contracts.composite_snapshot,
             ),
             code_revision=plan_record.code_revision,
             backtest_config=_config(),

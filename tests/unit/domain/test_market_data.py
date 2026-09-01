@@ -64,6 +64,7 @@ def test_session_carries_historical_limits_instead_of_recomputing_from_prefix() 
     ("board", "minimum", "increment", "valid", "invalid"),
     [
         (Board.MAIN, 100, 100, (100, 200), (1, 99, 101)),
+        (Board.STOCK_ETF, 100, 100, (100, 200), (1, 99, 101)),
         (Board.CHINEXT, 100, 100, (100, 200), (1, 99, 101)),
         (Board.STAR, 200, 1, (200, 201, 299), (1, 199)),
         (Board.BSE, 100, 1, (100, 101, 299), (1, 99)),
@@ -86,6 +87,7 @@ def test_session_enforces_board_specific_buy_declaration_rules(
         lower_limit=price("8.00"),
         minimum_buy_quantity=minimum,
         buy_quantity_increment=increment,
+        price_tick=Decimal("0.001") if board is Board.STOCK_ETF else Decimal("0.01"),
     )
 
     assert all(session.is_valid_buy_quantity(item) for item in valid)
@@ -105,6 +107,39 @@ def test_session_rejects_a_quantity_rule_that_does_not_match_its_board() -> None
             lower_limit=price("8.00"),
             minimum_buy_quantity=100,
             buy_quantity_increment=100,
+        )
+
+
+def test_stock_etf_session_requires_exchange_tick_and_t_plus_one() -> None:
+    session = InstrumentSession(
+        instrument_id=InstrumentId("510300.SH"),
+        session_date=date(2025, 1, 2),
+        board=Board.STOCK_ETF,
+        status=TradingStatus.TRADING,
+        previous_close=price("4.001"),
+        upper_limit=price("4.401"),
+        lower_limit=price("3.601"),
+        minimum_buy_quantity=100,
+        buy_quantity_increment=100,
+        price_tick=Decimal("0.001"),
+        t_plus_one=True,
+    )
+
+    assert session.price_tick == Decimal("0.001")
+    assert session.t_plus_one is True
+
+    with pytest.raises(DomainValidationError, match=r"stock_etf requires price_tick=0\.001"):
+        InstrumentSession(
+            instrument_id=InstrumentId("510300.SH"),
+            session_date=date(2025, 1, 2),
+            board=Board.STOCK_ETF,
+            status=TradingStatus.TRADING,
+            previous_close=price("4.00"),
+            upper_limit=price("4.40"),
+            lower_limit=price("3.60"),
+            minimum_buy_quantity=100,
+            buy_quantity_increment=100,
+            price_tick=Decimal("0.01"),
         )
 
 

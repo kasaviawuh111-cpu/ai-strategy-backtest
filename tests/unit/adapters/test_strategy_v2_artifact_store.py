@@ -4,6 +4,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import DatabaseError
 
 from ashare_lab.adapters.persistence import create_backtest_run_engine
 from ashare_lab.adapters.persistence.strategy_v2_artifacts import (
@@ -18,6 +20,7 @@ from ashare_lab.domain.runs.models_v2 import (
     ExecutableStrategyPlanRecordV2,
     RunManifestV2,
     SnapshotBindingV2,
+    StoredRunResultV2,
     StoredValidationReceiptV2,
     ValidationReceiptClaimsV2,
 )
@@ -42,7 +45,9 @@ BACKTEST_CONFIG = {
 def _snapshot(kind: str, suffix: str) -> SnapshotBindingV2:
     return SnapshotBindingV2(
         kind=kind,
-        snapshot_id=f"{kind}:{suffix * 64}",
+        snapshot_id=(
+            f"composite:{suffix * 64}" if kind == "composite_snapshot" else f"{kind}:{suffix * 64}"
+        ),
         provider="choice",
         schema_version=f"{kind}.v2",
         content_hash="sha256:" + suffix * 64,
@@ -50,6 +55,10 @@ def _snapshot(kind: str, suffix: str) -> SnapshotBindingV2:
         coverage_end=date(2026, 8, 28),
         generated_at=NOW,
     )
+
+
+def _composite() -> SnapshotBindingV2:
+    return _snapshot("composite_snapshot", "f")
 
 
 def _strategy() -> StrategySpecV2:
@@ -104,6 +113,7 @@ def _artifacts() -> tuple[
         security_master=_snapshot("security_master", "c"),
         trading_calendar=_snapshot("trading_calendar", "d"),
         market_data=_snapshot("market_data", "e"),
+        composite_snapshot=_composite(),
         provider=draft.provider,
         validator_version="strategy-v2-gate.2",
         code_revision=GIT_SHA,
@@ -153,6 +163,14 @@ def test_draft_receipt_plan_and_manifest_survive_process_restart(tmp_path: Path)
     first.append_draft_revision(draft)
     first.append_validated_plan(plan, receipt)
     first.append_run_manifest(manifest)
+    result = StoredRunResultV2.from_payload(
+        run_id=manifest.run_id,
+        manifest_hash=manifest.manifest_hash,
+        engine_result_hash=manifest.engine_result_hash,
+        payload={"audit": {"engineResultHash": manifest.engine_result_hash}, "series": []},
+        created_at=NOW,
+    )
+    first.append_run_result(result)
     first.engine.dispose()
 
     reopened = _store(database)
@@ -160,6 +178,7 @@ def test_draft_receipt_plan_and_manifest_survive_process_restart(tmp_path: Path)
     assert reopened.get_plan(plan.plan_id) == plan
     assert reopened.get_validation_receipt(receipt.receipt_id) == receipt
     assert reopened.get_run_manifest(manifest.run_id) == manifest
+    assert reopened.get_run_result(manifest.run_id) == result
 
 
 def test_append_only_records_reject_conflicting_rewrites(tmp_path: Path) -> None:
@@ -181,6 +200,47 @@ def test_append_only_records_reject_conflicting_rewrites(tmp_path: Path) -> None
     store.append_draft_revision(draft)
     store.append_validated_plan(plan, receipt)
     store.append_run_manifest(manifest)
+
+
+def test_database_guards_cover_every_v2_artifact_table(tmp_path: Path) -> None:
+    store = _store(tmp_path / "database-guards.db")
+    draft, plan, receipt, manifest = _artifacts()
+    store.append_draft_revision(draft)
+    store.append_validated_plan(plan, receipt)
+    store.append_run_manifest(manifest)
+    store.append_run_result(
+        StoredRunResultV2.from_payload(
+            run_id=manifest.run_id,
+            manifest_hash=manifest.manifest_hash,
+            engine_result_hash=manifest.engine_result_hash,
+            payload={"audit": {"engineResultHash": manifest.engine_result_hash}},
+            created_at=NOW,
+        )
+    )
+    tables = (
+        "strategy_draft_revisions_v2",
+        "strategy_executable_plans_v2",
+        "strategy_validation_receipts_v2",
+        "backtest_run_manifests_v2",
+        "backtest_run_results_v2",
+    )
+    for table in tables:
+        with (
+            store.engine.begin() as connection,
+            pytest.raises(
+                DatabaseError,
+                match="append-only",
+            ),
+        ):
+            connection.execute(text(f"UPDATE {table} SET artifact_json=artifact_json || ' '"))
+        with (
+            store.engine.begin() as connection,
+            pytest.raises(
+                DatabaseError,
+                match="append-only",
+            ),
+        ):
+            connection.execute(text(f"DELETE FROM {table}"))
 
 
 def test_database_payloads_do_not_contain_credentials(tmp_path: Path) -> None:
@@ -206,6 +266,7 @@ def test_database_payloads_do_not_contain_credentials(tmp_path: Path) -> None:
         ("security_master", _snapshot("security_master", "0")),
         ("trading_calendar", _snapshot("trading_calendar", "0")),
         ("market_data", _snapshot("market_data", "0")),
+        ("composite_snapshot", _snapshot("composite_snapshot", "0")),
         ("code_revision", "0" * 40),
     ),
 )
@@ -235,3 +296,87 @@ def test_model_copy_cannot_bypass_secret_validation(tmp_path: Path) -> None:
     forged = draft.model_copy(update={"original_input": "MACD sk-1234567890abcdefghijklmnop"})
     with pytest.raises(ValueError, match="sensitive credential"):
         store.append_draft_revision(forged)
+
+
+def test_run_result_must_match_server_manifest(tmp_path: Path) -> None:
+    store = _store(tmp_path / "result-binding.db")
+    draft, plan, receipt, manifest = _artifacts()
+    store.append_draft_revision(draft)
+    store.append_validated_plan(plan, receipt)
+    store.append_run_manifest(manifest)
+    result = StoredRunResultV2.from_payload(
+        run_id=manifest.run_id,
+        manifest_hash="sha256:" + "0" * 64,
+        engine_result_hash=manifest.engine_result_hash,
+        payload={"audit": {"engineResultHash": manifest.engine_result_hash}},
+        created_at=NOW,
+    )
+    with pytest.raises(MissingArtifactDependencyError, match="server-owned"):
+        store.append_run_result(result)
+
+
+def test_atomic_completed_run_is_idempotent_and_rejects_conflicting_rewrite(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path / "atomic-idempotence.db")
+    draft, plan, receipt, manifest = _artifacts()
+    store.append_draft_revision(draft)
+    store.append_validated_plan(plan, receipt)
+    result = StoredRunResultV2.from_payload(
+        run_id=manifest.run_id,
+        manifest_hash=manifest.manifest_hash,
+        engine_result_hash=manifest.engine_result_hash,
+        payload={"audit": {"engineResultHash": manifest.engine_result_hash}, "series": []},
+        created_at=NOW,
+    )
+
+    store.append_completed_run(manifest, result)
+    store.append_completed_run(manifest, result)
+
+    changed = StoredRunResultV2.from_payload(
+        run_id=manifest.run_id,
+        manifest_hash=manifest.manifest_hash,
+        engine_result_hash=manifest.engine_result_hash,
+        payload={"audit": {"engineResultHash": manifest.engine_result_hash}, "series": [1]},
+        created_at=NOW,
+    )
+    with pytest.raises(ImmutableArtifactConflictError, match="run result"):
+        store.append_completed_run(manifest, changed)
+    assert store.get_run_manifest(manifest.run_id) == manifest
+    assert store.get_run_result(manifest.run_id) == result
+
+
+def test_atomic_completed_run_rolls_back_manifest_when_result_insert_fails(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path / "atomic-rollback.db")
+    draft, plan, receipt, first_manifest = _artifacts()
+    store.append_draft_revision(draft)
+    store.append_validated_plan(plan, receipt)
+    shared_payload = {
+        "audit": {"engineResultHash": first_manifest.engine_result_hash},
+        "series": [],
+    }
+    first_result = StoredRunResultV2.from_payload(
+        run_id=first_manifest.run_id,
+        manifest_hash=first_manifest.manifest_hash,
+        engine_result_hash=first_manifest.engine_result_hash,
+        payload=shared_payload,
+        created_at=NOW,
+    )
+    store.append_completed_run(first_manifest, first_result)
+
+    second_manifest = first_manifest.model_copy(update={"run_id": "run:p0d-atomic-rollback"})
+    colliding_result = StoredRunResultV2.from_payload(
+        run_id=second_manifest.run_id,
+        manifest_hash=second_manifest.manifest_hash,
+        engine_result_hash=second_manifest.engine_result_hash,
+        payload=shared_payload,
+        created_at=NOW,
+    )
+    assert colliding_result.result_hash == first_result.result_hash
+
+    with pytest.raises(ImmutableArtifactConflictError, match="completed run"):
+        store.append_completed_run(second_manifest, colliding_result)
+    assert store.get_run_manifest(second_manifest.run_id) is None
+    assert store.get_run_result(second_manifest.run_id) is None

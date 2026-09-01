@@ -126,10 +126,15 @@ class FakeRunner:
                             "instrument_id": instrument,
                             "listing_date": "2010-03-19",
                             "board": (
-                                "chinext"
+                                "stock_etf"
+                                if code.startswith(("5", "1"))
+                                else "chinext"
                                 if code.startswith(("300", "301"))
-                                else ("star" if code.startswith(("688", "689")) else "main")
+                                else "star"
+                                if code.startswith(("688", "689"))
+                                else "main"
                             ),
+                            "asset_type": ("ETF" if code.startswith(("5", "1")) else "STOCK"),
                         },
                         "actions": [],
                         "coverage": {},
@@ -176,6 +181,23 @@ class FakeRunner:
         if script.endswith("prepare_eastmoney_snapshot.py"):
             output_root = Path(command[command.index("--output-root") + 1])
             digest = "c" * 64
+            path = output_root / digest
+            path.mkdir(parents=True)
+            (path / "snapshot_manifest.json").write_text("{}", encoding="utf-8")
+            return PreparationCommandResult(
+                0,
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "snapshotId": f"technical:{digest}",
+                        "path": str(path),
+                    }
+                ),
+                "",
+            )
+        if script.endswith("prepare_etf_snapshot.py"):
+            output_root = Path(command[command.index("--output-root") + 1])
+            digest = "d" * 64
             path = output_root / digest
             path.mkdir(parents=True)
             (path / "snapshot_manifest.json").write_text("{}", encoding="utf-8")
@@ -437,6 +459,36 @@ def test_choice_failure_falls_back_to_offline_push2_snapshot_pipeline(tmp_path: 
     event_command = runner.calls[4]
     selected = Path(event_command[event_command.index("--choice-snapshot") + 1])
     assert selected.name == "c" * 64
+
+
+def test_etf_uses_choice_first_then_strict_etf_fallback_and_composite(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        fail_label="prepare_choice_snapshot.py",
+        fail_returncode=CHOICE_PROVIDER_UNAVAILABLE_EXIT_CODE,
+    )
+
+    result = _preparer(tmp_path, runner).prepare(
+        _requirements(instrument="510300.SH"),
+        DateRange(date(2021, 1, 1), date(2026, 1, 1)),
+    )
+
+    assert result.producer_snapshot_id == f"composite:{'b' * 64}"
+    assert [Path(call[1]).name for call in runner.calls] == [
+        "prepare_baostock_reference.py",
+        "prepare_choice_snapshot.py",
+        "prepare_etf_snapshot.py",
+        "prepare_event_snapshot.py",
+    ]
+    assert not any(
+        call[1].endswith("prepare_eastmoney_corporate_actions.py") for call in runner.calls
+    )
+    fallback = runner.calls[2]
+    assert fallback[fallback.index("--reference-json") + 1].endswith("baostock-reference.json")
+    assert fallback[fallback.index("--fallback-reason") + 1] == "choice_daily_exit_75"
+    event = runner.calls[3]
+    selected = Path(event[event.index("--choice-snapshot") + 1])
+    assert selected.name == "d" * 64
+    assert "--no-event-required" in event
 
 
 def test_choice_and_push2_failure_remains_snapshot_failed(tmp_path: Path) -> None:

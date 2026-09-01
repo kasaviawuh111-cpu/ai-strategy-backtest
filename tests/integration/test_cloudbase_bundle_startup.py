@@ -21,8 +21,20 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 @pytest.mark.integration
 def test_generated_cloudbase_bundle_reaches_strict_ready(tmp_path: Path) -> None:
     digest = os.environ.get("ASHARE_CLOUDBASE_TEST_SNAPSHOT_DIGEST")
-    if digest is None:
-        pytest.skip("set ASHARE_CLOUDBASE_TEST_SNAPSHOT_DIGEST for the release bundle gate")
+    database_url = os.environ.get("ASHARE_CLOUDBASE_TEST_DATABASE_URL")
+    snapshot_mount = os.environ.get("ASHARE_CLOUDBASE_TEST_SNAPSHOT_MOUNT")
+    storage_id = os.environ.get("ASHARE_CLOUDBASE_TEST_SNAPSHOT_STORAGE_ID")
+    restart_probe_id = os.environ.get("ASHARE_CLOUDBASE_TEST_SNAPSHOT_RESTART_PROBE_ID")
+    if not all((digest, database_url, snapshot_mount, storage_id, restart_probe_id)):
+        pytest.skip(
+            "set release digest, dedicated PostgreSQL URL, durable snapshot mount, "
+            "storage ID and cross-restart probe ID for the CloudBase bundle gate"
+        )
+    assert digest is not None
+    assert database_url is not None
+    assert snapshot_mount is not None
+    assert storage_id is not None
+    assert restart_probe_id is not None
     source_snapshot = REPOSITORY / "var" / "snapshots" / "composite" / digest
     if not source_snapshot.is_dir():
         pytest.fail(f"release snapshot is missing: {source_snapshot}")
@@ -48,16 +60,24 @@ def test_generated_cloudbase_bundle_reaches_strict_ready(tmp_path: Path) -> None
             "APP_HOST": "127.0.0.1",
             "APP_PORT": str(port),
             "PORT": str(port),
-            "DATABASE_URL": f"sqlite+pysqlite:///{tmp_path / 'runs.db'}",
-            "INITIALIZE_SCHEMA": "true",
+            "DATABASE_URL": database_url,
+            "INITIALIZE_SCHEMA": "false",
             "QUEUE_BACKEND": "thread",
             "LOCAL_WORKER_THREADS": "1",
             "DATA_ROOT": str(deployed_snapshot),
-            "MARKET_DATA_PROFILE": "composite_snapshot",
+            "MARKET_DATA_PROFILE": "on_demand_snapshot",
             "SESSION_REFERENCE_MODE": "parquet",
             "SESSION_REFERENCE_PATH": str(deployed_snapshot / "instrument_sessions.parquet"),
             "EVENT_DATA_REQUIRED": "true",
-            "ARTIFACT_ROOT": str(tmp_path / "artifacts"),
+            "SNAPSHOT_STORAGE_MODE": "durable_mount",
+            "SNAPSHOT_STORAGE_ID": storage_id,
+            "SNAPSHOT_STORAGE_RESTART_PROBE_ID": restart_probe_id,
+            "SNAPSHOT_STORAGE_MARKER": str(Path(snapshot_mount) / ".ashare-snapshot-store.json"),
+            "CHOICE_SNAPSHOT_ROOT": str(Path(snapshot_mount) / "choice"),
+            "TECHNICAL_SNAPSHOT_ROOT": str(Path(snapshot_mount) / "technical"),
+            "EVENT_SNAPSHOT_ROOT": str(Path(snapshot_mount) / "events"),
+            "COMPOSITE_SNAPSHOT_ROOT": str(Path(snapshot_mount) / "composite"),
+            "SNAPSHOT_PREPARATION_ROOT": str(Path(snapshot_mount) / "preparations"),
             "CATALOG_ROOT": str(bundle / "catalogs"),
             "CODE_REVISION": revision,
             "CORS_ALLOWED_ORIGINS": ("https://59ac3319a9594be59fa3034fcae82a8f.app.workbuddy.link"),
@@ -67,16 +87,7 @@ def test_generated_cloudbase_bundle_reaches_strict_ready(tmp_path: Path) -> None
     process = subprocess.Popen(
         (
             sys.executable,
-            "-m",
-            "uvicorn",
-            "ashare_lab.main:create_app",
-            "--factory",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--workers",
-            "1",
+            "deploy/cloudbase/runtime_entrypoint.py",
         ),
         cwd=bundle,
         env=environment,

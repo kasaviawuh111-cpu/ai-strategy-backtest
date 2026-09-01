@@ -187,6 +187,9 @@ def create_backtest_run_schema(database: str | URL | Engine) -> Engine:
 
     engine = database if isinstance(database, Engine) else create_backtest_run_engine(database)
     BACKTEST_RUN_METADATA.create_all(engine)
+    from .immutability import install_terminal_run_guard
+
+    install_terminal_run_guard(engine)
     return engine
 
 

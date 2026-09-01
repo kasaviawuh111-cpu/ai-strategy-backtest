@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import pyarrow as pa
@@ -69,6 +71,8 @@ SESSION_REFERENCE_FIELDS = ("date", "preclose", "tradestatus", "isST")
 SESSION_REFERENCE_METHOD = "query_history_k_data_plus"
 SESSION_REFERENCE_FREQUENCY = "d"
 SESSION_REFERENCE_ADJUST_FLAG = "3"
+ETF_SESSION_REFERENCE_SCHEMA_VERSION = "ashare-lab.stock-etf-session-reference.v1"
+ETF_CORPORATE_ACTION_COVERAGE_SCOPE = "stock_etf_cash_and_unit_change_reconciliation"
 _CHOICE_TRADING_STATUS = "正常交易"
 _CHOICE_SUSPENDED_STATUSES = frozenset({"连续停牌"})
 _ARROW: Any = pa
@@ -293,19 +297,34 @@ def build_daily_research_snapshot(
                 },
             },
             "sessionReference": {
-                "kind": "baostock-historical-facts-plus-versioned-rulebook",
+                "kind": (
+                    "stock-etf-multi-source-daily-facts-plus-versioned-rulebook"
+                    if validated_session_coverage.get("schemaVersion")
+                    == ETF_SESSION_REFERENCE_SCHEMA_VERSION
+                    else "baostock-historical-facts-plus-versioned-rulebook"
+                ),
                 "provider": validated_session_coverage["provider"],
-                "queryMethod": SESSION_REFERENCE_METHOD,
+                "queryMethod": validated_session_coverage.get(
+                    "queryMethod",
+                    SESSION_REFERENCE_METHOD,
+                ),
                 "fields": list(SESSION_REFERENCE_FIELDS),
                 "frequency": SESSION_REFERENCE_FREQUENCY,
-                "adjustFlag": SESSION_REFERENCE_ADJUST_FLAG,
+                "adjustFlag": validated_session_coverage.get(
+                    "adjustFlag",
+                    SESSION_REFERENCE_ADJUST_FLAG,
+                ),
                 "coverage": validated_session_coverage,
                 "ruleVersion": HistoricalAshareRuleBook.version,
                 "board": spec.board.value,
                 "listingDate": spec.listing_date.isoformat(),
                 "statusCrossCheck": source.status_cross_check,
                 "previousCloseCrossCheck": source.previous_close_cross_check,
-                "priceLimitSource": "derived from ruleVersion using BaoStock isST/preclose",
+                "priceLimitSource": (
+                    "stock ETF rule derived from ruleVersion using Tencent prior raw close"
+                    if spec.board is Board.STOCK_ETF
+                    else "derived from ruleVersion using BaoStock isST/preclose"
+                ),
             },
             "adjustmentPrefixStability": dict(prefix_stability),
             "corporateActionCoverage": validated_action_coverage,
@@ -564,6 +583,12 @@ def _validate_session_reference_coverage(
     provider_rows: Sequence[Mapping[str, str]],
     spec: ChoiceSnapshotSpec,
 ) -> dict[str, object]:
+    if coverage.get("schemaVersion") == ETF_SESSION_REFERENCE_SCHEMA_VERSION:
+        return _validate_etf_session_reference_coverage(
+            coverage,
+            provider_rows=provider_rows,
+            spec=spec,
+        )
     if coverage.get("status") != "complete" or coverage.get("querySucceeded") is not True:
         raise ChoiceSnapshotError("BaoStock session-reference query must complete successfully")
     if coverage.get("instrumentId") != spec.symbol:
@@ -732,6 +757,143 @@ def _validate_session_reference_coverage(
     }
 
 
+def _validate_etf_session_reference_coverage(
+    coverage: Mapping[str, object],
+    *,
+    provider_rows: Sequence[Mapping[str, str]],
+    spec: ChoiceSnapshotSpec,
+) -> dict[str, object]:
+    if spec.board is not Board.STOCK_ETF or not _is_mainland_etf_symbol(spec.symbol):
+        raise ChoiceSnapshotError("stock-ETF session evidence does not match the snapshot identity")
+    if coverage.get("status") != "complete" or coverage.get("querySucceeded") is not True:
+        raise ChoiceSnapshotError("stock-ETF session acquisition must complete successfully")
+    if coverage.get("instrumentId") != spec.symbol:
+        raise ChoiceSnapshotError("stock-ETF session evidence belongs to another instrument")
+    provider = _coverage_text(coverage.get("provider"), "stock-ETF session provider")
+    if (
+        coverage.get("start") != spec.start.isoformat()
+        or coverage.get("end") != spec.end.isoformat()
+    ):
+        raise ChoiceSnapshotError("stock-ETF session range must exactly match the snapshot")
+    if coverage.get("fields") != list(SESSION_REFERENCE_FIELDS):
+        raise ChoiceSnapshotError("stock-ETF session fields are not the strict field set")
+    if (
+        coverage.get("frequency") != "d"
+        or coverage.get("adjustFlag") != "0"
+        or coverage.get("priceBasis") != "unadjusted"
+    ):
+        raise ChoiceSnapshotError("stock-ETF session evidence must use unadjusted daily data")
+    if coverage.get("rowCount") != len(provider_rows) or coverage.get("zeroResult") is not (
+        not provider_rows
+    ):
+        raise ChoiceSnapshotError("stock-ETF session row metadata is inconsistent")
+    returned_start = provider_rows[0]["date"] if provider_rows else None
+    returned_end = provider_rows[-1]["date"] if provider_rows else None
+    if (
+        coverage.get("returnedStart") != returned_start
+        or coverage.get("returnedEnd") != returned_end
+    ):
+        raise ChoiceSnapshotError("stock-ETF session returned range is inconsistent")
+    date_axis_digest = _canonical_sha256([row["date"] for row in provider_rows])
+    if coverage.get("dateAxisSha256") != date_axis_digest:
+        raise ChoiceSnapshotError("stock-ETF session date-axis hash is invalid")
+    if coverage.get("calendarPolicy") != (
+        "exact Tencent/Sohu trading-row intersection; BaoStock overlap independently "
+        "checks provider identity and values"
+    ):
+        raise ChoiceSnapshotError("stock-ETF calendar policy is missing")
+
+    raw_audits = coverage.get("sourceAudits")
+    if not isinstance(raw_audits, Sequence) or isinstance(
+        raw_audits,
+        str | bytes | bytearray,
+    ):
+        raise ChoiceSnapshotError("stock-ETF source audits must be a list")
+    audits = list(cast(Sequence[object], raw_audits))
+    required_purposes = {
+        "tencent_unadjusted",
+        "tencent_hfq_signal",
+        "tencent_qfq_action_reconciliation",
+        "tencent_hfq_prefix",
+        "sohu_unadjusted_cross_check",
+        "baostock_overlap_cross_check",
+    }
+    observed_purposes: set[str] = set()
+    for index, raw_audit in enumerate(audits):
+        if not isinstance(raw_audit, Mapping):
+            raise ChoiceSnapshotError(f"stock-ETF source audit {index} must be an object")
+        audit = cast(Mapping[str, object], raw_audit)
+        purpose = _coverage_text(audit.get("purpose"), f"stock-ETF source audit {index} purpose")
+        observed_purposes.add(purpose)
+        _coverage_text(audit.get("provider"), f"stock-ETF source audit {index} provider")
+        _coverage_text(audit.get("url"), f"stock-ETF source audit {index} URL")
+        params = audit.get("params")
+        if not isinstance(params, Mapping) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in cast(Mapping[object, object], params).items()
+        ):
+            raise ChoiceSnapshotError(f"stock-ETF source audit {index} params are invalid")
+        for timestamp_field in ("requestedAt", "receivedAt"):
+            raw_timestamp = audit.get(timestamp_field)
+            if not isinstance(raw_timestamp, str):
+                raise ChoiceSnapshotError(
+                    f"stock-ETF source audit {index} {timestamp_field} is invalid"
+                )
+            try:
+                parsed_timestamp = datetime.fromisoformat(raw_timestamp)
+            except ValueError as exc:
+                raise ChoiceSnapshotError(
+                    f"stock-ETF source audit {index} {timestamp_field} is invalid"
+                ) from exc
+            if parsed_timestamp.tzinfo is None or parsed_timestamp.utcoffset() is None:
+                raise ChoiceSnapshotError(
+                    f"stock-ETF source audit {index} {timestamp_field} lacks timezone"
+                )
+        canonical_digest = audit.get("canonicalSha256")
+        if not isinstance(canonical_digest, str) or not _is_sha256(canonical_digest):
+            raise ChoiceSnapshotError(f"stock-ETF source audit {index} canonical hash is invalid")
+        if purpose != "baostock_overlap_cross_check":
+            wire_digest = audit.get("rawWireSha256")
+            if not isinstance(wire_digest, str) or not _is_sha256(wire_digest):
+                raise ChoiceSnapshotError(
+                    f"stock-ETF source audit {index} raw wire hash is invalid"
+                )
+        elif audit.get("wireBytesCaptured") is not False or not isinstance(
+            audit.get("wireCaptureReason"), str
+        ):
+            raise ChoiceSnapshotError("BaoStock SDK audit must disclose its wire-byte boundary")
+        row_count = audit.get("rowCount")
+        if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count <= 0:
+            raise ChoiceSnapshotError(f"stock-ETF source audit {index} has no evidence rows")
+    if observed_purposes != required_purposes:
+        raise ChoiceSnapshotError("stock-ETF source audit coverage is incomplete")
+
+    overlap = _coverage_mapping(coverage.get("baostockOverlap"), "baostockOverlap")
+    overlap_count = overlap.get("rowCount")
+    if isinstance(overlap_count, bool) or not isinstance(overlap_count, int) or overlap_count < 1:
+        raise ChoiceSnapshotError("BaoStock overlap must contain real rows")
+    if not _is_sha256(overlap.get("canonicalSha256")):
+        raise ChoiceSnapshotError("BaoStock overlap canonical hash is invalid")
+    return {
+        "schemaVersion": ETF_SESSION_REFERENCE_SCHEMA_VERSION,
+        "status": "complete",
+        "querySucceeded": True,
+        "provider": provider,
+        "instrumentId": spec.symbol,
+        "start": spec.start.isoformat(),
+        "end": spec.end.isoformat(),
+        "rowCount": len(provider_rows),
+        "returnedStart": returned_start,
+        "returnedEnd": returned_end,
+        "dateAxisSha256": date_axis_digest,
+        "queryMethod": "Tencent/Sohu HTTPS plus BaoStock SDK overlap",
+        "adjustFlag": "0",
+        "calendarPolicy": coverage["calendarPolicy"],
+        "sourceAudits": [dict(cast(Mapping[str, object], item)) for item in audits],
+        "baostockOverlap": dict(overlap),
+    }
+
+
 def _normalized_baostock_audit_sha256(
     *,
     method: str,
@@ -776,6 +938,14 @@ def _canonical_sha256(value: object) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value.removeprefix("sha256:")) == 64
+        and all(character in "0123456789abcdef" for character in value.removeprefix("sha256:"))
+    )
 
 
 def _signal_rows_with_raw_liquidity(
@@ -953,6 +1123,7 @@ def _validate_corporate_action_coverage(
         start=spec.start,
         end=spec.end,
         action_type_counts=action_type_counts,
+        instrument_id=spec.symbol,
     )
 
 
@@ -962,6 +1133,7 @@ def validate_corporate_action_coverage_evidence(
     start: date,
     end: date,
     action_type_counts: Mapping[str, int],
+    instrument_id: str | None = None,
 ) -> dict[str, object]:
     """Validate the exact corporate-action proof used by producer and loaders.
 
@@ -990,6 +1162,14 @@ def validate_corporate_action_coverage_evidence(
     if coverage.get("querySucceeded") is not True:
         raise ChoiceSnapshotError("corporate-action source query must complete successfully")
     scope = coverage.get("coverageScope")
+    if scope == ETF_CORPORATE_ACTION_COVERAGE_SCOPE:
+        return _validate_etf_corporate_action_coverage(
+            coverage,
+            start=start,
+            end=end,
+            action_type_counts=normalized_counts,
+            instrument_id=instrument_id,
+        )
     if scope == MIXED_CORPORATE_ACTION_COVERAGE_SCOPE:
         return _validate_mixed_corporate_action_coverage(
             coverage,
@@ -1045,6 +1225,148 @@ def validate_corporate_action_coverage_evidence(
         "supportedCategories": list(STRICT_CORPORATE_ACTION_CATEGORIES),
         "unsupportedCategories": [],
     }
+
+
+def _validate_etf_corporate_action_coverage(
+    coverage: Mapping[str, object],
+    *,
+    start: date,
+    end: date,
+    action_type_counts: Mapping[str, int],
+    instrument_id: str | None,
+) -> dict[str, object]:
+    coverage_instrument = coverage.get("instrumentId")
+    if (
+        not isinstance(coverage_instrument, str)
+        or not _is_mainland_etf_symbol(coverage_instrument)
+        or (instrument_id is not None and coverage_instrument != instrument_id)
+    ):
+        raise ChoiceSnapshotError("stock-ETF action evidence belongs to another instrument")
+    if coverage.get("status") != "complete" or coverage.get("instrumentType") != "stock_etf":
+        raise ChoiceSnapshotError("stock-ETF corporate-action coverage is incomplete")
+    provider, coverage_start, coverage_end, digest = _corporate_action_coverage_identity(
+        coverage,
+        start=start,
+        end=end,
+    )
+    cash_category = CorporateActionKind.CASH_DIVIDEND.value
+    raw_counts = coverage.get("categoryActionCounts")
+    if not isinstance(raw_counts, Mapping):
+        raise ChoiceSnapshotError("stock-ETF action category counts must be an object")
+    expected_counts = cast(Mapping[object, object], raw_counts)
+    for category in STRICT_CORPORATE_ACTION_CATEGORIES:
+        if expected_counts.get(category) != action_type_counts[category]:
+            raise ChoiceSnapshotError("stock-ETF action category count does not match actions")
+        if category != cash_category and action_type_counts[category] != 0:
+            raise ChoiceSnapshotError("stock-ETF proof only permits official cash distributions")
+    row_count = action_type_counts[cash_category]
+    if coverage.get("rowCount") != row_count or coverage.get("zeroResult") is not (row_count == 0):
+        raise ChoiceSnapshotError("stock-ETF action row metadata is inconsistent")
+    if coverage.get("officialNoticeCount") != row_count:
+        raise ChoiceSnapshotError("stock-ETF official distribution coverage is incomplete")
+
+    raw_notices = coverage.get("officialNotices")
+    if not isinstance(raw_notices, Sequence) or isinstance(
+        raw_notices,
+        str | bytes | bytearray,
+    ):
+        raise ChoiceSnapshotError("stock-ETF official notices must be a list")
+    notices: list[dict[str, object]] = []
+    ex_dates: list[str] = []
+    for index, raw_notice in enumerate(cast(Sequence[object], raw_notices)):
+        if not isinstance(raw_notice, Mapping):
+            raise ChoiceSnapshotError(f"stock-ETF official notice {index} must be an object")
+        notice = dict(cast(Mapping[str, object], raw_notice))
+        url = notice.get("url")
+        if not isinstance(url, str):
+            raise ChoiceSnapshotError(f"stock-ETF official notice {index} URL is invalid")
+        parsed = urlparse(url)
+        parsed_url = PurePosixPath(parsed.path)
+        expected_code = coverage_instrument.split(".", maxsplit=1)[0]
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "www.sse.com.cn"
+            or not coverage_instrument.endswith(".SH")
+            or f"{expected_code}_" not in parsed_url.name
+            or parsed_url.suffix != ".pdf"
+        ):
+            raise ChoiceSnapshotError(f"stock-ETF official notice {index} is not an SSE PDF")
+        for digest_field in ("rawPdfSha256", "extractedTextSha256"):
+            if not _is_sha256(notice.get(digest_field)):
+                raise ChoiceSnapshotError(
+                    f"stock-ETF official notice {index} {digest_field} is invalid"
+                )
+        announced = _as_date(notice.get("announcedDate"), "ETF notice announcement date")
+        record = _as_date(notice.get("recordDate"), "ETF notice record date")
+        ex_date = _as_date(notice.get("exDate"), "ETF notice ex-date")
+        pay = _as_date(notice.get("payDate"), "ETF notice pay date")
+        if not announced < record < ex_date <= pay or not start <= ex_date <= end:
+            raise ChoiceSnapshotError("stock-ETF official notice dates are inconsistent")
+        amount = _positive_decimal(
+            notice.get("grossCashPerUnit"),
+            "ETF notice gross cash per unit",
+        )
+        notice["grossCashPerUnit"] = str(amount)
+        ex_dates.append(ex_date.isoformat())
+        notices.append(notice)
+    if len(ex_dates) != len(set(ex_dates)) or len(notices) != row_count:
+        raise ChoiceSnapshotError("stock-ETF official notice coverage has duplicate ex-dates")
+
+    reconciliation = _coverage_mapping(
+        coverage.get("adjustmentReconciliation"),
+        "adjustmentReconciliation",
+    )
+    reconciliation_rows = reconciliation.get("rowCount")
+    if (
+        reconciliation.get("status") != "passed"
+        or isinstance(reconciliation_rows, bool)
+        or not isinstance(reconciliation_rows, int)
+        or reconciliation_rows < row_count
+        or reconciliation.get("officialExDates") != ex_dates
+        or reconciliation.get("unmatchedAdjustmentTransitions") != 0
+        or reconciliation.get("unitSplitCandidates") != 0
+        or reconciliation.get("unitConsolidationCandidates") != 0
+        or not _is_sha256(reconciliation.get("offsetRowsSha256"))
+    ):
+        raise ChoiceSnapshotError("stock-ETF adjustment reconciliation is incomplete")
+    identity = {
+        "notices": notices,
+        "adjustmentReconciliation": dict(reconciliation),
+    }
+    if digest != _canonical_sha256(identity):
+        raise ChoiceSnapshotError("stock-ETF corporate-action aggregate hash is invalid")
+    if coverage.get("notApplicableCategories") != [
+        CorporateActionKind.RIGHTS_ISSUE.value,
+        CorporateActionKind.SHARE_DISTRIBUTION.value,
+    ]:
+        raise ChoiceSnapshotError("stock-ETF inapplicable action categories are not explicit")
+    return {
+        "status": "complete",
+        "querySucceeded": True,
+        "provider": provider,
+        "instrumentId": coverage_instrument,
+        "instrumentType": "stock_etf",
+        "start": coverage_start.isoformat(),
+        "end": coverage_end.isoformat(),
+        "rowCount": row_count,
+        "zeroResult": row_count == 0,
+        "rawResponseSha256": digest,
+        "coverageScope": ETF_CORPORATE_ACTION_COVERAGE_SCOPE,
+        "categoryActionCounts": dict(action_type_counts),
+        "officialNoticeCount": row_count,
+        "officialNotices": notices,
+        "adjustmentReconciliation": dict(reconciliation),
+        "notApplicableCategories": list(cast(Sequence[str], coverage["notApplicableCategories"])),
+        "timeQuality": coverage.get("timeQuality"),
+        "dateAvailabilityPolicy": coverage.get("dateAvailabilityPolicy"),
+        "hashSemantics": coverage.get("hashSemantics"),
+    }
+
+
+def _is_mainland_etf_symbol(symbol: str) -> bool:
+    """Recognize an explicit ETF code space without conferring executability."""
+
+    return re.fullmatch(r"(?:5\d{5}\.SH|1\d{5}\.SZ)", symbol) is not None
 
 
 def _validate_mixed_corporate_action_coverage(

@@ -48,11 +48,11 @@ class HistoricalAshareRuleBook:
 
     def build_session(self, item: PriceLimitRuleInput) -> InstrumentSession:
         upper_ratio, lower_ratio = self._ratios(item)
+        tick = Decimal("0.001") if item.board is Board.STOCK_ETF else Decimal("0.01")
         if upper_ratio is None or lower_ratio is None:
             upper_limit = None
             lower_limit = None
         else:
-            tick = Decimal("0.01")
             upper_limit = Price(
                 (item.previous_close.amount * (Decimal("1") + upper_ratio)).quantize(
                     tick, rounding=ROUND_HALF_UP
@@ -77,10 +77,16 @@ class HistoricalAshareRuleBook:
             lower_limit=lower_limit,
             minimum_buy_quantity=minimum_buy_quantity,
             buy_quantity_increment=buy_quantity_increment,
+            price_tick=tick,
             is_st=item.is_st,
         )
 
     def _ratios(self, item: PriceLimitRuleInput) -> tuple[Decimal | None, Decimal | None]:
+        if item.board is Board.STOCK_ETF:
+            if item.is_st:
+                raise DomainValidationError("stock_etf cannot use stock ST rules")
+            return Decimal("0.10"), Decimal("0.10")
+
         if item.board is Board.STAR:
             if item.listing_session_number <= 5:
                 return None, None

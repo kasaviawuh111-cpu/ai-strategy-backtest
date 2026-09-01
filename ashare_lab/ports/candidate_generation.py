@@ -120,3 +120,15 @@ class CandidateAst:
 
 class CandidateGenerator(Protocol):
     async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]: ...
+
+
+type BoundedCandidateBoundary = Literal["schema_bounded_candidate.v1"]
+
+
+class BoundedCandidateGenerator(Protocol):
+    """Server-owned candidate port that preserves the bounded schema boundary."""
+
+    @property
+    def boundary(self) -> BoundedCandidateBoundary: ...
+
+    async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]: ...

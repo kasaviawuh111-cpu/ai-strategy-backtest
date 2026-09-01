@@ -16,7 +16,7 @@ from ashare_lab.domain.runs.models_v2 import (
     StoredValidationReceiptV2,
     ValidationReceiptClaimsV2,
 )
-from ashare_lab.domain.strategy.canonical import canonical_json
+from ashare_lab.domain.strategy.canonical import canonical_hash, canonical_json
 from ashare_lab.domain.strategy.validation_v2 import (
     ExecutableStrategyPlan,
     StrategyCandidateV2,
@@ -78,11 +78,19 @@ class ValidationReceiptServiceV2:
             raise PersistentPlanRecoveryError("server draft revision is missing")
         if draft.original_input != plan.original_input or draft.provider != plan.provider:
             raise PersistentPlanRecoveryError("plan differs from the server draft revision")
-        security, calendar, market = _snapshot_bindings_by_kind(snapshot_bindings)
+        security, calendar, market, composite, producer_children = _snapshot_bindings_by_kind(
+            snapshot_bindings
+        )
         if security.snapshot_id != plan.security_master_snapshot_id:
             raise PersistentPlanRecoveryError("security-master snapshot binding differs from plan")
         if market.snapshot_id not in plan.data_snapshot_ids:
             raise PersistentPlanRecoveryError("market-data snapshot binding differs from plan")
+        if calendar.snapshot_id != plan.trading_calendar_snapshot_id:
+            raise PersistentPlanRecoveryError("trading-calendar snapshot binding differs from plan")
+        if composite.snapshot_id != plan.composite_snapshot_id:
+            raise PersistentPlanRecoveryError("composite snapshot binding differs from plan")
+        if snapshot_bindings_hash(snapshot_bindings) != plan.snapshot_bindings_hash:
+            raise PersistentPlanRecoveryError("trusted snapshot binding digest differs from plan")
         if (
             market.coverage_start > plan.strategy.backtest.start
             or market.coverage_end < plan.strategy.backtest.end
@@ -104,6 +112,8 @@ class ValidationReceiptServiceV2:
             security_master=security,
             trading_calendar=calendar,
             market_data=market,
+            composite_snapshot=composite,
+            producer_children=producer_children,
             provider=plan.provider,
             validator_version=_VALIDATOR_VERSION,
             code_revision=plan.code_revision,
@@ -171,7 +181,7 @@ class ValidationReceiptServiceV2:
         if now < authenticated_claims.issued_at:
             raise PersistentPlanRecoveryError("validation receipt is not valid yet")
 
-        current_bindings = _snapshot_bindings_by_kind(current_snapshot_bindings)
+        current_bindings = _ordered_snapshot_bindings(current_snapshot_bindings)
         if current_bindings != authenticated_claims.snapshot_bindings:
             raise PersistentPlanRecoveryError("trusted snapshot binding changed after validation")
         if (
@@ -238,25 +248,57 @@ def plan_snapshot_ids(record: ExecutableStrategyPlanRecordV2) -> tuple[str, ...]
     return (record.market_data.snapshot_id,)
 
 
+def snapshot_bindings_hash(values: tuple[SnapshotBindingV2, ...]) -> str:
+    """Canonical digest of outer, derived and producer-child authority."""
+
+    ordered = _ordered_snapshot_bindings(values)
+    return canonical_hash([item.model_dump(mode="json") for item in ordered])
+
+
 def _snapshot_bindings_by_kind(
     values: tuple[SnapshotBindingV2, ...],
-) -> tuple[SnapshotBindingV2, SnapshotBindingV2, SnapshotBindingV2]:
+) -> tuple[
+    SnapshotBindingV2,
+    SnapshotBindingV2,
+    SnapshotBindingV2,
+    SnapshotBindingV2,
+    tuple[SnapshotBindingV2, ...],
+]:
     if type(values) is not tuple or any(type(item) is not SnapshotBindingV2 for item in values):
         raise PersistentPlanRecoveryError("snapshot bindings must be trusted typed values")
-    by_kind = {item.kind: item for item in values}
-    if len(values) != 3 or set(by_kind) != {
+    core_values = tuple(item for item in values if item.kind != "producer_child")
+    by_kind = {item.kind: item for item in core_values}
+    producer_children = tuple(
+        sorted(
+            (item for item in values if item.kind == "producer_child"),
+            key=lambda item: item.snapshot_id,
+        )
+    )
+    if len(core_values) != 4 or set(by_kind) != {
         "security_master",
         "trading_calendar",
         "market_data",
+        "composite_snapshot",
     }:
         raise PersistentPlanRecoveryError(
-            "exactly one security-master, calendar and market-data snapshot is required"
+            "exactly one composite, security-master, calendar and market-data snapshot is required"
         )
+    if len({item.snapshot_id for item in producer_children}) != len(producer_children):
+        raise PersistentPlanRecoveryError("producer child snapshot identities must be unique")
     return (
         by_kind["security_master"],
         by_kind["trading_calendar"],
         by_kind["market_data"],
+        by_kind["composite_snapshot"],
+        producer_children,
     )
+
+
+def _ordered_snapshot_bindings(
+    values: tuple[SnapshotBindingV2, ...],
+) -> tuple[SnapshotBindingV2, ...]:
+    security, calendar, market, composite, producer_children = _snapshot_bindings_by_kind(values)
+    return security, calendar, market, *producer_children, composite
 
 
 def _urlsafe_encode(value: bytes) -> str:
@@ -273,4 +315,5 @@ def _urlsafe_decode(value: str) -> bytes:
 __all__ = [
     "PersistentPlanRecoveryError",
     "ValidationReceiptServiceV2",
+    "snapshot_bindings_hash",
 ]

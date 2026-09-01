@@ -44,6 +44,8 @@
 | 交互 | React H5/WebView，支持编辑参数、区间、资金和成本 |
 | 运行 | 本地 SQLite/thread；部署材料为 PostgreSQL/Redis/RQ/Docker |
 
+云端持久 PostgreSQL/CFS、数据库不可变权限和跨容器重启恢复已登记为后续生产化 TODO；当前版本不得据本地 SQLite 或容器内文件声称生产级持久化。
+
 覆盖目录还登记了 181 个 A 股单股指标/数据项和 160 个 A 股相关事件，但登记不等于可执行。其中技术、价格、量能 131 项中只有 35 个 `stable`；最终以
 `GET /api/v1/capabilities` 的 `backtest_execution_available`、逐事件码
 `backtest_available` 与 `preparation_available` 为准。固定 composite 只有在当前

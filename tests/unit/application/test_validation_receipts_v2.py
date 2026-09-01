@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DatabaseError
 
 from ashare_lab.adapters.persistence import create_backtest_run_engine
 from ashare_lab.adapters.persistence.strategy_v2_artifacts import (
@@ -21,6 +22,7 @@ from ashare_lab.application.submission_gate_v2 import (
 from ashare_lab.application.validation_receipts_v2 import (
     PersistentPlanRecoveryError,
     ValidationReceiptServiceV2,
+    snapshot_bindings_hash,
 )
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.instruments import (
@@ -131,8 +133,13 @@ def _source() -> SourceRef:
     )
 
 
-def _context(strategy: StrategySpecV2 | None = None) -> StrategyV2ValidationContext:
+def _context(
+    strategy: StrategySpecV2 | None = None,
+    *,
+    bindings: tuple[SnapshotBindingV2, ...] | None = None,
+) -> StrategyV2ValidationContext:
     active = strategy or _strategy()
+    selected_bindings = bindings or _bindings()
     return StrategyV2ValidationContext(
         security_master=_master(),
         original_input="MACD金叉买入，死叉卖出",
@@ -172,17 +179,28 @@ def _context(strategy: StrategySpecV2 | None = None) -> StrategyV2ValidationCont
             ),
         ),
         code_revision=GIT_SHA,
+        trading_calendar_snapshot_id=selected_bindings[1].snapshot_id,
+        composite_snapshot_id=selected_bindings[3].snapshot_id,
+        snapshot_bindings_hash=snapshot_bindings_hash(selected_bindings),
     )
 
 
-def _bindings() -> tuple[SnapshotBindingV2, SnapshotBindingV2, SnapshotBindingV2]:
+def _bindings() -> tuple[SnapshotBindingV2, ...]:
     def binding(kind: str, suffix: str, provider: str = "choice") -> SnapshotBindingV2:
         return SnapshotBindingV2(
             kind=kind,
             snapshot_id=(
                 _master().snapshot_id
                 if kind == "security_master"
-                else (SNAPSHOT_ID if kind == "market_data" else f"{kind}:{suffix * 64}")
+                else (
+                    SNAPSHOT_ID
+                    if kind == "market_data"
+                    else (
+                        f"composite:{suffix * 64}"
+                        if kind == "composite_snapshot"
+                        else f"{kind}:{suffix * 64}"
+                    )
+                )
             ),
             provider=provider,
             schema_version=f"{kind}.v2",
@@ -196,6 +214,7 @@ def _bindings() -> tuple[SnapshotBindingV2, SnapshotBindingV2, SnapshotBindingV2
         binding("security_master", "c"),
         binding("trading_calendar", "d", "sse_szse"),
         binding("market_data", "e"),
+        binding("composite_snapshot", "f", "ashare-lab composite snapshot"),
     )
 
 
@@ -268,7 +287,7 @@ def test_raw_persisted_payload_cannot_bypass_the_submission_gate(tmp_path: Path)
 
 def test_tampered_expired_or_wrong_key_receipts_fail_closed(tmp_path: Path) -> None:
     database = tmp_path / "tamper.db"
-    service, receipt_id, context = _issue(database)
+    service, receipt_id, _ = _issue(database)
     receipt = service.store.get_validation_receipt(receipt_id)
     assert receipt is not None
 
@@ -283,19 +302,16 @@ def test_tampered_expired_or_wrong_key_receipts_fail_closed(tmp_path: Path) -> N
         .decode()
     )
     forged = receipt.model_copy(update={"signed_token": f"{parts[0]}.{forged_payload}.{parts[2]}"})
-    with service.store.engine.begin() as connection:
+    with (
+        service.store.engine.begin() as connection,
+        pytest.raises(DatabaseError, match="append-only"),
+    ):
         connection.execute(
             text(
                 "UPDATE strategy_validation_receipts_v2 "
                 "SET artifact_json = :payload WHERE receipt_id = :receipt_id"
             ),
             {"payload": canonical_json(forged), "receipt_id": receipt_id},
-        )
-    with pytest.raises(PersistentPlanRecoveryError, match=r"token hash|signature"):
-        service.restore_executable_plan(
-            receipt_id,
-            current_context=context,
-            current_snapshot_bindings=_bindings(),
         )
 
     # Re-issue into a clean database to isolate expiry and key rotation.
@@ -328,16 +344,110 @@ def test_tampered_expired_or_wrong_key_receipts_fail_closed(tmp_path: Path) -> N
         )
 
 
+def test_expired_plan_is_fully_revalidated_and_receives_a_new_append_only_receipt(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "resign.db"
+    first, first_receipt_id, context = _issue(database)
+    revalidation_clock = NOW + timedelta(hours=2)
+    revalidator = ValidationReceiptServiceV2(
+        store=_store(database),
+        signing_key=KEY,
+        clock=lambda: revalidation_clock,
+        receipt_ttl=timedelta(hours=1),
+    )
+    with pytest.raises(PersistentPlanRecoveryError, match="expired"):
+        revalidator.restore_executable_plan(
+            first_receipt_id,
+            current_context=context,
+            current_snapshot_bindings=_bindings(),
+        )
+
+    candidate = StrategyCandidateV2(
+        original_input=context.original_input,
+        draft_id=context.draft_id,
+        revision=context.revision,
+        provider=context.provider,
+        strategy=_strategy(),
+    )
+    revalidated_plan = validate_strategy_candidate_v2(candidate, context)
+    replacement = revalidator.persist_validated_plan(
+        revalidated_plan,
+        snapshot_bindings=_bindings(),
+    )
+
+    first_receipt = first.store.get_validation_receipt(first_receipt_id)
+    assert first_receipt is not None
+    assert replacement.receipt_id != first_receipt_id
+    assert replacement.plan_id == first_receipt.plan_id
+    assert replacement.issued_at == revalidation_clock
+    assert (
+        revalidator.store.get_validation_receipt_for_draft_revision(
+            context.draft_id,
+            context.revision,
+        )
+        == replacement
+    )
+    assert (
+        revalidator.restore_executable_plan(
+            replacement.receipt_id,
+            current_context=context,
+            current_snapshot_bindings=_bindings(),
+        ).plan_id
+        == revalidated_plan.plan_id
+    )
+    assert first.store.get_validation_receipt(first_receipt_id) == first_receipt
+
+
 def test_snapshot_drift_rejects_recovery(tmp_path: Path) -> None:
     service, receipt_id, context = _issue(tmp_path / "drift.db")
-    security, calendar, market = _bindings()
+    security, calendar, market, composite = _bindings()
     changed_market = market.model_copy(update={"content_hash": "sha256:" + "9" * 64})
     with pytest.raises(PersistentPlanRecoveryError, match="snapshot binding"):
         service.restore_executable_plan(
             receipt_id,
             current_context=context,
-            current_snapshot_bindings=(security, calendar, changed_market),
+            current_snapshot_bindings=(security, calendar, changed_market, composite),
         )
+
+    changed_composite = composite.model_copy(
+        update={
+            "snapshot_id": "composite:" + "0" * 64,
+            "content_hash": "sha256:" + "0" * 64,
+        }
+    )
+    with pytest.raises(PersistentPlanRecoveryError, match="snapshot binding changed"):
+        service.restore_executable_plan(
+            receipt_id,
+            current_context=context,
+            current_snapshot_bindings=(security, calendar, market, changed_composite),
+        )
+
+
+def test_outer_composite_identity_changes_the_deterministic_plan_id() -> None:
+    bindings = _bindings()
+    original_context = _context(bindings=bindings)
+    candidate = StrategyCandidateV2(
+        original_input=original_context.original_input,
+        draft_id=original_context.draft_id,
+        revision=original_context.revision,
+        provider=original_context.provider,
+        strategy=_strategy(),
+    )
+    original = validate_strategy_candidate_v2(candidate, original_context)
+    changed_composite = bindings[3].model_copy(
+        update={
+            "snapshot_id": "composite:" + "0" * 64,
+            "content_hash": "sha256:" + "0" * 64,
+        }
+    )
+    changed_bindings = (*bindings[:3], changed_composite)
+    changed = validate_strategy_candidate_v2(
+        candidate,
+        _context(bindings=changed_bindings),
+    )
+
+    assert changed.plan_id != original.plan_id
 
 
 def test_original_input_is_reloaded_from_the_server_draft(tmp_path: Path) -> None:

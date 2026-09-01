@@ -62,6 +62,8 @@ from .models_v2 import (
 
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SYMBOL = re.compile(r"[0-9]{6}\.(SH|SZ|BJ)")
+_CONTENT_ID = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}:[0-9a-f]{64}")
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 _PLAN_AUTHORITY = object()
 _PLAN_SIGNING_KEY = secrets.token_bytes(32)
 
@@ -203,6 +205,9 @@ class StrategyV2ValidationContext:
     dataset_coverage: tuple[DatasetCoverageV2, ...]
     grounding_expectations: tuple[ConditionGroundingExpectation, ...]
     code_revision: str
+    trading_calendar_snapshot_id: str
+    composite_snapshot_id: str
+    snapshot_bindings_hash: str
 
     def __post_init__(self) -> None:
         if type(self.original_input) is not str or not self.original_input.strip():
@@ -225,6 +230,21 @@ class StrategyV2ValidationContext:
             raise ValueError("expected_backtest must come from the trusted request envelope")
         if type(self.code_revision) is not str or _GIT_SHA.fullmatch(self.code_revision) is None:
             raise ValueError("code_revision must be a 40-character Git SHA")
+        if (
+            type(self.trading_calendar_snapshot_id) is not str
+            or _CONTENT_ID.fullmatch(self.trading_calendar_snapshot_id) is None
+        ):
+            raise ValueError("trading_calendar_snapshot_id must be content-addressed")
+        if (
+            type(self.composite_snapshot_id) is not str
+            or re.fullmatch(r"composite:[0-9a-f]{64}", self.composite_snapshot_id) is None
+        ):
+            raise ValueError("composite_snapshot_id must be a Composite content id")
+        if (
+            type(self.snapshot_bindings_hash) is not str
+            or _SHA256.fullmatch(self.snapshot_bindings_hash) is None
+        ):
+            raise ValueError("snapshot_bindings_hash must be sha256:<64 lowercase hex digits>")
         if type(self.dataset_coverage) is not tuple:
             raise ValueError("dataset_coverage must be a tuple")
         if any(type(item) is not DatasetCoverageV2 for item in self.dataset_coverage):
@@ -256,6 +276,9 @@ class ExecutableStrategyPlan:
     provider: str
     catalog_hash: str
     security_master_snapshot_id: str
+    trading_calendar_snapshot_id: str
+    composite_snapshot_id: str
+    snapshot_bindings_hash: str
     dataset_coverage: tuple[DatasetCoverageV2, ...]
     data_snapshot_ids: tuple[str, ...]
     code_revision: str
@@ -546,6 +569,9 @@ def _issue_plan(
         "provider": context.provider,
         "revision": context.revision,
         "security_master_snapshot_id": context.security_master.snapshot_id,
+        "trading_calendar_snapshot_id": context.trading_calendar_snapshot_id,
+        "composite_snapshot_id": context.composite_snapshot_id,
+        "snapshot_bindings_hash": context.snapshot_bindings_hash,
         "strategy_hash": strategy_hash,
         "validator_version": "strategy-v2-gate.1",
     }
@@ -561,6 +587,9 @@ def _issue_plan(
         "provider": context.provider,
         "revision": context.revision,
         "security_master_snapshot_id": context.security_master.snapshot_id,
+        "trading_calendar_snapshot_id": context.trading_calendar_snapshot_id,
+        "composite_snapshot_id": context.composite_snapshot_id,
+        "snapshot_bindings_hash": context.snapshot_bindings_hash,
         "strategy": candidate.strategy.model_dump(mode="json"),
         "strategy_hash": strategy_hash,
         "validation_stages": [stage.value for stage in validation_stages],
@@ -575,6 +604,9 @@ def _issue_plan(
         provider=context.provider,
         catalog_hash=context.catalog.content_hash,
         security_master_snapshot_id=context.security_master.snapshot_id,
+        trading_calendar_snapshot_id=context.trading_calendar_snapshot_id,
+        composite_snapshot_id=context.composite_snapshot_id,
+        snapshot_bindings_hash=context.snapshot_bindings_hash,
         dataset_coverage=context.dataset_coverage,
         data_snapshot_ids=snapshot_ids,
         code_revision=context.code_revision,
@@ -596,6 +628,9 @@ def _plan_receipt_payload(plan: ExecutableStrategyPlan) -> dict[str, object]:
         "provider": plan.provider,
         "revision": plan.revision,
         "security_master_snapshot_id": plan.security_master_snapshot_id,
+        "trading_calendar_snapshot_id": plan.trading_calendar_snapshot_id,
+        "composite_snapshot_id": plan.composite_snapshot_id,
+        "snapshot_bindings_hash": plan.snapshot_bindings_hash,
         "strategy": plan.strategy.model_dump(mode="json"),
         "strategy_hash": plan.strategy_hash,
         "validation_stages": [stage.value for stage in plan.validation_stages],

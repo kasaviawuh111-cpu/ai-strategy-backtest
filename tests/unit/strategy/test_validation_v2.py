@@ -244,6 +244,9 @@ def _context(
         dataset_coverage=(coverage or _coverage(),),
         grounding_expectations=expectations or _expectations(),
         code_revision=CODE_REVISION,
+        trading_calendar_snapshot_id="trading_calendar:" + "d" * 64,
+        composite_snapshot_id="composite:" + "f" * 64,
+        snapshot_bindings_hash="sha256:" + "9" * 64,
     )
 
 

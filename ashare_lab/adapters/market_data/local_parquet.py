@@ -172,13 +172,20 @@ class _PinnedSnapshot:
 
 
 def normalize_instrument_id(value: InstrumentId | str) -> InstrumentId:
-    """Normalize a six-digit mainland stock code to ``<code>.<exchange>``.
+    """Normalize one supported mainland stock/ETF code to ``<code>.<exchange>``.
 
     The mapping covers the A-share code spaces used by Shanghai, Shenzhen and
     Beijing.  A supplied suffix must agree with the code-space mapping, which
     catches silent cross-exchange data errors early.
     """
 
+    raw = str(value).strip().upper()
+    # The low-level parquet key parser accepts the two mainland ETF code
+    # spaces only when the exchange suffix is explicit.  Executability still
+    # requires an exact record from the pinned security master; this is not an
+    # asset-type inference boundary.
+    if re.fullmatch(r"(?:5\d{5}\.SH|1\d{5}\.SZ)", raw):
+        return InstrumentId(raw)
     try:
         return normalize_a_share_instrument(value)
     except AshareInstrumentCodeError as exc:

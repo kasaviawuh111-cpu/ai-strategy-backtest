@@ -127,6 +127,7 @@ Registry 显式选择语义仍为 `implemented / fixture-tested`：只校验指�
 - 北交所只有领域数量/涨跌停规则；可证明的历史挂牌场所归属和跨源逐日停牌/reference 事实未闭环，因此完整回测继续 fail closed。
 - 送转不足 1 股尾数的最终登记证据、个人现金分红税制未完整闭环；配股默认不认购已实现，认购路径仍未提供。
 - 草稿持久化、结果分页、认证、用户级 run ownership、审计、限流、监控、备份恢复与生产发布演练未完成。
+- `deferred / production-unavailable`：云端持久 PostgreSQL/CFS、数据库不可变 ACL/trigger 和云端跨重启恢复本轮不实施；后续需在专用低权限账号、真实挂载和备份/恢复演练下单独验收，当前不得用本地 SQLite 结果替代。
 - 当前分钟实网探针返回 `10000017 overseas ip is restricted`；没有真实分钟快照，也没有可执行分钟策略链。
 - Tick、L2、股票池、组合和实盘交易不在 v1。
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an allowlisted CloudBase source bundle around one immutable snapshot."""
+"""Build an allowlisted CloudBase source bundle around trusted immutable snapshots."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import json
 import re
 import shutil
 import subprocess
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -19,25 +21,59 @@ from ashare_lab.adapters.market_data import (
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
-_ROOT_FILES = ("pyproject.toml", "uv.lock", "README.md", "LICENSE")
-_SOURCE_DIRECTORIES = ("ashare_lab", "astock_backtest", "catalogs", "contracts")
+_ROOT_FILES = ("pyproject.toml", "uv.lock", "README.md", "LICENSE", "alembic.ini")
+_SOURCE_DIRECTORIES = ("ashare_lab", "astock_backtest", "catalogs", "contracts", "alembic")
+_RUNTIME_SCRIPTS = (
+    "container_healthcheck.py",
+    "prepare_baostock_reference.py",
+    "prepare_choice_snapshot.py",
+    "prepare_eastmoney_corporate_actions.py",
+    "prepare_eastmoney_snapshot.py",
+    "prepare_event_snapshot.py",
+)
+_CLOUDBASE_FILES = (
+    "Dockerfile",
+    "deployment_entrypoint.py",
+    "runtime_entrypoint.py",
+    "production_db.py",
+    "tc3_database_release.py",
+    "README.md",
+    "env.example",
+    "ephemeral.env.example",
+)
 
 
 class BundleError(RuntimeError):
     """Raised before any incomplete deployment bundle is published."""
 
 
+@dataclass(frozen=True, slots=True)
+class _SnapshotEvidence:
+    digest: str
+    producer_snapshot_id: str
+    manifest_sha256: str
+    instrument_id: str
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--snapshot-digest", required=True)
+    parser.add_argument(
+        "--snapshot-digest",
+        action="append",
+        required=True,
+        help=(
+            "validated Composite v2 digest; repeat for every server-trusted snapshot "
+            "and put the legacy/default DATA_ROOT snapshot first"
+        ),
+    )
     parser.add_argument("--code-revision", required=True)
     args = parser.parse_args()
     repository = Path(__file__).resolve().parents[1]
     result = prepare_bundle(
         repository=repository,
         output=args.output,
-        snapshot_digest=args.snapshot_digest,
+        snapshot_digests=args.snapshot_digest,
         code_revision=args.code_revision,
     )
     print(json.dumps(result, ensure_ascii=True, indent=2, sort_keys=True))
@@ -48,14 +84,17 @@ def prepare_bundle(
     *,
     repository: Path,
     output: Path,
-    snapshot_digest: str,
     code_revision: str,
+    snapshot_digest: str | None = None,
+    snapshot_digests: Sequence[str] = (),
     verify_git: bool = True,
-) -> dict[str, str]:
+) -> dict[str, object]:
     repository = repository.expanduser().resolve()
     output = output.expanduser().resolve()
-    if _SHA256.fullmatch(snapshot_digest) is None:
-        raise BundleError("snapshot digest must be 64 lowercase hexadecimal characters")
+    selected_digests = _normalize_snapshot_digests(
+        snapshot_digest=snapshot_digest,
+        snapshot_digests=snapshot_digests,
+    )
     if _GIT_SHA.fullmatch(code_revision) is None:
         raise BundleError("code revision must be a 40-character lowercase Git SHA")
     if output.exists() and any(output.iterdir()):
@@ -65,17 +104,22 @@ def prepare_bundle(
     if verify_git:
         _verify_clean_revision(repository, code_revision)
 
-    snapshot = repository / "var" / "snapshots" / "composite" / snapshot_digest
-    manifest_sha256 = _validate_snapshot(snapshot, snapshot_digest)
-    try:
-        strict_snapshot = LocalParquetMarketDataRepository(
-            snapshot,
-            profile="composite_snapshot",
-        ).pin_strict_composite_snapshot()
-    except MarketDataAdapterError as exc:
-        raise BundleError("selected composite snapshot failed strict runtime validation") from exc
-    if strict_snapshot.producer_snapshot_id != f"composite:{snapshot_digest}":
-        raise BundleError("strict runtime pin returned a different producer snapshot")
+    snapshots: list[tuple[Path, _SnapshotEvidence]] = []
+    for digest in selected_digests:
+        snapshot = repository / "var" / "snapshots" / "composite" / digest
+        evidence = _validate_snapshot(snapshot, digest)
+        try:
+            strict_snapshot = LocalParquetMarketDataRepository(
+                snapshot,
+                profile="composite_snapshot",
+            ).pin_strict_composite_snapshot()
+        except MarketDataAdapterError as exc:
+            raise BundleError(
+                f"selected composite snapshot failed strict runtime validation: {digest}"
+            ) from exc
+        if strict_snapshot.producer_snapshot_id != evidence.producer_snapshot_id:
+            raise BundleError("strict runtime pin returned a different producer snapshot")
+        snapshots.append((snapshot, evidence))
     _validate_allowlisted_sources(repository)
 
     output.mkdir(parents=True, exist_ok=True)
@@ -88,29 +132,83 @@ def prepare_bundle(
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
         )
     (output / "scripts").mkdir()
-    shutil.copy2(
-        repository / "scripts" / "container_healthcheck.py",
-        output / "scripts" / "container_healthcheck.py",
-    )
+    for name in _RUNTIME_SCRIPTS:
+        shutil.copy2(repository / "scripts" / name, output / "scripts" / name)
     _copy_dockerfile_with_identity(
         repository / "deploy" / "cloudbase" / "Dockerfile",
         output / "Dockerfile",
         code_revision,
-        snapshot_digest,
+        selected_digests[0],
     )
-    shutil.copytree(snapshot, output / "deploy-snapshot" / snapshot_digest)
+    (output / "deploy" / "cloudbase").mkdir(parents=True)
+    for name in _CLOUDBASE_FILES:
+        if name == "Dockerfile":
+            continue
+        shutil.copy2(
+            repository / "deploy" / "cloudbase" / name,
+            output / "deploy" / "cloudbase" / name,
+        )
+    for snapshot, evidence in snapshots:
+        shutil.copytree(snapshot, output / "deploy-snapshot" / evidence.digest)
 
-    metadata = {
-        "bundleSchemaVersion": "ashare-lab.cloudbase-source-bundle.v1",
+    primary = snapshots[0][1]
+    metadata: dict[str, object] = {
+        "bundleSchemaVersion": "ashare-lab.cloudbase-source-bundle.v2",
         "codeRevision": code_revision,
-        "producerSnapshotId": f"composite:{snapshot_digest}",
-        "snapshotManifestSha256": manifest_sha256,
+        "deploymentProfiles": {
+            "ephemeral_candidate": {
+                "persistence": "ephemeral",
+                "restartRecoveryVerified": False,
+            },
+            "strict_production": {
+                "persistence": "postgresql_and_durable_mount_required",
+                "restartRecoveryVerified": "required_before_traffic",
+            },
+        },
+        # Retain the singular fields for old release tooling.  They identify
+        # the first/legacy DATA_ROOT snapshot, never an implicit replacement.
+        "producerSnapshotId": primary.producer_snapshot_id,
+        "snapshotManifestSha256": primary.manifest_sha256,
+        "producerSnapshotIds": [item.producer_snapshot_id for _, item in snapshots],
+        "snapshotRegistry": {
+            "contractVersion": "ashare-lab.durable-snapshot-store.v1",
+            "mode": "external_durable_mount",
+            "requiredMountPath": "/mnt/ashare-snapshots",
+            "writePolicy": "content_addressed_append_only",
+        },
+        "snapshots": [
+            {
+                "instrumentId": item.instrument_id,
+                "manifestSha256": item.manifest_sha256,
+                "producerSnapshotId": item.producer_snapshot_id,
+            }
+            for _, item in snapshots
+        ],
     }
     (output / "bundle-metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return metadata
+
+
+def _normalize_snapshot_digests(
+    *,
+    snapshot_digest: str | None,
+    snapshot_digests: Sequence[str],
+) -> tuple[str, ...]:
+    values = tuple(snapshot_digests)
+    if snapshot_digest is not None:
+        if values:
+            raise BundleError("use snapshot_digest or snapshot_digests, not both")
+        values = (snapshot_digest,)
+    if not values:
+        raise BundleError("at least one server-trusted snapshot digest is required")
+    if any(_SHA256.fullmatch(item) is None for item in values):
+        raise BundleError("snapshot digest must be 64 lowercase hexadecimal characters")
+    if len(set(values)) != len(values):
+        raise BundleError("snapshot digests must be unique")
+    return values
 
 
 def _copy_dockerfile_with_identity(
@@ -166,8 +264,8 @@ def _validate_allowlisted_sources(repository: Path) -> None:
     required = (
         *(repository / name for name in _ROOT_FILES),
         *(repository / name for name in _SOURCE_DIRECTORIES),
-        repository / "scripts" / "container_healthcheck.py",
-        repository / "deploy" / "cloudbase" / "Dockerfile",
+        *(repository / "scripts" / name for name in _RUNTIME_SCRIPTS),
+        *(repository / "deploy" / "cloudbase" / name for name in _CLOUDBASE_FILES),
     )
     missing = [str(path.relative_to(repository)) for path in required if not path.exists()]
     if missing:
@@ -176,7 +274,7 @@ def _validate_allowlisted_sources(repository: Path) -> None:
         raise BundleError("deployment source allowlist cannot contain symlinks")
 
 
-def _validate_snapshot(snapshot: Path, expected_digest: str) -> str:
+def _validate_snapshot(snapshot: Path, expected_digest: str) -> _SnapshotEvidence:
     if not snapshot.is_dir() or snapshot.is_symlink():
         raise BundleError("selected composite snapshot directory is missing or unsafe")
     manifest_path = snapshot / "snapshot_manifest.json"
@@ -223,7 +321,17 @@ def _validate_snapshot(snapshot: Path, expected_digest: str) -> str:
         payload = path.read_bytes()
         if expected_bytes != len(payload) or expected_sha256 != hashlib.sha256(payload).hexdigest():
             raise BundleError(f"selected snapshot file does not match manifest: {raw_name}")
-    return hashlib.sha256(manifest_bytes).hexdigest()
+    coverage = manifest.get("eventAcquisitionCoverage")
+    coverage_map = cast(dict[object, object], coverage) if isinstance(coverage, dict) else {}
+    instrument_id = coverage_map.get("instrumentId")
+    if not isinstance(instrument_id, str) or not instrument_id:
+        raise BundleError("selected snapshot does not declare one covered instrument")
+    return _SnapshotEvidence(
+        digest=expected_digest,
+        producer_snapshot_id=f"composite:{expected_digest}",
+        manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        instrument_id=instrument_id,
+    )
 
 
 if __name__ == "__main__":

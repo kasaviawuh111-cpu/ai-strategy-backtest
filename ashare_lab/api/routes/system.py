@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
@@ -14,6 +15,7 @@ from ..errors import ApiProblem
 from ..schemas import (
     CapabilitiesResponse,
     CatalogRelease,
+    ErrorDetail,
     EventCapability,
     EventDocumentTextCapability,
     HealthResponse,
@@ -52,7 +54,12 @@ async def readiness(container: Container) -> ReadinessResponse:
     checks = dict(container.readiness_probe())
     failed = tuple(sorted(name for name, ready in checks.items() if not ready))
     if not checks or failed:
-        raise _not_ready(failed or ("runtime",))
+        reasons = (
+            dict(container.readiness_reasons_probe())
+            if container.readiness_reasons_probe is not None
+            else {}
+        )
+        raise _not_ready(failed or ("runtime",), reasons=reasons)
     return ReadinessResponse(checks={name: "ok" for name in sorted(checks)})
 
 
@@ -238,9 +245,23 @@ def _indicator_catalog_mismatch(reason: str) -> ApiProblem:
     )
 
 
-def _not_ready(failed: tuple[str, ...]) -> ApiProblem:
+def _not_ready(
+    failed: tuple[str, ...],
+    *,
+    reasons: Mapping[str, str] | None = None,
+) -> ApiProblem:
+    reason_map = reasons or {}
     return ApiProblem(
         status_code=503,
         code="service_not_ready",
         message="Required runtime checks failed: " + ", ".join(failed),
+        details=tuple(
+            ErrorDetail(
+                location=name,
+                message=reason_map[name],
+                type="readiness_check_failed",
+            )
+            for name in failed
+            if name in reason_map
+        ),
     )

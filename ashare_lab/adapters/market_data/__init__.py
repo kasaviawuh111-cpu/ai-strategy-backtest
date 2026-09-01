@@ -6,6 +6,13 @@ from .baostock_reference import (
     BaoStockReferenceResult,
     to_choice_snapshot_payload,
 )
+from .baostock_security_search import (
+    BaoStockSecurityCandidateSearch,
+    BaoStockSecuritySearchClient,
+    BaoStockSecuritySearchError,
+    BaoStockSecuritySearchIntegrityError,
+    BaoStockSecuritySearchUnavailableError,
+)
 from .choice_minute import (
     ChoiceMinuteDecodeError,
     canonical_payload_sha256,
@@ -26,11 +33,26 @@ from .choice_minute_snapshot import (
     ChoiceMinuteSnapshotSpec,
     build_choice_minute_snapshot,
 )
+from .choice_security_search import (
+    ChoiceSecurityCandidateSearch,
+    ChoiceSecuritySearchClient,
+    ChoiceSecuritySearchError,
+    ChoiceSecuritySearchIntegrityError,
+    ChoiceSecuritySearchUnavailableError,
+)
 from .composite_snapshot import (
     COMPOSITE_SNAPSHOT_SCHEMA_VERSION,
     CompositeSnapshotError,
     CompositeSnapshotResult,
     compose_choice_event_snapshot,
+)
+from .eastmoney_security_search import (
+    ChoiceBaoStockEastmoneyCandidateSearch,
+    ChoiceFirstSecurityCandidateSearch,
+    EastmoneySecurityCandidateSearch,
+    EastmoneySecuritySearchError,
+    EastmoneySecuritySearchIntegrityError,
+    EastmoneySecuritySearchUnavailableError,
 )
 from .event_snapshot import (
     EVENT_SNAPSHOT_SCHEMA_VERSION,
@@ -87,6 +109,8 @@ from .snapshot_registry import (
 )
 from .trusted_snapshots import (
     SecurityMasterInstrumentNormalizer,
+    ServerOwnedTrustedInstrumentResolver,
+    ServerOwnedTrustedSnapshotResolver,
     TrustedSecurityMasterSnapshot,
     TrustedSecurityMasterSnapshotBuild,
     TrustedSecurityMasterSnapshotLoader,
@@ -95,6 +119,7 @@ from .trusted_snapshots import (
     TrustedSnapshotExpiredError,
     TrustedSnapshotIntegrityError,
     TrustedSnapshotMetadata,
+    TrustedSnapshotProviderUnavailableError,
     TrustedTechnicalSnapshot,
     TrustedTechnicalSnapshotLoader,
     TrustedV2SnapshotContracts,
@@ -113,12 +138,28 @@ __all__ = [
     "BaoStockReferenceAdapter",
     "BaoStockReferenceError",
     "BaoStockReferenceResult",
+    "BaoStockSecurityCandidateSearch",
+    "BaoStockSecuritySearchClient",
+    "BaoStockSecuritySearchError",
+    "BaoStockSecuritySearchIntegrityError",
+    "BaoStockSecuritySearchUnavailableError",
+    "ChoiceBaoStockEastmoneyCandidateSearch",
+    "ChoiceFirstSecurityCandidateSearch",
     "ChoiceMinuteDecodeError",
     "ChoiceMinuteSnapshotError",
     "ChoiceMinuteSnapshotResult",
     "ChoiceMinuteSnapshotSpec",
+    "ChoiceSecurityCandidateSearch",
+    "ChoiceSecuritySearchClient",
+    "ChoiceSecuritySearchError",
+    "ChoiceSecuritySearchIntegrityError",
+    "ChoiceSecuritySearchUnavailableError",
     "CompositeSnapshotError",
     "CompositeSnapshotResult",
+    "EastmoneySecurityCandidateSearch",
+    "EastmoneySecuritySearchError",
+    "EastmoneySecuritySearchIntegrityError",
+    "EastmoneySecuritySearchUnavailableError",
     "EventSnapshotError",
     "EventSnapshotResult",
     "InternalDemoSnapshotPreparer",
@@ -131,6 +172,8 @@ __all__ = [
     "ResearchFallbackSessionProvider",
     "ResearchInstrumentProfile",
     "SecurityMasterInstrumentNormalizer",
+    "ServerOwnedTrustedInstrumentResolver",
+    "ServerOwnedTrustedSnapshotResolver",
     "SessionFactory",
     "SessionReferenceAdapterError",
     "SessionReferenceIntegrityError",
@@ -158,6 +201,7 @@ __all__ = [
     "TrustedSnapshotExpiredError",
     "TrustedSnapshotIntegrityError",
     "TrustedSnapshotMetadata",
+    "TrustedSnapshotProviderUnavailableError",
     "TrustedTechnicalSnapshot",
     "TrustedTechnicalSnapshotLoader",
     "TrustedV2SnapshotContracts",

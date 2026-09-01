@@ -26,6 +26,12 @@ from enum import StrEnum
 from typing import Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
+from ashare_lab.domain.instruments import (
+    AssetType,
+    Exchange,
+    SecurityMasterAssetType,
+    SecurityMasterRecord,
+)
 from ashare_lab.domain.market_data import (
     Board,
     CorporateAction,
@@ -158,7 +164,16 @@ class BaoStockInstrumentReference:
     delisting_date: date | None
     status: BaoStockListingStatus
     board: Board
+    asset_type: AssetType
     currency: Literal["CNY"] = "CNY"
+
+
+@dataclass(frozen=True, slots=True)
+class BaoStockSecurityMasterResult:
+    """One provider-classified identity plus its immutable query evidence."""
+
+    record: SecurityMasterRecord
+    query_audit: BaoStockQueryAudit
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +200,26 @@ class BaoStockReferenceAdapter:
     def __init__(self, client: BaoStockClient) -> None:
         self._client = client
 
+    def resolve_security_master(self, *, symbol: str) -> BaoStockSecurityMasterResult:
+        """Classify one exact symbol without acquiring history or distributions."""
+
+        instrument_id, provider_code = _normalize_symbol_identity(symbol)
+        audit = self._query(
+            method="query_stock_basic",
+            params=(("code", provider_code),),
+            request=lambda: self._client.query_stock_basic(code=provider_code),
+        )
+        _require_query_success(audit, (audit,))
+        try:
+            record = _security_master_from_basic(
+                audit,
+                expected_instrument=instrument_id,
+                expected_provider_code=provider_code,
+            )
+        except BaoStockReferenceError as exc:
+            raise BaoStockReferenceError(str(exc), query_audits=(audit,)) from exc
+        return BaoStockSecurityMasterResult(record=record, query_audit=audit)
+
     def prepare(
         self,
         *,
@@ -198,7 +233,7 @@ class BaoStockReferenceAdapter:
         if captured_at.tzinfo is None or captured_at.utcoffset() is None:
             raise BaoStockReferenceError("captured_at must include an explicit timezone")
 
-        instrument_id, provider_code, board = _normalize_symbol(symbol)
+        instrument_id, provider_code = _normalize_symbol_identity(symbol)
         audits: list[BaoStockQueryAudit] = []
 
         basic_audit = self._query(
@@ -209,12 +244,15 @@ class BaoStockReferenceAdapter:
         audits.append(basic_audit)
         _require_query_success(basic_audit, audits)
         try:
-            instrument = _instrument_from_basic(
+            record = _security_master_from_basic(
                 basic_audit,
                 expected_instrument=instrument_id,
                 expected_provider_code=provider_code,
-                board=board,
             )
+            if record.asset_type is SecurityMasterAssetType.INDEX:
+                raise BaoStockReferenceError("security is an index and cannot enter backtest")
+            board = _board_for_security(record)
+            instrument = _instrument_from_security_master(record, provider_code, board)
         except BaoStockReferenceError as exc:
             raise BaoStockReferenceError(
                 str(exc),
@@ -226,56 +264,24 @@ class BaoStockReferenceAdapter:
                 query_audits=tuple(audits),
             )
 
-        actions: list[CorporateAction] = []
-        in_range_source_rows = 0
         years = tuple(range(start.year, end.year + 1))
-        for year in years:
-            audit = self._query(
-                method="query_dividend_data",
-                params=(
-                    ("code", provider_code),
-                    ("year", str(year)),
-                    ("yearType", "operate"),
-                ),
-                request=lambda year=year: self._client.query_dividend_data(
-                    code=provider_code,
-                    year=str(year),
-                    yearType="operate",
-                ),
+        if instrument.asset_type is AssetType.STOCK:
+            canonical_actions, coverage = self._collect_stock_actions(
+                instrument=instrument,
+                start=start,
+                end=end,
+                years=years,
+                captured_at=captured_at,
+                audits=audits,
             )
-            audits.append(audit)
-            _require_query_success(audit, audits)
-            try:
-                _require_fields(audit, _DIVIDEND_FIELDS)
-                for raw_row in audit.rows:
-                    row_actions, in_range = _actions_from_dividend_row(
-                        dict(raw_row),
-                        instrument=instrument,
-                        requested_year=year,
-                        start=start,
-                        end=end,
-                        captured_at=captured_at,
-                        response_sha256=audit.normalized_response_sha256,
-                    )
-                    in_range_source_rows += int(in_range)
-                    actions.extend(row_actions)
-            except BaoStockReferenceError as exc:
-                raise BaoStockReferenceError(
-                    str(exc),
-                    query_audits=tuple(audits),
-                ) from exc
-
-        canonical_actions = _validate_action_identity(actions, audits)
-        corporate_action_audits = tuple(audits)
-        coverage = _build_coverage(
-            instrument=instrument,
-            start=start,
-            end=end,
-            years=years,
-            actions=canonical_actions,
-            in_range_source_rows=in_range_source_rows,
-            audits=corporate_action_audits,
-        )
+        else:
+            canonical_actions = ()
+            coverage = _etf_reference_only_action_coverage(
+                instrument=instrument,
+                start=start,
+                end=end,
+                basic_audit=basic_audit,
+            )
 
         historical_sessions: list[BaoStockHistoricalSessionFact] = []
         history_audits: list[BaoStockQueryAudit] = []
@@ -344,6 +350,61 @@ class BaoStockReferenceAdapter:
             historical_session_coverage=historical_session_coverage,
         )
 
+    def _collect_stock_actions(
+        self,
+        *,
+        instrument: BaoStockInstrumentReference,
+        start: date,
+        end: date,
+        years: tuple[int, ...],
+        captured_at: datetime,
+        audits: list[BaoStockQueryAudit],
+    ) -> tuple[tuple[CorporateAction, ...], Mapping[str, object]]:
+        actions: list[CorporateAction] = []
+        in_range_source_rows = 0
+        for year in years:
+            audit = self._query(
+                method="query_dividend_data",
+                params=(
+                    ("code", instrument.provider_code),
+                    ("year", str(year)),
+                    ("yearType", "operate"),
+                ),
+                request=lambda year=year: self._client.query_dividend_data(
+                    code=instrument.provider_code,
+                    year=str(year),
+                    yearType="operate",
+                ),
+            )
+            audits.append(audit)
+            _require_query_success(audit, audits)
+            try:
+                _require_fields(audit, _DIVIDEND_FIELDS)
+                for raw_row in audit.rows:
+                    row_actions, in_range = _actions_from_dividend_row(
+                        dict(raw_row),
+                        instrument=instrument,
+                        requested_year=year,
+                        start=start,
+                        end=end,
+                        captured_at=captured_at,
+                        response_sha256=audit.normalized_response_sha256,
+                    )
+                    in_range_source_rows += int(in_range)
+                    actions.extend(row_actions)
+            except BaoStockReferenceError as exc:
+                raise BaoStockReferenceError(str(exc), query_audits=tuple(audits)) from exc
+        canonical = _validate_action_identity(actions, audits)
+        return canonical, _build_coverage(
+            instrument=instrument,
+            start=start,
+            end=end,
+            years=years,
+            actions=canonical,
+            in_range_source_rows=in_range_source_rows,
+            audits=tuple(audits),
+        )
+
     @staticmethod
     def _query(
         *,
@@ -384,6 +445,7 @@ def to_choice_snapshot_payload(result: BaoStockReferenceResult) -> dict[str, obj
             "delisting_date": _optional_iso_date(result.instrument.delisting_date),
             "status": result.instrument.status.value,
             "board": result.instrument.board.value,
+            "asset_type": result.instrument.asset_type.value,
             "currency": result.instrument.currency,
         },
         "actions": [_action_to_json(action) for action in result.corporate_actions],
@@ -396,7 +458,7 @@ def to_choice_snapshot_payload(result: BaoStockReferenceResult) -> dict[str, obj
     }
 
 
-def _normalize_symbol(value: str) -> tuple[InstrumentId, str, Board]:
+def _normalize_symbol_identity(value: str) -> tuple[InstrumentId, str]:
     raw = value.strip()
     canonical_match = _CANONICAL_RE.fullmatch(raw)
     provider_match = _PROVIDER_RE.fullmatch(raw)
@@ -409,19 +471,29 @@ def _normalize_symbol(value: str) -> tuple[InstrumentId, str, Board]:
         market = _market_for_digits(digits)
     else:
         raise BaoStockReferenceError("symbol must be a supported six-digit SH/SZ A-share code")
-    board = _board_for_digits(digits, market)
-    return InstrumentId(f"{digits}.{market}"), f"{market.lower()}.{digits}", board
+    _validate_candidate_exchange(digits, market)
+    return InstrumentId(f"{digits}.{market}"), f"{market.lower()}.{digits}"
+
+
+def _validate_candidate_exchange(digits: str, market: str) -> None:
+    sh_candidate = digits.startswith(("5", "600", "601", "603", "605", "688", "689", "000"))
+    sz_candidate = digits.startswith(("1", "000", "001", "002", "003", "300", "301", "399"))
+    if (market == "SH" and sh_candidate) or (market == "SZ" and sz_candidate):
+        return
+    raise BaoStockReferenceError("security code prefix does not match a supported exchange space")
 
 
 def _market_for_digits(digits: str) -> str:
-    if digits.startswith(("600", "601", "603", "605", "688", "689")):
+    if digits.startswith(("5", "600", "601", "603", "605", "688", "689")):
         return "SH"
-    if digits.startswith(("000", "001", "002", "003", "300", "301")):
+    if digits.startswith(("1", "000", "001", "002", "003", "300", "301")):
         return "SZ"
-    raise BaoStockReferenceError("code is not a supported SH/SZ CNY ordinary share")
+    raise BaoStockReferenceError("code is not a supported SH/SZ stock or ETF code")
 
 
-def _board_for_digits(digits: str, market: str) -> Board:
+def _stock_board_for_digits(digits: str, market: str) -> Board:
+    if digits.startswith(("5", "1")):
+        raise BaoStockReferenceError("BaoStock type=1 stock cannot use an ETF code space")
     inferred_market = _market_for_digits(digits)
     if market != inferred_market:
         raise BaoStockReferenceError("stock code prefix does not match its exchange suffix")
@@ -573,21 +645,25 @@ def _require_fields(audit: BaoStockQueryAudit, required: frozenset[str]) -> None
         )
 
 
-def _instrument_from_basic(
+def _security_master_from_basic(
     audit: BaoStockQueryAudit,
     *,
     expected_instrument: InstrumentId,
     expected_provider_code: str,
-    board: Board,
-) -> BaoStockInstrumentReference:
+) -> SecurityMasterRecord:
     _require_fields(audit, _BASIC_FIELDS)
     if audit.row_count != 1:
         raise BaoStockReferenceError("query_stock_basic must return exactly one security")
     row = dict(audit.rows[0])
     if row["code"].casefold() != expected_provider_code:
         raise BaoStockReferenceError("query_stock_basic returned a different security")
-    if row["type"] != "1":
-        raise BaoStockReferenceError("security is not a BaoStock type=1 ordinary stock")
+    asset_type = {
+        "1": SecurityMasterAssetType.STOCK,
+        "2": SecurityMasterAssetType.INDEX,
+        "5": SecurityMasterAssetType.ETF,
+    }.get(row["type"])
+    if asset_type is None:
+        raise BaoStockReferenceError("BaoStock security type is not STOCK, ETF, or INDEX")
     name = row["code_name"].strip()
     if not name:
         raise BaoStockReferenceError("security name cannot be blank")
@@ -606,14 +682,58 @@ def _instrument_from_basic(
         raise BaoStockReferenceError("security status must be BaoStock 0 or 1")
     if delisting_date is not None and delisting_date < listing_date:
         raise BaoStockReferenceError("outDate cannot precede ipoDate")
-    return BaoStockInstrumentReference(
-        instrument_id=expected_instrument,
-        provider_code=expected_provider_code,
+    market = str(expected_instrument).rsplit(".", maxsplit=1)[1]
+    return SecurityMasterRecord(
+        symbol=str(expected_instrument),
         name=name,
+        exchange=Exchange(market),
+        asset_type=asset_type,
+        currency="CNY",
         listing_date=listing_date,
         delisting_date=delisting_date,
-        status=status,
+        tradable=status is BaoStockListingStatus.LISTED,
+        data_source=(
+            "BaoStock query_stock_basic normalized sha256:" + audit.normalized_response_sha256
+        ),
+    )
+
+
+def _board_for_security(record: SecurityMasterRecord) -> Board:
+    digits, market = record.symbol.split(".", maxsplit=1)
+    if record.asset_type is SecurityMasterAssetType.ETF:
+        if not (
+            (market == "SH" and digits.startswith("5"))
+            or (market == "SZ" and digits.startswith("1"))
+        ):
+            raise BaoStockReferenceError("BaoStock type=5 ETF code space is inconsistent")
+        return Board.STOCK_ETF
+    if record.asset_type is not SecurityMasterAssetType.STOCK:
+        raise BaoStockReferenceError("security is not an executable STOCK or ETF")
+    return _stock_board_for_digits(digits, market)
+
+
+def _instrument_from_security_master(
+    record: SecurityMasterRecord,
+    provider_code: str,
+    board: Board,
+) -> BaoStockInstrumentReference:
+    asset_type = {
+        SecurityMasterAssetType.STOCK: AssetType.STOCK,
+        SecurityMasterAssetType.ETF: AssetType.ETF,
+    }.get(record.asset_type)
+    if asset_type is None:
+        raise BaoStockReferenceError("security is not an executable STOCK or ETF")
+    return BaoStockInstrumentReference(
+        instrument_id=InstrumentId(record.symbol),
+        provider_code=provider_code,
+        name=record.name,
+        listing_date=record.listing_date,
+        delisting_date=record.delisting_date,
+        status=(
+            BaoStockListingStatus.LISTED if record.tradable else BaoStockListingStatus.DELISTED
+        ),
         board=board,
+        asset_type=asset_type,
     )
 
 
@@ -906,6 +1026,39 @@ def _build_coverage(
             "dividStockMarketDate, conservatively used as credit and sellable date"
         ),
         "revisionSemantics": "latest_observed_row_without_historical_revision_stream",
+        "normalization": "trimmed strings, sorted fields and rows, canonical JSON SHA-256",
+    }
+
+
+def _etf_reference_only_action_coverage(
+    *,
+    instrument: BaoStockInstrumentReference,
+    start: date,
+    end: date,
+    basic_audit: BaoStockQueryAudit,
+) -> dict[str, object]:
+    """Disclose that BaoStock identity/session proof is not ETF action proof."""
+
+    return {
+        "status": "reference_only",
+        "querySucceeded": True,
+        "provider": PROVIDER,
+        "instrumentId": instrument.instrument_id.value,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "rowCount": 0,
+        "zeroResult": True,
+        "rawResponseSha256": basic_audit.normalized_response_sha256,
+        "normalizedResponseSha256": basic_audit.normalized_response_sha256,
+        "hashSemantics": "sha256_of_canonical_normalized_query_stock_basic",
+        "queryAudits": [basic_audit.as_dict()],
+        "supportedCategories": [],
+        "unsupportedCategories": [kind.value for kind in CorporateActionKind],
+        "coverageScope": "identity_and_sessions_only_not_etf_corporate_actions",
+        "timeQuality": None,
+        "dateAvailabilityPolicy": None,
+        "settlementPolicy": None,
+        "revisionSemantics": None,
         "normalization": "trimmed strings, sorted fields and rows, canonical JSON SHA-256",
     }
 

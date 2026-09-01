@@ -312,6 +312,11 @@ def test_openapi_exposes_compilation_and_async_backtest_vertical_slices(
         "/api/v1/backtest-runs/{run_id}/summary",
         "/api/v1/backtest-runs/{run_id}/series",
         "/api/v1/backtest-runs/{run_id}/trades",
+        "/api/v2/strategy-drafts",
+        "/api/v2/strategy-drafts/{draft_id}/revisions/{revision}",
+        "/api/v2/strategy-validations",
+        "/api/v2/backtest-runs",
+        "/api/v2/backtest-runs/{run_id}",
     }
     assert paths["/api/v1/strategy-drafts"]["post"]["operationId"] == "createStrategyDraft"
     assert (
@@ -323,3 +328,8 @@ def test_openapi_exposes_compilation_and_async_backtest_vertical_slices(
     assert "413" in paths["/api/v1/strategy-drafts"]["post"]["responses"]
     assert paths["/api/v1/backtest-runs"]["post"]["operationId"] == "createBacktestRun"
     assert "503" in paths["/api/v1/backtest-runs"]["post"]["responses"]
+    assert paths["/api/v2/strategy-drafts"]["post"]["operationId"] == ("createStrategyV2Draft")
+    assert paths["/api/v2/strategy-validations"]["post"]["operationId"] == (
+        "validateStrategyV2Draft"
+    )
+    assert paths["/api/v2/backtest-runs"]["post"]["operationId"] == ("createStrategyV2BacktestRun")

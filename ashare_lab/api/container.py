@@ -10,6 +10,7 @@ from fastapi import Request
 
 from ashare_lab.application.backtest_submission import BacktestRunConfig
 from ashare_lab.application.compile_strategy import StrategyCompiler
+from ashare_lab.application.strategy_v2_http import StrategyV2HttpService
 from ashare_lab.domain.catalog import CatalogSnapshot, CoverageCatalogSnapshot
 from ashare_lab.domain.strategy import StrategySpec
 from ashare_lab.ports.backtest_runs import BacktestRunStore, CreateRunResult
@@ -36,7 +37,9 @@ class ApiContainer:
     event_document_text_preparable_codes_probe: Callable[[], frozenset[str]]
     backtest_submission: BacktestSubmitter | None = None
     run_store: BacktestRunStore | None = None
+    strategy_v2_service: StrategyV2HttpService | None = None
     readiness_probe: Callable[[], Mapping[str, bool]] | None = None
+    readiness_reasons_probe: Callable[[], Mapping[str, str]] | None = None
 
     @property
     def backtest_execution_available(self) -> bool:

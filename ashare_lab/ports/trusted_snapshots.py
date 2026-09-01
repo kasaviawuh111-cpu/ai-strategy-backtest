@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
 from ashare_lab.domain.instruments import (
+    InstrumentRef,
     InstrumentResolutionError,
     InstrumentResolver,
     SecurityMasterSnapshot,
@@ -48,6 +49,10 @@ class TrustedSnapshotCoverageError(TrustedSnapshotError):
 
 class TrustedSnapshotExpiredError(TrustedSnapshotCoverageError):
     """A valid snapshot is too old for a new Strategy v2 submission."""
+
+
+class TrustedSnapshotProviderUnavailableError(TrustedSnapshotCoverageError):
+    """A required server-owned acquisition/search provider is unavailable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +109,8 @@ class TrustedTechnicalSnapshot:
     signal_bars: tuple[DailyBar, ...]
     sessions: tuple[InstrumentSession, ...]
     corporate_actions: tuple[CorporateAction, ...]
+    producer_metadata: TrustedSnapshotMetadata | None = None
+    producer_children: tuple[TrustedSnapshotMetadata, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +120,55 @@ class TrustedV2SnapshotContracts:
     security_master: SnapshotBindingV2
     trading_calendar: SnapshotBindingV2
     market_data: SnapshotBindingV2
+    composite_snapshot: SnapshotBindingV2
+    producer_children: tuple[SnapshotBindingV2, ...]
     dataset_coverage: DatasetCoverageV2
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedStrategyV2SnapshotSelection:
+    """Server-selected immutable producer prepared before receipt issuance."""
+
+    producer_snapshot_id: str
+    coverage_end: date
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"composite:[0-9a-f]{64}", self.producer_snapshot_id) is None:
+            raise TrustedSnapshotIntegrityError(
+                "Strategy v2 selection must be an outer Composite content id"
+            )
+        if type(self.coverage_end) is not date:
+            raise TrustedSnapshotIntegrityError("Strategy v2 coverage_end must be a date")
+
+
+class TrustedStrategyV2SnapshotResolver(Protocol):
+    """Resolve or prepare data using only server-owned providers and roots.
+
+    This boundary is called while issuing a draft.  Execution never calls it;
+    it reopens the exact persisted ``producer_snapshot_id`` offline.
+    """
+
+    def resolve_or_prepare(
+        self,
+        *,
+        instrument_id: InstrumentId,
+        requested_period: DateRange,
+        security_master: TrustedSecurityMasterSnapshot,
+    ) -> TrustedStrategyV2SnapshotSelection: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedInstrumentSelection:
+    """One authoritative identity plus the master snapshot that proved it."""
+
+    instrument: InstrumentRef
+    security_master: TrustedSecurityMasterSnapshot
+
+
+class TrustedInstrumentResolver(Protocol):
+    """Resolve exact code/name using server-owned reference providers only."""
+
+    def resolve_or_prepare(self, identifier: str, *, as_of: date) -> TrustedInstrumentSelection: ...
 
 
 class TrustedSecurityMasterSnapshotLoader(Protocol):
@@ -176,6 +231,11 @@ def build_trusted_v2_snapshot_contracts(
         )
 
     market = technical_snapshot.market_data_metadata
+    producer = technical_snapshot.producer_metadata
+    if producer is None or not producer.snapshot_id.startswith("composite:"):
+        raise TrustedSnapshotIntegrityError(
+            "Strategy v2 requires an outer content-addressed composite snapshot"
+        )
     validate_trusted_market_availability(
         execution_bars=technical_snapshot.execution_bars,
         signal_bars=technical_snapshot.signal_bars,
@@ -196,6 +256,14 @@ def build_trusted_v2_snapshot_contracts(
             technical_snapshot.calendar_metadata,
         ),
         market_data=_snapshot_binding("market_data", market),
+        composite_snapshot=_snapshot_binding("composite_snapshot", producer),
+        producer_children=tuple(
+            _snapshot_binding("producer_child", item)
+            for item in sorted(
+                technical_snapshot.producer_children,
+                key=lambda metadata: metadata.snapshot_id,
+            )
+        ),
         dataset_coverage=DatasetCoverageV2(
             dataset_id="daily_ohlcv",
             instrument_symbol=str(canonical_instrument),
@@ -234,7 +302,13 @@ def validate_trusted_market_availability(
 
 
 def _snapshot_binding(
-    kind: Literal["security_master", "trading_calendar", "market_data"],
+    kind: Literal[
+        "security_master",
+        "trading_calendar",
+        "market_data",
+        "composite_snapshot",
+        "producer_child",
+    ],
     metadata: TrustedSnapshotMetadata,
 ) -> SnapshotBindingV2:
     return SnapshotBindingV2(
@@ -250,6 +324,8 @@ def _snapshot_binding(
 
 
 __all__ = [
+    "TrustedInstrumentResolver",
+    "TrustedInstrumentSelection",
     "TrustedSecurityMasterSnapshot",
     "TrustedSecurityMasterSnapshotLoader",
     "TrustedSnapshotCoverageError",
@@ -257,6 +333,9 @@ __all__ = [
     "TrustedSnapshotExpiredError",
     "TrustedSnapshotIntegrityError",
     "TrustedSnapshotMetadata",
+    "TrustedSnapshotProviderUnavailableError",
+    "TrustedStrategyV2SnapshotResolver",
+    "TrustedStrategyV2SnapshotSelection",
     "TrustedTechnicalSnapshot",
     "TrustedTechnicalSnapshotLoader",
     "TrustedV2SnapshotContracts",

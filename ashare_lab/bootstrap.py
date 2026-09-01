@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import re
 import sys
+import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 from fastapi import FastAPI
 from sqlalchemy import text
@@ -22,17 +24,42 @@ from ashare_lab.adapters.language.openai_compatible import (
     DisabledCandidateJsonTransport,
     OpenAICompatibleCandidateTransport,
 )
-from ashare_lab.adapters.language.vibe_candidates import build_candidate_capability_matrix
+from ashare_lab.adapters.language.vibe_candidates import (
+    CandidateCapabilityMatrix,
+    CandidateProviderIdentityView,
+    VibeBoundedCandidateGenerator,
+    build_candidate_capability_matrix,
+)
 from ashare_lab.adapters.market_data import (
+    BaoStockReferenceAdapter,
+    BaoStockSecurityCandidateSearch,
+    BaoStockSecuritySearchClient,
+    BaoStockSecuritySearchUnavailableError,
+    ChoiceBaoStockEastmoneyCandidateSearch,
+    ChoiceSecurityCandidateSearch,
+    ChoiceSecuritySearchClient,
+    ChoiceSecuritySearchUnavailableError,
+    EastmoneySecurityCandidateSearch,
     InternalDemoSnapshotPreparer,
     LocalParquetMarketDataRepository,
     MarketDataAdapterError,
     OnDemandSnapshotMarketDataRepository,
     ParquetInstrumentSessionProvider,
     ResearchFallbackSessionProvider,
+    SecurityMasterInstrumentNormalizer,
+    ServerOwnedTrustedInstrumentResolver,
+    ServerOwnedTrustedSnapshotResolver,
     SnapshotRegistryMarketDataRepository,
 )
-from ashare_lab.adapters.persistence import SQLAlchemyBacktestRunStore
+from ashare_lab.adapters.market_data.baostock_reference import BaoStockClient
+from ashare_lab.adapters.market_data.trusted_snapshots import (
+    TrustedSecurityMasterSnapshotLoader,
+    TrustedTechnicalSnapshotLoader,
+)
+from ashare_lab.adapters.persistence import (
+    SQLAlchemyBacktestRunStore,
+    SQLAlchemyStrategyV2ArtifactStore,
+)
 from ashare_lab.api import create_app as create_http_app
 from ashare_lab.api.app import build_hybrid_candidate_compiler
 from ashare_lab.application.backtest_submission import (
@@ -40,23 +67,58 @@ from ashare_lab.application.backtest_submission import (
     BacktestSubmissionService,
     SubmissionVersions,
 )
+from ashare_lab.application.daily_backtest import DailyBacktestConfig, FeeQuoteProvider
 from ashare_lab.application.execute_backtest import (
     BacktestExecutionService,
     WorkerRuntimeIdentity,
 )
+from ashare_lab.application.execute_strategy_v2 import (
+    ExecuteStrategyV2Error,
+    ExecuteStrategyV2Service,
+)
+from ashare_lab.application.strategy_v2_draft_issuer import (
+    GroundedStrategyV2Issuer,
+    StrategyV2ProducerPin,
+)
+from ashare_lab.application.strategy_v2_http import (
+    AssetRoutingStrategyV2ReceiptExecutor,
+    PersistedStrategyV2HttpService,
+    StrategyV2HttpService,
+)
+from ashare_lab.application.technical_v2 import (
+    bind_stock_fee_provider,
+    create_etf_all_in_fee_provider,
+)
+from ashare_lab.application.validation_receipts_v2 import ValidationReceiptServiceV2
 from ashare_lab.domain.catalog import (
     CatalogSnapshot,
     load_catalog_directory,
     load_coverage_catalog_directory,
 )
 from ashare_lab.domain.events.catalog import DOCUMENT_TEXT_EVENT_CODES
-from ashare_lab.domain.execution import HistoricalAshareRuleBook
+from ashare_lab.domain.execution import (
+    AshareExchange,
+    FeeCalculator,
+    FeePolicy,
+    HistoricalAshareRuleBook,
+    TradingCalendar,
+)
+from ashare_lab.domain.instruments import (
+    AssetType,
+    Exchange,
+    InstrumentRef,
+    SecurityMasterRecord,
+)
 from ashare_lab.domain.market_data import DailyBar, DataSnapshotRef, InstrumentSession
-from ashare_lab.domain.shared import DomainValidationError, InstrumentId
+from ashare_lab.domain.shared import DomainValidationError, InstrumentId, Money
 from ashare_lab.domain.signals.runtime import validate_stable_indicator_evaluator_catalog
 from ashare_lab.ports.backtest_runs import BacktestJobQueue
 from ashare_lab.ports.market_data import DataRequirements, DateRange, MarketDataRepository
 from ashare_lab.ports.session_reference import SessionReferenceProvider
+from ashare_lab.ports.trusted_snapshots import (
+    TrustedSecurityMasterSnapshot,
+    TrustedTechnicalSnapshot,
+)
 from ashare_lab.settings import AppSettings
 
 
@@ -83,6 +145,19 @@ class ApiRuntime:
     event_preparable_codes_probe: Callable[[], frozenset[str]]
     event_document_text_backtest_codes_probe: Callable[[], frozenset[str]]
     event_document_text_preparable_codes_probe: Callable[[], frozenset[str]]
+    strategy_v2_service: StrategyV2HttpService | None = None
+    strategy_v2_unavailable_reason: str | None = None
+
+
+class _BaoStockLoginResult(Protocol):
+    error_code: object
+    error_msg: object
+
+
+class _BaoStockRuntimeClient(BaoStockClient, Protocol):
+    def login(self) -> _BaoStockLoginResult: ...
+
+    def logout(self) -> _BaoStockLoginResult: ...
 
 
 class _PinnedSnapshotSessionReference:
@@ -201,7 +276,101 @@ def _repository_path(repository_root: Path, path: Path) -> Path:
     return expanded.resolve() if expanded.is_absolute() else (repository_root / expanded).resolve()
 
 
-def build_api_runtime(settings: AppSettings | None = None) -> ApiRuntime:
+def _build_strategy_v2_snapshot_repository(
+    settings: AppSettings,
+    *,
+    trusted_master: TrustedSecurityMasterSnapshot,
+) -> OnDemandSnapshotMarketDataRepository:
+    """Build the server-only Choice-first acquisition boundary for v2 drafts."""
+
+    repository_root = Path(__file__).resolve().parents[1]
+    choice_setting = settings.strategy_v2_choice_root or settings.choice_snapshot_root
+    technical_setting = settings.strategy_v2_technical_root or settings.technical_snapshot_root
+    choice_root = _repository_path(repository_root, choice_setting)
+    technical_root = _repository_path(repository_root, technical_setting)
+    event_root = _repository_path(repository_root, settings.event_snapshot_root)
+    composite_root = _repository_path(repository_root, settings.strategy_v2_composite_root)
+    preparation_root = _repository_path(repository_root, settings.snapshot_preparation_root)
+    for root in (choice_root, technical_root, event_root, composite_root, preparation_root):
+        root.mkdir(parents=True, exist_ok=True)
+    registry = SnapshotRegistryMarketDataRepository(
+        composite_root,
+        instrument_normalizer=SecurityMasterInstrumentNormalizer(trusted_master),
+    )
+    preparer = InternalDemoSnapshotPreparer(
+        repository_root,
+        python_executable=sys.executable,
+        choice_output_root=choice_root,
+        technical_output_root=technical_root,
+        event_output_root=event_root,
+        composite_output_root=composite_root,
+        temporary_root=preparation_root,
+    )
+    return OnDemandSnapshotMarketDataRepository(
+        registry,
+        preparer,
+        refresh_each_submission=settings.on_demand_refresh_each_submission,
+    )
+
+
+def _resolve_strategy_v2_baostock_record(symbol: str) -> SecurityMasterRecord:
+    """Query one exact server-selected symbol without acquiring price history."""
+
+    if re.fullmatch(r"[0-9]{6}\.(?:SH|SZ|BJ)", symbol) is None:
+        raise ValueError("Strategy v2 security-master preparation requires a canonical symbol")
+    try:
+        client = cast(_BaoStockRuntimeClient, importlib.import_module("baostock"))
+    except ImportError as error:
+        raise RuntimeError("BaoStock security-master runtime is unavailable") from error
+    login = client.login()
+    if str(login.error_code) != "0":
+        raise RuntimeError("BaoStock security-master login failed")
+    try:
+        return BaoStockReferenceAdapter(client).resolve_security_master(symbol=symbol).record
+    finally:
+        client.logout()
+
+
+def _search_strategy_v2_choice_candidates(identifier: str) -> tuple[str, ...]:
+    """Discover candidates through Choice; authoritative identity is separate."""
+
+    try:
+        module = importlib.import_module("EmQuantAPI")
+        client = cast(ChoiceSecuritySearchClient, module.c)
+    except (ImportError, AttributeError) as error:
+        raise ChoiceSecuritySearchUnavailableError(
+            "Choice security candidate search is unavailable"
+        ) from error
+    return ChoiceSecurityCandidateSearch(client)(identifier)
+
+
+def _search_strategy_v2_baostock_candidates(identifier: str) -> tuple[str, ...]:
+    """Discover bounded names/codes; exact identity is re-queried separately."""
+
+    try:
+        client = cast(_BaoStockRuntimeClient, importlib.import_module("baostock"))
+    except ImportError as error:
+        raise BaoStockSecuritySearchUnavailableError(
+            "BaoStock security candidate search is unavailable"
+        ) from error
+    login = client.login()
+    if str(login.error_code) != "0":
+        raise BaoStockSecuritySearchUnavailableError(
+            "BaoStock security candidate search login failed"
+        )
+    try:
+        return BaoStockSecurityCandidateSearch(cast(BaoStockSecuritySearchClient, client))(
+            identifier
+        )
+    finally:
+        client.logout()
+
+
+def build_api_runtime(
+    settings: AppSettings | None = None,
+    *,
+    strategy_v2_service: StrategyV2HttpService | None = None,
+) -> ApiRuntime:
     execution = build_execution_runtime(settings)
     selected = execution.settings
     catalog = execution.catalog
@@ -250,11 +419,16 @@ def build_api_runtime(settings: AppSettings | None = None) -> ApiRuntime:
         event_preparable_codes_probe=event_preparable_codes_probe,
         event_document_text_backtest_codes_probe=event_document_text_backtest_codes_probe,
         event_document_text_preparable_codes_probe=(event_document_text_preparable_codes_probe),
+        strategy_v2_service=strategy_v2_service,
     )
 
 
-def create_configured_app(settings: AppSettings | None = None) -> FastAPI:
-    runtime = build_api_runtime(settings)
+def create_configured_app(
+    settings: AppSettings | None = None,
+    *,
+    strategy_v2_service: StrategyV2HttpService | None = None,
+) -> FastAPI:
+    runtime = build_api_runtime(settings, strategy_v2_service=strategy_v2_service)
     selected = runtime.execution.settings
     coverage_catalog = load_coverage_catalog_directory(selected.catalog_root / "coverage")
     capability_matrix = build_candidate_capability_matrix(runtime.catalog, coverage_catalog)
@@ -265,6 +439,17 @@ def create_configured_app(settings: AppSettings | None = None) -> FastAPI:
         capability_matrix=capability_matrix,
         backtest_anchor_date=runtime.execution.backtest_anchor_date,
     )
+    if strategy_v2_service is None:
+        configured_v2, unavailable_reason = _build_strategy_v2_http_service(
+            runtime,
+            candidate_transport=candidate_transport,
+            capability_matrix=capability_matrix,
+        )
+        runtime = replace(
+            runtime,
+            strategy_v2_service=configured_v2,
+            strategy_v2_unavailable_reason=unavailable_reason,
+        )
     app = create_http_app(
         compiler=compiler,
         catalog=runtime.catalog,
@@ -274,7 +459,9 @@ def create_configured_app(settings: AppSettings | None = None) -> FastAPI:
         max_body_bytes=selected.max_body_bytes,
         backtest_submission=runtime.submission,
         run_store=runtime.execution.run_store,
+        strategy_v2_service=runtime.strategy_v2_service,
         readiness_probe=_readiness_probe(runtime),
+        readiness_reasons_probe=_readiness_reasons_probe(runtime),
         event_backtest_probe=runtime.event_backtest_probe,
         event_backtest_codes_probe=runtime.event_backtest_codes_probe,
         event_preparable_codes_probe=runtime.event_preparable_codes_probe,
@@ -325,6 +512,220 @@ def _build_candidate_transport(
         response_mode=settings.candidate_provider_response_mode,
         max_request_bytes=settings.candidate_provider_max_request_bytes,
         max_response_bytes=settings.candidate_provider_max_response_bytes,
+    )
+
+
+def _build_strategy_v2_http_service(
+    runtime: ApiRuntime,
+    *,
+    candidate_transport: (DisabledCandidateJsonTransport | OpenAICompatibleCandidateTransport),
+    capability_matrix: CandidateCapabilityMatrix,
+) -> tuple[StrategyV2HttpService | None, str | None]:
+    """Build the complete v2 runtime only from explicit server configuration."""
+
+    settings = runtime.execution.settings
+    if not settings.strategy_v2_enabled:
+        return None, None
+    if not isinstance(candidate_transport, OpenAICompatibleCandidateTransport):
+        return None, "bounded candidate provider is disabled"
+    master_id = settings.strategy_v2_security_master_snapshot_id
+    default_producer_id = settings.strategy_v2_producer_snapshot_id
+    producer_ids_by_symbol = dict(settings.strategy_v2_producer_snapshot_ids)
+    signing_secret = settings.strategy_v2_receipt_signing_key
+    if master_id is None:
+        return None, "STRATEGY_V2_SECURITY_MASTER_SNAPSHOT_ID is required"
+    if signing_secret is None:
+        return None, "STRATEGY_V2_RECEIPT_SIGNING_KEY is required"
+    signing_key = signing_secret.get_secret_value().encode("utf-8")
+    if len(signing_key) < 32:
+        return None, "STRATEGY_V2_RECEIPT_SIGNING_KEY must contain at least 32 bytes"
+    if re.fullmatch(r"[0-9a-f]{40}", settings.code_revision) is None:
+        return None, "Strategy v2 requires a clean 40-character CODE_REVISION"
+    if importlib.util.find_spec("baostock") is None:
+        return None, "BaoStock security-master runtime is unavailable"
+    all_producer_ids = set(producer_ids_by_symbol.values())
+    if default_producer_id is not None:
+        all_producer_ids.add(default_producer_id)
+    for producer_id in all_producer_ids:
+        producer_manifest = (
+            settings.strategy_v2_composite_root.expanduser().resolve()
+            / producer_id.removeprefix("composite:")
+            / "snapshot_manifest.json"
+        )
+        if not producer_manifest.is_file():
+            return None, "configured Strategy v2 composite snapshot is missing"
+
+    max_age = timedelta(days=settings.strategy_v2_snapshot_max_age_days)
+    master_loader = TrustedSecurityMasterSnapshotLoader(
+        settings.strategy_v2_security_master_root,
+        max_age=max_age,
+    )
+    technical_loader = TrustedTechnicalSnapshotLoader(
+        composite_root=settings.strategy_v2_composite_root,
+        choice_root=settings.strategy_v2_choice_root,
+        technical_root=settings.strategy_v2_technical_root,
+        max_age=max_age,
+    )
+    try:
+        # Fail before announcing readiness if the configured security master is
+        # stale, missing or tampered. Per-instrument producer coverage remains
+        # an execution-time fail-closed gate.
+        trusted_master = master_loader.load(master_id)
+        metadata_by_id = {
+            producer_id: technical_loader.load_market_metadata(producer_id)
+            for producer_id in all_producer_ids
+        }
+        snapshot_resolver = ServerOwnedTrustedSnapshotResolver(
+            repository_factory=lambda selected_master: _build_strategy_v2_snapshot_repository(
+                settings,
+                trusted_master=selected_master,
+            ),
+            technical_loader=technical_loader,
+            exact_pins=producer_ids_by_symbol,
+            default_pin=default_producer_id,
+        )
+        instrument_resolver = ServerOwnedTrustedInstrumentResolver(
+            baseline_loader=master_loader,
+            baseline_snapshot_id=master_id,
+            output_root=settings.strategy_v2_security_master_root,
+            record_provider=_resolve_strategy_v2_baostock_record,
+            candidate_search=ChoiceBaoStockEastmoneyCandidateSearch(
+                choice=_search_strategy_v2_choice_candidates,
+                baostock=_search_strategy_v2_baostock_candidates,
+                eastmoney=EastmoneySecurityCandidateSearch(),
+            ),
+        )
+        artifact_store = SQLAlchemyStrategyV2ArtifactStore(
+            runtime.execution.run_store.engine,
+            initialize_schema=settings.initialize_schema,
+        )
+    except Exception as error:
+        return None, f"Strategy v2 trusted bootstrap failed: {type(error).__name__}"
+
+    receipts = ValidationReceiptServiceV2(
+        store=artifact_store,
+        signing_key=signing_key,
+        receipt_ttl=timedelta(seconds=settings.strategy_v2_receipt_ttl_seconds),
+    )
+    identity = candidate_transport.identity
+    generator = VibeBoundedCandidateGenerator(
+        candidate_transport,
+        capability_matrix=capability_matrix,
+        provider_identity=CandidateProviderIdentityView(
+            provider=identity.provider,
+            model=identity.model,
+            prompt_version=identity.prompt_version,
+            schema_version=identity.schema_version,
+        ),
+    )
+    issuer = GroundedStrategyV2Issuer(
+        generator=generator,
+        provider=identity.provider,
+        catalog=runtime.catalog,
+        receipts=receipts,
+        security_master_loader=master_loader,
+        security_master_snapshot_id=master_id,
+        technical_snapshot_loader=technical_loader,
+        producer_snapshot_id=default_producer_id,
+        backtest_anchor_date=(
+            metadata_by_id[default_producer_id].coverage.end
+            if default_producer_id is not None
+            else (
+                min(item.coverage.end for item in metadata_by_id.values())
+                if metadata_by_id
+                else trusted_master.metadata.coverage.end
+            )
+        ),
+        producer_pins={
+            symbol: StrategyV2ProducerPin(
+                snapshot_id=producer_id,
+                coverage_end=metadata_by_id[producer_id].coverage.end,
+            )
+            for symbol, producer_id in producer_ids_by_symbol.items()
+        },
+        instrument_resolver=instrument_resolver,
+        snapshot_resolver=snapshot_resolver,
+        code_revision=settings.code_revision,
+    )
+
+    def build_executor(
+        fee_provider: FeeQuoteProvider,
+        producer_id: str,
+        selected_master_id: str,
+    ) -> ExecuteStrategyV2Service:
+        return ExecuteStrategyV2Service(
+            receipt_service=receipts,
+            security_master_loader=master_loader,
+            technical_snapshot_loader=technical_loader,
+            security_master_snapshot_id=selected_master_id,
+            producer_snapshot_id=producer_id,
+            catalog=runtime.catalog,
+            code_revision=settings.code_revision,
+            calendar_factory=_strategy_v2_calendar,
+            fee_provider=fee_provider,
+            backtest_config=DailyBacktestConfig(),
+            run_id_factory=lambda: f"run:v2_{uuid.uuid4().hex}",
+            clock=lambda: datetime.now(UTC),
+        )
+
+    fee_providers: dict[tuple[AssetType, Exchange], FeeQuoteProvider] = {}
+    exchange_pairs = (
+        (Exchange.SH, AshareExchange.SHANGHAI),
+        (Exchange.SZ, AshareExchange.SHENZHEN),
+        (Exchange.BJ, AshareExchange.BEIJING),
+    )
+    for exchange, cash_equity_exchange in exchange_pairs:
+        stock_fees = bind_stock_fee_provider(
+            FeeCalculator(
+                FeePolicy(
+                    exchange=cash_equity_exchange,
+                    commission_rate=settings.strategy_v2_commission_rate,
+                    minimum_commission=Money(
+                        settings.strategy_v2_minimum_commission_cny,
+                    ),
+                )
+            )
+        )
+        etf_fees = create_etf_all_in_fee_provider(
+            exchange=exchange,
+            commission_rate=settings.strategy_v2_commission_rate,
+            minimum_commission=Money(settings.strategy_v2_minimum_commission_cny),
+        )
+        fee_providers[(AssetType.STOCK, exchange)] = stock_fees
+        fee_providers[(AssetType.ETF, exchange)] = etf_fees
+
+    def executor_for_plan(
+        instrument: InstrumentRef,
+        producer_id: str,
+        selected_master_id: str,
+    ) -> ExecuteStrategyV2Service:
+        fee_provider = fee_providers.get((instrument.asset_type, instrument.exchange))
+        if fee_provider is None:
+            raise ExecuteStrategyV2Error(
+                "capability_unavailable",
+                "server has no attested execution policy for this asset and exchange",
+            )
+        return build_executor(fee_provider, producer_id, selected_master_id)
+
+    routed_executor = AssetRoutingStrategyV2ReceiptExecutor(
+        artifacts=artifact_store,
+        executors={},
+        executor_factory=executor_for_plan,
+    )
+    return (
+        PersistedStrategyV2HttpService(
+            drafts=issuer,
+            artifacts=artifact_store,
+            executor=routed_executor,
+        ),
+        None,
+    )
+
+
+def _strategy_v2_calendar(snapshot: TrustedTechnicalSnapshot) -> TradingCalendar:
+    return TradingCalendar(
+        version=snapshot.calendar_metadata.snapshot_id,
+        sessions=tuple(item.session_date for item in snapshot.sessions),
     )
 
 
@@ -482,7 +883,18 @@ def _readiness_probe(runtime: ApiRuntime) -> Callable[[], dict[str, bool]]:
                 checks["job_queue"] = False
         else:
             checks["job_queue"] = True
+        if settings.strategy_v2_enabled:
+            checks["strategy_v2_runtime"] = runtime.strategy_v2_service is not None
         return checks
+
+    return probe
+
+
+def _readiness_reasons_probe(runtime: ApiRuntime) -> Callable[[], dict[str, str]]:
+    def probe() -> dict[str, str]:
+        if runtime.strategy_v2_unavailable_reason is None:
+            return {}
+        return {"strategy_v2_runtime": runtime.strategy_v2_unavailable_reason}
 
     return probe
 

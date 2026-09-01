@@ -21,21 +21,26 @@ from pathlib import Path
 from typing import cast
 
 from ashare_lab.domain.instruments import (
+    InstrumentAmbiguousError,
     InstrumentResolutionError,
     InstrumentResolver,
+    InstrumentUnconfirmedError,
     SecurityMasterAssetType,
     SecurityMasterRecord,
     SecurityMasterSnapshot,
 )
 from ashare_lab.domain.shared import InstrumentId
-from ashare_lab.ports.market_data import DataRequirements, DateRange
+from ashare_lab.ports.market_data import DataRequirements, DateRange, MarketDataRepository
 from ashare_lab.ports.trusted_snapshots import (
+    TrustedInstrumentSelection,
     TrustedSecurityMasterSnapshot,
     TrustedSnapshotCoverageError,
     TrustedSnapshotError,
     TrustedSnapshotExpiredError,
     TrustedSnapshotIntegrityError,
     TrustedSnapshotMetadata,
+    TrustedSnapshotProviderUnavailableError,
+    TrustedStrategyV2SnapshotSelection,
     TrustedTechnicalSnapshot,
     TrustedV2SnapshotContracts,
     build_trusted_v2_snapshot_contracts,
@@ -63,6 +68,16 @@ _SECURITY_MASTER_FILENAME = "security_master.json"
 _MANIFEST_FILENAME = "snapshot_manifest.json"
 _CHOICE_SOURCE_MANIFEST = "source/choice_snapshot_manifest.json"
 _TECHNICAL_SOURCE_MANIFEST = "source/technical_snapshot_manifest.json"
+_EVENT_SOURCE_MANIFEST = "source/event_snapshot_manifest.json"
+_CANONICAL_SECURITY_SYMBOL = re.compile(r"^[0-9]{6}\.(?:SH|SZ|BJ)$")
+
+
+def _require_composite_id(value: object) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"composite:[0-9a-f]{64}", value) is None:
+        raise TrustedSnapshotIntegrityError(
+            "Strategy v2 producer must be an outer Composite content id"
+        )
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +184,194 @@ class TrustedSecurityMasterSnapshotLoader:
         return TrustedSecurityMasterSnapshot(metadata=metadata, snapshot=snapshot, path=root)
 
 
+class ServerOwnedTrustedInstrumentResolver:
+    """Resolve a fixed identity or publish one provider-proven exact symbol.
+
+    Exact names already present in the baseline master remain supported.  A
+    miss may prepare only a canonical exchange-suffixed symbol.  This boundary
+    deliberately forbids numeric-prefix guessing, free-form name mapping, and
+    client-selected snapshot identities.
+    """
+
+    def __init__(
+        self,
+        *,
+        baseline_loader: TrustedSecurityMasterSnapshotLoader,
+        baseline_snapshot_id: str,
+        output_root: str | Path,
+        record_provider: Callable[[str], SecurityMasterRecord],
+        candidate_search: Callable[[str], tuple[str, ...]] | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._loader = baseline_loader
+        self._baseline_snapshot_id = baseline_snapshot_id
+        self._output_root = Path(output_root).expanduser().resolve()
+        self._record_provider = record_provider
+        self._candidate_search = candidate_search
+        self._clock = clock
+
+    def resolve_or_prepare(
+        self,
+        identifier: str,
+        *,
+        as_of: date,
+    ) -> TrustedInstrumentSelection:
+        baseline = self._loader.load(self._baseline_snapshot_id)
+        try:
+            instrument = InstrumentResolver(baseline.snapshot).resolve(identifier, as_of=as_of)
+        except InstrumentUnconfirmedError:
+            raw = identifier.strip()
+            canonical = raw.upper()
+            candidate_search_truncated = False
+            if _CANONICAL_SECURITY_SYMBOL.fullmatch(canonical) is not None:
+                candidate_symbols = (canonical,)
+            else:
+                if self._candidate_search is None:
+                    raise InstrumentUnconfirmedError(identifier=raw) from None
+                try:
+                    discovered_candidates = self._candidate_search(raw)
+                    candidate_search_truncated = bool(
+                        getattr(discovered_candidates, "truncated", False)
+                    )
+                    candidate_symbols = tuple(
+                        sorted(
+                            {
+                                item.strip().upper()
+                                for item in discovered_candidates
+                                if _CANONICAL_SECURITY_SYMBOL.fullmatch(item.strip().upper())
+                                is not None
+                            }
+                        )
+                    )
+                except Exception as error:
+                    raise TrustedSnapshotProviderUnavailableError(
+                        "server-owned security candidate search is unavailable"
+                    ) from error
+                if not candidate_symbols:
+                    raise InstrumentUnconfirmedError(identifier=raw) from None
+        else:
+            return TrustedInstrumentSelection(
+                instrument=instrument,
+                security_master=baseline,
+            )
+
+        resolved_records: dict[
+            str,
+            tuple[SecurityMasterRecord, TrustedInstrumentSelection | None],
+        ] = {}
+        for candidate_symbol in candidate_symbols:
+            existing = self._existing_exact(candidate_symbol, as_of=as_of)
+            if existing is not None:
+                record = next(
+                    item
+                    for item in existing.security_master.snapshot.records
+                    if item.symbol == candidate_symbol
+                )
+                if self._matches_identifier(record, raw):
+                    resolved_records[record.symbol] = (record, existing)
+                continue
+            try:
+                record = self._record_provider(candidate_symbol)
+            except InstrumentResolutionError:
+                raise
+            except Exception as error:
+                raise TrustedSnapshotProviderUnavailableError(
+                    "server-owned security-master provider could not confirm the instrument"
+                ) from error
+            if record.symbol != candidate_symbol:
+                raise TrustedSnapshotIntegrityError(
+                    "security-master provider returned a different instrument"
+                )
+            if self._matches_identifier(record, raw):
+                resolved_records[record.symbol] = (record, None)
+        if not resolved_records:
+            if candidate_search_truncated:
+                raise InstrumentAmbiguousError(
+                    identifier=raw,
+                    candidate_symbols=candidate_symbols,
+                )
+            raise InstrumentUnconfirmedError(identifier=raw)
+        if candidate_search_truncated or len(resolved_records) > 1:
+            raise InstrumentAmbiguousError(
+                identifier=raw,
+                candidate_symbols=(
+                    candidate_symbols if candidate_search_truncated else tuple(resolved_records)
+                ),
+            )
+        record, existing = next(iter(resolved_records.values()))
+        if existing is not None:
+            return existing
+        provisional = SecurityMasterSnapshot(snapshot_id="pending", records=(record,))
+        # Reject INDEX, unlisted, delisted, and non-tradable records before
+        # publishing an authority-bearing content object.
+        InstrumentResolver(provisional).resolve(record.symbol, as_of=as_of)
+        build = build_trusted_security_master_snapshot(
+            snapshot=provisional,
+            provider=record.data_source,
+            coverage=DateRange(record.listing_date, as_of),
+            generated_at=self._clock(),
+            output_root=self._output_root,
+        )
+        loaded = self._loader.load(build.metadata.snapshot_id)
+        instrument = InstrumentResolver(loaded.snapshot).resolve(record.symbol, as_of=as_of)
+        return TrustedInstrumentSelection(instrument=instrument, security_master=loaded)
+
+    @staticmethod
+    def _matches_identifier(record: SecurityMasterRecord, raw: str) -> bool:
+        if _CANONICAL_SECURITY_SYMBOL.fullmatch(raw.upper()) is not None:
+            return record.symbol == raw.upper()
+        if len(raw) == 6 and raw.isdigit():
+            return record.symbol.split(".", maxsplit=1)[0] == raw
+        normalized_query = "".join(raw.split()).casefold()
+        normalized_name = "".join(record.name.split()).casefold()
+        return bool(normalized_query) and normalized_query in normalized_name
+
+    def _existing_exact(
+        self,
+        canonical: str,
+        *,
+        as_of: date,
+    ) -> TrustedInstrumentSelection | None:
+        if not self._output_root.is_dir():
+            return None
+        candidates: list[TrustedInstrumentSelection] = []
+        for child in sorted(self._output_root.iterdir(), key=lambda item: item.name):
+            if not child.is_dir() or _SHA256.fullmatch(child.name) is None:
+                continue
+            snapshot_id = f"security_master:{child.name}"
+            if snapshot_id == self._baseline_snapshot_id:
+                continue
+            try:
+                loaded = self._loader.load(snapshot_id)
+                if loaded.metadata.coverage.end < as_of:
+                    continue
+                instrument = InstrumentResolver(loaded.snapshot).resolve(
+                    canonical,
+                    as_of=as_of,
+                )
+            except InstrumentUnconfirmedError:
+                continue
+            except TrustedSnapshotError:
+                # An unrelated stale/corrupt sibling cannot poison explicit
+                # selection of another immutable content object.
+                continue
+            candidates.append(
+                TrustedInstrumentSelection(
+                    instrument=instrument,
+                    security_master=loaded,
+                )
+            )
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: (
+                item.security_master.metadata.generated_at,
+                item.security_master.metadata.snapshot_id,
+            )
+        )
+        return candidates[0]
+
+
 class TrustedTechnicalSnapshotLoader:
     """Pin and read one trusted daily producer without accepting a client path."""
 
@@ -194,14 +397,42 @@ class TrustedTechnicalSnapshotLoader:
         self._max_age = _validated_max_age(max_age)
         self._clock = clock
 
-    def load(
+    def load_market_metadata(
         self,
-        *,
         producer_snapshot_id: object,
-        instrument_id: InstrumentId,
-        period: DateRange,
-        security_master: TrustedSecurityMasterSnapshot,
-    ) -> TrustedTechnicalSnapshot:
+    ) -> TrustedSnapshotMetadata:
+        """Load the immutable market coverage used to anchor relative periods.
+
+        This performs content-id and registered source-manifest verification;
+        callers never derive a relative period from a client date or from an
+        unverified JSON field.
+        """
+
+        producer_id, producer_path, manifest = self._producer_manifest(
+            producer_snapshot_id,
+        )
+        source_manifest = _technical_source_manifest(producer_path, manifest)
+        if manifest.get("schemaVersion") == "ashare-lab.composite-research-snapshot.v2":
+            files = _manifest_files(manifest)
+            relative = (
+                _CHOICE_SOURCE_MANIFEST
+                if _CHOICE_SOURCE_MANIFEST in files
+                else _TECHNICAL_SOURCE_MANIFEST
+            )
+            _verify_file(producer_path / relative, files[relative])
+        market_metadata, calendar_metadata = _technical_metadata(
+            producer_snapshot_id=producer_id,
+            manifest=manifest,
+            source_manifest=source_manifest,
+        )
+        _require_fresh(market_metadata, max_age=self._max_age, clock=self._clock)
+        _require_fresh(calendar_metadata, max_age=self._max_age, clock=self._clock)
+        return market_metadata
+
+    def _producer_manifest(
+        self,
+        producer_snapshot_id: object,
+    ) -> tuple[str, Path, Mapping[str, object]]:
         if not isinstance(producer_snapshot_id, str):
             raise TrustedSnapshotIntegrityError(
                 "producer snapshot id must be composite|choice|technical:<sha256>"
@@ -218,6 +449,26 @@ class TrustedTechnicalSnapshotLoader:
                 f"server has no trusted {profile} snapshot root configured"
             )
         producer_path = _safe_content_child(selected_root, match.group("digest"))
+        manifest = _load_json(producer_path / _MANIFEST_FILENAME, "producer manifest")
+        _validate_content_identity(
+            manifest,
+            expected_id=producer_snapshot_id,
+            expected_prefix=profile,
+            expected_digest=match.group("digest"),
+        )
+        return producer_snapshot_id, producer_path, manifest
+
+    def load(
+        self,
+        *,
+        producer_snapshot_id: object,
+        instrument_id: InstrumentId,
+        period: DateRange,
+        security_master: TrustedSecurityMasterSnapshot,
+    ) -> TrustedTechnicalSnapshot:
+        producer_snapshot_id, producer_path, manifest = self._producer_manifest(
+            producer_snapshot_id,
+        )
         try:
             resolver = InstrumentResolver(security_master.snapshot)
             resolver.resolve(str(instrument_id), as_of=period.start)
@@ -249,15 +500,26 @@ class TrustedTechnicalSnapshotLoader:
         except MarketDataCapabilityError as exc:
             raise TrustedSnapshotCoverageError(str(exc)) from exc
 
-        manifest = _load_json(producer_path / _MANIFEST_FILENAME, "producer manifest")
         source_manifest = _technical_source_manifest(producer_path, manifest)
         market_metadata, calendar_metadata = _technical_metadata(
             producer_snapshot_id=producer_snapshot_id,
             manifest=manifest,
             source_manifest=source_manifest,
         )
+        producer_metadata = _producer_metadata(
+            producer_snapshot_id=producer_snapshot_id,
+            manifest=manifest,
+            market_metadata=market_metadata,
+        )
+        producer_children = _composite_child_metadata(
+            producer_path=producer_path,
+            manifest=manifest,
+            technical_source_manifest=source_manifest,
+        )
         _require_fresh(market_metadata, max_age=self._max_age, clock=self._clock)
         _require_fresh(calendar_metadata, max_age=self._max_age, clock=self._clock)
+        for child in producer_children:
+            _require_fresh(child, max_age=self._max_age, clock=self._clock)
         if (
             period.start < market_metadata.coverage.start
             or period.end > market_metadata.coverage.end
@@ -310,6 +572,133 @@ class TrustedTechnicalSnapshotLoader:
             signal_bars=signal_bars,
             sessions=sessions,
             corporate_actions=corporate_actions,
+            producer_metadata=producer_metadata,
+            producer_children=producer_children,
+        )
+
+
+class ServerOwnedTrustedSnapshotResolver:
+    """Prepare/select one technical Composite before validation, never at execution.
+
+    Exact server pins remain useful for release evidence.  They are not a
+    whitelist: every other authoritative STOCK/ETF identity is routed through
+    the injected on-demand repository, whose preparer owns Choice-first and
+    configured public-source fallback policy.  Neither HTTP nor the language
+    model can provide a provider, path, or snapshot id.
+    """
+
+    def __init__(
+        self,
+        *,
+        repository: MarketDataRepository | None = None,
+        repository_factory: (
+            Callable[[TrustedSecurityMasterSnapshot], MarketDataRepository] | None
+        ) = None,
+        technical_loader: TrustedTechnicalSnapshotLoader,
+        exact_pins: Mapping[str, str] | None = None,
+        default_pin: str | None = None,
+    ) -> None:
+        if (repository is None) == (repository_factory is None):
+            raise ValueError("configure exactly one Strategy v2 snapshot repository source")
+        self._repository = repository
+        self._repository_factory = repository_factory
+        self._technical_loader = technical_loader
+        self._exact_pins = dict(exact_pins or {})
+        self._default_pin = default_pin
+        for symbol, snapshot_id in self._exact_pins.items():
+            if re.fullmatch(r"[0-9]{6}\.(?:SH|SZ|BJ)", symbol) is None:
+                raise ValueError("Strategy v2 exact producer pin symbol is invalid")
+            _require_composite_id(snapshot_id)
+        if default_pin is not None:
+            _require_composite_id(default_pin)
+
+    def resolve_or_prepare(
+        self,
+        *,
+        instrument_id: InstrumentId,
+        requested_period: DateRange,
+        security_master: TrustedSecurityMasterSnapshot,
+    ) -> TrustedStrategyV2SnapshotSelection:
+        symbol = str(instrument_id)
+        exact = self._exact_pins.get(symbol)
+        if exact is not None:
+            return self._validated_selection(
+                exact,
+                instrument_id=instrument_id,
+                period=requested_period,
+                security_master=security_master,
+            )
+
+        # A legacy single pin is only a local optimization. If it belongs to a
+        # different instrument/range, continue to the general acquisition path.
+        if self._default_pin is not None:
+            try:
+                return self._validated_selection(
+                    self._default_pin,
+                    instrument_id=instrument_id,
+                    period=requested_period,
+                    security_master=security_master,
+                )
+            except TrustedSnapshotCoverageError:
+                pass
+
+        requirements = DataRequirements(
+            instruments=(instrument_id,),
+            datasets=("daily_ohlcv", "corporate_actions"),
+        )
+        try:
+            repository = (
+                self._repository
+                if self._repository is not None
+                else cast(
+                    Callable[[TrustedSecurityMasterSnapshot], MarketDataRepository],
+                    self._repository_factory,
+                )(security_master)
+            )
+            pinned = repository.pin_snapshot(requirements, requested_period)
+        except (MarketDataCapabilityError, SnapshotRegistryNoMatchError) as error:
+            raise TrustedSnapshotCoverageError(
+                "server-owned Strategy v2 acquisition could not prove requested coverage"
+            ) from error
+        except (SnapshotIntegrityError, SnapshotRegistryIntegrityError) as error:
+            raise TrustedSnapshotIntegrityError(
+                "server-owned Strategy v2 acquisition failed integrity validation"
+            ) from error
+        producer_id = pinned.producer_snapshot_id
+        if producer_id is None:
+            raise TrustedSnapshotIntegrityError(
+                "prepared Strategy v2 selection is missing its outer producer identity"
+            )
+        return self._validated_selection(
+            producer_id,
+            instrument_id=instrument_id,
+            period=requested_period,
+            security_master=security_master,
+        )
+
+    def _validated_selection(
+        self,
+        producer_snapshot_id: str,
+        *,
+        instrument_id: InstrumentId,
+        period: DateRange,
+        security_master: TrustedSecurityMasterSnapshot,
+    ) -> TrustedStrategyV2SnapshotSelection:
+        _require_composite_id(producer_snapshot_id)
+        loaded = self._technical_loader.load(
+            producer_snapshot_id=producer_snapshot_id,
+            instrument_id=instrument_id,
+            period=period,
+            security_master=security_master,
+        )
+        producer = loaded.producer_metadata
+        if producer is None or producer.snapshot_id != producer_snapshot_id:
+            raise TrustedSnapshotIntegrityError(
+                "technical selection does not bind the requested outer Composite"
+            )
+        return TrustedStrategyV2SnapshotSelection(
+            producer_snapshot_id=producer_snapshot_id,
+            coverage_end=loaded.market_data_metadata.coverage.end,
         )
 
 
@@ -521,6 +910,179 @@ def _technical_metadata(
     )
 
 
+def _producer_metadata(
+    *,
+    producer_snapshot_id: str,
+    manifest: Mapping[str, object],
+    market_metadata: TrustedSnapshotMetadata,
+) -> TrustedSnapshotMetadata:
+    prefix, digest = producer_snapshot_id.split(":", 1)
+    if _SHA256.fullmatch(digest) is None:
+        raise TrustedSnapshotIntegrityError("producer snapshot content id is invalid")
+    schema = _text(manifest.get("schemaVersion"), "producer snapshot schema")
+    if prefix == "composite":
+        generated_at = _timestamp(manifest.get("composedAt"), "composite composedAt")
+        provider = "ashare-lab composite snapshot"
+    else:
+        generated_at = _timestamp(manifest.get("capturedAt"), "producer capturedAt")
+        provider = market_metadata.provider
+    return TrustedSnapshotMetadata(
+        snapshot_id=producer_snapshot_id,
+        provider=provider,
+        schema_version=schema,
+        content_hash=f"sha256:{digest}",
+        coverage=market_metadata.coverage,
+        generated_at=generated_at,
+    )
+
+
+def _composite_child_metadata(
+    *,
+    producer_path: Path,
+    manifest: Mapping[str, object],
+    technical_source_manifest: Mapping[str, object],
+) -> tuple[TrustedSnapshotMetadata, ...]:
+    """Bind every registered Composite child, not only derived price files."""
+
+    if manifest.get("schemaVersion") != "ashare-lab.composite-research-snapshot.v2":
+        return ()
+    files = _manifest_files(manifest)
+    technical_relative = (
+        _CHOICE_SOURCE_MANIFEST if _CHOICE_SOURCE_MANIFEST in files else _TECHNICAL_SOURCE_MANIFEST
+    )
+    if technical_relative not in files or _EVENT_SOURCE_MANIFEST not in files:
+        raise TrustedSnapshotIntegrityError(
+            "composite snapshot does not register every child manifest"
+        )
+    _verify_file(producer_path / technical_relative, files[technical_relative])
+    _verify_file(producer_path / _EVENT_SOURCE_MANIFEST, files[_EVENT_SOURCE_MANIFEST])
+    event_source_manifest = _load_json(
+        producer_path / _EVENT_SOURCE_MANIFEST,
+        "event source manifest",
+    )
+    raw_children = manifest.get("baseSnapshots")
+    if not isinstance(raw_children, Mapping):
+        raise TrustedSnapshotIntegrityError("composite baseSnapshots is missing")
+    children = cast(Mapping[object, object], raw_children)
+    technical_key = "choice" if technical_relative == _CHOICE_SOURCE_MANIFEST else "technical"
+    if set(children) != {technical_key, "events"}:
+        raise TrustedSnapshotIntegrityError(
+            "composite baseSnapshots must contain exactly technical prices and events"
+        )
+    technical = _validated_composite_child(
+        child=children[technical_key],
+        source_manifest=technical_source_manifest,
+        source_path=producer_path / technical_relative,
+        provider=_text(
+            technical_source_manifest.get("provider"),
+            "technical child provider",
+        ),
+        coverage=_technical_source_coverage(technical_source_manifest),
+    )
+    event = _validated_composite_child(
+        child=children["events"],
+        source_manifest=event_source_manifest,
+        source_path=producer_path / _EVENT_SOURCE_MANIFEST,
+        provider=_event_child_provider(event_source_manifest),
+        coverage=_coverage(
+            event_source_manifest.get("acquisitionCoverage"),
+            "event child",
+        ),
+    )
+    return tuple(sorted((technical, event), key=lambda item: item.snapshot_id))
+
+
+def _validated_composite_child(
+    *,
+    child: object,
+    source_manifest: Mapping[str, object],
+    source_path: Path,
+    provider: str,
+    coverage: DateRange,
+) -> TrustedSnapshotMetadata:
+    if not isinstance(child, Mapping):
+        raise TrustedSnapshotIntegrityError("composite child declaration is invalid")
+    typed = cast(Mapping[object, object], child)
+    snapshot_id = _text(typed.get("snapshotId"), "composite child snapshot id")
+    schema_version = _text(typed.get("schemaVersion"), "composite child schema")
+    manifest_hash = _text(typed.get("manifestSha256"), "composite child manifest hash")
+    if _SHA256.fullmatch(manifest_hash) is None or _sha256_file(source_path) != manifest_hash:
+        raise TrustedSnapshotIntegrityError("composite child manifest hash mismatch")
+    if (
+        source_manifest.get("snapshotId") != snapshot_id
+        or source_manifest.get("schemaVersion") != schema_version
+    ):
+        raise TrustedSnapshotIntegrityError(
+            "composite child declaration differs from its frozen manifest"
+        )
+    try:
+        prefix, digest = snapshot_id.split(":", maxsplit=1)
+    except ValueError as error:
+        raise TrustedSnapshotIntegrityError("composite child snapshot id is invalid") from error
+    if not prefix or _SHA256.fullmatch(digest) is None:
+        raise TrustedSnapshotIntegrityError("composite child snapshot id is invalid")
+    _validate_content_identity(
+        source_manifest,
+        expected_id=snapshot_id,
+        expected_prefix=prefix,
+        expected_digest=digest,
+    )
+    return TrustedSnapshotMetadata(
+        snapshot_id=snapshot_id,
+        provider=provider,
+        schema_version=schema_version,
+        content_hash=f"sha256:{manifest_hash}",
+        coverage=coverage,
+        generated_at=_timestamp(
+            source_manifest.get("capturedAt"),
+            "composite child capturedAt",
+        ),
+    )
+
+
+def _technical_source_coverage(source_manifest: Mapping[str, object]) -> DateRange:
+    requested = source_manifest.get("requestedRange")
+    if not isinstance(requested, list):
+        raise TrustedSnapshotIntegrityError("technical child requestedRange is invalid")
+    typed = cast(list[object], requested)
+    if len(typed) != 2 or any(not isinstance(item, str) for item in typed):
+        raise TrustedSnapshotIntegrityError("technical child requestedRange is invalid")
+    try:
+        return DateRange(
+            date.fromisoformat(cast(str, typed[0])),
+            date.fromisoformat(cast(str, typed[1])),
+        )
+    except ValueError as error:
+        raise TrustedSnapshotIntegrityError("technical child requestedRange is invalid") from error
+
+
+def _event_child_provider(source_manifest: Mapping[str, object]) -> str:
+    coverage = source_manifest.get("acquisitionCoverage")
+    if not isinstance(coverage, Mapping):
+        raise TrustedSnapshotIntegrityError("event child acquisitionCoverage is missing")
+    typed = cast(Mapping[object, object], coverage)
+    audit = typed.get("auditSummary")
+    successful: object = None
+    if isinstance(audit, Mapping):
+        successful = cast(Mapping[object, object], audit).get("successfulProviders")
+    providers = (
+        tuple(
+            sorted(
+                item
+                for item in cast(list[object], successful)
+                if isinstance(item, str) and item.strip()
+            )
+        )
+        if isinstance(successful, list)
+        else ()
+    )
+    if providers:
+        return "event-fusion[" + ",".join(providers) + "]"
+    if typed.get("mode") == "no_event_required":
+        return "no-event-required"
+    raise TrustedSnapshotIntegrityError("event child has no successful provider evidence")
+
+
 def _calendar_acquired_at(
     session_reference: Mapping[object, object],
     *,
@@ -694,6 +1256,8 @@ __all__ = [
     "CALENDAR_SNAPSHOT_SCHEMA_VERSION",
     "SECURITY_MASTER_SNAPSHOT_SCHEMA_VERSION",
     "SecurityMasterInstrumentNormalizer",
+    "ServerOwnedTrustedInstrumentResolver",
+    "ServerOwnedTrustedSnapshotResolver",
     "TrustedSecurityMasterSnapshot",
     "TrustedSecurityMasterSnapshotBuild",
     "TrustedSecurityMasterSnapshotLoader",
@@ -702,6 +1266,7 @@ __all__ = [
     "TrustedSnapshotExpiredError",
     "TrustedSnapshotIntegrityError",
     "TrustedSnapshotMetadata",
+    "TrustedSnapshotProviderUnavailableError",
     "TrustedTechnicalSnapshot",
     "TrustedTechnicalSnapshotLoader",
     "TrustedV2SnapshotContracts",

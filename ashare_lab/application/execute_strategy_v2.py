@@ -9,11 +9,13 @@ place in this API.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from typing import cast
 
 from ashare_lab.application.daily_backtest import (
     DailyBacktestConfig,
@@ -21,6 +23,7 @@ from ashare_lab.application.daily_backtest import (
     FeeQuoteProvider,
     SessionCalendar,
 )
+from ashare_lab.application.result_views import build_result_bundle
 from ashare_lab.application.technical_v2 import (
     TechnicalV2BacktestInput,
     TechnicalV2ExecutionError,
@@ -29,12 +32,14 @@ from ashare_lab.application.technical_v2 import (
 from ashare_lab.application.validation_receipts_v2 import (
     PersistentPlanRecoveryError,
     ValidationReceiptServiceV2,
+    snapshot_bindings_hash,
 )
 from ashare_lab.domain.catalog import CatalogSnapshot
 from ashare_lab.domain.runs import (
     DraftRevisionV2,
     RunManifestV2,
     SnapshotBindingV2,
+    StoredRunResultV2,
     canonical_signal_records_json,
 )
 from ashare_lab.domain.shared import InstrumentId, require_aware
@@ -180,6 +185,8 @@ class ExecuteStrategyV2Service:
                     contracts.security_master,
                     contracts.trading_calendar,
                     contracts.market_data,
+                    *contracts.producer_children,
+                    contracts.composite_snapshot,
                 ),
             )
         except PersistentPlanRecoveryError as error:
@@ -197,6 +204,8 @@ class ExecuteStrategyV2Service:
                 contracts.security_master,
                 contracts.trading_calendar,
                 contracts.market_data,
+                *contracts.producer_children,
+                contracts.composite_snapshot,
             ),
             code_revision=plan.code_revision,
             backtest_config=self._backtest_config,
@@ -237,7 +246,21 @@ class ExecuteStrategyV2Service:
             signal_records_json=canonical_signal_records_json(completed.signal_records),
             created_at=created_at,
         )
-        store.append_run_manifest(manifest)
+        result_bundle = build_result_bundle(
+            completed.result,
+            run_id=run_id,
+            period_start=record.strategy.backtest.start,
+            period_end=record.strategy.backtest.end,
+            manifest=_result_view_manifest(manifest),
+        )
+        stored_result = StoredRunResultV2.from_payload(
+            run_id=run_id,
+            manifest_hash=manifest.manifest_hash,
+            engine_result_hash=manifest.engine_result_hash,
+            payload=result_bundle,
+            created_at=created_at,
+        )
+        store.append_completed_run(manifest, stored_result)
         return ExecuteStrategyV2Result(
             run_id=run_id,
             result=completed.result,
@@ -261,12 +284,17 @@ def derive_technical_engine_run_key(
         raise ValueError("code_revision must be a complete 40-character Git SHA")
     if (
         type(snapshot_bindings) is not tuple
-        or len(snapshot_bindings) != 3
+        or len(snapshot_bindings) != 4
         or any(type(item) is not SnapshotBindingV2 for item in snapshot_bindings)
         or {item.kind for item in snapshot_bindings}
-        != {"security_master", "trading_calendar", "market_data"}
+        != {
+            "security_master",
+            "trading_calendar",
+            "market_data",
+            "composite_snapshot",
+        }
     ):
-        raise ValueError("exactly three typed snapshot bindings are required")
+        raise ValueError("exactly four typed snapshot bindings are required")
     asset_type, policy_version, parameters_hash = _fee_provider_identity(fee_provider)
 
     payload = {
@@ -305,6 +333,39 @@ def _backtest_config_payload(config: DailyBacktestConfig) -> dict[str, object]:
         "retry_unfilled_exits": config.retry_unfilled_exits,
         "slippage_bps": _decimal_text(config.slippage_bps),
         "state_entry_validity_sessions": config.state_entry_validity_sessions,
+    }
+
+
+def _result_view_manifest(manifest: RunManifestV2) -> dict[str, object]:
+    decoded: object = json.loads(manifest.backtest_config_json)
+    if not isinstance(decoded, dict):
+        raise ValueError("stored backtest config must be a JSON object")
+    raw_assumptions = cast(dict[object, object], decoded)
+    if any(not isinstance(key, str) for key in raw_assumptions):
+        raise ValueError("stored backtest config keys must be text")
+    assumptions = {cast(str, key): value for key, value in raw_assumptions.items()}
+    assumptions.update(
+        {
+            "fee_policy_hash": manifest.fee_policy_hash,
+            "fee_policy_version": manifest.fee_policy_version,
+        }
+    )
+    producer = manifest.composite_snapshot
+    if producer is None:
+        raise ValueError("P0-D result requires the outer composite snapshot identity")
+    return {
+        "assumptions": assumptions,
+        "catalog_hash": manifest.catalog_hash,
+        "code_revision": manifest.code_revision,
+        "data_snapshot": {
+            "checksum": manifest.market_data.content_hash,
+            "producer_schema_version": producer.schema_version,
+            "producer_snapshot_id": producer.snapshot_id,
+            "schema_version": manifest.market_data.schema_version,
+            "snapshot_id": manifest.market_data.snapshot_id,
+        },
+        "engine_version": "ashare-lab.strategy-v2-daily.v1",
+        "strategy_hash": manifest.strategy_hash,
     }
 
 
@@ -368,6 +429,13 @@ def _current_validation_context(
         )
         for grounding in strategy.interpretation_coverage.groundings
     )
+    bindings = (
+        contracts.security_master,
+        contracts.trading_calendar,
+        contracts.market_data,
+        *contracts.producer_children,
+        contracts.composite_snapshot,
+    )
     return StrategyV2ValidationContext(
         security_master=master.snapshot,
         original_input=draft.original_input,
@@ -380,6 +448,9 @@ def _current_validation_context(
         dataset_coverage=(contracts.dataset_coverage,),
         grounding_expectations=grounding_expectations,
         code_revision=code_revision,
+        trading_calendar_snapshot_id=contracts.trading_calendar.snapshot_id,
+        composite_snapshot_id=contracts.composite_snapshot.snapshot_id,
+        snapshot_bindings_hash=snapshot_bindings_hash(bindings),
     )
 
 

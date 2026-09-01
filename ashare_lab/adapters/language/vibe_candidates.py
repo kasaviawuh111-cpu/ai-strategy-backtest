@@ -38,6 +38,7 @@ from ashare_lab.domain.events.catalog import (
 from ashare_lab.domain.strategy.canonical import canonical_hash
 from ashare_lab.domain.strategy.models import JsonScalar
 from ashare_lab.ports.candidate_generation import (
+    BoundedCandidateBoundary,
     CandidateAst,
     CandidateGenerator,
     CandidateGroundingEvidence,
@@ -636,6 +637,12 @@ class VibeBoundedCandidateGenerator:
         self._capability_matrix = capability_matrix
         self._provider_identity = provider_identity
         self._min_confidence = min_confidence
+
+    @property
+    def boundary(self) -> BoundedCandidateBoundary:
+        """Identify the schema-constrained candidate boundary to application code."""
+
+        return "schema_bounded_candidate.v1"
 
     @property
     def capability_projection_version(self) -> str | None:

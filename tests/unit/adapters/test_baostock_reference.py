@@ -13,6 +13,7 @@ from ashare_lab.adapters.market_data.baostock_reference import (
     BaoStockReferenceError,
     to_choice_snapshot_payload,
 )
+from ashare_lab.domain.instruments import AssetType, SecurityMasterAssetType
 from ashare_lab.domain.market_data import Board, CorporateActionKind, TimeQuality
 
 BASIC_FIELDS = ("code", "code_name", "ipoDate", "outDate", "type", "status")
@@ -342,9 +343,9 @@ def test_rejects_non_cny_stock_or_exchange_mismatch_before_query(symbol: str) ->
     assert client.calls == []
 
 
-def test_requires_type_one_and_consistent_delisting_metadata() -> None:
+def test_rejects_index_execution_and_requires_consistent_delisting_metadata() -> None:
     type_client = _client(basic=_basic_result(stock_type="2"))
-    with pytest.raises(BaoStockReferenceError, match="type=1") as type_error:
+    with pytest.raises(BaoStockReferenceError, match="index") as type_error:
         BaoStockReferenceAdapter(type_client).prepare(
             symbol="300059.SZ",
             start=date(2024, 1, 1),
@@ -368,6 +369,69 @@ def test_requires_type_one_and_consistent_delisting_metadata() -> None:
     )
     assert result.instrument.status is BaoStockListingStatus.DELISTED
     assert result.instrument.delisting_date == date(2025, 2, 1)
+
+
+def test_resolves_stock_etf_and_index_from_baostock_basic_without_history() -> None:
+    etf_client = _client(
+        basic=_basic_result(
+            code="sh.510300",
+            name="华泰柏瑞沪深300ETF",
+            ipo_date="2012-05-28",
+            stock_type="5",
+        )
+    )
+    etf = BaoStockReferenceAdapter(etf_client).resolve_security_master(symbol="510300.SH")
+
+    assert etf.record.asset_type is SecurityMasterAssetType.ETF
+    assert etf.record.symbol == "510300.SH"
+    assert etf.record.tradable is True
+    assert etf_client.calls == [("query_stock_basic", "sh.510300", None)]
+    assert etf.query_audit.normalized_response_sha256 in etf.record.data_source
+
+    index_client = _client(
+        basic=_basic_result(
+            code="sh.000300",
+            name="沪深300",
+            ipo_date="2005-04-08",
+            stock_type="2",
+        )
+    )
+    index = BaoStockReferenceAdapter(index_client).resolve_security_master(symbol="000300.SH")
+
+    assert index.record.asset_type is SecurityMasterAssetType.INDEX
+    assert index_client.calls == [("query_stock_basic", "sh.000300", None)]
+
+
+def test_etf_reference_collects_sessions_without_masquerading_as_action_coverage() -> None:
+    client = _client(
+        basic=_basic_result(
+            code="sh.510300",
+            name="华泰柏瑞沪深300ETF",
+            ipo_date="2012-05-28",
+            stock_type="5",
+        )
+    )
+
+    result = BaoStockReferenceAdapter(client).prepare(
+        symbol="510300.SH",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        captured_at=CAPTURED_AT,
+    )
+
+    assert result.instrument.asset_type is AssetType.ETF
+    assert result.instrument.board is Board.STOCK_ETF
+    assert result.corporate_actions == ()
+    assert result.coverage["status"] == "reference_only"
+    assert result.coverage["coverageScope"] == (
+        "identity_and_sessions_only_not_etf_corporate_actions"
+    )
+    assert [call[0] for call in client.calls] == [
+        "query_stock_basic",
+        "query_history_k_data_plus",
+    ]
+    payload = to_choice_snapshot_payload(result)
+    assert payload["instrument"]["asset_type"] == "ETF"  # type: ignore[index]
 
 
 def test_all_requested_years_must_succeed_even_for_complete_zero_result() -> None:

@@ -16,10 +16,7 @@ from ashare_lab.adapters.market_data import (
 )
 from ashare_lab.adapters.market_data import choice_snapshot as choice_snapshot_module
 from ashare_lab.adapters.market_data import trusted_snapshots as trusted_snapshots_module
-from ashare_lab.adapters.market_data.local_parquet import (
-    LocalParquetMarketDataRepository,
-    MarketDataSchemaError,
-)
+from ashare_lab.adapters.market_data.local_parquet import LocalParquetMarketDataRepository
 from ashare_lab.adapters.market_data.trusted_snapshots import (
     SecurityMasterInstrumentNormalizer,
     TrustedSecurityMasterSnapshotLoader,
@@ -30,6 +27,7 @@ from ashare_lab.adapters.market_data.trusted_snapshots import (
     build_trusted_security_master_snapshot,
     build_trusted_v2_snapshot_contracts,
 )
+from ashare_lab.application.validation_receipts_v2 import snapshot_bindings_hash
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.instruments import (
     Exchange,
@@ -192,17 +190,21 @@ def test_composite_loader_reuses_registry_for_market_and_calendar(tmp_path: Path
     producer_snapshot_id = manifest["snapshotId"]
     security_master = _load_security_master(tmp_path / "security-master")
 
-    loaded = TrustedTechnicalSnapshotLoader(
+    loader = TrustedTechnicalSnapshotLoader(
         composite_root=registry_root,
         max_age=timedelta(days=7),
         clock=lambda: datetime(2025, 2, 2, 10, tzinfo=UTC),
-    ).load(
+    )
+    metadata = loader.load_market_metadata(producer_snapshot_id)
+    loaded = loader.load(
         producer_snapshot_id=producer_snapshot_id,
         instrument_id=InstrumentId("300059.SZ"),
         period=DateRange(date(2025, 1, 2), date(2025, 1, 10)),
         security_master=security_master,
     )
 
+    assert metadata == loaded.market_data_metadata
+    assert metadata.coverage.end == date(2025, 1, 10)
     assert loaded.market_data_metadata.provider == "Choice Quant API"
     assert loaded.calendar_metadata.provider == "BaoStock Python API"
     assert loaded.market_data_metadata.coverage == DateRange(date(2025, 1, 2), date(2025, 1, 10))
@@ -222,6 +224,13 @@ def test_composite_loader_reuses_registry_for_market_and_calendar(tmp_path: Path
     assert contracts.security_master.snapshot_id == security_master.metadata.snapshot_id
     assert contracts.trading_calendar.snapshot_id == loaded.calendar_metadata.snapshot_id
     assert contracts.market_data.snapshot_id == loaded.market_data_metadata.snapshot_id
+    assert {item.snapshot_id for item in contracts.producer_children} == {
+        item.snapshot_id for item in loaded.producer_children
+    }
+    assert {item.snapshot_id.split(":", maxsplit=1)[0] for item in contracts.producer_children} == {
+        "choice",
+        "events",
+    }
     assert contracts.dataset_coverage.source_refs[0].provider == "Choice Quant API"
     assert (
         contracts.dataset_coverage.source_refs[0].content_sha256
@@ -311,6 +320,17 @@ def test_composite_loader_reuses_registry_for_market_and_calendar(tmp_path: Path
             ),
         ),
         code_revision="1" * 40,
+        trading_calendar_snapshot_id=contracts.trading_calendar.snapshot_id,
+        composite_snapshot_id=contracts.composite_snapshot.snapshot_id,
+        snapshot_bindings_hash=snapshot_bindings_hash(
+            (
+                contracts.security_master,
+                contracts.trading_calendar,
+                contracts.market_data,
+                *contracts.producer_children,
+                contracts.composite_snapshot,
+            )
+        ),
     )
     plan = validate_strategy_candidate_v2(candidate, context)
     assert plan.strategy.instrument.symbol == "300059.SZ"
@@ -570,19 +590,21 @@ def test_etf_requires_security_master_allowlist_and_index_stays_rejected(
     composite_root = tmp_path / "composite"
     composite_root.mkdir()
 
-    # The v1 default remains stock-only; an ETF is accepted only through the
-    # exact security-master allowlist injected by the v2 trusted loader.
-    with pytest.raises(MarketDataSchemaError, match="outside the supported"):
-        LocalParquetMarketDataRepository(
-            choice_path,
-            profile="choice_snapshot",
-        ).pin_snapshot(
-            DataRequirements(
-                instruments=(InstrumentId("510300.SH"),),
-                datasets=("daily_ohlcv", "corporate_actions"),
-            ),
-            DateRange(date(2025, 1, 2), date(2025, 1, 10)),
-        )
+    # The low-level Parquet key parser now accepts the explicit SH/SZ ETF code
+    # spaces.  That is not execution authority: the trusted loader below still
+    # requires an exact, tradable ETF record in the server-owned master.
+    low_level = LocalParquetMarketDataRepository(
+        choice_path,
+        profile="choice_snapshot",
+    ).pin_snapshot(
+        DataRequirements(
+            instruments=(InstrumentId("510300.SH"),),
+            datasets=("daily_ohlcv", "corporate_actions"),
+        ),
+        DateRange(date(2025, 1, 2), date(2025, 1, 10)),
+    )
+    assert str(low_level.snapshot_id).startswith("snapshot:")
+    assert low_level.checksum.startswith("sha256:")
 
     loader = TrustedTechnicalSnapshotLoader(
         composite_root=composite_root,
@@ -590,6 +612,14 @@ def test_etf_requires_security_master_allowlist_and_index_stays_rejected(
         max_age=timedelta(days=7),
         clock=lambda: datetime(2025, 2, 2, 10, tzinfo=UTC),
     )
+    with pytest.raises(TrustedSnapshotCoverageError, match="确认标的"):
+        loader.load(
+            producer_snapshot_id=producer_snapshot_id,
+            instrument_id=InstrumentId("510300.SH"),
+            period=DateRange(date(2025, 1, 2), date(2025, 1, 10)),
+            security_master=_load_security_master(tmp_path / "stock-only-master"),
+        )
+
     loaded = loader.load(
         producer_snapshot_id=producer_snapshot_id,
         instrument_id=InstrumentId("510300.SH"),

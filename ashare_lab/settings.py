@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -123,11 +125,53 @@ class AppSettings(BaseSettings):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
     )
 
+    # Strategy v2 is opt-in and server-owned. These values locate immutable
+    # content objects; no equivalent path, snapshot id or signing key is
+    # accepted from HTTP or the language provider.
+    strategy_v2_enabled: bool = False
+    strategy_v2_security_master_root: Path = Path("var/snapshots/security_master")
+    strategy_v2_security_master_snapshot_id: str | None = Field(
+        default=None,
+        pattern=r"^security_master:[0-9a-f]{64}$",
+    )
+    strategy_v2_composite_root: Path = Path("var/snapshots/composite")
+    strategy_v2_choice_root: Path | None = None
+    strategy_v2_technical_root: Path | None = None
+    strategy_v2_producer_snapshot_id: str | None = Field(
+        default=None,
+        pattern=r"^composite:[0-9a-f]{64}$",
+    )
+    # Optional exact instrument pins for independently published immutable
+    # producers. The browser/model never selects or overrides this map.
+    strategy_v2_producer_snapshot_ids: dict[str, str] = Field(default_factory=dict)
+    strategy_v2_receipt_signing_key: SecretStr | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
+    strategy_v2_receipt_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
+    strategy_v2_snapshot_max_age_days: int = Field(default=30, ge=1, le=3650)
+    strategy_v2_commission_rate: Decimal = Field(
+        default=Decimal("0.0003"),
+        ge=Decimal("0"),
+        le=Decimal("0.01"),
+    )
+    strategy_v2_minimum_commission_cny: Decimal = Field(
+        default=Decimal("5"),
+        ge=Decimal("0"),
+        le=Decimal("1000"),
+    )
+
     @model_validator(mode="after")
     def candidate_provider_configuration_is_safe(self) -> AppSettings:
         """Fail closed for partial provider configuration without exposing secrets."""
 
         self._validate_cors_origins()
+        for symbol, snapshot_id in self.strategy_v2_producer_snapshot_ids.items():
+            if re.fullmatch(r"[0-9]{6}\.(?:SH|SZ|BJ)", symbol) is None:
+                raise ValueError("Strategy v2 producer map contains an invalid A-share symbol")
+            if re.fullmatch(r"composite:[0-9a-f]{64}", snapshot_id) is None:
+                raise ValueError("Strategy v2 producer map requires Composite content ids")
         if self.candidate_provider_mode == "disabled":
             return self
         if self.candidate_provider_endpoint is None or self.candidate_provider_model is None:

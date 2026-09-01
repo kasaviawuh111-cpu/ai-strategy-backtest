@@ -213,25 +213,39 @@ class InternalDemoSnapshotPreparer:
                 )
             listing_date = _iso_date(instrument_metadata.get("listing_date"), "listing_date")
             board = _text(instrument_metadata.get("board"), "board")
-
-            corporate_action_path = temporary / "eastmoney-corporate-actions.json"
-            self._run(
-                (
-                    self._python_executable,
-                    "scripts/prepare_eastmoney_corporate_actions.py",
-                    "--symbol",
-                    str(instrument),
-                    "--start",
-                    period.start.isoformat(),
-                    "--end",
-                    period.end.isoformat(),
-                    "--output",
-                    str(corporate_action_path),
-                ),
-                label="Eastmoney corporate-action acquisition",
-            )
-
+            asset_type = _text(instrument_metadata.get("asset_type"), "asset_type")
             prefix_end = _prefix_end(period)
+            corporate_action_path = temporary / "eastmoney-corporate-actions.json"
+            if asset_type == "STOCK":
+                self._run(
+                    (
+                        self._python_executable,
+                        "scripts/prepare_eastmoney_corporate_actions.py",
+                        "--symbol",
+                        str(instrument),
+                        "--start",
+                        period.start.isoformat(),
+                        "--end",
+                        period.end.isoformat(),
+                        "--output",
+                        str(corporate_action_path),
+                    ),
+                    label="Eastmoney corporate-action acquisition",
+                )
+            elif asset_type == "ETF":
+                if board != "stock_etf":
+                    raise SnapshotPreparationFailedError(
+                        "BaoStock ETF identity does not use the stock_etf rule board"
+                    )
+                # The ETF Choice attempt deliberately reuses the normal CLI.
+                # A provider-unavailable result is the only condition that may
+                # authorize the independently validated public-source fallback.
+                corporate_action_path = reference_path
+            else:
+                raise SnapshotPreparationUnsupportedError(
+                    f"security-master asset type is not executable: {asset_type}"
+                )
+
             choice_command = (
                 self._python_executable,
                 "scripts/prepare_choice_snapshot.py",
@@ -269,32 +283,49 @@ class InternalDemoSnapshotPreparer:
                 )
             elif choice_result.returncode == CHOICE_PROVIDER_UNAVAILABLE_EXIT_CODE:
                 fallback_reason = _choice_fallback_reason(choice_result)
+                fallback_script = (
+                    "scripts/prepare_etf_snapshot.py"
+                    if asset_type == "ETF"
+                    else "scripts/prepare_eastmoney_snapshot.py"
+                )
+                fallback_command: list[str] = [
+                    self._python_executable,
+                    fallback_script,
+                    "--symbol",
+                    str(instrument),
+                    "--start",
+                    period.start.isoformat(),
+                    "--end",
+                    period.end.isoformat(),
+                    "--prefix-end",
+                    prefix_end.isoformat(),
+                    "--output-root",
+                    str(self._technical_output_root),
+                    "--fallback-reason",
+                    fallback_reason,
+                ]
+                if asset_type == "ETF":
+                    fallback_command.extend(("--reference-json", str(reference_path)))
+                else:
+                    fallback_command.extend(
+                        (
+                            "--listing-date",
+                            listing_date.isoformat(),
+                            "--board",
+                            board,
+                            "--session-reference-json",
+                            str(reference_path),
+                            "--corporate-actions-json",
+                            str(corporate_action_path),
+                        )
+                    )
                 daily_payload = self._run_json(
-                    (
-                        self._python_executable,
-                        "scripts/prepare_eastmoney_snapshot.py",
-                        "--symbol",
-                        str(instrument),
-                        "--start",
-                        period.start.isoformat(),
-                        "--end",
-                        period.end.isoformat(),
-                        "--prefix-end",
-                        prefix_end.isoformat(),
-                        "--listing-date",
-                        listing_date.isoformat(),
-                        "--board",
-                        board,
-                        "--output-root",
-                        str(self._technical_output_root),
-                        "--session-reference-json",
-                        str(reference_path),
-                        "--corporate-actions-json",
-                        str(corporate_action_path),
-                        "--fallback-reason",
-                        fallback_reason,
+                    tuple(fallback_command),
+                    label=(
+                        "strict public ETF daily snapshot fallback acquisition"
+                        if asset_type == "ETF"
+                        else "Eastmoney Push2 daily snapshot fallback acquisition"
                     ),
-                    label="Eastmoney Push2 daily snapshot fallback acquisition",
                 )
                 _daily_id, daily_path = _published_snapshot(
                     daily_payload,
