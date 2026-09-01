@@ -17,6 +17,7 @@ from ashare_lab.adapters.language.vibe_candidates import (
     IdentifiedCandidateJsonTransport,
     VibeBoundedCandidateGenerator,
 )
+from ashare_lab.adapters.language.vibe_clarification import VibeClarificationDialogueRouter
 from ashare_lab.adapters.language.vibe_ideas import VibeIdeaRouter
 from ashare_lab.application.compile_strategy import StrategyCompiler
 from ashare_lab.application.strategy_v2_http import StrategyV2HttpService
@@ -176,6 +177,10 @@ def build_hybrid_candidate_compiler(
             capability_matrix=capability_matrix,
             provider_identity=candidate_transport.identity,
         ),
+        clarification_dialogue_router=VibeClarificationDialogueRouter(
+            candidate_transport,
+            capability_matrix=capability_matrix,
+        ),
     )
 
 
@@ -185,6 +190,7 @@ def _compiler_for_generator(
     *,
     backtest_anchor_date: date | None = None,
     idea_router: VibeIdeaRouter | None = None,
+    clarification_dialogue_router: VibeClarificationDialogueRouter | None = None,
 ) -> StrategyCompiler:
     manifest = next(
         (item for item in catalog.manifests if item.catalog_id == "cn_a.signals"),
@@ -197,6 +203,7 @@ def _compiler_for_generator(
         release_version=manifest.release_version,
         backtest_anchor_date=backtest_anchor_date,
         idea_router=idea_router,
+        clarification_dialogue_router=clarification_dialogue_router,
     )
 
 

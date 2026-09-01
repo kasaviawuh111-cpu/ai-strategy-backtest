@@ -26,6 +26,9 @@ from ..schemas import (
     CandidateGroundingPayload,
     CandidateProvenanceItem,
     CandidateRejectionItem,
+    ClarificationAnswerRequest,
+    ClarificationAnswerResponse,
+    ClarificationSuggestionPayload,
     IdeaAssetMappingPayload,
     IdeaProposalPayload,
     IdeaRoutePayload,
@@ -38,6 +41,7 @@ from ..schemas import (
 )
 from ..store import (
     DraftNotFoundError,
+    DraftRevisionStaleError,
     IdempotencyConflictError,
     StoredDraftRevision,
 )
@@ -60,11 +64,13 @@ async def create_strategy_draft(
     idempotency_key: IdempotencyKey = None,
 ) -> StrategyDraftResponse:
     validate_idempotency_key(idempotency_key)
-    outcome = await container.compiler.compile(_compile_input(body))
+    compile_input = _compile_input(body)
+    outcome = await container.compiler.compile(compile_input)
     request_hash = canonical_hash(body.model_dump(mode="json"))
     try:
         result = await container.drafts.create(
             outcome=outcome,
+            compile_input=compile_input,
             request_hash=request_hash,
             idempotency_key=idempotency_key,
         )
@@ -72,6 +78,95 @@ async def create_strategy_draft(
         raise _idempotency_conflict() from exc
     set_idempotency_replayed(response, replayed=result.replayed)
     return _to_response(result.value)
+
+
+@router.post(
+    "/{draft_id}/revisions/{revision}/clarification-answers",
+    response_model=ClarificationAnswerResponse,
+    status_code=status.HTTP_200_OK,
+    operation_id="answerStrategyDraftClarification",
+    responses=error_response_docs(404, 409, 413, 422, 500),
+)
+async def answer_strategy_draft_clarification(
+    draft_id: UUID,
+    revision: int,
+    body: ClarificationAnswerRequest,
+    response: Response,
+    container: Container,
+) -> ClarificationAnswerResponse:
+    try:
+        prior = await container.drafts.latest_for_answer(
+            draft_id=draft_id,
+            revision=revision,
+        )
+    except DraftNotFoundError as exc:
+        raise ApiProblem(
+            status_code=404,
+            code="strategy_draft_not_found",
+            message="Strategy draft was not found",
+        ) from exc
+    except DraftRevisionStaleError as exc:
+        raise ApiProblem(
+            status_code=409,
+            code="strategy_draft_revision_stale",
+            message="Clarification answer must target the latest draft revision",
+        ) from exc
+    try:
+        turn = await container.compiler.answer_clarification(
+            original_input=prior.compile_input,
+            prior_outcome=prior.outcome,
+            answer=body.answer,
+        )
+    except ValueError as exc:
+        raise ApiProblem(
+            status_code=409,
+            code="strategy_draft_not_awaiting_clarification",
+            message="Strategy draft is not awaiting clarification",
+        ) from exc
+
+    stored = prior
+    replayed = False
+    if turn.revision_changed:
+        request_hash = canonical_hash(
+            {
+                "draft_id": str(draft_id),
+                "revision": revision,
+                "answer": body.answer,
+            }
+        )
+        try:
+            result = await container.drafts.revise(
+                draft_id=draft_id,
+                outcome=turn.outcome,
+                compile_input=turn.compile_input,
+                request_hash=request_hash,
+                idempotency_key=None,
+                expected_revision=revision,
+            )
+        except DraftRevisionStaleError as exc:
+            raise ApiProblem(
+                status_code=409,
+                code="strategy_draft_revision_stale",
+                message="Clarification answer must target the latest draft revision",
+            ) from exc
+        except IdempotencyConflictError as exc:
+            raise _idempotency_conflict() from exc
+        stored = result.value
+        replayed = result.replayed
+    set_idempotency_replayed(response, replayed=replayed)
+    return ClarificationAnswerResponse(
+        reply_kind=turn.reply_kind,
+        assistant_message=turn.assistant_message,
+        suggestions=tuple(
+            ClarificationSuggestionPayload(
+                id=item.id,
+                title=item.title,
+                preview=item.preview,
+            )
+            for item in turn.suggestions
+        ),
+        draft=_to_response(stored),
+    )
 
 
 @router.post(

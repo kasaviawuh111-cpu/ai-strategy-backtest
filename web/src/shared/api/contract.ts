@@ -7,8 +7,10 @@ import type {
   CandidateRejectionItem,
   CapabilityParameter,
   CapabilityTriggerDefinition,
-  Clarification,
+  ClarificationAnswerInput,
+  ClarificationAnswerOutcome,
   CompileRequest,
+  CompileResponse,
   IdeaRoute,
   Instrument,
   StrategyCondition,
@@ -76,6 +78,17 @@ export type LiveDraftResponse = {
   candidate_rejections: CandidateRejectionItem[]
   idea_route?: IdeaRoute | null
   created_at: string
+}
+
+export type LiveClarificationAnswerResponse = {
+  reply_kind: 'accepted' | 'clarification'
+  assistant_message: string
+  suggestions: Array<{
+    id: string
+    title: string
+    preview: string
+  }>
+  draft: LiveDraftResponse
 }
 
 const FALLBACK_EVENT_LABELS: Record<string, string> = {
@@ -276,11 +289,7 @@ export const fromLiveDraftResponse = (
   response: LiveDraftResponse,
   input: CompileRequest,
   capabilities?: CapabilitiesResponse,
-): { status: 'compiled'; draft: StrategyDraft } | {
-  status: 'needs_clarification'
-  draftId: string
-  clarification: Clarification
-} => {
+): CompileResponse => {
   if (response.status === 'ready' && response.strategy) {
     return { status: 'compiled', draft: toDraft(response, input, capabilities) }
   }
@@ -306,6 +315,7 @@ export const fromLiveDraftResponse = (
     return {
       status: 'needs_clarification',
       draftId: response.draft_id,
+      revision: response.revision,
       clarification: {
         id: diagnosticCode,
         question: asksForInstrument
@@ -371,6 +381,20 @@ export const fromLiveDraftResponse = (
     code,
   })
 }
+
+export const fromLiveClarificationAnswerResponse = (
+  response: LiveClarificationAnswerResponse,
+  input: ClarificationAnswerInput,
+  capabilities?: CapabilitiesResponse,
+): ClarificationAnswerOutcome => ({
+  replyKind: response.reply_kind,
+  assistantMessage: response.assistant_message,
+  suggestions: response.suggestions.map((item) => ({ ...item })),
+  // The server owns how the saved original sentence and this answer are merged.
+  // The original request here is used only to label the returned UI draft; it
+  // is never resubmitted as an executable strategy candidate.
+  outcome: fromLiveDraftResponse(response.draft, input.originalRequest, capabilities),
+})
 
 export const toLiveRevisionBody = (draft: StrategyDraft): LiveRevisionBody => ({
   utterance: draft.sourceText,

@@ -63,27 +63,30 @@ afterEach(() => {
 })
 
 describe('formal main.tsx App journey', () => {
-  it('does not visibly fall back to 东方财富 when the stock-page symbol is invalid', async () => {
+  it('asks for a missing stock as plain text and keeps the bottom input usable', async () => {
     const onReturnToStockPage = vi.fn()
-    const onUseStandaloneExample = vi.fn()
+    const compile = vi.spyOn(strategyApi, 'compile')
     const user = userEvent.setup()
     renderApp(undefined, {
       instrumentContextError: '股票页没有提供有效的 A 股代码。',
       onReturnToStockPage,
-      onUseStandaloneExample,
     })
 
-    expect(screen.getByText(/未能识别当前股票/)).toBeInTheDocument()
-    expect(screen.getByText('股票页上下文无效')).toBeInTheDocument()
-    expect(screen.queryByText(/说出买卖规则/)).not.toBeInTheDocument()
-    expect(screen.getByLabelText('交易规则')).toHaveValue('')
+    expect(screen.getByText(/没有识别到当前股票/)).toBeInTheDocument()
+    expect(screen.queryByText('股票页上下文无效')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '使用东方财富示例' })).not.toBeInTheDocument()
+    const input = screen.getByLabelText('交易规则')
+    expect(input).toBeEnabled()
+    expect(input).toHaveValue('')
+    expect(input).toHaveAttribute('placeholder', '输入股票名称、买入和卖出条件')
+    await waitFor(() => expect(input).toHaveFocus())
     expect(screen.queryByLabelText('策略示例')).not.toBeInTheDocument()
 
-    const returnButtons = screen.getAllByRole('button', { name: '返回股票页' })
-    await user.click(returnButtons.at(-1) as HTMLButtonElement)
-    expect(onReturnToStockPage).toHaveBeenCalledTimes(1)
-    await user.click(screen.getByRole('button', { name: '使用东方财富示例' }))
-    expect(onUseStandaloneExample).toHaveBeenCalledTimes(1)
+    await user.type(input, '同花顺 MACD金叉买入，死叉卖出')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await waitFor(() => expect(compile).toHaveBeenCalledWith(expect.objectContaining({
+      utterance: '同花顺 MACD金叉买入，死叉卖出',
+    })))
   })
 
   it('uses the A-share instrument supplied by the host stock page', async () => {
@@ -350,28 +353,27 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, original)
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('只问这一次')).toBeInTheDocument()
-    for (const preserved of [
-      '股票：同花顺 300033.SZ',
-      '公告事件：年度报告',
-      '正文条件：AI 完整词出现 > 5 次',
-      '卖出：实际买入成交后持有 3 个交易日',
-    ]) {
-      expect(screen.getByText(preserved)).toBeInTheDocument()
-    }
+    const prompt = await screen.findByText(/系统只集中确认一次/)
+    expect(prompt).toHaveTextContent('股票是同花顺 300033.SZ')
+    expect(prompt).toHaveTextContent('公告事件是年度报告')
+    expect(prompt).toHaveTextContent('正文条件是AI 完整词出现 > 5 次')
+    expect(prompt).toHaveTextContent('卖出是实际买入成交后持有 3 个交易日')
+    expect(screen.queryByText('只问这一次')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /补充这一个片段/ })).not.toBeInTheDocument()
     expect(screen.queryByText('无法识别这条策略')).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: /补充这一个片段/ }))
-    expect(screen.getByLabelText('交易规则')).toHaveValue(original)
-    expect(screen.getByLabelText('交易规则')).toHaveFocus()
+    expect(input).toHaveValue('')
+    expect(input).toHaveAttribute('placeholder', '补充完整规则，或直接换一种说法')
+    await waitFor(() => expect(input).toHaveFocus())
     expect(compile).toHaveBeenCalledTimes(1)
   })
 
   it('asks for a missing standalone stock in text and merges the typed reply with the saved rule', async () => {
     const original = 'MACD金叉买入，MACD死叉卖出，回测近1年'
+    const originalCompile = strategyApi.compile
     const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
       status: 'needs_clarification',
       draftId: 'draft_missing_instrument',
+      revision: 1,
       clarification: {
         id: 'instrument_required',
         question: '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
@@ -379,6 +381,16 @@ describe('formal main.tsx App journey', () => {
         choices: [],
       },
     })
+    const answerClarification = vi.spyOn(strategyApi, 'answerClarification')
+      .mockImplementationOnce(async (turn) => ({
+        replyKind: 'accepted',
+        assistantMessage: '好，股票已经确认，刚才的买卖规则也都保留了。',
+        suggestions: [],
+        outcome: await originalCompile({
+          ...turn.originalRequest,
+          utterance: `同花顺，${original}`,
+        }),
+      }))
     const user = userEvent.setup()
     renderApp()
 
@@ -386,9 +398,8 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, original)
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText(
-      '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
-    )).toBeInTheDocument()
+    const prompt = await screen.findByText(/请补充股票名称或 6 位证券代码/)
+    expect(prompt).toHaveTextContent('买卖条件已经保留')
     expect(screen.queryByRole('button', { name: '补充股票代码' })).not.toBeInTheDocument()
     expect(input).toBeEnabled()
     expect(input).toHaveValue('')
@@ -398,11 +409,18 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '同花顺')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
-    expect(compile).toHaveBeenLastCalledWith(expect.objectContaining({
-      utterance: `同花顺，${original}`,
-      instrumentContextSource: 'standalone_default',
+    await waitFor(() => expect(answerClarification).toHaveBeenCalledTimes(1))
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(answerClarification).toHaveBeenCalledWith(expect.objectContaining({
+      draftId: 'draft_missing_instrument',
+      revision: 1,
+      answer: '同花顺',
+      originalRequest: expect.objectContaining({
+        utterance: original,
+        instrumentContextSource: 'standalone_default',
+      }),
     }))
+    expect(await screen.findByText(/股票已经确认/)).toBeInTheDocument()
   })
 
   it('offers a trusted stock-page instrument while keeping free stock input available', async () => {
@@ -432,7 +450,9 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, 'MACD金叉买入，MACD死叉卖出')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByRole('button', { name: /使用 贵州茅台/ })).toBeEnabled()
+    const prompt = await screen.findByText(/请确认使用当前股票“贵州茅台”/)
+    expect(prompt).toHaveTextContent('“使用 贵州茅台”')
+    expect(screen.queryByRole('button', { name: /使用 贵州茅台/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '补充股票代码' })).not.toBeInTheDocument()
     expect(input).toBeEnabled()
     expect(input).toHaveAttribute('placeholder', '输入股票名称或 6 位代码')
@@ -455,9 +475,13 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '年报正文 AI 超过 5 次买入，3 个交易日后卖出')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('已理解规则，但缺少报告正文数据')).toBeInTheDocument()
-    expect(screen.getByText(/不会用公告标题代替正文，也不会猜测词频/)).toBeInTheDocument()
+    const recovery = await screen.findByText(/我已理解你想用报告正文作为条件/)
+    expect(recovery).toHaveTextContent('不会用公告标题代替')
     expect(screen.queryByText('无法识别这条策略')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '修改规则' })).not.toBeInTheDocument()
+    expect(input).toBeEnabled()
+    expect(input).toHaveValue('')
+    await waitFor(() => expect(input).toHaveFocus())
   })
 
   it('rejects an unsupported sentence instead of silently falling back to MACD', async () => {
@@ -469,12 +493,14 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '火星逆行时满仓，月圆时卖出')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('无法识别这条策略')).toBeInTheDocument()
-    expect(screen.getByText(/当前可执行的技术指标或公告事件/)).toHaveTextContent(
-      '没有识别到当前可执行的技术指标或公告事件。请写清何时买入、何时卖出和回测区间，或先使用页面示例。',
-    )
+    const recovery = await screen.findByText(/我还没能把这句话还原成完整的买卖规则/)
+    expect(recovery).toHaveTextContent('价格阈值、涨跌幅')
+    expect(screen.queryByText('无法识别这条策略')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '修改规则' })).not.toBeInTheDocument()
     expect(document.body).not.toHaveTextContent('no_supported_signal_recognized')
     expect(screen.queryByText('MACD 金叉')).not.toBeInTheDocument()
+    expect(input).toHaveValue('')
+    await waitFor(() => expect(input).toHaveFocus())
   })
 
   it('guides an unavailable previous-session limit-up rule through plain text input', async () => {
@@ -495,13 +521,12 @@ describe('formal main.tsx App journey', () => {
 
     expect(await screen.findByText(/我已理解你想用“前一交易日涨停”作为买入条件/))
       .toBeInTheDocument()
-    expect(screen.getByText(/“短线”没有明确的卖出时点/)).toBeInTheDocument()
     expect(screen.queryByText('这句话暂时不能还原')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '修改规则' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '使用技术示例' })).not.toBeInTheDocument()
     expect(input).toBeEnabled()
     expect(input).toHaveValue('')
-    expect(input).toHaveAttribute('placeholder', '补充卖出方式，或换一种买入条件')
+    expect(input).toHaveAttribute('placeholder', '改用价格、涨跌幅或技术指标条件')
     await waitFor(() => expect(input).toHaveFocus())
     expect(screen.getByText(original)).toBeInTheDocument()
 
@@ -518,6 +543,7 @@ describe('formal main.tsx App journey', () => {
       .mockResolvedValueOnce({
         status: 'needs_clarification',
         draftId: 'idea-route-draft',
+        revision: 4,
         clarification: {
           id: 'idea_guidance_required',
           question: '选一个方向，我会把它变成完整买卖规则再识别。',
@@ -569,7 +595,16 @@ describe('formal main.tsx App journey', () => {
           }],
         },
       })
-      .mockImplementationOnce((input) => originalCompile(input))
+    const answerClarification = vi.spyOn(strategyApi, 'answerClarification')
+      .mockImplementationOnce(async (turn) => ({
+        replyKind: 'accepted',
+        assistantMessage: '明白，你选的是等趋势确认；股票和退出规则都保留了。',
+        suggestions: [],
+        outcome: await originalCompile({
+          ...turn.originalRequest,
+          utterance: 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年',
+        }),
+      }))
     const revise = vi.spyOn(strategyApi, 'revise')
     const user = userEvent.setup()
     renderApp()
@@ -579,36 +614,40 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '我讨厌特朗普')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByRole('button', { name: /等趋势确认/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /等超跌反弹/ })).toBeInTheDocument()
-    expect(screen.getByText('你在表达对特朗普相关政策的不认同，但还没有给出可回测的买卖条件。')).toBeInTheDocument()
-    expect(screen.getByText('价格与趋势同时转强后再进入。')).toBeInTheDocument()
-    expect(screen.getByText('仅在超跌后恢复时进入。')).toBeInTheDocument()
-    expect(screen.getByText('2 条可选规则')).toBeInTheDocument()
-    expect(screen.getByPlaceholderText('也可以直接打字告诉我')).toBeInTheDocument()
+    const guidance = await screen.findByText(/你在表达对特朗普相关政策的不认同/)
+    expect(guidance).toHaveTextContent('“MACD 金叉且站上 20 日均线买入')
+    expect(guidance).toHaveTextContent('“RSI 低于 30 买入')
+    expect(screen.queryByRole('button', { name: /等趋势确认/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /等超跌反弹/ })).not.toBeInTheDocument()
+    expect(input).toHaveValue('')
+    expect(input).toHaveAttribute('placeholder', '用一句话写下你选择的买卖规则')
+    await waitFor(() => expect(input).toHaveFocus())
     expect(screen.queryByText('已理解观点：')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
     expect(compile).toHaveBeenCalledTimes(1)
     expect(revise).not.toHaveBeenCalled()
 
-    await user.click(screen.getByRole('button', { name: /等趋势确认/ }))
-
-    expect(input).toHaveValue('MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年')
-    expect(compile).toHaveBeenCalledTimes(2)
-    expect(compile).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      utterance: 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年',
-      clarification: undefined,
+    await user.type(input, 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await waitFor(() => expect(answerClarification).toHaveBeenCalledTimes(1))
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(answerClarification).toHaveBeenCalledWith(expect.objectContaining({
+      draftId: 'idea-route-draft',
+      revision: 4,
+      answer: 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年',
+      originalRequest: expect.objectContaining({ utterance: '我讨厌特朗普' }),
     }))
     expect(await screen.findByRole('button', { name: '开始回测' })).toBeInTheDocument()
     expect(revise).not.toHaveBeenCalled()
   })
 
-  it('keeps the server-confirmed instrument when compiling an idea-route choice', async () => {
+  it('keeps the grounded instrument in plain-text directions for an ambiguous indicator', async () => {
     const originalCompile = strategyApi.compile
     const compile = vi.spyOn(strategyApi, 'compile')
       .mockResolvedValueOnce({
         status: 'needs_clarification',
         draftId: 'ambiguous-cross-draft',
+        revision: 2,
         clarification: {
           id: 'ambiguous_cross_indicator',
           question: '“金叉/死叉”指的是哪一类指标？',
@@ -644,7 +683,16 @@ describe('formal main.tsx App journey', () => {
           }],
         },
       })
-      .mockImplementationOnce((input) => originalCompile(input))
+    const answerClarification = vi.spyOn(strategyApi, 'answerClarification')
+      .mockImplementationOnce(async (turn) => ({
+        replyKind: 'accepted',
+        assistantMessage: '明白，你说的是 MACD 金叉和死叉，汤姆猫这只股票也已经保留。',
+        suggestions: [],
+        outcome: await originalCompile({
+          ...turn.originalRequest,
+          utterance: '汤姆猫MACD金叉买入，MACD死叉卖出，回测近1年',
+        }),
+      }))
     const user = userEvent.setup()
     renderApp()
 
@@ -652,18 +700,24 @@ describe('formal main.tsx App journey', () => {
     await user.clear(input)
     await user.type(input, '汤姆猫金叉买死叉卖')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await user.click(await screen.findByRole('button', { name: /MACD 金叉/ }))
+    const guidance = await screen.findByText(/已确认标的为汤姆猫/)
+    expect(guidance).toHaveTextContent('“汤姆猫MACD金叉买入')
+    expect(screen.queryByRole('button', { name: /MACD 金叉/ })).not.toBeInTheDocument()
+    expect(input).toHaveValue('')
+    await waitFor(() => expect(input).toHaveFocus())
 
-    expect(compile).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      utterance: 'MACD金叉买入，MACD死叉卖出，回测近1年',
-      instrument: expect.objectContaining({
-        name: '汤姆猫',
-        symbol: '300459.SZ',
-        exchange: 'SZSE',
-      }),
-      instrumentContextSource: 'stock_page',
+    await user.type(input, '汤姆猫MACD金叉买入，MACD死叉卖出，回测近1年')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+
+    await waitFor(() => expect(answerClarification).toHaveBeenCalledTimes(1))
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(answerClarification).toHaveBeenCalledWith(expect.objectContaining({
+      draftId: 'ambiguous-cross-draft',
+      revision: 2,
+      answer: '汤姆猫MACD金叉买入，MACD死叉卖出，回测近1年',
+      originalRequest: expect.objectContaining({ utterance: '汤姆猫金叉买死叉卖' }),
     }))
-    expect(await screen.findByText('汤姆猫')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '开始回测' })).toBeInTheDocument()
   })
 
   it('does not present uncovered catalog events as runnable event strategies', async () => {
@@ -675,8 +729,9 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '东方财富最终中标后买入，MACD 死叉卖出')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('无法识别这条策略')).toBeInTheDocument()
-    expect(screen.getByText(/当前可执行的技术指标或公告事件/)).toBeInTheDocument()
+    expect(await screen.findByText(/我还没能把这句话还原成完整的买卖规则/)).toBeInTheDocument()
+    expect(screen.queryByText('无法识别这条策略')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '修改规则' })).not.toBeInTheDocument()
     expect(document.body).not.toHaveTextContent('no_supported_signal_recognized')
     expect(screen.queryByText('最终中标')).not.toBeInTheDocument()
   })
@@ -690,20 +745,22 @@ describe('formal main.tsx App journey', () => {
     await user.clear(input)
     await user.type(input, 'MACD')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('只问这一次')).toBeInTheDocument()
-    expect(screen.getByText(/系统不会替你补默认买卖规则/)).toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: /补充完整规则/ }))
-    expect(screen.getByLabelText('交易规则')).toHaveValue('MACD')
-    expect(screen.getByLabelText('交易规则')).toHaveFocus()
+    const prompt = await screen.findByText(/系统不会替你补默认买卖规则/)
+    expect(prompt).toHaveTextContent('改用价格或涨跌幅条件')
+    expect(screen.queryByText('只问这一次')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /补充完整规则/ })).not.toBeInTheDocument()
+    expect(input).toHaveValue('')
+    await waitFor(() => expect(input).toHaveFocus())
     expect(compile).toHaveBeenCalledTimes(1)
     expect(screen.queryByText(/用到 \d+ 个条件/)).not.toBeInTheDocument()
   })
 
   it('returns a missing-exit clarification to the original input without inventing a rule', async () => {
+    const originalCompile = strategyApi.compile
     const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
       status: 'needs_clarification',
       draftId: 'draft_missing_exit',
+      revision: 5,
       clarification: {
         id: 'exit_rule_not_recognized',
         question: '已识别买入条件。你想在什么条件下卖出？',
@@ -717,6 +774,16 @@ describe('formal main.tsx App journey', () => {
         }],
       },
     })
+    const answerClarification = vi.spyOn(strategyApi, 'answerClarification')
+      .mockImplementationOnce(async (turn) => ({
+        replyKind: 'accepted',
+        assistantMessage: '明白，已经保留年度报告买入条件，并接上 MACD 死叉卖出。',
+        suggestions: [],
+        outcome: await originalCompile({
+          ...turn.originalRequest,
+          utterance: '年度报告发布后买入，MACD死叉卖出',
+        }),
+      }))
     const user = userEvent.setup()
     renderApp()
 
@@ -725,36 +792,68 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '年度报告发布后买入')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('只问这一次')).toBeInTheDocument()
-    expect(screen.getByText(/系统不会替你补一条默认策略/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /使用东方财富/ })).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: /补充卖出条件/ }))
-
-    expect(screen.getByLabelText('交易规则')).toHaveValue('年度报告发布后买入')
-    expect(screen.getByLabelText('交易规则')).toHaveFocus()
+    const prompt = await screen.findByText(/系统不会替你补一条默认策略/)
+    expect(prompt).toHaveTextContent('“MACD 死叉卖出”')
     expect(screen.queryByText('只问这一次')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /使用东方财富/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /补充卖出条件/ })).not.toBeInTheDocument()
+    expect(input).toHaveValue('')
+    expect(input).toHaveAttribute('placeholder', '补充什么时候卖出')
+    await waitFor(() => expect(input).toHaveFocus())
+
+    await user.type(input, 'MACD死叉卖出')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await waitFor(() => expect(answerClarification).toHaveBeenCalledTimes(1))
     expect(compile).toHaveBeenCalledTimes(1)
-    expect(screen.queryByText(/用到 \d+ 个条件/)).not.toBeInTheDocument()
+    expect(answerClarification).toHaveBeenCalledWith(expect.objectContaining({
+      draftId: 'draft_missing_exit',
+      revision: 5,
+      answer: 'MACD死叉卖出',
+      originalRequest: expect.objectContaining({ utterance: '年度报告发布后买入' }),
+    }))
+    expect(await screen.findByText(/已经保留年度报告买入条件/)).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: '开始回测' })).toBeInTheDocument()
   })
 
   it('returns a missing-entry clarification with the correct buy direction', async () => {
+    const pendingClarification = {
+      id: 'entry_rule_not_recognized',
+      question: '已识别卖出条件。你想在什么条件下买入？',
+      reason: '买入条件决定什么时候建立持仓。系统不会替你补一条默认策略。',
+      choices: [{
+        id: 'edit-utterance',
+        label: '补充买入条件',
+        description: '返回输入框，在原话前补充明确的买入条件。',
+        recommended: true,
+        action: 'edit_utterance' as const,
+      }],
+    }
     const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
       status: 'needs_clarification',
       draftId: 'draft_missing_entry',
-      clarification: {
-        id: 'entry_rule_not_recognized',
-        question: '已识别卖出条件。你想在什么条件下买入？',
-        reason: '买入条件决定什么时候建立持仓。系统不会替你补一条默认策略。',
-        choices: [{
-          id: 'edit-utterance',
-          label: '补充买入条件',
-          description: '返回输入框，在原话前补充明确的买入条件。',
-          recommended: true,
-          action: 'edit_utterance',
-        }],
-      },
+      revision: 6,
+      clarification: pendingClarification,
     })
+    const answerClarification = vi.spyOn(strategyApi, 'answerClarification')
+      .mockResolvedValueOnce({
+        replyKind: 'clarification',
+        assistantMessage: '听到了，你想在 RSI 较低时买入。MACD 死叉卖出已经保留；现在只差：请确认 RSI 的买入阈值。',
+        suggestions: [{
+          id: 'idea_aaaaaaaaaaaa',
+          title: 'RSI 低于 30 买入',
+          preview: 'RSI低于30买入，MACD死叉卖出',
+        }, {
+          id: 'idea_bbbbbbbbbbbb',
+          title: 'RSI 低于 25 买入',
+          preview: 'RSI低于25买入，MACD死叉卖出',
+        }],
+        outcome: {
+          status: 'needs_clarification',
+          draftId: 'draft_missing_entry',
+          revision: 6,
+          clarification: pendingClarification,
+        },
+      })
     const user = userEvent.setup()
     renderApp()
 
@@ -763,14 +862,30 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, 'MACD死叉卖出')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByText('只问这一次')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /补充买入条件/ })).toBeInTheDocument()
+    const prompt = await screen.findByText(/已识别卖出条件/)
+    expect(prompt).toHaveTextContent('“MACD 金叉买入”')
+    expect(screen.queryByText('只问这一次')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /补充买入条件/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /补充卖出条件/ })).not.toBeInTheDocument()
+    expect(input).toHaveValue('')
+    expect(input).toHaveAttribute('placeholder', '补充什么时候买入')
+    await waitFor(() => expect(input).toHaveFocus())
 
-    await user.click(screen.getByRole('button', { name: /补充买入条件/ }))
-    expect(screen.getByLabelText('交易规则')).toHaveValue('MACD死叉卖出')
-    expect(screen.getByLabelText('交易规则')).toHaveFocus()
+    await user.type(input, 'RSI低于30买入')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await waitFor(() => expect(answerClarification).toHaveBeenCalledTimes(1))
     expect(compile).toHaveBeenCalledTimes(1)
+    expect(answerClarification).toHaveBeenCalledWith(expect.objectContaining({
+      draftId: 'draft_missing_entry',
+      revision: 6,
+      answer: 'RSI低于30买入',
+      originalRequest: expect.objectContaining({ utterance: 'MACD死叉卖出' }),
+    }))
+    const followUp = await screen.findByText(/RSI 的买入阈值/)
+    expect(followUp).toHaveTextContent('1. RSI 低于 30 买入：RSI低于30买入，MACD死叉卖出')
+    expect(followUp).toHaveTextContent('2. RSI 低于 25 买入：RSI低于25买入，MACD死叉卖出')
+    expect(screen.queryByRole('button', { name: /RSI 低于/ })).not.toBeInTheDocument()
+    await waitFor(() => expect(input).toHaveFocus())
   })
 
   it('runs the financial example without dropping its PE condition', async () => {

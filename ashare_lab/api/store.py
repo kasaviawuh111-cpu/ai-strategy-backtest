@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from ashare_lab.application.compile_strategy import CompileOutcome
+from ashare_lab.ports.candidate_generation import CompileInput
 
 
 class DraftNotFoundError(LookupError):
@@ -18,11 +19,16 @@ class IdempotencyConflictError(ValueError):
     pass
 
 
+class DraftRevisionStaleError(ValueError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class StoredDraftRevision:
     draft_id: UUID
     revision: int
     outcome: CompileOutcome
+    compile_input: CompileInput
     created_at: datetime
 
 
@@ -50,6 +56,7 @@ class InMemoryDraftStore:
         self,
         *,
         outcome: CompileOutcome,
+        compile_input: CompileInput,
         request_hash: str,
         idempotency_key: str | None,
     ) -> StoreResult:
@@ -62,6 +69,7 @@ class InMemoryDraftStore:
                 draft_id=uuid4(),
                 revision=1,
                 outcome=outcome,
+                compile_input=compile_input,
                 created_at=datetime.now(UTC),
             )
             self._drafts[value.draft_id] = [value]
@@ -73,13 +81,17 @@ class InMemoryDraftStore:
         *,
         draft_id: UUID,
         outcome: CompileOutcome,
+        compile_input: CompileInput | None = None,
         request_hash: str,
         idempotency_key: str | None,
+        expected_revision: int | None = None,
     ) -> StoreResult:
         async with self._lock:
             revisions = self._drafts.get(draft_id)
             if revisions is None:
                 raise DraftNotFoundError(str(draft_id))
+            if expected_revision is not None and revisions[-1].revision != expected_revision:
+                raise DraftRevisionStaleError(f"expected revision {expected_revision}")
 
             scope = f"revise:{draft_id}"
             replay = self._find_replay(scope, idempotency_key, request_hash)
@@ -90,11 +102,29 @@ class InMemoryDraftStore:
                 draft_id=draft_id,
                 revision=len(revisions) + 1,
                 outcome=outcome,
+                compile_input=compile_input or revisions[-1].compile_input,
                 created_at=datetime.now(UTC),
             )
             revisions.append(value)
             self._remember(scope, idempotency_key, request_hash, value)
             return StoreResult(value=value, replayed=False)
+
+    async def latest_for_answer(
+        self,
+        *,
+        draft_id: UUID,
+        revision: int,
+    ) -> StoredDraftRevision:
+        """Return the exact latest revision so an answer cannot cross conversations."""
+
+        async with self._lock:
+            revisions = self._drafts.get(draft_id)
+            if revisions is None:
+                raise DraftNotFoundError(str(draft_id))
+            latest = revisions[-1]
+            if revision != latest.revision:
+                raise DraftRevisionStaleError(f"expected revision {latest.revision}")
+            return latest
 
     def _find_replay(
         self,

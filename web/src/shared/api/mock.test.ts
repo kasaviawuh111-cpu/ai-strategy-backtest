@@ -198,6 +198,23 @@ describe('mock API trust boundary', () => {
     })
   })
 
+  it('keeps clarification merging inside the Mock API instead of the App', async () => {
+    const originalRequest = request('MACD')
+    const pending = await mockApi.compile(originalRequest)
+    if (pending.status !== 'needs_clarification') throw new Error('expected clarification')
+
+    const answer = await mockApi.answerClarification({
+      draftId: pending.draftId,
+      revision: pending.revision,
+      answer: 'MACD 金叉买入，MACD 死叉卖出',
+      originalRequest,
+      clarification: pending.clarification,
+    })
+
+    expect(answer.replyKind).toBe('accepted')
+    expect(answer.outcome.status).toBe('compiled')
+  })
+
   it('fails closed for an unknown mock clarification answer', async () => {
     await expect(mockApi.compile({
       ...request('东方财富 MACD 金叉买入，死叉卖出'),

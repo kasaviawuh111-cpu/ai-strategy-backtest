@@ -2,18 +2,21 @@ import { mockApi } from './mock'
 import { ApiError } from './types'
 import {
   fromLiveDraftResponse,
+  fromLiveClarificationAnswerResponse,
   mergeLiveRevision,
   toLiveBacktestBody,
   toLiveCompileBody,
   toLiveRevisionBody,
 } from './contract'
-import type { LiveDraftResponse } from './contract'
+import type { LiveClarificationAnswerResponse, LiveDraftResponse } from './contract'
 import type {
   ApiProblem,
   BacktestActivity,
   BacktestRun,
   BacktestSummary,
   CapabilitiesResponse,
+  ClarificationAnswerInput,
+  ClarificationAnswerOutcome,
   CompileRequest,
   CompileResponse,
   EquityPoint,
@@ -260,6 +263,30 @@ export const strategyApi = {
     // “能理解”与“当前可回测”是两个阶段。编译成功后由页面单独展示
     // catalog / preparation / pinned snapshot，不能在这里把已识别规则吞成错误。
     return fromLiveDraftResponse(response, input, capabilities)
+  },
+
+  answerClarification: async (
+    input: ClarificationAnswerInput,
+  ): Promise<ClarificationAnswerOutcome> => {
+    if (useMock) return mockApi.answerClarification(input)
+    if (!Number.isInteger(input.revision) || (input.revision ?? 0) < 1) {
+      throw new ApiError({
+        type: 'about:blank',
+        title: '澄清版本无效',
+        status: 409,
+        detail: '这轮澄清没有绑定有效的策略版本，请重新提交原始规则。',
+        code: 'strategy_draft_revision_missing',
+      })
+    }
+    const [response, capabilities] = await Promise.all([
+      request<LiveClarificationAnswerResponse>(
+        `/api/v1/strategy-drafts/${encodeURIComponent(input.draftId)}`
+        + `/revisions/${input.revision}/clarification-answers`,
+        { method: 'POST', body: JSON.stringify({ answer: input.answer }) },
+      ),
+      systemApi.capabilities().catch(() => undefined),
+    ])
+    return fromLiveClarificationAnswerResponse(response, input, capabilities)
   },
 
   revise: async (draft: StrategyDraft): Promise<StrategyDraft> => {

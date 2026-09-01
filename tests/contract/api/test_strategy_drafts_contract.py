@@ -19,6 +19,10 @@ from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatu
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.strategy import StrategySpec, canonical_hash
 from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
+from ashare_lab.ports.clarification_dialogue import (
+    ClarificationDialogueAssessment,
+    ClarificationDialogueRequest,
+)
 from ashare_lab.ports.idea_routing import IdeaAssetMapping, IdeaProposal, IdeaRoute
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -32,6 +36,25 @@ class _UnexpectedFallback:
 class _ExplodingCompiler:
     async def compile(self, _request: Any) -> Any:
         raise RuntimeError("internal secret must not leak")
+
+
+class _RecordingDialogueRouter:
+    def __init__(self, *, explode: bool = False) -> None:
+        self.explode = explode
+        self.requests: list[ClarificationDialogueRequest] = []
+
+    async def assess(
+        self,
+        request: ClarificationDialogueRequest,
+    ) -> ClarificationDialogueAssessment | None:
+        self.requests.append(request)
+        if self.explode:
+            raise AssertionError("valid supplement must not call dialogue provider")
+        return ClarificationDialogueAssessment(
+            reply_kind="off_topic",
+            acknowledgement_id="light_redirect",
+            recommended_option_ids=tuple(reversed([item.id for item in request.options])),
+        )
 
 
 class _IdeaCompiler:
@@ -557,6 +580,235 @@ def test_revision_increments_and_is_itself_idempotent(
     assert first.json()["provenance"] == [{"path": "/", "source": "revision/request.strategy"}]
     assert first.json() == replay.json()
     assert replay.headers["Idempotency-Replayed"] == "true"
+
+
+def test_clarification_answer_reuses_the_server_saved_sentence_and_creates_a_revision(
+    client: TestClient,
+) -> None:
+    created = client.post(
+        "/api/v1/strategy-drafts",
+        json={
+            "utterance": "东方财富MACD金叉买入",
+            "instrument_context": "300059.SZ",
+            "as_of_date": "2026-08-20",
+        },
+    ).json()
+
+    response = client.post(
+        (
+            f"/api/v1/strategy-drafts/{created['draft_id']}"
+            f"/revisions/{created['revision']}/clarification-answers"
+        ),
+        json={"answer": "MACD死叉卖出"},
+    )
+    payload: dict[str, Any] = response.json()
+
+    assert response.status_code == 200
+    assert payload["reply_kind"] == "accepted"
+    assert "完整" in payload["assistant_message"]
+    assert payload["suggestions"] == []
+    assert payload["draft"]["draft_id"] == created["draft_id"]
+    assert payload["draft"]["revision"] == 2
+    assert payload["draft"]["status"] == "ready"
+    assert payload["draft"]["strategy"]["instrument"]["symbol"] == "300059.SZ"
+    assert payload["draft"]["strategy"]["entry"]["indicator_id"] == "technical.macd"
+    assert payload["draft"]["strategy"]["exit"]["children"][0]["indicator_id"] == ("technical.macd")
+
+
+def test_unresolved_clarification_stays_textual_and_returns_only_validated_choices(
+    client: TestClient,
+) -> None:
+    created = client.post(
+        "/api/v1/strategy-drafts",
+        json={
+            "utterance": "东方财富MACD金叉买入",
+            "instrument_context": "300059.SZ",
+            "as_of_date": "2026-08-20",
+        },
+    ).json()
+
+    response = client.post(
+        (
+            f"/api/v1/strategy-drafts/{created['draft_id']}"
+            f"/revisions/{created['revision']}/clarification-answers"
+        ),
+        json={"answer": "我是你爸"},
+    )
+    payload: dict[str, Any] = response.json()
+
+    assert response.status_code == 200
+    assert payload["reply_kind"] == "clarification"
+    assert payload["draft"]["revision"] == created["revision"]
+    assert payload["draft"]["diagnostic_code"] == created["diagnostic_code"]
+    assert "听到了" in payload["assistant_message"]
+    assert "进场条件" in payload["assistant_message"]
+    assert "什么时候卖" in payload["assistant_message"]
+    assert 2 <= len(payload["suggestions"]) <= 3
+    proposal_ids = {item["id"] for item in created["idea_route"]["proposals"]}
+    assert {item["id"] for item in payload["suggestions"]}.issubset(proposal_ids)
+    assert all(set(item) == {"id", "title", "preview"} for item in payload["suggestions"])
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected_acknowledgement"),
+    [
+        ("我不想用MACD死叉卖出", "不想用"),
+        ("你觉得MACD死叉卖出好吗", "询问"),
+        ("比如MACD死叉卖出", "举例"),
+    ],
+)
+def test_negation_question_and_example_never_become_an_executable_supplement(
+    client: TestClient,
+    answer: str,
+    expected_acknowledgement: str,
+) -> None:
+    created = client.post(
+        "/api/v1/strategy-drafts",
+        json={
+            "utterance": "东方财富MACD金叉买入",
+            "instrument_context": "300059.SZ",
+            "as_of_date": "2026-08-20",
+        },
+    ).json()
+
+    response = client.post(
+        (
+            f"/api/v1/strategy-drafts/{created['draft_id']}"
+            f"/revisions/{created['revision']}/clarification-answers"
+        ),
+        json={"answer": answer},
+    )
+    payload: dict[str, Any] = response.json()
+
+    assert response.status_code == 200
+    assert payload["reply_kind"] == "clarification"
+    assert payload["draft"]["revision"] == 1
+    assert payload["draft"]["status"] == "needs_clarification"
+    assert payload["draft"]["diagnostic_code"] == "exit_rule_not_recognized"
+    assert expected_acknowledgement in payload["assistant_message"]
+    assert 2 <= len(payload["suggestions"]) <= 3
+
+
+def test_unsupported_recompile_does_not_replace_the_valid_clarification_revision(
+    client: TestClient,
+) -> None:
+    created = client.post(
+        "/api/v1/strategy-drafts",
+        json={
+            "utterance": "东方财富MACD金叉买入",
+            "instrument_context": "300059.SZ",
+            "as_of_date": "2026-08-20",
+        },
+    ).json()
+
+    response = client.post(
+        (
+            f"/api/v1/strategy-drafts/{created['draft_id']}"
+            f"/revisions/{created['revision']}/clarification-answers"
+        ),
+        json={"answer": "MACD在零轴上方死叉卖出"},
+    )
+    payload: dict[str, Any] = response.json()
+
+    assert response.status_code == 200
+    assert payload["reply_kind"] == "clarification"
+    assert payload["draft"]["revision"] == 1
+    assert payload["draft"]["diagnostic_code"] == "exit_rule_not_recognized"
+    assert payload["draft"]["status"] == "needs_clarification"
+
+
+def test_dialogue_provider_is_used_only_after_deterministic_recompile_keeps_same_diagnostic() -> (
+    None
+):
+    router = _RecordingDialogueRouter()
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(),
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals",
+        release_version="2026.09.01",
+        clarification_dialogue_router=router,
+    )
+    app = create_app(compiler=compiler)
+    with TestClient(app) as dialogue_client:
+        created = dialogue_client.post(
+            "/api/v1/strategy-drafts",
+            json={
+                "utterance": "东方财富MACD金叉买入",
+                "instrument_context": "300059.SZ",
+                "as_of_date": "2026-08-20",
+            },
+        ).json()
+        unresolved = dialogue_client.post(
+            (
+                f"/api/v1/strategy-drafts/{created['draft_id']}"
+                f"/revisions/{created['revision']}/clarification-answers"
+            ),
+            json={"answer": "我是你爸"},
+        ).json()
+
+    assert len(router.requests) == 1
+    assert router.requests[0].answer == "我是你爸"
+    assert unresolved["assistant_message"].startswith("我听到了，我们先把刚才没说完的规则补完整")
+    assert [item["id"] for item in unresolved["suggestions"]] == [
+        item.id for item in reversed(router.requests[0].options)
+    ]
+
+
+def test_valid_clarification_supplement_never_calls_dialogue_provider() -> None:
+    router = _RecordingDialogueRouter(explode=True)
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(),
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals",
+        release_version="2026.09.01",
+        clarification_dialogue_router=router,
+    )
+    app = create_app(compiler=compiler)
+    with TestClient(app) as dialogue_client:
+        created = dialogue_client.post(
+            "/api/v1/strategy-drafts",
+            json={
+                "utterance": "东方财富MACD金叉买入",
+                "instrument_context": "300059.SZ",
+                "as_of_date": "2026-08-20",
+            },
+        ).json()
+        response = dialogue_client.post(
+            (
+                f"/api/v1/strategy-drafts/{created['draft_id']}"
+                f"/revisions/{created['revision']}/clarification-answers"
+            ),
+            json={"answer": "MACD死叉卖出"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["draft"]["status"] == "ready"
+    assert router.requests == []
+
+
+def test_clarification_answer_rejects_a_stale_or_missing_revision(client: TestClient) -> None:
+    created = client.post(
+        "/api/v1/strategy-drafts",
+        json={
+            "utterance": "东方财富MACD金叉买入",
+            "instrument_context": "300059.SZ",
+            "as_of_date": "2026-08-20",
+        },
+    ).json()
+    url = (
+        f"/api/v1/strategy-drafts/{created['draft_id']}"
+        f"/revisions/{created['revision']}/clarification-answers"
+    )
+    assert client.post(url, json={"answer": "MACD死叉卖出"}).status_code == 200
+
+    stale = client.post(url, json={"answer": "持有5个交易日卖出"})
+    missing = client.post(
+        f"/api/v1/strategy-drafts/{uuid4()}/revisions/1/clarification-answers",
+        json={"answer": "MACD死叉卖出"},
+    )
+
+    _assert_error(stale, status_code=409, code="strategy_draft_revision_stale")
+    _assert_error(missing, status_code=404, code="strategy_draft_not_found")
 
 
 def test_revision_preserves_event_leaf_and_edited_exit_exactly(client: TestClient) -> None:

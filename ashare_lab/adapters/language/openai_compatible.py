@@ -126,6 +126,13 @@ class OpenAICompatibleCandidateTransport:
     def response_mode(self) -> Literal["json_schema", "json_object"]:
         return self._response_mode
 
+    def _default_system_footer(self, request: CandidateTransportRequest) -> str:
+        return (
+            f"Prompt contract: {self._identity.prompt_version}; "
+            f"candidate schema: {self._identity.schema_version}; "
+            f"return at most {request.max_candidates} candidates."
+        )
+
     async def generate_json(
         self,
         request: CandidateTransportRequest,
@@ -143,7 +150,7 @@ class OpenAICompatibleCandidateTransport:
             response_format = {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "ashare_bounded_strategy_candidates",
+                    "name": request.response_schema_name,
                     "strict": True,
                     "schema": request.response_schema,
                 },
@@ -153,22 +160,26 @@ class OpenAICompatibleCandidateTransport:
             # same contract and the local VibeBounded/Catalog validators remain
             # authoritative; there is deliberately no free-text fallback.
             response_format = {"type": "json_object"}
-        user_payload: dict[str, object] = {
-            "utterance": request.utterance,
-            "instrumentContext": request.instrument_context,
-            "asOfDate": request.as_of_date.isoformat(),
-            "maxCandidates": request.max_candidates,
-            "capabilityProjectionVersion": request.capability_projection_version,
-            "capabilityProjectionHash": request.capability_projection_hash,
-            "capabilityMatrix": request.capability_matrix,
-        }
+        user_payload: dict[str, object] = (
+            dict(request.user_payload)
+            if request.user_payload is not None
+            else {
+                "utterance": request.utterance,
+                "instrumentContext": request.instrument_context,
+                "asOfDate": request.as_of_date.isoformat(),
+                "maxCandidates": request.max_candidates,
+                "capabilityProjectionVersion": request.capability_projection_version,
+                "capabilityProjectionHash": request.capability_projection_hash,
+                "capabilityMatrix": request.capability_matrix,
+            }
+        )
         schema_contract = ""
         if self._response_mode == "json_object":
             # JSON-object gateways (including DeepSeek) do not receive the
             # schema through ``response_format``.  Put the existing bounded
             # schema in the prompt rather than asking the model to guess a DSL.
             user_payload["responseSchema"] = request.response_schema
-            schema_contract = (
+            schema_contract = request.json_object_contract or (
                 " The responseSchema field in the user JSON is authoritative. "
                 "Return exactly one JSON object matching it; do not rename keys, "
                 "add wrapper/action/reasoning fields, or use aliases in place of "
@@ -197,9 +208,7 @@ class OpenAICompatibleCandidateTransport:
                     "role": "system",
                     "content": (
                         f"{request.system_contract}\n"
-                        f"Prompt contract: {self._identity.prompt_version}; "
-                        f"candidate schema: {self._identity.schema_version}; "
-                        f"return at most {request.max_candidates} candidates."
+                        f"{request.system_footer or self._default_system_footer(request)}"
                         f"{schema_contract}"
                     ),
                 },

@@ -3,6 +3,8 @@ import type {
   BacktestRun,
   BacktestSummary,
   Clarification,
+  ClarificationAnswerInput,
+  ClarificationAnswerOutcome,
   CompileRequest,
   CompileResponse,
   EquityPoint,
@@ -53,6 +55,18 @@ const browserWait = (milliseconds: number) =>
 let waitForMockPresentation = browserWait
 
 const wait = (milliseconds = 700) => waitForMockPresentation(milliseconds)
+
+const mergeMockClarificationAnswer = (input: ClarificationAnswerInput): string => {
+  const original = input.originalRequest.utterance.trim()
+  const answer = input.answer.trim()
+  if (input.clarification.id === 'idea_guidance_required') return answer
+  if ([
+    'instrument_required',
+    'instrument_unconfirmed',
+    'instrument_resolution_unavailable',
+  ].includes(input.clarification.id)) return `${answer}，${original}`
+  return `${original}，${answer}`
+}
 
 /** Test-only timing seam. Production and browser Mock journeys retain their delays. */
 export const enableImmediateMockWaitForTests = () => {
@@ -919,6 +933,22 @@ export const mockApi = {
       })
     }
     return { status: 'compiled', draft: makeDraft(request, kind) }
+  },
+
+  async answerClarification(input: ClarificationAnswerInput): Promise<ClarificationAnswerOutcome> {
+    const outcome = await mockApi.compile({
+      ...input.originalRequest,
+      utterance: mergeMockClarificationAnswer(input),
+      clarification: undefined,
+    })
+    return {
+      replyKind: 'accepted',
+      assistantMessage: outcome.status === 'compiled'
+        ? '好，我已经把这句补充接到刚才的规则里，买入和卖出条件都完整了。'
+        : '明白，这部分已经接上了。请继续补充剩余条件。',
+      suggestions: [],
+      outcome,
+    }
   },
 
   async revise(draft: StrategyDraft): Promise<StrategyDraft> {

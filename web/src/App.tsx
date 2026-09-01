@@ -5,14 +5,13 @@ import { FailureCard, ResultCard, RunningCard, StrategyCard } from './components
 import {
   Bubble, Chip, Chips, DayDivider, FollowUp, FollowUps, Say, ThinkBlock, ThinkingStream, Turn,
 } from './components/primitives'
-import { Proposals } from './components/Proposals'
 import { ChainScreen, ExecutionDetailsScreen, ParamsScreen, ReportScreen } from './screens'
 import { apiMode, backtestApi, strategyApi, systemApi } from './shared/api/client'
 import { ApiError } from './shared/api/types'
 import type {
   BacktestActivity,
   Clarification,
-  ClarificationChoice,
+  ClarificationSuggestion,
   CompileRequest,
   Instrument as ApiInstrument,
   StrategyDraft,
@@ -51,10 +50,15 @@ import './styles/app.css'
 
 type Overlay = 'params' | 'report' | 'execution' | 'chain'
 
-type ClarificationRecord = {
-  question: string
-  reason: string
-  answer: string
+type ClarificationMessage = {
+  role: 'assistant' | 'user'
+  text: string
+}
+
+type ClarificationTarget = {
+  draftId: string
+  revision?: number
+  originalRequest: CompileRequest
 }
 
 type JourneySnapshot = {
@@ -69,7 +73,7 @@ type JourneySnapshot = {
   trades: TradeRow[]
   evidence: RunEvidence
   activities: BacktestActivity[]
-  clarification?: ClarificationRecord
+  clarificationMessages: ClarificationMessage[]
 }
 
 const terminalStates = new Set(['succeeded', 'failed', 'cancelled'])
@@ -86,26 +90,88 @@ const isInstrumentClarification = (
 ): clarification is Clarification =>
   Boolean(clarification && instrumentClarificationIds.has(clarification.id))
 
-const mergeInstrumentReplyWithRule = (reply: string, originalRule: string): string => {
-  if (/(?:买入|卖出|回测|止盈|止损|持有)/.test(reply)) return reply
-  return `${reply}，${originalRule}`
+const suggestionText = (clarification: Clarification): string[] => {
+  const fromChoices = clarification.choices
+    .map((choice) => {
+      const suggestion = choice.suggestedUtterance?.trim()
+      if (!suggestion) return choice.label.trim()
+      const instrumentName = choice.instrumentName?.trim()
+      return instrumentName && !suggestion.includes(instrumentName)
+        ? `${instrumentName}${suggestion}`
+        : suggestion
+    })
+    .filter(Boolean)
+
+  let fallback: string[]
+  if (isInstrumentClarification(clarification)) {
+    fallback = ['输入公司名称', '输入 6 位证券代码']
+  } else if (clarification.id === 'entry_rule_not_recognized') {
+    fallback = ['MACD 金叉买入', '突破 20 日均线买入', '跌幅达到你设定的比例时买入']
+  } else if (clarification.id === 'exit_rule_not_recognized') {
+    fallback = ['MACD 死叉卖出', '跌破 20 日均线卖出', '持有若干个交易日后卖出']
+  } else {
+    fallback = ['补充完整的买入和卖出条件', '改用价格或涨跌幅条件', '改用 MACD、均线或 RSI 条件']
+  }
+  return [...new Set([...fromChoices, ...fallback])].slice(0, 3)
 }
 
-const instrumentFromConfirmedSymbol = (
-  symbol: string | undefined,
-  groundedName: string | undefined,
-  fallback: ApiInstrument,
-): ApiInstrument | undefined => {
-  if (!symbol) return undefined
-  const match = /^(\d{6})\.(SH|SZ|BJ)$/.exec(symbol)
-  if (!match) return undefined
-  const exchange = match[2] === 'SH' ? 'SSE' : match[2] === 'SZ' ? 'SZSE' : 'BSE'
-  return {
-    symbol,
-    name: fallback.symbol === symbol ? fallback.name : groundedName?.trim() || symbol,
-    market: 'CN_A',
-    exchange,
+const clarificationAnswerMessage = (
+  assistantMessage: string,
+  suggestions: ClarificationSuggestion[],
+): string => {
+  if (suggestions.length === 0) return assistantMessage
+  const numbered = suggestions
+    .map((item, index) => `${index + 1}. ${item.title}：${item.preview}`)
+    .join('\n')
+  return `${assistantMessage}\n你可以直接输入：\n${numbered}\n也可以自己描述。`
+}
+
+const clarificationMessage = (clarification: Clarification): string => {
+  const recognized = clarification.recognized?.length
+    ? `我已保留这些内容：${clarification.recognized
+      .map((item) => `${item.label}是${item.value}`)
+      .join('；')}。`
+    : ''
+  const suggestions = suggestionText(clarification)
+    .map((item) => `“${item}”`)
+    .join('、')
+  return [
+    clarification.reason,
+    recognized,
+    clarification.question,
+    suggestions ? `你可以在下方输入${suggestions}，也可以直接说自己的规则。` : '',
+  ].filter(Boolean).join(' ')
+}
+
+const clarificationPlaceholder = (clarification: Clarification | undefined): string => {
+  if (!clarification) return '说出什么时候买、什么时候卖'
+  if (isInstrumentClarification(clarification)) return '输入股票名称或 6 位代码'
+  if (clarification.id === 'entry_rule_not_recognized') return '补充什么时候买入'
+  if (clarification.id === 'exit_rule_not_recognized') return '补充什么时候卖出'
+  if (clarification.ideaRoute) return '用一句话写下你选择的买卖规则'
+  return '补充完整规则，或直接换一种说法'
+}
+
+const compileRecoveryMessage = (error: unknown): string => {
+  const code = errorCode(error)?.toLowerCase() ?? ''
+  if (code === 'previous_session_limit_up_capability_unavailable') {
+    return '我已理解你想用“前一交易日涨停”作为买入条件。当前回测还不能可靠执行这个信号，也不会用单日涨 10% 代替。请在下方改用“价格突破”、“涨跌幅”或“MACD / 均线”条件，并说清卖出方式。'
   }
+  if (code.includes('document_text')) {
+    return '我已理解你想用报告正文作为条件，但当前固定数据还不能审计这段正文。系统不会用公告标题代替，也不会猜测词频。请在下方改用价格、涨跌幅或技术指标条件。'
+  }
+  if (
+    code.includes('no_candidate')
+    || code.includes('no_supported_signal')
+    || code.includes('not_recognized')
+    || code.includes('compile_unsupported')
+  ) {
+    return '我还没能把这句话还原成完整的买卖规则。请在下方用一句话补充股票、买入和卖出条件；可以从价格阈值、涨跌幅，或 MACD / 均线 / RSI 中选一个方向。'
+  }
+  if (code.includes('capability') || code.includes('unavailable')) {
+    return `我已理解这条规则，但当前回测还缺少可验证的数据或执行能力。${errorMessage(error)} 请在下方换成价格、涨跌幅或已支持的技术指标条件。`
+  }
+  return '这次规则识别没有完成。你可以在下方原样重试，或把股票、买入条件和卖出条件改成一句更明确的话。'
 }
 
 type QuickIconName = 'thinking' | 'skill' | 'task' | 'timer' | 'stock'
@@ -313,11 +379,6 @@ export default function App({
   instrumentContextSource = 'standalone_default',
   instrumentContextError,
   onReturnToStockPage = () => window.history.back(),
-  onUseStandaloneExample = () => {
-    const standalone = new URL(window.location.href)
-    standalone.search = ''
-    window.location.assign(standalone.toString())
-  },
 }: AppProps) {
   const queryClient = useQueryClient()
   const volumeBreakoutExample = `${instrument.name}创20日新高且放量1.5倍买入，跌破20日线卖出`
@@ -327,7 +388,9 @@ export default function App({
   const [draft, setDraft] = useState<StrategyDraft>()
   const [baselineDraft, setBaselineDraft] = useState<StrategyDraft>()
   const [clarification, setClarification] = useState<Clarification>()
-  const [clarificationRecord, setClarificationRecord] = useState<ClarificationRecord>()
+  const [clarificationTarget, setClarificationTarget] = useState<ClarificationTarget>()
+  const [clarificationMessages, setClarificationMessages] = useState<ClarificationMessage[]>([])
+  const [clarificationPrompt, setClarificationPrompt] = useState<string>()
   const [runId, setRunId] = useState<string>()
   /**
    * 点「开始回测」是用户下的指令，所以它应该像用户说的一句话那样进入对话流，
@@ -353,19 +416,21 @@ export default function App({
   }
   const back = () => setStack((current) => current.slice(0, -1))
 
+  const compileRequestFor = ({ text, instrumentOverride }: {
+    text: string
+    instrumentOverride?: ApiInstrument
+  }): CompileRequest => ({
+    instrument: instrumentOverride ?? instrument,
+    instrumentContextSource: instrumentOverride ? 'stock_page' : instrumentContextSource,
+    utterance: text,
+  })
+
   const compileMutation = useMutation({
-    mutationFn: ({ text, answer, instrumentOverride }: {
+    mutationFn: ({ text, instrumentOverride }: {
       text: string
-      answer?: CompileRequest['clarification']
       instrumentOverride?: ApiInstrument
-    }) =>
-      strategyApi.compile({
-        instrument: instrumentOverride ?? instrument,
-        instrumentContextSource: instrumentOverride ? 'stock_page' : instrumentContextSource,
-        utterance: text,
-        clarification: answer,
-      }),
-    onSuccess: (outcome) => {
+    }) => strategyApi.compile(compileRequestFor({ text, instrumentOverride })),
+    onSuccess: (outcome, variables) => {
       setRunId(undefined)
       setStack([])
       setRunCommand(undefined)
@@ -373,19 +438,74 @@ export default function App({
         setDraft(undefined)
         setBaselineDraft(undefined)
         setClarification(outcome.clarification)
-        if (isInstrumentClarification(outcome.clarification)) {
-          setUtterance('')
-          window.setTimeout(() => inputRef.current?.focus(), 0)
-        }
+        setClarificationTarget({
+          draftId: outcome.draftId,
+          revision: outcome.revision,
+          originalRequest: compileRequestFor(variables),
+        })
+        setClarificationMessages([])
+        setClarificationPrompt(clarificationMessage(outcome.clarification))
+        setUtterance('')
+        window.setTimeout(() => inputRef.current?.focus(), 0)
       } else {
         const nextDraft = cloneDraft(outcome.draft)
         setClarification(undefined)
+        setClarificationTarget(undefined)
+        setClarificationPrompt(undefined)
         setDraft(nextDraft)
         setBaselineDraft(cloneDraft(nextDraft))
       }
     },
+    onError: () => {
+      setUtterance('')
+      window.setTimeout(() => inputRef.current?.focus(), 0)
+    },
+  })
+
+  const answerMutation = useMutation({
+    mutationFn: ({ answer, target, pendingClarification }: {
+      answer: string
+      target: ClarificationTarget
+      pendingClarification: Clarification
+    }) => strategyApi.answerClarification({
+      draftId: target.draftId,
+      revision: target.revision,
+      answer,
+      originalRequest: target.originalRequest,
+      clarification: pendingClarification,
+    }),
+    onSuccess: (turn, variables) => {
+      const assistantText = clarificationAnswerMessage(turn.assistantMessage, turn.suggestions)
+      setRunId(undefined)
+      setStack([])
+      setRunCommand(undefined)
+      if (turn.outcome.status === 'needs_clarification') {
+        setDraft(undefined)
+        setBaselineDraft(undefined)
+        setClarification(turn.outcome.clarification)
+        setClarificationTarget({
+          draftId: turn.outcome.draftId,
+          revision: turn.outcome.revision,
+          originalRequest: variables.target.originalRequest,
+        })
+        setClarificationPrompt(assistantText)
+      } else {
+        const nextDraft = cloneDraft(turn.outcome.draft)
+        setClarification(undefined)
+        setClarificationTarget(undefined)
+        setClarificationPrompt(undefined)
+        setClarificationMessages((current) => [
+          ...current,
+          { role: 'assistant', text: assistantText },
+        ])
+        setDraft(nextDraft)
+        setBaselineDraft(cloneDraft(nextDraft))
+      }
+      setUtterance('')
+      window.setTimeout(() => inputRef.current?.focus(), 0)
+    },
     onError: (error) => {
-      if (errorCode(error) !== 'previous_session_limit_up_capability_unavailable') return
+      setClarificationPrompt(compileRecoveryMessage(error))
       setUtterance('')
       window.setTimeout(() => inputRef.current?.focus(), 0)
     },
@@ -452,7 +572,7 @@ export default function App({
   const resultLoading = hasResult
     && (summaryQuery.isLoading || seriesQuery.isLoading || activitiesQuery.isLoading)
   const resultReady = Boolean(summaryQuery.data && seriesQuery.data && activitiesQuery.data)
-  const isJourneyLocked = startMutation.isPending || Boolean(
+  const isJourneyLocked = answerMutation.isPending || startMutation.isPending || Boolean(
     runQuery.data && !terminalStates.has(runQuery.data.state),
   )
   const validation = draft ? draftValidation(draft) : { valid: false, reason: undefined }
@@ -499,11 +619,11 @@ export default function App({
       trades,
       evidence,
       activities: activitiesQuery.data,
-      clarification: clarificationRecord,
+      clarificationMessages,
     }
   }, [
     activitiesQuery.data,
-    clarificationRecord,
+    clarificationMessages,
     draft,
     evidence,
     marks,
@@ -527,7 +647,9 @@ export default function App({
     setDraft(undefined)
     setBaselineDraft(undefined)
     setClarification(undefined)
-    setClarificationRecord(undefined)
+    setClarificationTarget(undefined)
+    setClarificationMessages([])
+    setClarificationPrompt(undefined)
     setRunId(undefined)
     setRunCommand(undefined)
     setSubmittedText(undefined)
@@ -535,6 +657,7 @@ export default function App({
     setReminderSet(false)
     setStack([])
     compileMutation.reset()
+    answerMutation.reset()
     startMutation.reset()
     window.setTimeout(() => inputRef.current?.focus(), 0)
   }
@@ -546,17 +669,16 @@ export default function App({
 
   const submitText = (text: string) => {
     const normalized = text.trim()
-    if (!normalized || isJourneyLocked || instrumentContextError) return
-    if (isInstrumentClarification(clarification) && submittedText && !clarificationRecord) {
-      const originalRule = submittedText
-      const nextText = mergeInstrumentReplyWithRule(normalized, originalRule)
-      setClarificationRecord({
-        question: clarification.question,
-        reason: clarification.reason,
-        answer: normalized,
-      })
-      setClarification(undefined)
-      setUtterance(nextText)
+    if (!normalized || isJourneyLocked) return
+    if (clarification && clarificationTarget && submittedText) {
+      const prompt = clarificationPrompt ?? clarificationMessage(clarification)
+      setClarificationMessages((current) => [
+        ...current,
+        { role: 'assistant', text: prompt },
+        { role: 'user', text: normalized },
+      ])
+      setClarificationPrompt(undefined)
+      setUtterance('')
       setDraft(undefined)
       setBaselineDraft(undefined)
       setRunId(undefined)
@@ -565,7 +687,11 @@ export default function App({
       setReminderSet(false)
       setStack([])
       startMutation.reset()
-      compileMutation.mutate({ text: nextText })
+      answerMutation.mutate({
+        answer: normalized,
+        target: clarificationTarget,
+        pendingClarification: clarification,
+      })
       return
     }
     rememberCurrentJourney()
@@ -574,45 +700,17 @@ export default function App({
     setDraft(undefined)
     setBaselineDraft(undefined)
     setClarification(undefined)
-    setClarificationRecord(undefined)
+    setClarificationTarget(undefined)
+    setClarificationMessages([])
+    setClarificationPrompt(undefined)
     setRunId(undefined)
     setRunCommand(undefined)
     setReportSnapshot(undefined)
     setReminderSet(false)
     setStack([])
+    answerMutation.reset()
     startMutation.reset()
     compileMutation.mutate({ text: normalized })
-  }
-
-  const handleClarify = (choice: ClarificationChoice) => {
-    if (!clarification || !submittedText) return
-    if (choice.action === 'edit_utterance') {
-      resetForEdit()
-      return
-    }
-    if (choice.action === 'replace_and_compile') {
-      const replacement = choice.suggestedUtterance?.trim()
-      if (!replacement) return
-      const instrumentOverride = instrumentFromConfirmedSymbol(
-        choice.instrumentSymbol,
-        choice.instrumentName,
-        instrument,
-      )
-      setUtterance(replacement)
-      setSubmittedText(replacement)
-      setClarification(undefined)
-      compileMutation.mutate({ text: replacement, instrumentOverride })
-      return
-    }
-    setClarificationRecord({
-      question: clarification.question,
-      reason: clarification.reason,
-      answer: choice.label,
-    })
-    compileMutation.mutate({
-      text: submittedText,
-      answer: { id: clarification.id, choiceId: choice.id },
-    })
   }
 
   const handleDraftChange = (nextDraft: StrategyDraft) => {
@@ -653,17 +751,7 @@ export default function App({
   }
 
   let failure: FailureState | undefined
-  if (instrumentContextError) {
-    failure = {
-      key: 'missing_stock',
-      status: 'rejected',
-      title: '股票页上下文无效',
-      reason: instrumentContextError,
-      actions: ['返回股票页', '使用东方财富示例'],
-    }
-  } else if (compileMutation.isError && !needsLimitUpRuleRewrite) {
-    failure = failureFor(compileMutation.error, 'compile_failed', '这句话暂时不能还原', instrument)
-  } else if (runQuery.isError && !resultReady) {
+  if (runQuery.isError && !resultReady) {
     failure = failureFor(runQuery.error, 'run_read_failed', '任务状态读取失败', instrument, runId)
   } else if (cancelMutation.isError) {
     failure = failureFor(cancelMutation.error, 'cancel_failed', '取消请求没有完成', instrument, runId)
@@ -685,19 +773,12 @@ export default function App({
   }
 
   const handleFailureAction = (index: number) => {
-    if (failure?.key === 'missing_stock' && instrumentContextError) {
-      if (index === 0) onReturnToStockPage()
-      else onUseStandaloneExample()
-    } else if (index === 0 && failure?.key === 'result_failed') refreshResults()
+    if (index === 0 && failure?.key === 'result_failed') refreshResults()
     else if (index === 0 && ['run_read_failed', 'cancel_failed'].includes(failure?.key ?? '')) {
       void runQuery.refetch()
-    } else if (index === 0 && failure?.key === 'missing_stock' && submittedText) {
-      compileMutation.mutate({ text: submittedText })
     } else if (
       failure?.key === 'data_incomplete'
       || failure?.key === 'event_time_insufficient'
-      || (failure?.key === 'unsupported_strategy' && index === 1)
-      || (failure?.key === 'compile_failed' && index === 1)
       || (failure?.key === 'run_failed' && index === 1)
     ) {
       submitText(volumeBreakoutExample)
@@ -709,8 +790,14 @@ export default function App({
     : 0
   const apiLabel = apiMode === 'mock' ? '界面预览' : '回测服务'
   const activeOverlay = stack.at(-1)
-  const typedInstrumentClarification = isInstrumentClarification(clarification)
-    && clarification?.choices.length === 0
+  const compileRecovery = compileMutation.isError
+    ? compileRecoveryMessage(compileMutation.error)
+    : undefined
+
+  useEffect(() => {
+    if (!instrumentContextError) return
+    window.setTimeout(() => inputRef.current?.focus(), 0)
+  }, [instrumentContextError])
 
   useEffect(() => {
     const node = scrollRef.current
@@ -720,7 +807,9 @@ export default function App({
     }
   }, [
     clarification,
-    clarificationRecord,
+    clarificationMessages.length,
+    clarificationPrompt,
+    answerMutation.isPending,
     compileMutation.isPending,
     draft,
     journeyHistory.length,
@@ -759,12 +848,13 @@ export default function App({
               {journeyHistory.map((journey) => (
                 <Fragment key={journey.id}>
                   <Turn mine><Bubble>{journey.utterance}</Bubble></Turn>
-                  {journey.clarification ? (
-                    <>
-                      <Turn><Say>{journey.clarification.question}</Say></Turn>
-                      <Turn mine><Bubble>{journey.clarification.answer}</Bubble></Turn>
-                    </>
-                  ) : null}
+                  {journey.clarificationMessages.map((message, index) => (
+                    <Turn key={`${journey.id}-clarification-${index}`} mine={message.role === 'user'}>
+                      {message.role === 'user'
+                        ? <Bubble>{message.text}</Bubble>
+                        : <Say>{message.text}</Say>}
+                    </Turn>
+                  ))}
                   <Turn>
                     <ThinkBlock
                       meta="历史记录"
@@ -803,7 +893,7 @@ export default function App({
                 <Turn>
                   <Say>
                     {instrumentContextError
-                      ? '未能识别当前股票。请返回股票页重新选择，或使用示例股票。'
+                      ? '没有识别到当前股票。请在下方输入股票名称或 6 位代码，并一起说出买入和卖出条件。例如：“东方财富 MACD 金叉买入，死叉卖出”。'
                       : journeyHistory.length > 0
                         ? <>说出新的买卖规则，继续回测。</>
                         : <>想怎么交易？用一句话告诉我，我来帮你把它变成可回测的策略。</>}
@@ -824,15 +914,13 @@ export default function App({
                 </Turn>
               ) : <Turn mine><Bubble>{submittedText}</Bubble></Turn>}
 
-              {clarificationRecord ? (
-                <>
-                  <Turn>
-                    <ThinkBlock meta="回答已记录" lines={[clarificationRecord.reason]} />
-                    <Say>{clarificationRecord.question}</Say>
-                  </Turn>
-                  <Turn mine><Bubble>{clarificationRecord.answer}</Bubble></Turn>
-                </>
-              ) : null}
+              {clarificationMessages.map((message, index) => (
+                <Turn key={`clarification-${index}`} mine={message.role === 'user'}>
+                  {message.role === 'user'
+                    ? <Bubble>{message.text}</Bubble>
+                    : <Say>{message.text}</Say>}
+                </Turn>
+              ))}
 
               {compileMutation.isPending ? (
                 <Turn>
@@ -843,60 +931,17 @@ export default function App({
                 </Turn>
               ) : null}
 
-              {clarification && !clarificationRecord && !compileMutation.isPending ? (
+              {answerMutation.isPending ? (
                 <Turn>
-                  {typedInstrumentClarification ? (
-                    <Say>{clarification.question}</Say>
-                  ) : (
-                    <>
-                      <ThinkBlock
-                        meta={clarification.choices.some((choice) => choice.action === 'replace_and_compile')
-                          ? `${clarification.choices.filter((choice) => choice.action === 'replace_and_compile').length} 条可选规则`
-                          : '只问这一次'}
-                        lines={[
-                          ...(clarification.recognized ?? []).map((item) => `${item.label}：${item.value}`),
-                          ...(clarification.choices.some((choice) => choice.action === 'replace_and_compile')
-                            ? [
-                                '候选只使用当前已发布、能通过规则校验的能力，不是设想。',
-                                '我不替你换股票，也不替你决定买卖点。',
-                              ]
-                            : []),
-                        ]}
-                      />
-                      <Say>{clarification.reason}</Say>
-                      <Say>{clarification.question}</Say>
-                      {clarification.choices.some((choice) => choice.action === 'replace_and_compile') ? (
-                        <Proposals
-                          items={clarification.choices
-                            .filter((choice) => choice.action === 'replace_and_compile')
-                            .map((choice) => {
-                              const unavailable = /盘中|分钟/.test(`${choice.label}${choice.description}`)
-                              return {
-                                id: choice.id,
-                                title: choice.label,
-                                detail: choice.description,
-                                disabled: unavailable,
-                                disabledReason: unavailable ? '分钟数据与撮合尚未接入' : undefined,
-                              }
-                            })}
-                          onPick={(id) => {
-                            const choice = clarification.choices.find((item) => item.id === id)
-                            if (choice) handleClarify(choice)
-                          }}
-                        />
-                      ) : (
-                        <Chips>
-                          {clarification.choices.map((choice) => {
-                            const unavailable = /盘中|分钟/.test(`${choice.label}${choice.description}`)
-                            return <Chip key={choice.id} pin={choice.recommended ? '推荐' : undefined}
-                              disabled={unavailable} title={unavailable ? '分钟数据与撮合尚未接入' : choice.description}
-                              onClick={() => handleClarify(choice)}>{choice.label}{unavailable ? ' · 暂不可用' : ''}</Chip>
-                          })}
-                        </Chips>
-                      )}
-                    </>
-                  )}
+                  <ThinkingStream
+                    title="接上这句补充"
+                    status="正在核对它是否补齐了刚才的问题"
+                  />
                 </Turn>
+              ) : null}
+
+              {clarificationPrompt && !compileMutation.isPending && !answerMutation.isPending ? (
+                <Turn><Say>{clarificationPrompt}</Say></Turn>
               ) : null}
 
               {draft && uiStrategy ? (
@@ -995,14 +1040,7 @@ export default function App({
                 <Turn><FailureCard state={failure} onAction={handleFailureAction} /></Turn>
               ) : null}
 
-              {needsLimitUpRuleRewrite ? (
-                <Turn>
-                  <Say>
-                    我已理解你想用“前一交易日涨停”作为买入条件。当前回测还不能可靠执行这个信号；
-                    另外“短线”没有明确的卖出时点。请直接在下方补充卖出方式，或换一种买入条件。
-                  </Say>
-                </Turn>
-              ) : null}
+              {compileRecovery ? <Turn><Say>{compileRecovery}</Say></Turn> : null}
             </div>
           </div>
 
@@ -1037,17 +1075,19 @@ export default function App({
                   </svg>
                 </button>
                 <input ref={inputRef} className="strategy-input" aria-label="交易规则" value={utterance}
-                  disabled={isJourneyLocked || Boolean(instrumentContextError)} onChange={(event) => setUtterance(event.target.value)}
-                  placeholder={isInstrumentClarification(clarification) && !clarificationRecord
-                    ? '输入股票名称或 6 位代码'
-                    : needsLimitUpRuleRewrite
-                      ? '补充卖出方式，或换一种买入条件'
-                    : clarification && !clarificationRecord
-                      ? '也可以直接打字告诉我'
-                    : '说出什么时候买、什么时候卖'} />
+                  disabled={isJourneyLocked} onChange={(event) => setUtterance(event.target.value)}
+                  placeholder={needsLimitUpRuleRewrite
+                    ? '改用价格、涨跌幅或技术指标条件'
+                    : clarification
+                      ? clarificationPlaceholder(clarification)
+                      : compileMutation.isError
+                        ? '补充完整规则，或直接换一种说法'
+                        : instrumentContextError
+                          ? '输入股票名称、买入和卖出条件'
+                          : '说出什么时候买、什么时候卖'} />
                 {utterance.trim() ? (
                   <button type="submit" className="send" aria-label="识别交易规则"
-                    disabled={isJourneyLocked || compileMutation.isPending || Boolean(instrumentContextError)}>
+                    disabled={isJourneyLocked || compileMutation.isPending}>
                     <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
                       <path d="M4 9h10M10 5l4 4-4 4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
                     </svg>

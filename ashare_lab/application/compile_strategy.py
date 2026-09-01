@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from enum import StrEnum
 from itertools import pairwise
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from ashare_lab.application.clarification_guidance import build_clarification_guidance
@@ -48,6 +49,11 @@ from ashare_lab.ports.candidate_generation import (
     PositionReturnIntent,
     SignalIntent,
     TrailingDrawdownIntent,
+)
+from ashare_lab.ports.clarification_dialogue import (
+    ClarificationDialogueRequest,
+    ClarificationDialogueRouter,
+    ClarificationOption,
 )
 from ashare_lab.ports.idea_routing import IdeaProposal, IdeaRoute, IdeaRouter
 
@@ -114,6 +120,13 @@ _STRATEGY_SYNTAX_MARKERS = (
     "中标",
     "许可",
 )
+_CLARIFICATION_NEGATION_RE = re.compile(
+    r"(?:不想(?:用|要|选)?|不打算|不考虑|不接受|不要|不用|别用|拒绝|排除)"
+)
+_CLARIFICATION_QUESTION_RE = re.compile(
+    r"(?:你觉得|你认为|是不是|能不能|可不可以|合适吗|好吗|行吗|怎么样|如何|[吗呢][？?]?$|[？?]$)"
+)
+_CLARIFICATION_EXAMPLE_RE = re.compile(r"^(?:比如|例如|举例|比方说|譬如|打个比方)")
 _POSITION_AWARE_EXIT_AND_EXPLANATION = (
     "当前回测只支持把持有期、止盈、止损、回撤与其他卖出条件按“任一先触发即卖出”执行，"
     "尚不能正确执行“同时满足才卖出”。请改用“或”，或只保留一个这类卖出条件。"
@@ -304,6 +317,23 @@ class CompileOutcome:
     idea_route: IdeaRoute | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ClarificationSuggestion:
+    id: str
+    title: str
+    preview: str
+
+
+@dataclass(frozen=True, slots=True)
+class ClarificationTurnOutcome:
+    reply_kind: Literal["accepted", "clarification"]
+    assistant_message: str
+    outcome: CompileOutcome
+    compile_input: CompileInput
+    revision_changed: bool
+    suggestions: tuple[ClarificationSuggestion, ...] = ()
+
+
 class StrategyCompiler:
     def __init__(
         self,
@@ -317,6 +347,7 @@ class StrategyCompiler:
         trusted_date_provider: Callable[[], date] | None = None,
         backtest_anchor_date: date | None = None,
         idea_router: IdeaRouter | None = None,
+        clarification_dialogue_router: ClarificationDialogueRouter | None = None,
     ) -> None:
         self._generator = generator
         self._catalog = catalog
@@ -327,6 +358,117 @@ class StrategyCompiler:
         self._trusted_date_provider = trusted_date_provider or _shanghai_today
         self._backtest_anchor_date = backtest_anchor_date
         self._idea_router = idea_router
+        self._clarification_dialogue_router = clarification_dialogue_router
+
+    async def answer_clarification(
+        self,
+        *,
+        original_input: CompileInput,
+        prior_outcome: CompileOutcome,
+        answer: str,
+    ) -> ClarificationTurnOutcome:
+        """Apply one answer without granting the model any strategy authority."""
+
+        if (
+            prior_outcome.status is not CompileStatus.NEEDS_CLARIFICATION
+            or prior_outcome.diagnostic_code is None
+        ):
+            raise ValueError("draft revision is not awaiting clarification")
+        selected_utterance = _selected_clarification_utterance(prior_outcome, answer)
+        pragmatic_issue = (
+            None if selected_utterance is not None else _clarification_pragmatic_issue(answer)
+        )
+        if pragmatic_issue is None:
+            merged_input = CompileInput(
+                utterance=(
+                    selected_utterance
+                    if selected_utterance is not None
+                    else _merge_clarification_answer(
+                        original_input.utterance,
+                        answer,
+                        diagnostic_code=prior_outcome.diagnostic_code,
+                    )
+                ),
+                instrument_context=original_input.instrument_context,
+                as_of_date=original_input.as_of_date,
+            )
+            recompiled = await self.compile(merged_input)
+        else:
+            merged_input = original_input
+            recompiled = prior_outcome
+        progressed = recompiled.status is CompileStatus.READY or (
+            recompiled.status is CompileStatus.NEEDS_CLARIFICATION
+            and recompiled.diagnostic_code != prior_outcome.diagnostic_code
+        )
+        if progressed:
+            if recompiled.status is CompileStatus.READY:
+                message = "好，我已经把这句补充接到刚才的规则里，买入和卖出条件都完整了。"
+            else:
+                next_question = recompiled.clarification or "还需要再补充一项信息。"
+                message = f"明白，这部分已经接上了。接下来只差：{next_question}"
+            return ClarificationTurnOutcome(
+                reply_kind="accepted",
+                assistant_message=message,
+                outcome=recompiled,
+                compile_input=merged_input,
+                revision_changed=True,
+                suggestions=_clarification_suggestions(recompiled),
+            )
+
+        if recompiled.status in {CompileStatus.UNSUPPORTED, CompileStatus.INVALID}:
+            pragmatic_issue = "unsupported"
+
+        suggestions = _clarification_suggestions(prior_outcome)
+        assessment = None
+        context_summary = (
+            prior_outcome.idea_route.understanding
+            if prior_outcome.idea_route is not None
+            else "你刚才已经说清的部分我会原样保留。"
+        ).rstrip("。！？!? ")
+        if self._clarification_dialogue_router is not None:
+            assessment = await self._clarification_dialogue_router.assess(
+                ClarificationDialogueRequest(
+                    answer=answer.strip(),
+                    diagnostic_code=prior_outcome.diagnostic_code,
+                    question=prior_outcome.clarification or "请补充缺失的策略条件。",
+                    context_summary=context_summary,
+                    options=tuple(
+                        ClarificationOption(
+                            id=item.id,
+                            title=item.title,
+                            preview=item.preview,
+                        )
+                        for item in suggestions
+                    ),
+                )
+            )
+        if assessment is not None:
+            suggestions = _rank_clarification_suggestions(
+                suggestions,
+                assessment.recommended_option_ids,
+            )
+            acknowledgement = _provider_acknowledgement(assessment.acknowledgement_id)
+            message = (
+                f"{acknowledgement}。{context_summary}。"
+                f"接下来只差：{prior_outcome.clarification or '请补充缺失条件。'}"
+                "你可以从下面选，也可以直接打字告诉我。"
+            )
+        else:
+            acknowledgement = _pragmatic_fallback(pragmatic_issue)
+            message = (
+                f"{acknowledgement}{context_summary}。"
+                f"接下来只差："
+                f"{prior_outcome.clarification or '请补充缺失条件。'}"
+                "你可以从下面选，也可以直接打字告诉我。"
+            )
+        return ClarificationTurnOutcome(
+            reply_kind="clarification",
+            assistant_message=message,
+            outcome=prior_outcome,
+            compile_input=original_input,
+            revision_changed=False,
+            suggestions=suggestions,
+        )
 
     async def compile(self, request: CompileInput) -> CompileOutcome:
         if not request.utterance.strip():
@@ -1082,6 +1224,112 @@ def _period_provenance(
     if candidate.backtest_lookback_years is not None:
         return "utterance/relative_lookback", end_source
     return "default/lookback_years", end_source
+
+
+def _selected_clarification_utterance(
+    outcome: CompileOutcome,
+    answer: str,
+) -> str | None:
+    if outcome.idea_route is None:
+        return None
+    normalized = answer.strip()
+    proposals = outcome.idea_route.proposals
+    for proposal in proposals:
+        if normalized in {proposal.id, proposal.title, proposal.suggested_utterance}:
+            return proposal.suggested_utterance
+    ordinal_match = re.fullmatch(
+        r"(?:我?选|选择|用)?\s*(?:第)?\s*([123一二三])\s*(?:个|项|条)?",
+        normalized,
+    )
+    if ordinal_match is None:
+        return None
+    ordinal = {"1": 1, "一": 1, "2": 2, "二": 2, "3": 3, "三": 3}[ordinal_match.group(1)]
+    if ordinal > len(proposals):
+        return None
+    return proposals[ordinal - 1].suggested_utterance
+
+
+def _clarification_pragmatic_issue(answer: str) -> str | None:
+    normalized = answer.strip()
+    if _CLARIFICATION_NEGATION_RE.search(normalized):
+        return "negation"
+    if _CLARIFICATION_EXAMPLE_RE.search(normalized):
+        return "example"
+    if _CLARIFICATION_QUESTION_RE.search(normalized):
+        return "question"
+    return None
+
+
+def _pragmatic_fallback(issue: str | None) -> str:
+    if issue == "negation":
+        return "明白，这个方向你不想用，我不会把它写进规则。"
+    if issue == "question":
+        return "你是在询问这个条件是否合适，我先不把它当作决定。"
+    if issue == "example":
+        return "我把这句理解为举例，不会直接写进规则。"
+    if issue == "unsupported":
+        return "这项补充目前不能安全执行，我先保留原规则。"
+    return "我听到了，不过这句还没有补上刚才缺的内容。"
+
+
+def _provider_acknowledgement(acknowledgement_id: str) -> str:
+    return {
+        "light_redirect": "我听到了，我们先把刚才没说完的规则补完整",
+        "respect_preference": "明白，这代表你的偏好，我不会替你直接定成规则",
+        "answer_question": "你是在问这个方向是否合适，我先不把提问当作确认",
+        "ask_rephrase": "我还没完全理解这句补充，先保留原来的规则",
+        "confirm_cancel": "明白，你暂时不想继续这个方向，我不会改动原规则",
+    }[acknowledgement_id]
+
+
+def _merge_clarification_answer(
+    original: str,
+    answer: str,
+    *,
+    diagnostic_code: str,
+) -> str:
+    supplement = answer.strip(" ，,。；;\n\t")
+    base = original.strip(" ，,。；;\n\t")
+    if diagnostic_code == "idea_guidance_required":
+        return supplement
+    if diagnostic_code in {
+        "instrument_required",
+        "instrument_unconfirmed",
+        "instrument_resolution_unavailable",
+    }:
+        return f"{supplement}，{base}"
+    return f"{base}，{supplement}"
+
+
+def _clarification_suggestions(
+    outcome: CompileOutcome,
+) -> tuple[ClarificationSuggestion, ...]:
+    if outcome.idea_route is None:
+        return ()
+    return tuple(
+        ClarificationSuggestion(
+            id=item.id,
+            title=item.title,
+            # Every exposed sentence was recompiled and passed the active
+            # Catalog gate before it reached ``idea_route``.  Returning the
+            # complete sentence lets the user answer with a real rule instead
+            # of forcing the UI to turn an abstract hypothesis into DSL.
+            preview=item.suggested_utterance,
+        )
+        for item in outcome.idea_route.proposals[:3]
+    )
+
+
+def _rank_clarification_suggestions(
+    suggestions: tuple[ClarificationSuggestion, ...],
+    recommended_ids: tuple[str, ...],
+) -> tuple[ClarificationSuggestion, ...]:
+    if not recommended_ids:
+        return suggestions
+    by_id = {item.id: item for item in suggestions}
+    ranked = [by_id[item] for item in recommended_ids if item in by_id]
+    ranked.extend(item for item in suggestions if item.id not in recommended_ids)
+    return tuple(ranked)
 
 
 def _shanghai_today() -> date:

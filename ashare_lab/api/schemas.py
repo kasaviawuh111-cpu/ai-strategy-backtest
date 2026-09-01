@@ -46,6 +46,10 @@ class StrategyDraftRevisionRequest(ApiModel):
     utterance: str | None = Field(default=None, max_length=2_000)
 
 
+class ClarificationAnswerRequest(ApiModel):
+    answer: str = Field(min_length=1, max_length=2_000)
+
+
 class ProvenanceItem(ApiModel):
     path: str = Field(min_length=1, max_length=256)
     source: str = Field(min_length=1, max_length=128)
@@ -181,6 +185,19 @@ class StrategyDraftResponse(ApiModel):
         if self.diagnostic_code == "idea_guidance_required" and self.idea_route is None:
             raise ValueError("idea_guidance_required must include idea_route")
         return self
+
+
+class ClarificationSuggestionPayload(ApiModel):
+    id: str = Field(pattern=r"^idea_[0-9a-f]{12}$")
+    title: str = Field(min_length=1, max_length=96)
+    preview: str = Field(min_length=1, max_length=512)
+
+
+class ClarificationAnswerResponse(ApiModel):
+    reply_kind: Literal["accepted", "clarification"]
+    assistant_message: str = Field(min_length=1, max_length=1_000)
+    suggestions: tuple[ClarificationSuggestionPayload, ...] = Field(max_length=3)
+    draft: StrategyDraftResponse
 
 
 class HealthResponse(ApiModel):

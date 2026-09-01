@@ -381,7 +381,34 @@ export type CompileRequest = {
 
 export type CompileResponse =
   | { status: 'compiled'; draft: StrategyDraft }
-  | { status: 'needs_clarification'; draftId: string; clarification: Clarification }
+  | {
+      status: 'needs_clarification'
+      draftId: string
+      /** Live drafts are revision-bound; Mock responses may omit this legacy field. */
+      revision?: number
+      clarification: Clarification
+    }
+
+export type ClarificationSuggestion = {
+  id: string
+  title: string
+  preview: string
+}
+
+export type ClarificationAnswerInput = {
+  draftId: string
+  revision?: number
+  answer: string
+  originalRequest: CompileRequest
+  clarification: Clarification
+}
+
+export type ClarificationAnswerOutcome = {
+  replyKind: 'accepted' | 'clarification'
+  assistantMessage: string
+  suggestions: ClarificationSuggestion[]
+  outcome: CompileResponse
+}
 
 export type CapabilityParameter = {
   name: string

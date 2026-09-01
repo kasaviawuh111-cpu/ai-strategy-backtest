@@ -209,6 +209,76 @@ describe('live strategy client', () => {
     })
   })
 
+  it('answers a saved draft revision without rebuilding the rule in the browser', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    const clarificationDraft: LiveDraftResponse = {
+      draft_id: '8c91eb84-ab49-4b0c-890a-682e9cc6fe21',
+      revision: 3,
+      status: 'needs_clarification',
+      strategy: null,
+      strategy_hash: null,
+      clarification: '已识别卖出条件。请补充买入条件。',
+      diagnostic_code: 'entry_rule_not_recognized',
+      provenance: [],
+      candidate_provenance: null,
+      candidate_grounding: null,
+      candidate_alternatives: [],
+      candidate_rejections: [],
+      created_at: '2026-08-29T00:00:00Z',
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/capabilities') {
+        return { ok: true, json: async () => capabilities() }
+      }
+      if (path === '/api/v1/strategy-drafts') {
+        return { ok: true, json: async () => clarificationDraft }
+      }
+      if (path === '/api/v1/strategy-drafts/8c91eb84-ab49-4b0c-890a-682e9cc6fe21/revisions/3/clarification-answers') {
+        expect(init?.method).toBe('POST')
+        expect(JSON.parse(String(init?.body))).toEqual({ answer: 'RSI 低于 30 买入' })
+        expect(new Headers(init?.headers).has('Idempotency-Key')).toBe(false)
+        return {
+          ok: true,
+          json: async () => ({
+            reply_kind: 'clarification',
+            assistant_message: '已保留 MACD 死叉卖出，请确认 RSI 阈值。',
+            suggestions: [{
+              id: 'idea_123456789abc',
+              title: 'RSI 低于 30 买入',
+              preview: 'RSI 低于 30 买入，MACD 死叉卖出',
+            }],
+            draft: clarificationDraft,
+          }),
+        }
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { strategyApi } = await import('./client')
+    const pending = await strategyApi.compile({
+      ...clarifiedRequest,
+      utterance: 'MACD 死叉卖出',
+    })
+    if (pending.status !== 'needs_clarification') throw new Error('expected clarification')
+
+    const answer = await strategyApi.answerClarification({
+      draftId: pending.draftId,
+      revision: pending.revision,
+      answer: 'RSI 低于 30 买入',
+      originalRequest: { ...clarifiedRequest, utterance: 'MACD 死叉卖出' },
+      clarification: pending.clarification,
+    })
+
+    expect(answer).toMatchObject({
+      replyKind: 'clarification',
+      assistantMessage: '已保留 MACD 死叉卖出，请确认 RSI 阈值。',
+      suggestions: [{ id: 'idea_123456789abc' }],
+      outcome: { status: 'needs_clarification', draftId: clarificationDraft.draft_id, revision: 3 },
+    })
+  })
+
   it('compiles a server-owned StrategySpec even when execution is unavailable, then gates revise and run', async () => {
     vi.stubEnv('VITE_USE_MOCK', 'false')
     const unavailable = capabilities({

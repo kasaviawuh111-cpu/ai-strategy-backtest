@@ -611,6 +611,10 @@ class CandidateTransportRequest:
     capability_projection_hash: str
     system_contract: str
     upstream_pattern_commit: str = _UPSTREAM_COMMIT
+    response_schema_name: str = "ashare_bounded_strategy_candidates"
+    user_payload: Mapping[str, object] | None = None
+    json_object_contract: str | None = None
+    system_footer: str | None = None
 
 
 type CandidateTransportResponse = str | bytes | Mapping[str, object]
