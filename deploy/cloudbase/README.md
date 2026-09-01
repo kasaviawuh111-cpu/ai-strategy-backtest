@@ -1,6 +1,8 @@
 # CloudBase candidate release
 
-The image has two explicit, mutually exclusive profiles. There is no default:
+The image has two explicit, mutually exclusive profiles. The current release
+bundle deliberately defaults to `ephemeral_candidate` because persistent
+PostgreSQL and cross-restart recovery are deferred:
 
 - `ephemeral_candidate` is the temporary non-production profile. It uses
   SQLite, initializes its own schema, and stores acquired snapshots on the
@@ -10,9 +12,11 @@ The image has two explicit, mutually exclusive profiles. There is no default:
 - `strict_production` keeps the existing fail-closed PostgreSQL/CFS entrypoint.
   It cannot start until every production prerequisite below is proven.
 
-`deployment_entrypoint.py` rejects a missing or unknown
-`DEPLOYMENT_PROFILE`; selecting the temporary candidate never weakens or
-bypasses `runtime_entrypoint.py`.
+`deployment_entrypoint.py` still rejects a missing or unknown
+`DEPLOYMENT_PROFILE`; selecting `strict_production` always uses the separate
+fail-closed `runtime_entrypoint.py`. A production deployment must explicitly
+override the complete strict-production environment rather than relying on the
+temporary image defaults.
 
 The current stable service stays unchanged until every gate below passes. A
 candidate is created as a separate version with zero default traffic. Traffic

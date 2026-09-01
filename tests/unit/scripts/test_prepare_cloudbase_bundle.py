@@ -273,11 +273,15 @@ def test_cloudbase_dockerfile_uses_portable_source_build_contract() -> None:
     assert "python -m pip install --no-cache-dir uv==0.12.1" in dockerfile
     assert dockerfile.count("uv sync --locked --extra demo") == 2
     assert "import baostock, pypdfium2" in dockerfile
-    assert "DEPLOYMENT_PROFILE=unconfigured" in dockerfile
+    assert "DEPLOYMENT_PROFILE=ephemeral_candidate" in dockerfile
+    assert "APP_ENV=staging" in dockerfile
+    assert "DATABASE_URL=sqlite+pysqlite:////app/var/ephemeral/ashare.db" in dockerfile
+    assert "PERSISTENCE_MODE=ephemeral" in dockerfile
+    assert "RESTART_RECOVERY_VERIFIED=false" in dockerfile
     assert "/app/var/ephemeral/snapshots/composite" in dockerfile
     assert "MARKET_DATA_PROFILE=on_demand_snapshot" in dockerfile
-    assert "SNAPSHOT_STORAGE_MODE=durable_mount" in dockerfile
-    assert "SNAPSHOT_STORAGE_MARKER=/mnt/ashare-snapshots/" in dockerfile
+    assert "SNAPSHOT_STORAGE_MODE=ephemeral_local" in dockerfile
+    assert "SNAPSHOT_STORAGE_MARKER=" not in dockerfile
     assert "DATA_ROOT=/app/var/snapshots/composite/${SNAPSHOT_DIGEST}" in dockerfile
     assert "deploy-snapshot/ /app/var/snapshots/composite/" in dockerfile
     assert "COPY --chown=app:app scripts ./scripts" in dockerfile

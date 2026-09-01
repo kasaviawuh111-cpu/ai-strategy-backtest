@@ -26,25 +26,28 @@ ARG APP_GID=10001
 ARG CODE_REVISION
 ARG SNAPSHOT_DIGEST
 
-ENV DEPLOYMENT_PROFILE=unconfigured \
-    APP_ENV=production \
+ENV DEPLOYMENT_PROFILE=ephemeral_candidate \
+    APP_ENV=staging \
     APP_HOST=0.0.0.0 \
     APP_PORT=8000 \
-    INITIALIZE_SCHEMA=false \
+    DATABASE_URL=sqlite+pysqlite:////app/var/ephemeral/ashare.db \
+    INITIALIZE_SCHEMA=true \
     QUEUE_BACKEND=thread \
     LOCAL_WORKER_THREADS=1 \
+    PERSISTENCE_MODE=ephemeral \
+    RESTART_RECOVERY_VERIFIED=false \
     DATA_ROOT=/app/var/snapshots/composite/${SNAPSHOT_DIGEST} \
     MARKET_DATA_PROFILE=on_demand_snapshot \
     SESSION_REFERENCE_MODE=parquet \
     SESSION_REFERENCE_PATH=/app/var/snapshots/composite/${SNAPSHOT_DIGEST}/instrument_sessions.parquet \
     EVENT_DATA_REQUIRED=false \
-    SNAPSHOT_STORAGE_MODE=durable_mount \
-    SNAPSHOT_STORAGE_MARKER=/mnt/ashare-snapshots/.ashare-snapshot-store.json \
-    CHOICE_SNAPSHOT_ROOT=/mnt/ashare-snapshots/choice \
-    TECHNICAL_SNAPSHOT_ROOT=/mnt/ashare-snapshots/technical \
-    EVENT_SNAPSHOT_ROOT=/mnt/ashare-snapshots/events \
-    COMPOSITE_SNAPSHOT_ROOT=/mnt/ashare-snapshots/composite \
-    SNAPSHOT_PREPARATION_ROOT=/mnt/ashare-snapshots/preparations \
+    SNAPSHOT_STORAGE_MODE=ephemeral_local \
+    CHOICE_SNAPSHOT_ROOT=/app/var/ephemeral/snapshots/choice \
+    TECHNICAL_SNAPSHOT_ROOT=/app/var/ephemeral/snapshots/technical \
+    EVENT_SNAPSHOT_ROOT=/app/var/ephemeral/snapshots/events \
+    COMPOSITE_SNAPSHOT_ROOT=/app/var/ephemeral/snapshots/composite \
+    SNAPSHOT_PREPARATION_ROOT=/app/var/ephemeral/snapshots/preparations \
+    ARTIFACT_ROOT=/app/var/ephemeral/artifacts \
     CATALOG_ROOT=/app/catalogs \
     ENGINE_VERSION=2.0.0a0 \
     CODE_REVISION=${CODE_REVISION} \
@@ -63,6 +66,7 @@ RUN groupadd --gid "${APP_GID}" app \
         /app/var/ephemeral/snapshots/events \
         /app/var/ephemeral/snapshots/composite \
         /app/var/ephemeral/snapshots/preparations \
+        /app/var/ephemeral/artifacts \
     && chown -R app:app /app
 
 WORKDIR /app
