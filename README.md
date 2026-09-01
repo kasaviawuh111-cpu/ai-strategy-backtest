@@ -35,7 +35,7 @@
 | 策略 | A 股、单股、只做多、日线 |
 | 自然语言与观点引导 | 完整策略继续走“确定性快路 + 受限 CandidateAst + 现有严格编译”；模型 transport 已配置，只有较早版本的公网冒烟证据，当前 revision 仍为 `Live-unverified`。`idea-route.v1` 已达到 `implemented / fixture-tested`：任意有意义输入先被理解；纯观点只生成“观点 → 可检验假设 → 当前权威 A 股页价格代理 → 2—3 个固定模板候选”，用户一次选择后才重新编译，选择前不可回测 |
 | 其他开源胶水 | `implemented / fixture-tested / Live-unverified`：MOSS/pandas 指标差分、Vibe/mootdx 日线接口和 AKShare-shaped 东方财富 Push2 日线请求协议已落地；指标未切默认，mootdx 商业与数据条款待审，Push2 直连未取得真实 batch 或 snapshot，公共未文档化接口不视为生产授权 |
-| 技术信号 | 35 个透明日线定义：均线/趋势、MACD/RSI/KDJ/CCI/Stochastic/Williams %R、BIAS/ROC/Momentum、BOLL/Donchian、TR/ATR/NATR/波动率、ADX/DMI、价格与量价等；目录可执行不等于任意中文说法都已验收 |
+| 技术信号 | 37 个透明日线定义：固定收盘价阈值、均线/趋势、MACD/RSI/KDJ/CCI/Stochastic/Williams %R、BIAS/ROC/Momentum、BOLL/Donchian、TR/ATR/NATR/波动率、ADX/DMI、价格、量价与换手率等；目录可执行不等于任意中文说法都已验收 |
 | 事件信号 | 69 项只达到 Catalog/编译/Adapter/运行时代码路径；当前 strict Composite 只对年报、半年报、季报、业绩预告、业绩快报 5 码提供 pinned coverage，共 26 条东方财富秒级观察；不得写成 69 类真实历史覆盖 |
 | 报告正文词频 | `implemented / fixture-tested / Mock-verified / Live-unverified`：可对“初始完整定期报告正文”做确定性词频，并与“首次实际买入成交后第 N 个 A 股交易日退出”组合；当前 strict Composite 的 26 条 observation 中 `document_text=0`，必须 opt-in 重采正文后才能 Live 运行 |
 | A 股规则 | T+1、停牌、涨跌停、手数、费用、滑点、PIT 容量、部分成交、订单过期 |
@@ -46,7 +46,7 @@
 
 云端持久 PostgreSQL/CFS、数据库不可变权限和跨容器重启恢复已登记为后续生产化 TODO；当前版本不得据本地 SQLite 或容器内文件声称生产级持久化。
 
-覆盖目录还登记了 181 个 A 股单股指标/数据项和 160 个 A 股相关事件，但登记不等于可执行。其中技术、价格、量能 131 项中只有 35 个 `stable`；最终以
+覆盖目录还登记了 182 个 A 股单股指标/数据项和 160 个 A 股相关事件，但登记不等于可执行。其中技术、价格、量能 132 项中只有 37 个 `stable`；最终以
 `GET /api/v1/capabilities` 的 `backtest_execution_available`、逐事件码
 `backtest_available` 与 `preparation_available` 为准。固定 composite 只有在当前
 pinned snapshot 已有合格区间覆盖时才返回 `backtest_available=true`；on-demand

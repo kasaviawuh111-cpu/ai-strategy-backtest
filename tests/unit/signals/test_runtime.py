@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -9,6 +9,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from ashare_lab.domain.market_data import PriceBasis
+from ashare_lab.domain.shared import InstrumentId, Price
 from ashare_lab.domain.signals import SignalRuntime, SignalRuntimeError
 from ashare_lab.domain.signals.models import SignalFact
 from ashare_lab.domain.strategy import (
@@ -746,6 +748,173 @@ def test_return_pct_cross_uses_percentage_points_and_two_ready_values() -> None:
     assert fact is not None and fact.triggered
     assert fact.left_value == pytest.approx(Decimal(150) / Decimal(26))
     assert fact.right_value == Decimal(5)
+
+
+def test_close_price_threshold_uses_pinned_daily_close_and_inclusive_boundary() -> None:
+    condition = indicator_condition(
+        "price.close",
+        "at_least",
+        {},
+        value=19,
+    )
+
+    aligned = SignalRuntime().evaluate_aligned(condition, make_bars(["18.5", "19", "19.01"]))
+
+    assert aligned[0] is not None and not aligned[0].triggered
+    assert aligned[1] is not None and aligned[1].triggered
+    assert aligned[1].left_value == aligned[1].right_value == Decimal(19)
+    assert aligned[2] is not None and aligned[2].triggered
+    assert aligned[2].left_value == Decimal("19.01")
+    assert aligned[2].right_value == Decimal(19)
+
+
+@pytest.mark.parametrize(
+    ("trigger", "prices", "expected_triggered"),
+    [
+        ("crosses_above", (18, 20), True),
+        ("crosses_below", (20, 18), True),
+        ("above", (19, 20), True),
+        ("below", (19, 18), True),
+        ("at_least", (18, 19), True),
+        ("at_most", (20, 19), True),
+    ],
+)
+def test_close_price_catalog_triggers_have_deterministic_positive_examples(
+    trigger: str,
+    prices: tuple[int, int],
+    expected_triggered: bool,
+) -> None:
+    aligned = SignalRuntime().evaluate_aligned(
+        indicator_condition("price.close", trigger, {}, value=19),
+        make_bars(prices),
+    )
+
+    assert aligned[-1] is not None
+    assert aligned[-1].triggered is expected_triggered
+
+
+@pytest.mark.parametrize(
+    ("trigger", "prices", "threshold"),
+    [
+        ("at_least", (100, 105), 5),
+        ("at_most", (100, 95), -5),
+    ],
+)
+def test_daily_return_inclusive_triggers_include_the_exact_boundary(
+    trigger: str,
+    prices: tuple[int, int],
+    threshold: int,
+) -> None:
+    aligned = SignalRuntime().evaluate_aligned(
+        indicator_condition(
+            "price.return_pct",
+            trigger,
+            {"period": 1, "price_field": "close"},
+            value=threshold,
+        ),
+        make_bars(prices),
+    )
+
+    assert aligned[-1] is not None and aligned[-1].triggered
+    assert aligned[-1].left_value == aligned[-1].right_value == Decimal(threshold)
+
+
+def test_mixed_close_price_and_ma_use_execution_and_signal_bars_respectively() -> None:
+    execution_bars = make_bars([18, 20, 21])
+    signal_bars = tuple(
+        replace(
+            bar,
+            open=Price(Decimal(close)),
+            high=Price(Decimal(close)),
+            low=Price(Decimal(close)),
+            close=Price(Decimal(close)),
+            price_basis=PriceBasis.BACK_ADJUSTED,
+        )
+        for bar, close in zip(execution_bars, (100, 90, 110), strict=True)
+    )
+    condition = AllCondition(
+        children=(
+            indicator_condition("price.close", "at_least", {}, value=19),
+            ma_condition("price_above", period=2),
+        )
+    )
+
+    aligned = SignalRuntime().evaluate_aligned(
+        condition,
+        signal_bars,
+        execution_bars=execution_bars,
+    )
+
+    assert aligned[0] is not None and not aligned[0].triggered
+    assert aligned[1] is not None and not aligned[1].triggered
+    assert tuple(child.left_value for child in aligned[1].children) == (
+        Decimal(20),
+        Decimal(90),
+    )
+    assert aligned[2] is not None and aligned[2].triggered
+
+
+@pytest.mark.parametrize("mismatch", ["instrument", "date", "availability", "price_basis"])
+def test_close_price_execution_bars_fail_closed_when_not_exactly_aligned(
+    mismatch: str,
+) -> None:
+    signal_bars = tuple(
+        replace(bar, price_basis=PriceBasis.BACK_ADJUSTED) for bar in make_bars([18, 20, 21])
+    )
+    execution_bars = list(make_bars([18, 20, 21]))
+    if mismatch == "instrument":
+        execution_bars[1] = replace(
+            execution_bars[1],
+            instrument_id=InstrumentId("600519.SH"),
+        )
+    elif mismatch == "date":
+        execution_bars[1] = replace(
+            execution_bars[1],
+            session_date=execution_bars[1].session_date.replace(day=20),
+        )
+    elif mismatch == "availability":
+        execution_bars[1] = replace(
+            execution_bars[1],
+            available_at=execution_bars[1].available_at.replace(hour=15, minute=2),
+        )
+    else:
+        execution_bars[1] = replace(
+            execution_bars[1],
+            price_basis=PriceBasis.BACK_ADJUSTED,
+        )
+    condition = indicator_condition("price.close", "at_least", {}, value=19)
+
+    with pytest.raises(SignalRuntimeError):
+        SignalRuntime().evaluate_aligned(
+            condition,
+            signal_bars,
+            execution_bars=tuple(execution_bars),
+        )
+
+
+def test_close_price_rejects_adjusted_bars_without_execution_series() -> None:
+    adjusted_bars = tuple(
+        replace(bar, price_basis=PriceBasis.BACK_ADJUSTED) for bar in make_bars([18, 20, 21])
+    )
+
+    with pytest.raises(SignalRuntimeError, match="unadjusted"):
+        SignalRuntime().evaluate_aligned(
+            indicator_condition("price.close", "at_least", {}, value=19),
+            adjusted_bars,
+        )
+
+
+def test_threshold_runtime_rejects_inclusive_trigger_not_declared_by_indicator() -> None:
+    with pytest.raises(SignalRuntimeError, match="inclusive threshold"):
+        SignalRuntime().evaluate_aligned(
+            indicator_condition(
+                "technical.cci",
+                "at_least",
+                {"period": 14, "constant": 0.015},
+                value=100,
+            ),
+            make_bars(range(1, 20)),
+        )
 
 
 def test_rolling_high_excludes_today_and_equality_is_not_new_high() -> None:

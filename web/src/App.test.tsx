@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, vi } from 'vitest'
 
@@ -12,6 +12,7 @@ import { settleMockRunOnFirstPoll } from './test/mock-run'
 const renderApp = (
   instrument?: Instrument,
   options?: {
+    instrumentContextSource?: 'stock_page' | 'standalone_default'
     instrumentContextError?: string
     onReturnToStockPage?: () => void
     onUseStandaloneExample?: () => void
@@ -366,6 +367,78 @@ describe('formal main.tsx App journey', () => {
     expect(compile).toHaveBeenCalledTimes(1)
   })
 
+  it('asks for a missing standalone stock in text and merges the typed reply with the saved rule', async () => {
+    const original = 'MACD金叉买入，MACD死叉卖出，回测近1年'
+    const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
+      status: 'needs_clarification',
+      draftId: 'draft_missing_instrument',
+      clarification: {
+        id: 'instrument_required',
+        question: '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
+        reason: '买卖条件已经保留，现在只缺回测标的。',
+        choices: [],
+      },
+    })
+    const user = userEvent.setup()
+    renderApp()
+
+    const input = screen.getByLabelText('交易规则')
+    await user.type(input, original)
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+
+    expect(await screen.findByText(
+      '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
+    )).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '补充股票代码' })).not.toBeInTheDocument()
+    expect(input).toBeEnabled()
+    expect(input).toHaveValue('')
+    expect(input).toHaveAttribute('placeholder', '输入股票名称或 6 位代码')
+    await waitFor(() => expect(input).toHaveFocus())
+
+    await user.type(input, '同花顺')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+
+    await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
+    expect(compile).toHaveBeenLastCalledWith(expect.objectContaining({
+      utterance: `同花顺，${original}`,
+      instrumentContextSource: 'standalone_default',
+    }))
+  })
+
+  it('offers a trusted stock-page instrument while keeping free stock input available', async () => {
+    const instrument: Instrument = {
+      name: '贵州茅台', symbol: '600519.SH', market: 'CN_A', exchange: 'SSE',
+    }
+    vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
+      status: 'needs_clarification',
+      draftId: 'draft_stock_page_instrument',
+      clarification: {
+        id: 'instrument_required',
+        question: '请确认使用当前股票“贵州茅台”，或在下方输入其他股票名称或 6 位证券代码。',
+        reason: '买卖条件已经保留，现在只缺回测标的。',
+        choices: [{
+          id: 'use-current-instrument',
+          label: '使用 贵州茅台',
+          description: '继续回测 600519.SH。',
+          recommended: true,
+          action: 'submit_clarification',
+        }],
+      },
+    })
+    const user = userEvent.setup()
+    renderApp(instrument, { instrumentContextSource: 'stock_page' })
+
+    const input = screen.getByLabelText('交易规则')
+    await user.type(input, 'MACD金叉买入，MACD死叉卖出')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+
+    expect(await screen.findByRole('button', { name: /使用 贵州茅台/ })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: '补充股票代码' })).not.toBeInTheDocument()
+    expect(input).toBeEnabled()
+    expect(input).toHaveAttribute('placeholder', '输入股票名称或 6 位代码')
+    await waitFor(() => expect(input).toHaveFocus())
+  })
+
   it('separates recognized document rules with missing data from unknown language', async () => {
     vi.spyOn(strategyApi, 'compile').mockRejectedValueOnce(new ApiError({
       type: 'about:blank',
@@ -404,6 +477,41 @@ describe('formal main.tsx App journey', () => {
     expect(screen.queryByText('MACD 金叉')).not.toBeInTheDocument()
   })
 
+  it('guides an unavailable previous-session limit-up rule through plain text input', async () => {
+    const original = '东方财富昨天涨停今天买入，短线卖出'
+    const compile = vi.spyOn(strategyApi, 'compile').mockRejectedValueOnce(new ApiError({
+      type: 'about:blank',
+      title: '前一交易日涨停能力不可用',
+      status: 422,
+      detail: '当前运行时尚未发布前一交易日涨停信号。',
+      code: 'previous_session_limit_up_capability_unavailable',
+    }))
+    const user = userEvent.setup()
+    renderApp()
+
+    const input = screen.getByLabelText('交易规则')
+    await user.type(input, original)
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+
+    expect(await screen.findByText(/我已理解你想用“前一交易日涨停”作为买入条件/))
+      .toBeInTheDocument()
+    expect(screen.getByText(/“短线”没有明确的卖出时点/)).toBeInTheDocument()
+    expect(screen.queryByText('这句话暂时不能还原')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '修改规则' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '使用技术示例' })).not.toBeInTheDocument()
+    expect(input).toBeEnabled()
+    expect(input).toHaveValue('')
+    expect(input).toHaveAttribute('placeholder', '补充卖出方式，或换一种买入条件')
+    await waitFor(() => expect(input).toHaveFocus())
+    expect(screen.getByText(original)).toBeInTheDocument()
+
+    const replacement = '东方财富MACD金叉买入，MACD死叉卖出'
+    await user.type(input, replacement)
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
+    expect(compile).toHaveBeenLastCalledWith(expect.objectContaining({ utterance: replacement }))
+  })
+
   it('guides an opinion into explicit A-share strategy choices before allowing a backtest', async () => {
     const originalCompile = strategyApi.compile
     const compile = vi.spyOn(strategyApi, 'compile')
@@ -413,7 +521,7 @@ describe('formal main.tsx App journey', () => {
         clarification: {
           id: 'idea_guidance_required',
           question: '选一个方向，我会把它变成完整买卖规则再识别。',
-          reason: '原话表达的是观点，还不是买卖规则。以下方向都需要你先选定，系统不会替你自动执行。',
+          reason: '你在表达对特朗普相关政策的不认同，但还没有给出可回测的买卖条件。',
           ideaRoute: {
             schema_version: 'idea-route.v1',
             understanding: '你在表达对特朗普相关政策的不认同。',
@@ -471,17 +579,19 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '我讨厌特朗普')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    expect(await screen.findByRole('button', { name: '等趋势确认' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '等超跌反弹' })).toBeInTheDocument()
-    expect(screen.getByText('已理解观点：')).toBeInTheDocument()
-    expect(screen.getByText('投资假设：')).toBeInTheDocument()
-    expect(screen.getByText('当前 A 股映射：')).toBeInTheDocument()
-    expect(screen.getAllByText(/当前页面是东方财富/).length).toBeGreaterThan(0)
+    expect(await screen.findByRole('button', { name: /等趋势确认/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /等超跌反弹/ })).toBeInTheDocument()
+    expect(screen.getByText('你在表达对特朗普相关政策的不认同，但还没有给出可回测的买卖条件。')).toBeInTheDocument()
+    expect(screen.getByText('价格与趋势同时转强后再进入。')).toBeInTheDocument()
+    expect(screen.getByText('仅在超跌后恢复时进入。')).toBeInTheDocument()
+    expect(screen.getByText('2 条可选规则')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('也可以直接打字告诉我')).toBeInTheDocument()
+    expect(screen.queryByText('已理解观点：')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
     expect(compile).toHaveBeenCalledTimes(1)
     expect(revise).not.toHaveBeenCalled()
 
-    await user.click(screen.getByRole('button', { name: '等趋势确认' }))
+    await user.click(screen.getByRole('button', { name: /等趋势确认/ }))
 
     expect(input).toHaveValue('MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年')
     expect(compile).toHaveBeenCalledTimes(2)
@@ -491,6 +601,69 @@ describe('formal main.tsx App journey', () => {
     }))
     expect(await screen.findByRole('button', { name: '开始回测' })).toBeInTheDocument()
     expect(revise).not.toHaveBeenCalled()
+  })
+
+  it('keeps the server-confirmed instrument when compiling an idea-route choice', async () => {
+    const originalCompile = strategyApi.compile
+    const compile = vi.spyOn(strategyApi, 'compile')
+      .mockResolvedValueOnce({
+        status: 'needs_clarification',
+        draftId: 'ambiguous-cross-draft',
+        clarification: {
+          id: 'ambiguous_cross_indicator',
+          question: '“金叉/死叉”指的是哪一类指标？',
+          reason: '已确认标的为汤姆猫，但金叉可能指多种指标。',
+          ideaRoute: {
+            schema_version: 'idea-route.v1',
+            understanding: '你想在汤姆猫出现金叉时买入，死叉时卖出。',
+            hypothesis: '先确认金叉所属指标。',
+            asset_mapping: {
+              instrument_symbol: '300459.SZ',
+              relation: 'current_page_proxy',
+              rationale: '服务端证券主数据已确认汤姆猫。',
+              evidence_status: 'host_context_only',
+            },
+            proposals: [],
+          },
+          choices: [{
+            id: 'macd-cross',
+            label: 'MACD 金叉 / 死叉',
+            description: 'MACD 金叉买入，MACD 死叉卖出',
+            action: 'replace_and_compile',
+            suggestedUtterance: 'MACD金叉买入，MACD死叉卖出，回测近1年',
+            instrumentSymbol: '300459.SZ',
+            instrumentName: '汤姆猫',
+          }, {
+            id: 'kdj-cross',
+            label: 'KDJ 金叉 / 死叉',
+            description: 'KDJ 金叉买入，KDJ 死叉卖出',
+            action: 'replace_and_compile',
+            suggestedUtterance: 'KDJ金叉买入，KDJ死叉卖出，回测近1年',
+            instrumentSymbol: '300459.SZ',
+            instrumentName: '汤姆猫',
+          }],
+        },
+      })
+      .mockImplementationOnce((input) => originalCompile(input))
+    const user = userEvent.setup()
+    renderApp()
+
+    const input = screen.getByLabelText('交易规则')
+    await user.clear(input)
+    await user.type(input, '汤姆猫金叉买死叉卖')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(await screen.findByRole('button', { name: /MACD 金叉/ }))
+
+    expect(compile).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      utterance: 'MACD金叉买入，MACD死叉卖出，回测近1年',
+      instrument: expect.objectContaining({
+        name: '汤姆猫',
+        symbol: '300459.SZ',
+        exchange: 'SZSE',
+      }),
+      instrumentContextSource: 'stock_page',
+    }))
+    expect(await screen.findByText('汤姆猫')).toBeInTheDocument()
   })
 
   it('does not present uncovered catalog events as runnable event strategies', async () => {

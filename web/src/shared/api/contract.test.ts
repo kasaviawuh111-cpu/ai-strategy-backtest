@@ -10,11 +10,13 @@ import type { LiveDraftResponse } from './contract'
 import type {
   CapabilitiesResponse,
   CompileRequest,
+  IndicatorCapability,
   StrategyCondition,
   StrategyDraft,
   StrategySpec,
   StrategySpecIndicatorCondition,
 } from './types'
+import { toStrategySummary } from '../../view-model'
 
 const capabilities = (overrides: Partial<CapabilitiesResponse> = {}): CapabilitiesResponse => ({
   markets: ['CN_A'],
@@ -35,6 +37,36 @@ const capabilities = (overrides: Partial<CapabilitiesResponse> = {}): Capabiliti
   },
   ...overrides,
 })
+
+const conditionOrderCapability = (
+  indicatorId: 'price.close' | 'price.return_pct',
+  displayName: string,
+): IndicatorCapability => {
+  const triggers = ['crosses_above', 'crosses_below', 'above', 'below', 'at_least', 'at_most']
+  return {
+    indicator_id: indicatorId,
+    definition_version: '1.0.0',
+    status: 'stable',
+    display_name: displayName,
+    description: displayName,
+    warmup_bars: indicatorId === 'price.close' ? 2 : 7,
+    timeframes: ['1d'],
+    evaluation_modes: ['bar_close_confirmed'],
+    triggers,
+    parameters: [],
+    trigger_definitions: triggers.map((id) => ({
+      id,
+      display_name: null,
+      description: null,
+      value_requirement: 'required',
+      minimum: null,
+      maximum: null,
+      unit: null,
+      exclusive_minimum: false,
+      exclusive_maximum: false,
+    })),
+  }
+}
 
 const request: CompileRequest = {
   utterance: '东方财富 MACD 金叉买入，死叉卖出，回测近 5 年',
@@ -122,6 +154,18 @@ describe('live API contract adapter', () => {
     })
   })
 
+  it('does not send the standalone demo stock as authoritative context', () => {
+    expect(toLiveCompileBody({
+      ...request,
+      instrumentContextSource: 'standalone_default',
+      utterance: '同花顺ROE高于0%买入，MACD死叉卖出，回测近1年',
+    })).toEqual({
+      utterance: '同花顺ROE高于0%买入，MACD死叉卖出，回测近1年',
+      instrument_context: null,
+      as_of_date: '2026-08-06',
+    })
+  })
+
   it('answers the only backend v2 clarification through instrument_context', () => {
     expect(toLiveCompileBody({
       ...request,
@@ -155,6 +199,75 @@ describe('live API contract adapter', () => {
     })
   })
 
+  it('asks for a code instead of offering the demo stock in standalone mode', () => {
+    const outcome = fromLiveDraftResponse({
+      ...response,
+      status: 'needs_clarification',
+      strategy: null,
+      strategy_hash: null,
+      clarification: '请确认要回测哪一只 A 股。',
+      diagnostic_code: 'instrument_required',
+    }, { ...request, instrumentContextSource: 'standalone_default' })
+
+    expect(outcome).toMatchObject({
+      status: 'needs_clarification',
+      clarification: {
+        question: '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
+        choices: [],
+      },
+    })
+    if (outcome.status !== 'needs_clarification') throw new Error('expected clarification')
+    expect(outcome.clarification.recognized).not.toContainEqual(expect.objectContaining({
+      label: '股票',
+      value: expect.stringContaining('东方财富'),
+    }))
+  })
+
+  it('turns an unresolved instrument diagnostic into the same typed clarification', () => {
+    const outcome = fromLiveDraftResponse({
+      ...response,
+      status: 'unsupported',
+      strategy: null,
+      strategy_hash: null,
+      clarification: null,
+      diagnostic_code: 'instrument_unconfirmed',
+    }, { ...request, instrumentContextSource: 'standalone_default' })
+
+    expect(outcome).toMatchObject({
+      status: 'needs_clarification',
+      clarification: {
+        id: 'instrument_unconfirmed',
+        question: '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
+        choices: [],
+      },
+    })
+  })
+
+  it('uses the grounded company name when the validated strategy changes symbol', () => {
+    const outcome = fromLiveDraftResponse({
+      ...response,
+      strategy: {
+        ...strategy,
+        instrument: { ...strategy.instrument, symbol: '300033.SZ' },
+      },
+      candidate_grounding: {
+        matched_spans: ['同花顺'],
+        spans: [{ path: '/instrument/symbol', start: 0, end: 3, text: '同花顺' }],
+      },
+    }, {
+      ...request,
+      instrumentContextSource: 'standalone_default',
+      utterance: '同花顺ROE高于0%买入，MACD死叉卖出',
+    })
+
+    if (outcome.status !== 'compiled') throw new Error('expected compiled strategy')
+    expect(outcome.draft.instrument).toMatchObject({
+      name: '同花顺',
+      symbol: '300033.SZ',
+      exchange: 'SZSE',
+    })
+  })
+
   it('turns a missing exit into an edit action instead of a stock choice or default rule', () => {
     const outcome = fromLiveDraftResponse({
       ...response,
@@ -169,7 +282,7 @@ describe('live API contract adapter', () => {
       status: 'needs_clarification',
       clarification: {
         id: 'exit_rule_not_recognized',
-        reason: expect.stringContaining('不会替你补'),
+        reason: expect.stringContaining('不能替你定'),
         choices: [{
           id: 'edit-utterance',
           label: '补充卖出条件',
@@ -196,11 +309,11 @@ describe('live API contract adapter', () => {
       status: 'needs_clarification',
       clarification: {
         id: 'entry_rule_not_recognized',
-        reason: expect.stringContaining('不会替你补'),
+        reason: expect.stringContaining('不能替你定'),
         choices: [{
           id: 'edit-utterance',
           label: '补充买入条件',
-          description: expect.stringContaining('买入条件'),
+          description: expect.stringContaining('什么时候买'),
           action: 'edit_utterance',
         }],
       },
@@ -233,17 +346,17 @@ describe('live API contract adapter', () => {
     })
   })
 
-  it('maps an idea route into user-confirmed replacement choices without creating a strategy', () => {
-    const outcome = fromLiveDraftResponse({
+  it('maps a structured missing-entry clarification into replacement choices and uses its grounded reason', () => {
+    const guidedResponse: LiveDraftResponse = {
       ...response,
       status: 'needs_clarification',
       strategy: null,
       strategy_hash: null,
       clarification: '选一个方向，我会把它变成完整买卖规则再识别。',
-      diagnostic_code: 'idea_guidance_required',
+      diagnostic_code: 'entry_rule_not_recognized',
       idea_route: {
         schema_version: 'idea-route.v1',
-        understanding: '你在表达对特朗普相关政策的不认同。',
+        understanding: '你已经说清楚跌破 20 日线卖出，但还没说什么时候买入；我不会替你选择进场条件。',
         hypothesis: '把观点转换成当前股票可检验的价格代理，而不是假设观点直接导致股价变化。',
         asset_mapping: {
           instrument_symbol: '300059.SZ',
@@ -273,12 +386,14 @@ describe('live API contract adapter', () => {
           confidence: 0.75,
         }],
       },
-    }, request)
+    }
+    const outcome = fromLiveDraftResponse(guidedResponse, request)
 
     expect(outcome).toMatchObject({
       status: 'needs_clarification',
       clarification: {
-        id: 'idea_guidance_required',
+        id: 'entry_rule_not_recognized',
+        reason: '你已经说清楚跌破 20 日线卖出，但还没说什么时候买入；我不会替你选择进场条件。',
         ideaRoute: {
           schema_version: 'idea-route.v1',
           asset_mapping: { instrument_symbol: '300059.SZ' },
@@ -286,16 +401,61 @@ describe('live API contract adapter', () => {
         choices: [{
           id: 'trend-confirmation',
           label: '等趋势确认',
+          description: '价格与趋势同时转强后再进入；补充买入：MACD 金叉且站上 20 日均线',
           action: 'replace_and_compile',
           suggestedUtterance: 'MACD 金叉且站上 20 日均线买入，MACD 死叉卖出，回测近 5 年',
+          instrumentSymbol: '300059.SZ',
         }, {
           id: 'oversold-rebound',
           label: '等超跌反弹',
           action: 'replace_and_compile',
           suggestedUtterance: 'RSI 低于 30 买入，RSI 高于 70 卖出，回测近 5 年',
+          instrumentSymbol: '300059.SZ',
         }],
       },
     })
+    const exitOutcome = fromLiveDraftResponse({
+      ...guidedResponse,
+      diagnostic_code: 'exit_rule_not_recognized',
+    }, request)
+    expect(exitOutcome.status).toBe('needs_clarification')
+    if (exitOutcome.status !== 'needs_clarification') throw new Error('expected clarification')
+    expect(exitOutcome.clarification.choices[0]).toMatchObject({
+      id: 'trend-confirmation',
+      description: '价格与趋势同时转强后再进入；补充卖出：MACD 死叉',
+    })
+    for (const diagnosticCode of ['strategy_rule_incomplete', 'ambiguous_cross_indicator']) {
+      const completeOutcome = fromLiveDraftResponse({
+        ...guidedResponse,
+        diagnostic_code: diagnosticCode,
+      }, request)
+      expect(completeOutcome.status).toBe('needs_clarification')
+      if (completeOutcome.status !== 'needs_clarification') throw new Error('expected clarification')
+      expect(completeOutcome.clarification.choices[0]).toMatchObject({
+        id: 'trend-confirmation',
+        description: '价格与趋势同时转强后再进入；买入：MACD 金叉且站上 20 日均线；卖出：MACD 死叉',
+      })
+    }
+    const remappedOutcome = fromLiveDraftResponse({
+      ...guidedResponse,
+      candidate_grounding: {
+        matched_spans: ['汤姆猫'],
+        spans: [{ path: '/instrument/symbol', start: 0, end: 3, text: '汤姆猫' }],
+      },
+      idea_route: {
+        ...guidedResponse.idea_route!,
+        asset_mapping: {
+          ...guidedResponse.idea_route!.asset_mapping,
+          instrument_symbol: '300459.SZ',
+        },
+      },
+    }, request)
+    expect(remappedOutcome.status).toBe('needs_clarification')
+    if (remappedOutcome.status !== 'needs_clarification') throw new Error('expected clarification')
+    expect(remappedOutcome.clarification.choices.map((choice) => choice.instrumentSymbol))
+      .toEqual(['300459.SZ', '300459.SZ'])
+    expect(remappedOutcome.clarification.choices.map((choice) => choice.instrumentName))
+      .toEqual(['汤姆猫', '汤姆猫'])
     expect(outcome).not.toHaveProperty('draft')
   })
 
@@ -340,6 +500,16 @@ describe('live API contract adapter', () => {
       strategy_hash: null,
       diagnostic_code: 'no_supported_signal_recognized',
     }, request)).toThrow('没有识别到当前可执行的技术指标或公告事件')
+  })
+
+  it('explains why a previous-session limit-up entry cannot be approximated', () => {
+    expect(() => fromLiveDraftResponse({
+      ...response,
+      status: 'unsupported',
+      strategy: null,
+      strategy_hash: null,
+      diagnostic_code: 'previous_session_limit_up_capability_unavailable',
+    }, request)).toThrow('前一交易日涨停、下一交易日买入')
   })
 
   it.each([
@@ -655,7 +825,7 @@ describe('live API contract adapter', () => {
 
     expect(outcome.draft.entry.conditions[0]).toMatchObject({
       indicatorId: 'technical.server_defined_demo',
-      label: '服务端新指标 转强',
+      label: '服务端新指标 转强 1.5',
       trigger: '服务端定义的转强条件',
       parameters: [
         expect.objectContaining({
@@ -757,7 +927,7 @@ describe('live API contract adapter', () => {
 
     expect(outcome.draft.entry.conditions[0]).toMatchObject({
       indicatorId: 'amount.average',
-      label: '平均成交额 高于',
+      label: '平均成交额 高于 100000000元',
       parameters: expect.arrayContaining([
         expect.objectContaining({ key: 'period', label: '平均周期', value: 5 }),
         expect.objectContaining({
@@ -774,6 +944,202 @@ describe('live API contract adapter', () => {
       label: '阶段新高 创新高',
       trigger: '严格高于此前完整区间最高价',
     })
+  })
+
+  it('shows catalog names, comparisons, values, and units for generic threshold indicators', () => {
+    const turnover: StrategySpecIndicatorCondition = {
+      type: 'indicator_condition',
+      indicator_id: 'market.turnover_rate',
+      definition_version: '1.0.0',
+      params: {},
+      timeframe: '1d',
+      evaluation_mode: 'bar_close_confirmed',
+      trigger: 'above',
+      value: 5,
+    }
+    const rsi: StrategySpecIndicatorCondition = {
+      type: 'indicator_condition',
+      indicator_id: 'technical.rsi',
+      definition_version: '1.0.0',
+      params: { period: 14 },
+      timeframe: '1d',
+      evaluation_mode: 'bar_close_confirmed',
+      trigger: 'below',
+      value: 30,
+    }
+    const outcome = fromLiveDraftResponse(
+      {
+        ...response,
+        strategy: {
+          ...strategy,
+          entry: turnover,
+          exit: { op: 'first_of', children: [rsi] },
+        },
+      },
+      { ...request, utterance: '东方财富换手率高于5%买入，RSI低于30卖出，回测近1年' },
+      capabilities({
+        indicators: [{
+          indicator_id: 'market.turnover_rate',
+          definition_version: '1.0.0',
+          status: 'stable',
+          display_name: '换手率',
+          description: '供应商原始换手率',
+          warmup_bars: 2,
+          timeframes: ['1d'],
+          evaluation_modes: ['bar_close_confirmed'],
+          triggers: ['above'],
+          parameters: [],
+          trigger_definitions: [{
+            id: 'above',
+            display_name: '高于',
+            description: '换手率高于设定阈值',
+            value_requirement: 'required',
+            minimum: 0,
+            maximum: null,
+            unit: '%',
+            exclusive_minimum: false,
+            exclusive_maximum: false,
+          }],
+        }, {
+          indicator_id: 'technical.rsi',
+          definition_version: '1.0.0',
+          status: 'stable',
+          display_name: 'RSI',
+          description: '相对强弱指标',
+          warmup_bars: 16,
+          timeframes: ['1d'],
+          evaluation_modes: ['bar_close_confirmed'],
+          triggers: ['below'],
+          parameters: [{
+            name: 'period',
+            value_type: 'integer',
+            required: true,
+            default: 14,
+            minimum: 2,
+            maximum: 1000,
+            choices: [],
+            display_name: '周期',
+            unit: '交易日',
+          }],
+          trigger_definitions: [{
+            id: 'below',
+            display_name: '低于',
+            description: 'RSI 低于设定阈值',
+            value_requirement: 'required',
+            minimum: 0,
+            maximum: 100,
+            unit: null,
+            exclusive_minimum: false,
+            exclusive_maximum: false,
+          }],
+        }],
+      }),
+    )
+    if (outcome.status !== 'compiled') throw new Error('expected generic threshold strategy')
+
+    expect(outcome.draft.entry.conditions[0]).toMatchObject({
+      label: '换手率 高于 5%',
+      parameters: [expect.objectContaining({ key: '$value', value: 5, unit: '%' })],
+    })
+    expect(outcome.draft.exit.conditions[0]).toMatchObject({
+      label: 'RSI 低于 30',
+      parameters: expect.arrayContaining([
+        expect.objectContaining({ key: '$value', value: 30 }),
+      ]),
+    })
+    expect(toStrategySummary(outcome.draft).rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: '买入', value: '换手率 高于 5%' }),
+      expect.objectContaining({ label: '卖出', value: 'RSI 低于 30' }),
+    ]))
+  })
+
+  it('shows absolute-price condition orders with their thresholds in Chinese', () => {
+    const entry: StrategySpecIndicatorCondition = {
+      type: 'indicator_condition',
+      indicator_id: 'price.close',
+      definition_version: '1.0.0',
+      params: {},
+      timeframe: '1d',
+      evaluation_mode: 'bar_close_confirmed',
+      trigger: 'crosses_above',
+      value: 19,
+    }
+    const outcome = fromLiveDraftResponse(
+      {
+        ...response,
+        strategy: {
+          ...strategy,
+          entry,
+          exit: {
+            op: 'first_of',
+            children: [{ ...entry, trigger: 'crosses_below', value: 17.8 }],
+          },
+        },
+      },
+      { ...request, utterance: '东方财富涨超19块买，17.8卖，回测近1年' },
+      capabilities({
+        indicators: [conditionOrderCapability('price.close', '收盘价阈值')],
+      }),
+    )
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled price strategy')
+
+    expect(outcome.draft.entry.conditions[0]).toMatchObject({
+      label: '收盘价 上穿 19 元',
+      trigger: '日线收盘确认：收盘价 上穿 19 元',
+      parameters: [expect.objectContaining({ key: '$value', value: 19, unit: '元' })],
+    })
+    expect(outcome.draft.exit.conditions[0]).toMatchObject({
+      label: '收盘价 下穿 17.8 元',
+    })
+    expect(toStrategySummary(outcome.draft).rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: '买入', value: '收盘价 上穿 19 元' }),
+      expect.objectContaining({ label: '卖出', value: '收盘价 下穿 17.8 元' }),
+    ]))
+  })
+
+  it('shows one-session rise and decline conditions with values instead of raw triggers', () => {
+    const entry: StrategySpecIndicatorCondition = {
+      type: 'indicator_condition',
+      indicator_id: 'price.return_pct',
+      definition_version: '1.0.0',
+      params: { period: 1, price_field: 'close' },
+      timeframe: '1d',
+      evaluation_mode: 'bar_close_confirmed',
+      trigger: 'at_least',
+      value: 5,
+    }
+    const outcome = fromLiveDraftResponse(
+      {
+        ...response,
+        strategy: {
+          ...strategy,
+          entry,
+          exit: {
+            op: 'first_of',
+            children: [{ ...entry, trigger: 'at_most', value: -5 }],
+          },
+        },
+      },
+      { ...request, utterance: '东方财富当日上涨5%买入，当日下跌5%卖出，回测近1年' },
+      capabilities({
+        indicators: [conditionOrderCapability('price.return_pct', '区间涨跌幅')],
+      }),
+    )
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled return strategy')
+
+    expect(outcome.draft.entry.conditions[0]).toMatchObject({
+      label: '当日涨幅 ≥ 5%',
+      parameters: expect.arrayContaining([
+        expect.objectContaining({ key: '$value', value: 5, unit: '%' }),
+      ]),
+    })
+    expect(outcome.draft.exit.conditions[0]).toMatchObject({
+      label: '当日跌幅 ≥ 5%',
+    })
+    expect(toStrategySummary(outcome.draft).rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: '买入', value: '当日涨幅 ≥ 5%' }),
+      expect.objectContaining({ label: '卖出', value: '当日跌幅 ≥ 5%' }),
+    ]))
   })
 
   it('exposes volume, divergence, and trend parameters with catalog bounds', () => {
@@ -873,7 +1239,7 @@ describe('live API contract adapter', () => {
 
     expect(outcome.draft.entry.conditions[0]).toMatchObject({
       indicatorId: 'volume.relative',
-      label: '相对成交量 连续达到倍数',
+      label: '相对成交量 连续达到倍数 1.2倍',
       parameters: expect.arrayContaining([
         expect.objectContaining({ key: 'baseline_period', label: '前序基准周期', value: 20 }),
         expect.objectContaining({ key: 'consecutive_days', label: '连续天数', value: 3 }),

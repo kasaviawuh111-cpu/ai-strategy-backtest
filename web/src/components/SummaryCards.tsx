@@ -128,7 +128,7 @@ export function RecognizedCard(
             <span>{item.label}</span><b>{item.value}</b>
           </div>
         ))}
-        <Notice tone="info">这里只保留原话片段；补完后仍由服务端生成最终策略，不在前端猜规则。</Notice>
+        <Notice tone="info">这些是你已经说清楚的部分，我先留着；补完直接接上，不用重说一遍。</Notice>
       </div>
     </section>
   );

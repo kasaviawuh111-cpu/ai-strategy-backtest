@@ -141,7 +141,7 @@ def _spec(
     exit: object | None = None,
 ) -> StrategySpecV2:
     return StrategySpecV2(
-        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.08.30"),
+        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.09.01"),
         instrument=instrument or _instrument(),
         entry=entry or _entry(),
         exit=exit or _exit(),

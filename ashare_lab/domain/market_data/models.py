@@ -231,6 +231,12 @@ class DailyBar:
     turnover: Decimal
     available_at: datetime
     price_basis: PriceBasis = PriceBasis.UNADJUSTED
+    # This is deliberately separate from ``turnover`` (CNY amount).  A
+    # provider-reported turnover rate must never be reconstructed from volume
+    # and a contemporaneous share-capital value during replay.
+    turnover_rate_pct: Decimal | None = None
+    turnover_rate_provider: str | None = None
+    turnover_rate_methodology: str | None = None
 
     def __post_init__(self) -> None:
         require_aware(self.available_at, "available_at")
@@ -247,6 +253,22 @@ class DailyBar:
             raise DomainValidationError("OHLC values are inconsistent with high/low")
         if self.turnover < 0 or not self.turnover.is_finite():
             raise DomainValidationError("turnover must be a finite non-negative Decimal")
+        turnover_rate_provenance = (
+            self.turnover_rate_provider,
+            self.turnover_rate_methodology,
+        )
+        if self.turnover_rate_pct is None:
+            if any(value is not None for value in turnover_rate_provenance):
+                raise DomainValidationError("turnover-rate provenance requires turnover_rate_pct")
+            return
+        if self.turnover_rate_pct < 0 or not self.turnover_rate_pct.is_finite():
+            raise DomainValidationError("turnover_rate_pct must be a finite non-negative Decimal")
+        if any(
+            not isinstance(value, str) or not value.strip() for value in turnover_rate_provenance
+        ):
+            raise DomainValidationError(
+                "turnover-rate provenance requires non-empty provider and methodology"
+            )
 
 
 @dataclass(frozen=True, slots=True)

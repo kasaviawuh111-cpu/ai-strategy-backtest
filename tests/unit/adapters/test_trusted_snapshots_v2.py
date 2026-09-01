@@ -262,7 +262,7 @@ def test_composite_loader_reuses_registry_for_market_and_calendar(tmp_path: Path
     strategy = StrategySpecV2(
         catalog=CatalogRefV2(
             catalog_id="cn_a.signals",
-            release_version="2026.08.30",
+            release_version="2026.09.01",
         ),
         instrument=instrument,
         entry=entry,

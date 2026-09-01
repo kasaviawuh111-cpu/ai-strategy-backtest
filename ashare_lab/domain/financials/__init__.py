@@ -15,6 +15,7 @@ from .models import (
     FinancialUnit,
     FinancialValueOrigin,
 )
+from .publication import FinancialPublicationEvidence
 
 __all__ = [
     "FIRST_FINANCIAL_METRIC_CATALOG",
@@ -25,6 +26,7 @@ __all__ = [
     "FinancialMetricDefinition",
     "FinancialMetricId",
     "FinancialPeriodBasis",
+    "FinancialPublicationEvidence",
     "FinancialReportType",
     "FinancialSnapshotManifest",
     "FinancialStatementScope",

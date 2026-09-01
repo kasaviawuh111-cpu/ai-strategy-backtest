@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from enum import StrEnum
+from itertools import pairwise
 from zoneinfo import ZoneInfo
 
+from ashare_lab.application.clarification_guidance import build_clarification_guidance
 from ashare_lab.domain.catalog import CatalogSnapshot
 from ashare_lab.domain.market_data import AshareInstrumentCodeError, normalize_a_share_instrument
 from ashare_lab.domain.strategy import (
@@ -47,13 +49,24 @@ from ashare_lab.ports.candidate_generation import (
     SignalIntent,
     TrailingDrawdownIntent,
 )
-from ashare_lab.ports.idea_routing import IdeaRoute, IdeaRouter
+from ashare_lab.ports.idea_routing import IdeaProposal, IdeaRoute, IdeaRouter
 
 DEFAULT_INITIAL_CASH_CNY = 1_000_000
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 POSITION_AWARE_EXIT_AND_UNSUPPORTED = "position_aware_exit_and_not_supported"
 _IDEA_ROUTE_DIAGNOSTIC_CODES = frozenset(
     {"no_supported_signal_recognized", "candidate_provider_invalid_output"}
+)
+_LOCAL_CLARIFICATION_ROUTE_CODES = frozenset(
+    {
+        "entry_rule_not_recognized",
+        "exit_rule_not_recognized",
+        "strategy_rule_incomplete",
+        "ambiguous_obv_direction",
+        "ambiguous_volume_direction",
+        "ambiguous_boolean_expression",
+        "ambiguous_cross_indicator",
+    }
 )
 _STRATEGY_SYNTAX_MARKERS = (
     "买入",
@@ -113,9 +126,20 @@ _NON_DAILY_TIMEFRAME_RE = re.compile(
     re.IGNORECASE,
 )
 _SAME_SESSION_EXECUTION_RE = re.compile(
-    r"(?:(?:当日|当天|同日|本交易日)[^,，。；;]{0,12}(?:买入|卖出|下单|成交)|"
-    r"(?:马上|立刻|立即|即时)[^,，。；;]{0,6}(?:买入|卖出|下单|成交)|"
-    r"(?:买入|卖出|下单|成交)[^,，。；;]{0,4}(?:马上|立刻|立即|即时))"
+    r"(?:(?:当日|当天|今日|同日|本交易日)[^,，。；;]{0,12}"
+    r"(?:买入|卖出|买进|卖掉|下单|成交|买|卖)|"
+    r"(?:马上|立刻|立即|即时)[^,，。；;]{0,6}"
+    r"(?:买入|卖出|买进|卖掉|下单|成交|买|卖)|"
+    r"(?:买入|卖出|买进|卖掉|下单|成交|买|卖)"
+    r"[^,，。；;]{0,4}(?:马上|立刻|立即|即时))"
+)
+_DAILY_RETURN_ACTION_RE = re.compile(
+    r"(?:当日|当天|今日)(?:上涨|下跌|涨幅|(?<!涨)跌幅|涨|(?<!涨)跌)了?"
+    r"(?:不低于|不小于|不少于|大于等于|不高于|不大于|"
+    r"不超过|小于等于|超过|高于|大于|低于|小于|超|达到|到|至少|至多|"
+    r">=|<=|≥|≤|>|<)?"
+    r"\d+(?:\.\d+)?\s*[%％](?:以上|及以上|以下|及以下)?"
+    r"(?:时|则|就)?\s*(?:买入|卖出|买进|卖掉|买|卖)"
 )
 _NON_DEFAULT_EXECUTION_RE = re.compile(
     r"(?:下一|下个|次)(?:个)?(?:可交易)?(?:交易日|日)"
@@ -143,6 +167,11 @@ _SUPPORTED_HOLDING_EXIT_RE = re.compile(
 _SUPPORTED_BARE_HOLDING_EXIT_RE = re.compile(
     r"\s*(?:后)?(?:第)?\d{1,4}(?:个)?(?:交易日|交易天|天|日)"
     r"(?:后|时|到期)?\s*(?:卖出|卖掉|平仓|清仓)\s*"
+)
+_PREVIOUS_SESSION_LIMIT_UP_ENTRY_RE = re.compile(
+    r"涨停[^。；;!！?？]{0,20}"
+    r"(?:次日|翌日|第二天|第2天|下一个交易日|下一交易日|下个交易日|隔日|隔天)"
+    r"[^,，。；;]{0,8}(?:买入|买进|建仓|开仓|(?<!购)买)"
 )
 _SPECIFIC_REPORT_PERIOD_RE = re.compile(
     r"(?:(?:19|20)\d{2}(?:年(?:的)?)?(?:年度报告|年报|半年度报告|半年报|中报|"
@@ -195,6 +224,12 @@ _EXPLICIT_INDICATOR_TRIGGER_RE = re.compile(
 )
 
 _SOURCE_SEMANTIC_EXPLANATIONS = {
+    "previous_session_limit_up_capability_unavailable": (
+        "已理解为‘前一交易日涨停、下一交易日买入’，但这个信号还缺"
+        "逐证券逐交易日的涨停价/涨停状态，以及 DSL 的前一交易日引用；"
+        "不能用单日涨 10% 替代。‘做个短线’也没有说清卖出方式，请补充持有天数、"
+        "止盈止损或技术卖出条件。原话会保留，系统不会猜。"
+    ),
     "non_daily_timeframe_not_supported": (
         "当前正式回测只支持日线收盘确认，不能把分钟、盘中、周线或月线信号改成日线执行。"
     ),
@@ -321,13 +356,20 @@ class StrategyCompiler:
         )
         source_semantic_diagnostic = _unsupported_source_semantics(request.utterance)
         if source_semantic_diagnostic is not None:
+            if source_semantic_diagnostic in _LOCAL_CLARIFICATION_ROUTE_CODES:
+                clarification_outcome = await self._compile_local_clarification(
+                    effective_request,
+                    source_semantic_diagnostic,
+                )
+                if clarification_outcome is not None:
+                    return clarification_outcome
             return CompileOutcome(
                 status=(
                     CompileStatus.NEEDS_CLARIFICATION
                     if source_semantic_diagnostic == "indicator_trigger_requires_clarification"
                     else CompileStatus.UNSUPPORTED
                 ),
-                clarification=_SOURCE_SEMANTIC_EXPLANATIONS[source_semantic_diagnostic],
+                clarification=_SOURCE_SEMANTIC_EXPLANATIONS.get(source_semantic_diagnostic),
                 diagnostic_code=source_semantic_diagnostic,
             )
         if self._idea_router is not None and _looks_like_broad_viewpoint(
@@ -350,6 +392,40 @@ class StrategyCompiler:
                 return idea_outcome
         candidate = candidates[0]
         if len(candidates) == 1 and candidate.unsupported_code is not None:
+            if candidate.unsupported_code in _LOCAL_CLARIFICATION_ROUTE_CODES:
+                clarification_request = effective_request
+                if (
+                    clarification_request.instrument_context is None
+                    and candidate.instrument_symbol is not None
+                ):
+                    # A standalone company name may already have been resolved
+                    # by the server-owned security master.  Reuse that trusted
+                    # symbol while validating clarification proposals instead
+                    # of falling back to a generic text prompt.
+                    clarification_request = CompileInput(
+                        utterance=effective_request.utterance,
+                        instrument_context=candidate.instrument_symbol,
+                        as_of_date=effective_request.as_of_date,
+                    )
+                clarification_outcome = await self._compile_local_clarification(
+                    clarification_request,
+                    candidate.unsupported_code,
+                    candidate_grounding=candidate.grounding_evidence,
+                    candidate_provenance=candidate.provenance,
+                )
+                if clarification_outcome is not None:
+                    return clarification_outcome
+            if candidate.unsupported_code == "return_period_requires_clarification":
+                return CompileOutcome(
+                    status=CompileStatus.NEEDS_CLARIFICATION,
+                    clarification=(
+                        "你说了涨跌幅或收益率，但没有说明观察周期。请明确是当日、"
+                        "还是几日涨跌幅；系统不会默认为 5 日。"
+                    ),
+                    diagnostic_code=candidate.unsupported_code,
+                    candidate_provenance=candidate.provenance,
+                    candidate_grounding=candidate.grounding_evidence,
+                )
             if candidate.unsupported_code == "natural_day_holding_period_requires_clarification":
                 return CompileOutcome(
                     status=CompileStatus.NEEDS_CLARIFICATION,
@@ -587,6 +663,77 @@ class StrategyCompiler:
             idea_route=idea_route,
         )
 
+    async def _compile_local_clarification(
+        self,
+        request: CompileInput,
+        diagnostic_code: str,
+        *,
+        candidate_grounding: tuple[CandidateGroundingEvidence, ...] = (),
+        candidate_provenance: CandidateProvenance | None = None,
+    ) -> CompileOutcome | None:
+        guidance = build_clarification_guidance(request, diagnostic_code)
+        if guidance is None:
+            return None
+        validated_proposals_list: list[IdeaProposal] = []
+        for proposal in guidance.route.proposals:
+            if await self._clarification_proposal_is_valid(
+                request,
+                proposal.suggested_utterance,
+            ):
+                validated_proposals_list.append(proposal)
+        validated_proposals = tuple(validated_proposals_list)
+        if len(validated_proposals) < 2:
+            return None
+        route = replace(guidance.route, proposals=validated_proposals[:3])
+        return CompileOutcome(
+            status=CompileStatus.NEEDS_CLARIFICATION,
+            clarification=guidance.question,
+            diagnostic_code=diagnostic_code,
+            candidate_provenance=candidate_provenance,
+            candidate_grounding=_merge_candidate_grounding(
+                candidate_grounding,
+                guidance.grounding,
+            ),
+            idea_route=route,
+        )
+
+    async def _clarification_proposal_is_valid(
+        self,
+        request: CompileInput,
+        utterance: str,
+    ) -> bool:
+        """Recompile a server-owned sentence without entering guidance again."""
+
+        if _unsupported_source_semantics(utterance) is not None:
+            return False
+        proposal_request = CompileInput(
+            utterance=utterance,
+            instrument_context=request.instrument_context,
+            as_of_date=request.as_of_date,
+        )
+        candidates = await self._generator.generate(proposal_request)
+        valid_hashes: set[str] = set()
+        for candidate in candidates[:3]:
+            if candidate.unsupported_code is not None or candidate.instrument_symbol is None:
+                continue
+            try:
+                instrument_symbol = normalize_a_share_instrument(candidate.instrument_symbol).value
+            except AshareInstrumentCodeError:
+                continue
+            if _period_error(candidate, request.as_of_date) is not None:
+                continue
+            try:
+                strategy = self._build_strategy(
+                    candidate,
+                    request.as_of_date,
+                    instrument_symbol=instrument_symbol,
+                )
+                validate_strategy_against_catalog(strategy, self._catalog)
+            except (_UnsupportedCandidateSemantics, ValueError, StrategyCatalogError):
+                continue
+            valid_hashes.add(canonical_hash(strategy))
+        return len(valid_hashes) == 1
+
     def _build_strategy(
         self,
         candidate: CandidateAst,
@@ -771,6 +918,23 @@ def _period_error(candidate: CandidateAst, as_of_date: date) -> str | None:
     return None
 
 
+def _merge_candidate_grounding(
+    *groups: tuple[CandidateGroundingEvidence, ...],
+) -> tuple[CandidateGroundingEvidence, ...]:
+    """Preserve source grounding while adding server-owned clarification spans."""
+
+    merged: list[CandidateGroundingEvidence] = []
+    seen: set[tuple[str, int, int, str]] = set()
+    for group in groups:
+        for item in group:
+            identity = (item.path, item.start, item.end, item.text)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            merged.append(item)
+    return tuple(merged)
+
+
 def _unsupported_source_semantics(utterance: str) -> str | None:
     """Reject source meaning that the bounded daily DSL cannot preserve.
 
@@ -782,9 +946,12 @@ def _unsupported_source_semantics(utterance: str) -> str | None:
     """
 
     text = unicodedata.normalize("NFKC", utterance).casefold()
+    if _PREVIOUS_SESSION_LIMIT_UP_ENTRY_RE.search(text) is not None:
+        return "previous_session_limit_up_capability_unavailable"
     if _NON_DAILY_TIMEFRAME_RE.search(text) is not None:
         return "non_daily_timeframe_not_supported"
-    if _SAME_SESSION_EXECUTION_RE.search(text) is not None:
+    execution_text = _DAILY_RETURN_ACTION_RE.sub("", text)
+    if _SAME_SESSION_EXECUTION_RE.search(execution_text) is not None:
         return "same_session_execution_not_supported"
     if _NON_DEFAULT_EXECUTION_RE.search(text) is not None:
         return "execution_price_time_not_supported"
@@ -800,9 +967,33 @@ def _unsupported_source_semantics(utterance: str) -> str | None:
             return "event_attribute_filter_not_supported"
     if _MACD_UNMODELED_QUALIFIER_RE.search(text) is not None:
         return "technical_qualifier_not_supported"
+    if _has_unjoined_entry_actions(text):
+        return "ambiguous_boolean_expression"
+    if re.search(r"(?:obv|能量潮)[^,，。；;]{0,8}变化[^,，。；;]{0,8}(?:买入|卖出|买|卖)", text):
+        return "ambiguous_obv_direction"
+    if re.search(
+        r"(?:成交量|量能|量比)[^,，。；;]{0,8}变化[^,，。；;]{0,8}(?:买入|卖出|买|卖)",
+        text,
+    ):
+        return "ambiguous_volume_direction"
     if _has_named_indicator_without_trigger(text):
         return "indicator_trigger_requires_clarification"
     return None
+
+
+def _has_unjoined_entry_actions(text: str) -> bool:
+    """Do not silently convert repeated entry clauses into an OR strategy."""
+
+    entries = tuple(
+        match
+        for match in re.finditer(r"(?<![购超])(?:买入|买进|买)", text)
+        if not text[match.end() :].startswith(("后", "之后", "以后"))
+    )
+    return any(
+        re.search(r"(?:并且|而且|同时|以及|且|或者|或是|任一|或)", text[left.end() : right.start()])
+        is None
+        for left, right in pairwise(entries)
+    )
 
 
 def _has_unmodeled_delayed_execution(text: str) -> bool:

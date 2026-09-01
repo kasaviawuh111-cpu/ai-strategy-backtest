@@ -43,6 +43,41 @@ def test_daily_bar_rejects_impossible_ohlc() -> None:
         )
 
 
+def test_daily_bar_requires_complete_provider_turnover_rate_provenance() -> None:
+    common = {
+        "instrument_id": InstrumentId("300059.SZ"),
+        "session_date": date(2025, 1, 2),
+        "open": price("10.00"),
+        "high": price("10.10"),
+        "low": price("9.90"),
+        "close": price("10.05"),
+        "volume": Quantity(1000),
+        "turnover": Decimal("10050"),
+        "available_at": datetime(2025, 1, 2, 15, 0, tzinfo=SHANGHAI),
+    }
+
+    bar = DailyBar(
+        **common,
+        turnover_rate_pct=Decimal("3.25"),
+        turnover_rate_provider="eastmoney_push2his_public",
+        turnover_rate_methodology="eastmoney_push2his.f61.provider_reported_turnover_rate_pct.v1",
+    )
+
+    assert bar.turnover_rate_pct == Decimal("3.25")
+    assert bar.turnover_rate_provider == "eastmoney_push2his_public"
+
+    with pytest.raises(DomainValidationError, match="turnover-rate provenance"):
+        DailyBar(**common, turnover_rate_pct=Decimal("3.25"))
+
+    with pytest.raises(DomainValidationError, match="turnover_rate_pct"):
+        DailyBar(
+            **common,
+            turnover_rate_pct=Decimal("-1"),
+            turnover_rate_provider="eastmoney_push2his_public",
+            turnover_rate_methodology="provider-method.v1",
+        )
+
+
 def test_session_carries_historical_limits_instead_of_recomputing_from_prefix() -> None:
     session = InstrumentSession(
         instrument_id=InstrumentId("300059.SZ"),

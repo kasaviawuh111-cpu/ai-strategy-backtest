@@ -43,8 +43,8 @@ def test_latest_indicator_rows_preserve_direct_values_nulls_and_wire_hash() -> N
                 "SECUCODE": "300059.SZ",
                 "REPORT_DATE": "2026-06-30 00:00:00",
                 "TOTAL_OPERATE_INCOME": 10_505_339_283.68,
-                "TOI_YOY_RATIO": 0.5322,
-                "ROE": 0.0846,
+                "TOI_YOY_RATIO": 53.22,
+                "ROE": 8.46,
                 "NET_CAPITAL": None,
             }
         ]
@@ -59,9 +59,45 @@ def test_latest_indicator_rows_preserve_direct_values_nulls_and_wire_hash() -> N
         batch = source.fetch_latest_indicators("300059.SZ", retrieved_at=RETRIEVED_AT)
 
     assert batch.dataset is OperatorDataset.LATEST_INDICATORS
-    assert batch.rows[0]["TOI_YOY_RATIO"] == 0.5322
+    assert batch.rows[0]["TOI_YOY_RATIO"] == 53.22
     assert batch.rows[0]["NET_CAPITAL"] is None
     assert batch.requests[0].raw_response_sha256 == "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def test_main_financial_rows_keep_direct_report_and_publication_fields() -> None:
+    """The PIT binder needs raw report/notice/update fields, not derived values."""
+
+    raw = _body(
+        [
+            {
+                "SECUCODE": "300059.SZ",
+                "REPORT_DATE": "2025-06-30 00:00:00",
+                "REPORT_TYPE": "中报",
+                "NOTICE_DATE": "2025-08-15 00:00:00",
+                "UPDATE_DATE": "2025-08-15 00:00:00",
+                "TOTALOPERATEREVE": 7_000_000_000.0,
+                "PARENTNETPROFIT": 5_000_000_000.0,
+                "ROEJQ": 8.46,
+                "XSMLL": None,
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["type"] == OperatorDataset.MAIN_FINANCIAL_DATA.value
+        assert request.url.params["source"] == "HSF10"
+        assert request.url.params["sty"] == "ALL"
+        assert request.url.params["filter"] == '(SECUCODE="300059.SZ")'
+        return httpx.Response(200, content=raw, request=request)
+
+    with EastmoneyOperatorReadingSource(transport=httpx.MockTransport(handler)) as source:
+        batch = source.fetch_main_financial_data("300059.SZ", retrieved_at=RETRIEVED_AT)
+
+    assert batch.dataset is OperatorDataset.MAIN_FINANCIAL_DATA
+    assert batch.rows[0]["REPORT_DATE"] == "2025-06-30 00:00:00"
+    assert batch.rows[0]["NOTICE_DATE"] == "2025-08-15 00:00:00"
+    assert batch.rows[0]["UPDATE_DATE"] == "2025-08-15 00:00:00"
+    assert batch.rows[0]["XSMLL"] is None
 
 
 @pytest.mark.parametrize("symbol", ["300059.SZ", "000001.SZ", "600519.SH", "688981.SH"])

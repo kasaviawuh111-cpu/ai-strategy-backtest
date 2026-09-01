@@ -60,6 +60,21 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _SCHEMA_VERSION = "local-parquet.market-data.v3"
 _DAILY_DATASET = "daily_ohlcv"
 _DAILY_FILENAME = "daily_ohlcv.parquet"
+_DAILY_BAR_BASE_PROJECTION = (
+    "stock_code",
+    '"date"',
+    '"open"',
+    "high",
+    "low",
+    '"close"',
+    "volume",
+    "amount",
+)
+_DAILY_TURNOVER_RATE_PROJECTION = (
+    "turnover_rate_pct",
+    "turnover_rate_provider",
+    "turnover_rate_methodology",
+)
 _SIGNAL_DAILY_DATASET = "signal_daily_ohlcv"
 _SIGNAL_DAILY_FILENAME = "signal_daily_ohlcv.parquet"
 _MINUTE_DATASET = "minute_ohlcv"
@@ -641,13 +656,15 @@ class LocalParquetMarketDataRepository:
         raw_start = typed_coverage.get("start")
         raw_end = typed_coverage.get("end")
         raw_codes = typed_coverage.get("requestedEventCodes")
+        no_event_required = typed_coverage.get("mode") == NO_EVENT_REQUIRED_MODE
         if (
             not isinstance(raw_instrument, str)
             or not isinstance(raw_start, str)
             or not isinstance(raw_end, str)
             or not isinstance(raw_codes, list)
-            or not raw_codes
             or any(not isinstance(item, str) for item in cast(list[object], raw_codes))
+            or (no_event_required and raw_codes != [])
+            or (not no_event_required and not raw_codes)
         ):
             raise SnapshotIntegrityError("composite snapshot event acquisition scope is invalid")
         try:
@@ -657,10 +674,13 @@ class LocalParquetMarketDataRepository:
             raise SnapshotIntegrityError(
                 "composite snapshot event acquisition scope is invalid"
             ) from exc
+        requested_datasets = ("daily_ohlcv", "corporate_actions")
+        if not no_event_required:
+            requested_datasets = (*requested_datasets, "events")
         return self.pin_snapshot(
             DataRequirements(
                 instruments=(instrument,),
-                datasets=("daily_ohlcv", "corporate_actions", "events"),
+                datasets=requested_datasets,
                 event_codes=tuple(cast(list[str], raw_codes)),
             ),
             period,
@@ -905,19 +925,37 @@ class LocalParquetMarketDataRepository:
             )
         daily_file = next(item for item in pinned.files if item.dataset == dataset)
 
-        # The static projection and parameterized predicates let DuckDB push
-        # column and row-group pruning into the Parquet scan.
-        query = """
-            SELECT stock_code, "date", "open", high, low, "close", volume, amount
-            FROM read_parquet(?)
-            WHERE stock_code = ?
-              AND "date" >= ?
-              AND "date" < ?
-            ORDER BY "date" ASC
-        """
         end_exclusive = _exclusive_day_after(period.end)
         try:
             with duckdb.connect(database=":memory:") as connection:
+                described = connection.execute(
+                    "DESCRIBE SELECT * FROM read_parquet(?)",
+                    [str(daily_file.path)],
+                ).fetchall()
+                columns = {str(row[0]) for row in described}
+                turnover_rate_columns = set(_DAILY_TURNOVER_RATE_PROJECTION)
+                present_turnover_rate_columns = turnover_rate_columns & columns
+                if (
+                    present_turnover_rate_columns
+                    and present_turnover_rate_columns != turnover_rate_columns
+                ):
+                    raise MarketDataSchemaError(
+                        "daily OHLCV snapshot has partial turnover-rate provenance columns"
+                    )
+                projection = _DAILY_BAR_BASE_PROJECTION
+                if present_turnover_rate_columns:
+                    projection = (*projection, *_DAILY_TURNOVER_RATE_PROJECTION)
+                # The projection is selected from fixed schema constants and
+                # predicates remain parameterized, so DuckDB can still push
+                # column and row-group pruning into the Parquet scan.
+                query = f"""\
+                    SELECT {", ".join(projection)}
+                    FROM read_parquet(?)
+                    WHERE stock_code = ?
+                      AND "date" >= ?
+                      AND "date" < ?
+                    ORDER BY "date" ASC
+                """
                 rows = connection.execute(
                     query,
                     [
@@ -2218,8 +2256,13 @@ class LocalParquetMarketDataRepository:
         *,
         price_basis: PriceBasis,
     ) -> DailyBar:
-        if len(row) != 8:
-            raise MarketDataSchemaError("daily OHLCV projection returned 8-column mismatch")
+        if len(row) not in {
+            len(_DAILY_BAR_BASE_PROJECTION),
+            len(_DAILY_BAR_BASE_PROJECTION) + len(_DAILY_TURNOVER_RATE_PROJECTION),
+        }:
+            raise MarketDataSchemaError(
+                "daily OHLCV projection returned an unsupported column count"
+            )
         (
             raw_code,
             raw_date,
@@ -2229,7 +2272,26 @@ class LocalParquetMarketDataRepository:
             raw_close,
             raw_volume,
             raw_amount,
+            *turnover_rate_fields,
         ) = row
+        turnover_rate_pct: Decimal | None = None
+        turnover_rate_provider: str | None = None
+        turnover_rate_methodology: str | None = None
+        if turnover_rate_fields:
+            (
+                raw_turnover_rate_pct,
+                raw_turnover_rate_provider,
+                raw_turnover_rate_methodology,
+            ) = turnover_rate_fields
+            turnover_rate_pct = _optional_decimal(raw_turnover_rate_pct, "turnover_rate_pct")
+            turnover_rate_provider = _optional_text(
+                raw_turnover_rate_provider,
+                "turnover_rate_provider",
+            )
+            turnover_rate_methodology = _optional_text(
+                raw_turnover_rate_methodology,
+                "turnover_rate_methodology",
+            )
         row_instrument = self._instrument_normalizer(_required_text(raw_code, "stock_code"))
         if row_instrument != expected_instrument:
             raise MarketDataSchemaError("daily OHLCV query returned a different instrument")
@@ -2253,6 +2315,9 @@ class LocalParquetMarketDataRepository:
                 tzinfo=_SHANGHAI,
             ),
             price_basis=price_basis,
+            turnover_rate_pct=turnover_rate_pct,
+            turnover_rate_provider=turnover_rate_provider,
+            turnover_rate_methodology=turnover_rate_methodology,
         )
 
     def _row_to_minute_bar(

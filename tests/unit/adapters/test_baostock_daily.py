@@ -100,6 +100,7 @@ def _values(**overrides: str) -> dict[str, str]:
         "preclose": "9.80",
         "volume": "1000",
         "amount": "11000",
+        "turn": "1.279500",
         "tradestatus": "1",
         "isST": "0",
     }
@@ -196,6 +197,7 @@ def test_fetch_splits_at_calendar_years_and_preserves_each_query_audit() -> None
     assert row.preclose == Decimal("9.80")
     assert row.volume == 1000
     assert row.amount == Decimal("11000")
+    assert row.turnover_rate_pct == Decimal("1.279500")
     assert row.trade_status == "1"
     assert row.is_st is True
     assert row.as_snapshot_row(collection.instrument_id) == {
@@ -207,6 +209,11 @@ def test_fetch_splits_at_calendar_years_and_preserves_each_query_audit() -> None
         "close": Decimal("11.00"),
         "volume": 1000,
         "amount": Decimal("11000"),
+        "turnover_rate_pct": Decimal("1.279500"),
+        "turnover_rate_provider": "baostock_python_api",
+        "turnover_rate_methodology": (
+            "baostock.history_k_data_plus.turn.provider_reported_turnover_rate_pct.v1"
+        ),
     }
 
     assert len(collection.query_audits) == 3
@@ -235,6 +242,26 @@ def test_sh_symbol_maps_to_baostock_provider_code() -> None:
 
     assert collection.provider_code == "sh.600519"
     assert client.calls[0]["code"] == "sh.600519"
+
+
+def test_provider_reported_turnover_rate_is_preserved_in_percent_points() -> None:
+    """The provider's raw ``turn`` field must cross the adapter unchanged.
+
+    It is explicitly not derived from volume or share-capital data: the
+    fixture's turnover-rate value has no relationship to its volume/amount.
+    """
+
+    collection = _fetch(_result(_values(turn="1.279500")))
+
+    row = collection.rows[0]
+    assert row.turnover_rate_pct == Decimal("1.279500")
+    assert row.as_snapshot_row(collection.instrument_id)["turnover_rate_pct"] == Decimal("1.279500")
+    assert row.as_snapshot_row(collection.instrument_id)["turnover_rate_provider"] == (
+        "baostock_python_api"
+    )
+    assert row.as_snapshot_row(collection.instrument_id)["turnover_rate_methodology"] == (
+        "baostock.history_k_data_plus.turn.provider_reported_turnover_rate_pct.v1"
+    )
 
 
 def test_back_adjusted_uses_flag_one_without_false_amount_price_identity() -> None:

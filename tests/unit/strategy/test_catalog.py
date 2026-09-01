@@ -22,17 +22,19 @@ class CatalogTests(unittest.TestCase):
     def setUp(self) -> None:
         self.catalog = load_catalog_directory(ROOT / "catalogs")
         self.payload = json.loads(EXAMPLE.read_text(encoding="utf-8"))
-        self.payload["catalog"]["release_version"] = "2026.08.30"
+        self.payload["catalog"]["release_version"] = "2026.09.01"
 
-    def test_loads_one_active_release_with_thirty_five_indicators(self) -> None:
+    def test_loads_one_active_release_with_thirty_seven_indicators(self) -> None:
         self.assertEqual(len(self.catalog.manifests), 1)
         self.assertEqual(
             {item.id for item in self.catalog.indicators},
             {
                 "amount.average",
                 "market.amount",
+                "market.turnover_rate",
                 "market.volume",
                 "price.amplitude",
+                "price.close",
                 "price.consecutive_up",
                 "price.return_pct",
                 "price.rolling_high",
@@ -224,6 +226,16 @@ class CatalogTests(unittest.TestCase):
             },
             {
                 "type": "indicator_condition",
+                "indicator_id": "price.close",
+                "definition_version": "1.0.0",
+                "params": {},
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "crosses_above",
+                "value": 19,
+            },
+            {
+                "type": "indicator_condition",
                 "indicator_id": "price.return_pct",
                 "definition_version": "1.0.0",
                 "params": {"period": 5, "price_field": "close"},
@@ -271,6 +283,16 @@ class CatalogTests(unittest.TestCase):
                 "evaluation_mode": "bar_close_confirmed",
                 "trigger": "crosses_above",
                 "value": 100_000_000,
+            },
+            {
+                "type": "indicator_condition",
+                "indicator_id": "market.turnover_rate",
+                "definition_version": "1.0.0",
+                "params": {},
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "above",
+                "value": 3,
             },
             {
                 "type": "indicator_condition",

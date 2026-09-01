@@ -10,12 +10,13 @@ StrategyCompiler and Catalog remain the authority for executable semantics.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from collections import Counter
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import date
 from math import isfinite
 from typing import Annotated, Literal, Protocol, cast
@@ -78,6 +79,24 @@ _DEFAULTED_PARAMETER_PATH_RE = re.compile(
 _RSI_TRANSITION_THRESHOLD_RE = re.compile(
     r"(?:重新)?(?:回到|到)\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*(?:上方|下方)"
 )
+
+_EXPLICIT_A_SHARE_CODE_RE = re.compile(r"(?<!\d)\d{6}(?:\.(?:SH|SZ|BJ))?(?!\d)", re.I)
+_INSTRUMENT_NAME_MARKER_RE = re.compile(
+    r"(?:"
+    r"MACD|ROE|PE|PB|PS|PCF|RSI|KDJ|CCI|BOLL|BBI|ADX|ATR|BIAS|DMI|OBV|"
+    r"EMA|MA\d*|\d{1,4}\s*日(?:均线|线|MA)|"
+    r"市盈率|市净率|市销率|换手率|成交量|成交额|量比|振幅|"
+    r"股价|收盘价|价格|均线|年报|半年报|季报|业绩预告|业绩快报|"
+    r"(?:当日|当天|今日)(?:上涨|下跌|涨幅|跌幅|涨|跌)|"
+    r"上涨|下跌|涨幅|跌幅|涨到|跌到|涨至|跌至|"
+    r"涨超|跌超|跌破|突破|创\d+日新高|金叉|死叉|"
+    r"\d+(?:\.\d+)?\s*(?:元|块)"
+    r")",
+    re.I,
+)
+_INSTRUMENT_NAME_PREFIX_RE = re.compile(
+    r"^(?:(?:请|麻烦)?(?:帮我|给我|我想|想要)?(?:回测|测试|看看|看下|测一下)?(?:一下)?)"
+)
 _DEFAULT_MIN_CONFIDENCE = 0.75
 _LOGGER = logging.getLogger(__name__)
 
@@ -112,6 +131,7 @@ _INDICATOR_ALIAS_OVERRIDES: Mapping[str, tuple[str, ...]] = {
     "technical.trend_regime": ("阶段趋势",),
     "technical.obv": ("OBV", "能量潮"),
     "price.return_pct": ("区间涨跌幅",),
+    "price.close": ("收盘价", "最新价", "固定价格", "价格阈值", "元", "块"),
     "price.amplitude": ("振幅",),
     "price.rolling_high": ("滚动新高", "新高"),
     "price.consecutive_up": ("连续上涨", "连涨"),
@@ -741,23 +761,102 @@ class HybridCandidateGenerator:
         deterministic: CandidateGenerator,
         bounded_fallback: CandidateGenerator,
         fallback_codes: frozenset[str] = _DEFAULT_FALLBACK_CODES,
+        instrument_name_resolver: Callable[[str], str] | None = None,
     ) -> None:
         self._deterministic = deterministic
         self._bounded_fallback = bounded_fallback
         self._fallback_codes = fallback_codes
+        self._instrument_name_resolver = instrument_name_resolver
 
     async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]:
-        primary = await self._deterministic.generate(request)
+        effective_request = request
+        mention = _leading_instrument_name(request.utterance)
+        if mention is not None and self._instrument_name_resolver is not None:
+            try:
+                resolved_symbol = await asyncio.to_thread(
+                    self._instrument_name_resolver,
+                    mention.text,
+                )
+            except LookupError:
+                return (_unsupported(request.instrument_context, "instrument_unconfirmed"),)
+            except Exception:
+                return (
+                    _unsupported(
+                        request.instrument_context,
+                        "instrument_resolution_unavailable",
+                    ),
+                )
+            context = (
+                request.instrument_context.strip().upper() if request.instrument_context else None
+            )
+            if context is not None and resolved_symbol != context:
+                return (_unsupported(context, "instrument_context_mismatch"),)
+            effective_request = CompileInput(
+                utterance=request.utterance,
+                instrument_context=resolved_symbol,
+                as_of_date=request.as_of_date,
+            )
+
+        primary = await self._deterministic.generate(effective_request)
+        if mention is not None and effective_request is not request:
+            grounding = CandidateGroundingEvidence(
+                path="/instrument/symbol",
+                start=mention.start,
+                end=mention.end,
+                text=mention.text,
+            )
+            primary = tuple(
+                replace(
+                    item,
+                    grounding_evidence=(grounding, *item.grounding_evidence),
+                )
+                for item in primary
+            )
         if not primary:
-            return await self._bounded_fallback.generate(request)
+            return await self._bounded_fallback.generate(effective_request)
         first = primary[0]
         if not _should_use_bounded_fallback(
             first,
-            utterance=request.utterance,
+            utterance=effective_request.utterance,
             fallback_codes=self._fallback_codes,
         ):
             return primary
-        return await self._bounded_fallback.generate(request)
+        return await self._bounded_fallback.generate(effective_request)
+
+
+@dataclass(frozen=True, slots=True)
+class _InstrumentNameMention:
+    text: str
+    start: int
+    end: int
+
+
+def _leading_instrument_name(utterance: str) -> _InstrumentNameMention | None:
+    """Extract only a leading company/fund name before an explicit rule marker.
+
+    This is deliberately a small lexical boundary, not a security resolver.  A
+    returned name still has no authority until the injected server-owned
+    resolver confirms one unique A-share symbol against provider reference
+    data.
+    """
+
+    if _EXPLICIT_A_SHARE_CODE_RE.search(utterance) is not None:
+        return None
+    marker = _INSTRUMENT_NAME_MARKER_RE.search(utterance)
+    if marker is None or marker.start() == 0:
+        return None
+    prefix = utterance[: marker.start()]
+    cleaned = _INSTRUMENT_NAME_PREFIX_RE.sub("", prefix.strip(), count=1)
+    cleaned = re.sub(r"[\s，,;；:：。]+$", "", cleaned)
+    cleaned = re.sub(r"(?:的|发)$", "", cleaned).strip()
+    if not 2 <= len(cleaned) <= 32:
+        return None
+    if re.fullmatch(r"[一-鿿A-Za-z0-9*STst·\-]+", cleaned) is None:
+        return None
+    start = utterance.rfind(cleaned, 0, marker.start())
+    if start < 0:
+        return None
+    return _InstrumentNameMention(text=cleaned, start=start, end=start + len(cleaned))
 
 
 def _should_use_bounded_fallback(

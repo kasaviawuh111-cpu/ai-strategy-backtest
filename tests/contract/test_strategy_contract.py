@@ -32,7 +32,7 @@ class StrategyContractTests(unittest.TestCase):
         validated = validate_strategy_against_catalog(strategy, catalog)
 
         self.assertEqual(validated.schema_version, "strategy.v1")
-        self.assertEqual(validated.catalog.release_version, "2026.08.30")
+        self.assertEqual(validated.catalog.release_version, "2026.09.01")
 
     def test_event_and_indicator_example_is_executable_by_the_dsl_subset(self) -> None:
         example_path = ROOT / "contracts/examples/strategy.event-forecast-macd.daily.v1.json"

@@ -562,6 +562,7 @@ type _Family = Literal[
     "dmi",
     "donchian",
     "historical_volatility",
+    "price_close",
     "return_pct",
     "return_stddev",
     "roc",
@@ -572,6 +573,7 @@ type _Family = Literal[
     "amplitude",
     "amount",
     "amount_average",
+    "turnover_rate",
     "obv",
     "trend_regime",
     "volume_divergence",
@@ -628,6 +630,8 @@ class RuleBasedCandidateGenerator:
         exit_join: ConditionJoin | None = None
         entry_rule_clause_count = 0
         exit_rule_clause_count = 0
+        entry_has_compound_clause = False
+        exit_has_compound_clause = False
         defaulted: list[str] = []
         for clause in clauses:
             intents, clause_defaults, unsupported_code = _parse_clause(
@@ -653,6 +657,7 @@ class RuleBasedCandidateGenerator:
                 )
                 if signal_intents:
                     entry_rule_clause_count += 1
+                    entry_has_compound_clause = entry_has_compound_clause or len(signal_intents) > 1
                     entry.extend(signal_intents)
             else:
                 if clause_join is not None and exit_join is not None and clause_join != exit_join:
@@ -660,11 +665,18 @@ class RuleBasedCandidateGenerator:
                 exit_join = clause_join or exit_join
                 if intents:
                     exit_rule_clause_count += 1
+                    exit_has_compound_clause = exit_has_compound_clause or len(intents) > 1
                 exit_.extend(intents)
             defaulted.extend(clause_defaults)
 
-        if entry_rule_clause_count > 1 or exit_rule_clause_count > 1:
-            return (_unsupported(symbol, "ambiguous_boolean_expression", 0.98),)
+        if entry_rule_clause_count > 1:
+            if entry_join == "all" or entry_has_compound_clause:
+                return (_unsupported(symbol, "ambiguous_boolean_expression", 0.98),)
+            entry_join = "any"
+        if exit_rule_clause_count > 1:
+            if exit_join == "all" or exit_has_compound_clause:
+                return (_unsupported(symbol, "ambiguous_boolean_expression", 0.98),)
+            exit_join = "any"
 
         entry_clauses = tuple(clause for clause in clauses if clause.action == "entry")
         has_generic_entry_placeholder = any(
@@ -707,8 +719,16 @@ def _condition_join(
         return "all", None
     if has_or:
         return "any", None
-    if len(intents) > 1 and not _is_intrinsic_multi_intent(intents):
-        return None, "ambiguous_boolean_expression"
+    if len(intents) > 1:
+        if not _is_intrinsic_multi_intent(intents):
+            return None, "ambiguous_boolean_expression"
+        indicator_ids = {
+            intent.indicator_id for intent in intents if isinstance(intent, IndicatorIntent)
+        }
+        # “KDJ 高位死叉” is one compound state: the cross must happen while
+        # J is in the high zone.  Trend-regime phrases intentionally expose
+        # equivalent alternative observations and therefore remain OR.
+        return ("all" if indicator_ids == {"technical.kdj"} else "any"), None
     return None, None
 
 
@@ -1122,17 +1142,45 @@ def _parse_clause(
         if threshold_rule is None and _has_unsupported_numeric_relation(text):
             return [], [], "unsupported_comparator"
         if threshold_rule is not None:
+            return_period = _return_period(text) or _return_period(full_text)
+            if return_period is None:
+                return [], [], "return_period_requires_clarification"
             intents.append(
                 _intent(
                     "price.return_pct",
                     threshold_rule[1],
                     params=(
-                        ("period", _return_period(text) or _return_period(full_text) or 5),
+                        ("period", return_period),
                         ("price_field", "close"),
                     ),
                     value=threshold_rule[0],
                 )
             )
+
+    inherits_price_close = (
+        not clause_families
+        and global_families == frozenset({"price_close"})
+        and _bare_price_level_value(text) is not None
+    )
+    has_explicit_price_subject = re.search(r"(?:股价|价格|收盘价|最新价)", text) is not None
+    price_context_is_only_a_financial_unit = (
+        financial_intent is not None and not has_explicit_price_subject
+    )
+    if (
+        "price_close" in clause_families or inherits_price_close
+    ) and not price_context_is_only_a_financial_unit:
+        price_level_rule = _price_level_rule(text, action=action, full_text=full_text)
+        if price_level_rule is None:
+            return [], [], "ambiguous_price_direction"
+        value, trigger = price_level_rule
+        intents.append(
+            _intent(
+                "price.close",
+                trigger,
+                params=(),
+                value=value,
+            )
+        )
 
     if "rolling_high" in clause_families:
         intents.append(
@@ -1207,6 +1255,21 @@ def _parse_clause(
                     value=threshold_rule[0],
                 )
             )
+
+    if _family_active("turnover_rate", text, clause_families, global_families):
+        threshold_rule = _turnover_rate_threshold_rule(text)
+        if threshold_rule is None:
+            if re.search(_SIGNED_NUMBER, text) is not None:
+                return [], [], "turnover_rate_percentage_required"
+            return [], [], "ambiguous_turnover_rate_threshold"
+        intents.append(
+            _intent(
+                "market.turnover_rate",
+                threshold_rule[1],
+                params=(),
+                value=threshold_rule[0],
+            )
+        )
 
     inherits_volume_divergence = (
         not clause_families
@@ -1355,13 +1418,27 @@ def _parse_clause(
 
 
 def _financial_intent(text: str) -> tuple[FinancialIntent | None, str | None]:
-    metric_id = next(
-        (metric for pattern, metric in _FINANCIAL_METRIC_ALIASES if pattern.search(text)),
-        None,
-    )
-    if metric_id is None:
+    metric_match: re.Match[str] | None = None
+    metric_id: FinancialMetricId | None = None
+    for pattern, candidate_metric_id in _FINANCIAL_METRIC_ALIASES:
+        candidate_match = pattern.search(text)
+        if candidate_match is not None:
+            metric_match = candidate_match
+            metric_id = candidate_metric_id
+            break
+    if metric_id is None or metric_match is None:
         return None, None
-    comparison = _FINANCIAL_COMPARISON_RE.search(text)
+
+    # Bind the comparison to the same boolean clause as the metric. Searching
+    # the whole action clause would let a preceding price condition donate its
+    # operator/value to EPS (for example “股价低于 19 元且 EPS 高于 1 元”).
+    boundary_pattern = re.compile(r"(?:并且|而且|同时|以及|且|或者|或是|任一|或|[,，。；;])")
+    local_start = 0
+    for boundary in boundary_pattern.finditer(text, 0, metric_match.start()):
+        local_start = boundary.end()
+    following_boundary = boundary_pattern.search(text, metric_match.end())
+    local_end = following_boundary.start() if following_boundary is not None else len(text)
+    comparison = _FINANCIAL_COMPARISON_RE.search(text[local_start:local_end])
     if comparison is None:
         return None, "financial_comparison_required"
     comparator = cast(
@@ -1395,6 +1472,13 @@ def _financial_intent(text: str) -> tuple[FinancialIntent | None, str | None]:
             or value.copy_abs() > 1
         ):
             value /= Decimal("100")
+    elif unit is FinancialUnit.PERCENT:
+        has_explicit_percent = (
+            comparison.group("percent_prefix") is not None
+            or comparison.group("percent") is not None
+        )
+        if not has_explicit_percent and value.copy_abs() < 1:
+            return None, "financial_percentage_unit_required"
     elif unit is FinancialUnit.CNY:
         scale = comparison.group("scale")
         if scale == "亿":
@@ -1541,8 +1625,10 @@ def _explicit_families(text: str) -> frozenset[_Family]:
         folded,
     ):
         families.add("return_stddev")
-    elif re.search(r"(?:涨跌幅|涨幅|跌幅|收益率)", text):
+    elif re.search(r"(?:涨跌幅|涨幅|跌幅|收益率)", text) or _mentions_daily_return_shorthand(text):
         families.add("return_pct")
+    if _has_price_level_context(text):
+        families.add("price_close")
     if re.search(
         r"(?:历史波动率|年化波动率|(?<![a-z])(?:historicalvolatility|histvol)(?![a-z]))",
         folded,
@@ -1596,6 +1682,8 @@ def _explicit_families(text: str) -> frozenset[_Family]:
         families.add("amount_average")
     elif "成交额" in text:
         families.add("amount")
+    if "换手率" in text:
+        families.add("turnover_rate")
     if re.search(r"(?:量价|obv|能量潮)[^，。；;]*(?:顶背离|底背离)", text, re.I):
         families.add("volume_divergence")
     elif "obv" in folded or "能量潮" in text:
@@ -1630,6 +1718,8 @@ def _technical_negation_error(
         return "negated_signal_not_supported"
     inclusive = re.search(r"(?:不低于|不小于|不少于|不高于|不大于|不超过)", text)
     if inclusive is not None:
+        if families <= frozenset({"price_close", "return_pct"}):
+            return None
         if families == frozenset({"relative_volume"}) and re.search(
             r"(?:成交量|放量|缩量)[^，。；;]*"
             r"(?:不低于|不小于|不少于|不高于|不大于|不超过)",
@@ -1744,6 +1834,7 @@ def _family_active(
         "amplitude",
         "amount",
         "amount_average",
+        "turnover_rate",
         "historical_volatility",
         "momentum",
         "natr",
@@ -1937,7 +2028,10 @@ def _threshold_rule(text: str) -> tuple[float, str] | None:
 
 
 def _return_threshold_rule(text: str) -> tuple[float, str] | None:
-    rule = _threshold_rule(text)
+    shorthand = _daily_return_shorthand_rule(text)
+    if shorthand is not None:
+        return shorthand
+    rule = _inclusive_return_threshold_rule(text) or _threshold_rule(text)
     if rule is None or re.search(r"(?<!涨)跌幅", text) is None:
         return rule
     value, trigger = rule
@@ -1946,8 +2040,23 @@ def _return_threshold_rule(text: str) -> tuple[float, str] | None:
         "below": "above",
         "crosses_above": "crosses_below",
         "crosses_below": "crosses_above",
+        "at_least": "at_most",
+        "at_most": "at_least",
     }[trigger]
     return -abs(value), mirrored_trigger
+
+
+def _inclusive_return_threshold_rule(text: str) -> tuple[float, str] | None:
+    definitions = (
+        (("不低于", "不小于", "不少于", "至少", ">=", "≥"), "at_least"),
+        (("不高于", "不大于", "不超过", "至多", "<=", "≤"), "at_most"),
+    )
+    for operators, trigger in definitions:
+        operator_pattern = "|".join(re.escape(item) for item in operators)
+        match = re.search(rf"(?:{operator_pattern})[^\d+-]*{_SIGNED_NUMBER}", text, re.I)
+        if match is not None:
+            return float(match.group(1)), trigger
+    return None
 
 
 def _amount_threshold_rule(text: str) -> tuple[float, str] | None:
@@ -1977,9 +2086,212 @@ def _amount_threshold_rule(text: str) -> tuple[float, str] | None:
     return None
 
 
+def _turnover_rate_threshold_rule(text: str) -> tuple[float, str] | None:
+    """Parse only explicit percentage-point turnover-rate thresholds.
+
+    ``DailyBar.turnover_rate_pct`` holds the provider's raw percentage-point
+    value (for example ``3.25`` means 3.25%), not a 0-1 ratio.  Requiring a
+    visible percentage unit prevents a bare number from being silently
+    interpreted as volume, an amount, or a decimal ratio.
+    """
+
+    definitions = (
+        (("上穿", "突破"), "crosses_above"),
+        (("下穿", "跌破"), "crosses_below"),
+        (("高于", "大于", "超过", ">"), "above"),
+        (("低于", "小于", "少于", "不足", "<"), "below"),
+    )
+    for operators, trigger in definitions:
+        operator_pattern = "|".join(re.escape(item) for item in operators)
+        match = re.search(
+            rf"(?:{operator_pattern})[^\d+-]*(?:百分之\s*(?P<prefix_value>{_SIGNED_NUMBER})|"
+            rf"(?P<suffix_value>{_SIGNED_NUMBER})\s*(?:[%％]|个百分点))",
+            text,
+            re.I,
+        )
+        if match is not None:
+            raw_value = match.group("prefix_value") or match.group("suffix_value")
+            assert raw_value is not None
+            return float(raw_value), trigger
+    return None
+
+
 def _return_period(text: str) -> int | None:
     match = re.search(r"(\d{1,4})日(?:涨跌幅|涨幅|跌幅|收益率)", text)
-    return int(match.group(1)) if match is not None else None
+    if match is not None:
+        return int(match.group(1))
+    if _mentions_daily_return_shorthand(text):
+        return 1
+    return None
+
+
+def _mentions_daily_return_shorthand(text: str) -> bool:
+    if re.search(r"(?:放量|缩量|量价)", text) is not None:
+        return False
+    return (
+        re.search(
+            rf"(?:(?:当日|当天|今日))?"
+            rf"(?:上涨|下跌|涨幅|(?<!涨)跌幅|涨(?!跌)|(?<!涨)跌)了?"
+            rf"(?:不低于|不小于|不少于|大于等于|不高于|不大于|"
+            rf"不超过|小于等于|超过|高于|大于|低于|小于|超|达到|到|至少|至多|"
+            rf">=|<=|≥|≤|>|<)?"
+            rf"{_NUMBER}\s*[%％]",
+            text,
+        )
+        is not None
+    )
+
+
+def _daily_return_shorthand_rule(text: str) -> tuple[float, str] | None:
+    if not _mentions_daily_return_shorthand(text):
+        return None
+    match = re.search(
+        rf"(?:(?:当日|当天|今日))?(?P<direction>上涨|下跌|涨幅|跌幅|涨|跌)了?"
+        rf"(?P<operator>超过|超|达到|到|不低于|不小于|不少于|至少|大于等于|"
+        rf"不高于|不大于|不超过|至多|小于等于|>=|<=|≥|≤)?"
+        rf"(?P<number>{_NUMBER})\s*[%％]",
+        text,
+    )
+    if match is None:
+        return None
+    value = float(match.group("number"))
+    operator = match.group("operator")
+    strict_lower_bound = operator in {"超过", "超"}
+    inclusive_upper_bound = operator in {
+        "不高于",
+        "不大于",
+        "不超过",
+        "至多",
+        "小于等于",
+        "<=",
+        "≤",
+    }
+    if match.group("direction") in {"下跌", "跌幅", "跌"}:
+        if strict_lower_bound:
+            return -abs(value), "below"
+        return -abs(value), "at_least" if inclusive_upper_bound else "at_most"
+    if strict_lower_bound:
+        return abs(value), "above"
+    return abs(value), "at_most" if inclusive_upper_bound else "at_least"
+
+
+def _has_price_level_context(text: str) -> bool:
+    if _explicit_price_level_rule(text) is not None:
+        return True
+    return re.search(rf"{_NUMBER}\s*(?:元|块)(?![\u3400-\u9fff])", text) is not None
+
+
+def _explicit_price_level_rule(text: str) -> tuple[float, str] | None:
+    definitions = (
+        (("不高于", "不大于", "不超过", "至多", "小于等于", "<=", "≤"), "at_most"),
+        (("不低于", "不小于", "不少于", "至少", "达到", "大于等于", ">=", "≥"), "at_least"),
+        (("涨到", "涨至", "涨超", "上穿", "突破", "站上"), "crosses_above"),
+        (("跌到", "跌至", "下穿", "跌破", "失守"), "crosses_below"),
+        (("高于", "大于", "超过"), "above"),
+        (("低于", "小于", "不足"), "below"),
+    )
+    # Prefer an explicitly named price subject before considering colloquial
+    # shorthand such as “涨超 19 块”.  Otherwise a mixed clause like
+    # “每股收益超过 1 元且股价低于 19 元” is captured at the financial value.
+    for subject_pattern in (r"(?:股价|价格|收盘价|最新价)", ""):
+        for operators, trigger in definitions:
+            operator_pattern = "|".join(re.escape(item) for item in operators)
+            match = re.search(
+                rf"{subject_pattern}(?:{operator_pattern})"
+                rf"[^\d+-]*{_SIGNED_NUMBER}\s*(?:元|块)",
+                text,
+            )
+            if match is not None:
+                return float(match.group(1)), trigger
+    suffix = re.search(
+        rf"(?:股价|价格|收盘价|最新价)?{_SIGNED_NUMBER}\s*(?:元|块)"
+        r"\s*(?P<direction>以上|及以上|以下|及以下)",
+        text,
+    )
+    if suffix is not None:
+        return (
+            float(suffix.group(1)),
+            "at_least" if "上" in suffix.group("direction") else "at_most",
+        )
+    return None
+
+
+def _bare_price_level_value(text: str) -> float | None:
+    match = re.fullmatch(
+        rf"(?:股价|价格|收盘价|最新价)?{_SIGNED_NUMBER}\s*(?:元|块)?",
+        text,
+    )
+    if match is not None:
+        return float(match.group(1))
+
+    # The hybrid resolver has already bound a leading A-share company name to
+    # the authoritative instrument context before this parser runs.  Preserve
+    # the existing paired-price inference when that name remains attached to
+    # the first level (for example "东方财富19元买, 17.8元卖").  Keep directional
+    # price moves and per-share financial facts out: "股价涨5元" must not be
+    # rewritten into the absolute level 5.
+    contextual = re.fullmatch(
+        rf"(?P<context>[\u3400-\u9fffA-Za-z·*\s]{{2,40}}?)"
+        rf"(?P<value>{_SIGNED_NUMBER})\s*(?:元|块)",
+        text,
+    )
+    if contextual is None:
+        return None
+    context = contextual.group("context")
+    if (
+        re.search(
+            r"(?:股价|价格|收盘价|最新价|每股|收益|利润|营收|"
+            r"市盈|市净|市销|市现|涨跌幅|收益率|上涨|下跌|涨|跌|"
+            r"上升|下降|高于|低于|达到|超过|突破|失守|上穿|下穿|"
+            r"不低于|不高于|等于)",
+            context,
+        )
+        is not None
+    ):
+        return None
+    return float(contextual.group("value"))
+
+
+def _price_level_value(text: str) -> float | None:
+    explicit = _explicit_price_level_rule(text)
+    if explicit is not None:
+        return explicit[0]
+    unit_value = re.search(rf"{_SIGNED_NUMBER}\s*(?:元|块)", text)
+    if unit_value is not None:
+        return float(unit_value.group(1))
+    return _bare_price_level_value(text)
+
+
+def _price_level_rule(
+    text: str,
+    *,
+    action: _Action,
+    full_text: str,
+) -> tuple[float, str] | None:
+    explicit = _explicit_price_level_rule(text)
+    if explicit is not None:
+        return explicit
+    current_value = _bare_price_level_value(text)
+    if current_value is None:
+        unit_value = re.fullmatch(rf"{_SIGNED_NUMBER}\s*(?:元|块)", text)
+        current_value = float(unit_value.group(1)) if unit_value is not None else None
+    if current_value is None:
+        return None
+    pairs: dict[_Action, list[float]] = {"entry": [], "exit": []}
+    for clause in _action_clauses(full_text):
+        value = _price_level_value(clause.text)
+        if value is not None:
+            pairs[clause.action].append(value)
+    if len(pairs["entry"]) != 1 or len(pairs["exit"]) != 1:
+        return None
+    entry_value = pairs["entry"][0]
+    exit_value = pairs["exit"][0]
+    if entry_value == exit_value:
+        return None
+    buy_low_sell_high = entry_value < exit_value
+    if action == "entry":
+        return current_value, "crosses_below" if buy_low_sell_high else "crosses_above"
+    return current_value, "crosses_above" if buy_low_sell_high else "crosses_below"
 
 
 def _rolling_high_period(text: str) -> int | None:

@@ -68,7 +68,7 @@ def _strategy() -> StrategySpecV2:
         "params": {"fast": 12, "slow": 26, "signal": 9},
     }
     return StrategySpecV2(
-        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.08.30"),
+        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.09.01"),
         instrument=InstrumentRef(
             symbol="600519.SH",
             name="贵州茅台",

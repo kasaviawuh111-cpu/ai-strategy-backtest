@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -348,6 +349,20 @@ def test_choice_login_does_not_retry_permission_errors() -> None:
     assert calls == 1
 
 
+@pytest.mark.parametrize("error_code", [10001014, 10001020])
+def test_choice_login_activation_errors_allow_the_server_owned_fallback(
+    error_code: int,
+) -> None:
+    """A local Choice activation gap is availability, never bad market data."""
+
+    with pytest.raises(ChoiceProviderUnavailableError, match=str(error_code)):
+        _start_with_retry(
+            lambda: _FakeEmQuantData(error_code, "activation required"),
+            _FakeChoiceClient,
+            sleeper=lambda _: pytest.fail("activation errors must not be retried"),
+        )
+
+
 def test_choice_login_stops_after_three_transient_attempts() -> None:
     calls = 0
     sleeps: list[float] = []
@@ -690,6 +705,46 @@ def test_builds_content_addressed_dual_price_snapshot(tmp_path: Path) -> None:
     assert signal[0].price_basis is PriceBasis.BACK_ADJUSTED
     assert execution[0].close.amount != signal[0].close.amount
     assert execution[0].volume == signal[0].volume
+
+
+def test_snapshot_preserves_provider_reported_turnover_rate_for_both_price_bases(
+    tmp_path: Path,
+) -> None:
+    execution_rows = _execution_rows()
+    for row, rate in zip(
+        execution_rows,
+        (Decimal("2.500000000000000001"), Decimal("3.25")),
+        strict=True,
+    ):
+        row["turnover_rate_pct"] = rate
+        row["turnover_rate_provider"] = "eastmoney_push2his_public"
+        row["turnover_rate_methodology"] = (
+            "eastmoney_push2his.f61.provider_reported_turnover_rate_pct.v1"
+        )
+
+    result = _build(tmp_path, execution_rows=execution_rows)
+    repository = LocalParquetMarketDataRepository(result.path, profile="choice_snapshot")
+    period = DateRange(date(2025, 1, 2), date(2025, 1, 3))
+    snapshot = repository.pin_snapshot(
+        DataRequirements(
+            instruments=(InstrumentId("300059.SZ"),),
+            datasets=("daily_ohlcv",),
+        ),
+        period,
+    )
+
+    execution = repository.load_daily_bars(snapshot, InstrumentId("300059.SZ"), period)
+    signal = repository.load_signal_bars(snapshot, InstrumentId("300059.SZ"), period)
+
+    assert [bar.turnover_rate_pct for bar in execution] == [
+        Decimal("2.500000000000000001"),
+        Decimal("3.25"),
+    ]
+    assert [bar.turnover_rate_pct for bar in signal] == [
+        Decimal("2.500000000000000001"),
+        Decimal("3.25"),
+    ]
+    assert all(bar.turnover_rate_provider == "eastmoney_push2his_public" for bar in signal)
 
 
 def test_provider_neutral_snapshot_declares_real_source_and_omits_choice_flags(

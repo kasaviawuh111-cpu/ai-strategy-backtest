@@ -425,7 +425,7 @@ def _effective_warmup_calendar_days(
             )
             continue
 
-        if condition.indicator_id in {"price.amplitude", "market.amount"}:
+        if condition.indicator_id in {"price.close", "price.amplitude", "market.amount"}:
             base_bars = 2 if condition.indicator_id == "price.amplitude" else 1
             required_trading_bars = max(
                 required_trading_bars,

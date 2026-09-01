@@ -32,8 +32,8 @@ def condition() -> FinancialConditionV1:
         period_basis=FinancialPeriodBasis.FULL_YEAR,
         statement_scope=FinancialStatementScope.CONSOLIDATED,
         comparator="gt",
-        value=Decimal("0.20"),
-        unit=FinancialUnit.RATIO,
+        value=Decimal("20"),
+        unit=FinancialUnit.PERCENT,
     )
 
 
@@ -51,7 +51,7 @@ def fact(*, first_available_at: datetime, value: Decimal | None) -> FinancialFac
         report_type=FinancialReportType.ANNUAL,
         period_basis=FinancialPeriodBasis.FULL_YEAR,
         statement_scope=FinancialStatementScope.CONSOLIDATED,
-        unit=FinancialUnit.RATIO,
+        unit=FinancialUnit.PERCENT,
         availability=PointInTimeAvailability(
             observed_at=datetime(2023, 12, 31, tzinfo=SHANGHAI),
             announced_at=first_available_at,
@@ -86,13 +86,13 @@ def test_financial_fact_is_invisible_before_first_available_at() -> None:
     aligned = SignalRuntime().evaluate_aligned(
         condition(),
         bars,
-        financial_facts=(fact(first_available_at=available_at, value=Decimal("0.25")),),
+        financial_facts=(fact(first_available_at=available_at, value=Decimal("25")),),
     )
 
     assert aligned[:2] == (None, None)
     assert aligned[2] is not None
     assert aligned[2].triggered is True
-    assert aligned[2].left_value == Decimal("0.25")
+    assert aligned[2].left_value == Decimal("25")
     assert aligned[2].evidence[0].raw_response_sha256 == RAW_HASH
 
 
@@ -113,7 +113,7 @@ def test_future_financial_suffix_cannot_change_existing_signal_prefix() -> None:
     bars = make_bars([10, 10, 10])
     first = fact(
         first_available_at=datetime.combine(bars[0].session_date, time(9), tzinfo=SHANGHAI),
-        value=Decimal("0.25"),
+        value=Decimal("25"),
     )
 
     full = SignalRuntime().evaluate_aligned(condition(), bars, financial_facts=(first,))

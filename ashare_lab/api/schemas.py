@@ -165,8 +165,21 @@ class StrategyDraftResponse(ApiModel):
             raise ValueError("non-ready draft cannot contain a strategy or strategy_hash")
         if self.idea_route is not None and self.status is not CompileStatus.NEEDS_CLARIFICATION:
             raise ValueError("idea guidance must require clarification")
-        if (self.diagnostic_code == "idea_guidance_required") != (self.idea_route is not None):
-            raise ValueError("idea_guidance_required and idea_route must be present together")
+        route_codes = {
+            "idea_guidance_required",
+            "entry_rule_not_recognized",
+            "exit_rule_not_recognized",
+            "strategy_rule_incomplete",
+            "no_supported_signal_recognized",
+            "ambiguous_obv_direction",
+            "ambiguous_volume_direction",
+            "ambiguous_boolean_expression",
+            "ambiguous_cross_indicator",
+        }
+        if self.idea_route is not None and self.diagnostic_code not in route_codes:
+            raise ValueError("idea route is not allowed for this diagnostic code")
+        if self.diagnostic_code == "idea_guidance_required" and self.idea_route is None:
+            raise ValueError("idea_guidance_required must include idea_route")
         return self
 
 

@@ -31,7 +31,7 @@ def event_strategy(
     attributes: dict[str, str | int | float | bool] | None = None,
 ) -> StrategySpec:
     return StrategySpec(
-        catalog=CatalogRef(catalog_id="cn_a.signals", release_version="2026.08.30"),
+        catalog=CatalogRef(catalog_id="cn_a.signals", release_version="2026.09.01"),
         instrument=Instrument(symbol="300059.SZ"),
         entry=EventCondition(
             event_code=event_code,
@@ -145,7 +145,7 @@ def test_unknown_event_code_and_wrong_version_are_rejected() -> None:
 def test_event_strategy_must_declare_event_data_capability() -> None:
     with pytest.raises(ValueError, match="daily_ohlcv_events"):
         StrategySpec(
-            catalog=CatalogRef(catalog_id="cn_a.signals", release_version="2026.08.30"),
+            catalog=CatalogRef(catalog_id="cn_a.signals", release_version="2026.09.01"),
             instrument=Instrument(symbol="300059.SZ"),
             entry=EventCondition(
                 event_code="event.financial_results.annual_report",

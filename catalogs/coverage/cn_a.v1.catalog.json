@@ -12126,6 +12126,61 @@
           ]
         }
       ],
+      "description": "A 股单股回测目录中的收盘价阈值；状态仅表示当前产品可用性，不代表投资有效性。",
+      "family": "price_action",
+      "formula_summary": "直接比较规范日线的不复权收盘价与人民币固定阈值；信号收盘确认。",
+      "id": "price.close",
+      "implementation_ref": "ashare_lab.domain.signals.runtime:SignalRuntime[price.close]",
+      "kind": "indicator",
+      "legacy_atom_ids": [],
+      "name_zh": "收盘价阈值",
+      "parameters": [],
+      "status": "stable",
+      "time_semantics": {
+        "daily_bar_fallback": "next_tradable_session_open",
+        "date_only_policy": "not_applicable",
+        "default_order_time": "next_tradable_session_open",
+        "notes": "日线指标在收盘后确认；不得以同一根日线收盘价成交。",
+        "observation_basis": "bar_close",
+        "required_quality": "exchange_session",
+        "revision_policy": "as_known_at_cutoff"
+      },
+      "triggers": [
+        "crosses_above",
+        "crosses_below",
+        "above",
+        "below",
+        "at_least",
+        "at_most"
+      ],
+      "warmup_bars": 2
+    },
+    {
+      "blockers": [],
+      "data_requirements": [
+        {
+          "dataset_id": "market.ohlcv.daily",
+          "fields": [
+            "instrument_id",
+            "session_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount"
+          ],
+          "frequency": "1d",
+          "license_status": "cleared",
+          "point_in_time_required": true,
+          "required_time_fields": [
+            "fact_at",
+            "available_at",
+            "ingested_at",
+            "revision_id"
+          ]
+        }
+      ],
       "description": "A 股单股回测目录中的区间涨跌幅；状态仅表示当前产品可用性，不代表投资有效性。",
       "family": "price_action",
       "formula_summary": "区间涨跌幅=100*(price_t/price_(t-period)-1)，数值单位为百分点。",
@@ -12159,7 +12214,9 @@
         "crosses_above",
         "crosses_below",
         "above",
-        "below"
+        "below",
+        "at_least",
+        "at_most"
       ],
       "warmup_bars": 7
     },
@@ -14432,25 +14489,19 @@
       "warmup_bars": 2
     },
     {
-      "blockers": [
-        "当前数据快照或授权不满足 point-in-time 回测要求",
-        "尚无权威运行时实现与边界测试"
-      ],
+      "blockers": [],
       "data_requirements": [
         {
-          "dataset_id": "market.provider_factors.point_in_time",
+          "dataset_id": "market.ohlcv.daily",
           "fields": [
             "instrument_id",
             "session_date",
-            "field_code",
-            "value",
-            "unit",
-            "provider",
-            "methodology_version",
-            "revision_id"
+            "turnover_rate_pct",
+            "turnover_rate_provider",
+            "turnover_rate_methodology"
           ],
           "frequency": "1d",
-          "license_status": "not_acquired",
+          "license_status": "cleared",
           "point_in_time_required": true,
           "required_time_fields": [
             "fact_at",
@@ -14462,9 +14513,9 @@
       ],
       "description": "A 股单股回测目录中的换手率；状态仅表示当前产品可用性，不代表投资有效性。",
       "family": "volume_liquidity",
-      "formula_summary": "换手率=当日成交股数/当时可得流通股本；若使用供应商原始值，必须固定 provider 与 methodology_version。",
+      "formula_summary": "直接比较供应商保存的原始换手率百分点；不由成交量、成交额或流通股本推导。缺失原始值、provider 或 methodology 时拒绝运行。",
       "id": "market.turnover_rate",
-      "implementation_ref": null,
+      "implementation_ref": "ashare_lab.domain.signals.runtime:SignalRuntime[market.turnover_rate]",
       "kind": "indicator",
       "legacy_atom_ids": [
         "turnover_above_10",
@@ -14473,23 +14524,23 @@
       ],
       "name_zh": "换手率",
       "parameters": [],
-      "status": "unavailable",
+      "status": "stable",
       "time_semantics": {
-        "daily_bar_fallback": "reject",
-        "date_only_policy": "conservative_after_close",
+        "daily_bar_fallback": "next_tradable_session_open",
+        "date_only_policy": "not_applicable",
         "default_order_time": "next_tradable_session_open",
-        "notes": "成交量本身不能推出换手率；必须使用当时可得的流通股本，或保存供应商原始换手率及其方法学版本。",
-        "observation_basis": "available_at",
-        "required_quality": "date_only",
+        "notes": "只使用供应商原始换手率百分点；不得由成交量、成交额或流通股本推导。原始值、provider 或 methodology 缺一即拒绝。",
+        "observation_basis": "bar_close",
+        "required_quality": "exchange_session",
         "revision_policy": "as_known_at_cutoff"
       },
       "triggers": [
-        "above",
-        "below",
         "crosses_above",
-        "crosses_below"
+        "crosses_below",
+        "above",
+        "below"
       ],
-      "warmup_bars": 20
+      "warmup_bars": 2
     },
     {
       "blockers": [
@@ -18791,8 +18842,8 @@
       "warmup_bars": 20
     }
   ],
-  "published_on": "2026-08-30",
-  "release_version": "2026.08.30",
+  "published_on": "2026-09-01",
+  "release_version": "2026.09.01",
   "schema_version": "catalog-coverage.v1",
   "state": "active"
 }

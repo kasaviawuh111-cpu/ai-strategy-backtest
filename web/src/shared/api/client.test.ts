@@ -113,7 +113,54 @@ describe('live strategy client', () => {
   afterEach(() => {
     vi.unstubAllEnvs()
     vi.unstubAllGlobals()
+    vi.restoreAllMocks()
     vi.resetModules()
+  })
+
+  it('allows the server-owned snapshot preparation step to outlive ordinary API calls', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    const supported = capabilities({
+      event_backtest_available: true,
+      event_availability_scope: 'pinned_snapshot',
+      events: [{
+        event_code: 'event.financial_results.annual_report',
+        definition_version: '1.0.0',
+        catalog_status: 'stable',
+        status: 'available',
+        backtest_available: true,
+        preparation_available: false,
+        availability_scope: 'pinned_snapshot',
+        unavailable_reason: null,
+        triggers: ['published'],
+      }],
+    })
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/capabilities') {
+        return { ok: true, json: async () => supported }
+      }
+      if (path === '/api/v1/strategy-drafts') {
+        return { ok: true, json: async () => readyResponse() }
+      }
+      if (path === '/api/v1/backtest-runs') {
+        return { ok: true, json: async () => ({ id: 'run:prepared', state: 'queued' }) }
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { backtestApi, strategyApi } = await import('./client')
+    const compiled = await strategyApi.compile({
+      ...clarifiedRequest,
+      utterance: '东方财富年报发布后买入，MACD 死叉卖出',
+      clarification: undefined,
+    })
+    if (compiled.status !== 'compiled') throw new Error('expected compiled StrategySpec')
+
+    await backtestApi.create(compiled.draft)
+
+    expect(timeoutSpy).toHaveBeenLastCalledWith(120_000)
   })
 
   it('sends the clarification answer through the backend v2 instrument_context field', async () => {

@@ -36,13 +36,13 @@ def latest_batch() -> OperatorReadingBatch:
             "SECUCODE": "300059.SZ",
             "REPORT_DATE": "2025-06-30 00:00:00",
             "TOTAL_OPERATE_INCOME": 7_000_000_000.0,
-            "TOI_YOY_RATIO": 0.5322,
+            "TOI_YOY_RATIO": 53.22,
             "PARENT_NETPROFIT": 5_000_000_000.0,
-            "PNP_YOY_RATIO": 0.4485,
-            "ROE": 0.0846,
-            "ROTA": 0.0179,
-            "NPR": 0.7676,
-            "GROSS_PROFIT_RATIO": 0.7439,
+            "PNP_YOY_RATIO": 44.85,
+            "ROE": 8.46,
+            "ROTA": 1.79,
+            "NPR": 76.76,
+            "GROSS_PROFIT_RATIO": 74.39,
             "PER_NETCASH_OPERATE": None,
         },
     )
@@ -73,7 +73,7 @@ def publication() -> FinancialPublicationTime:
     )
 
 
-def test_latest_financial_values_are_direct_and_ratios_are_not_scaled() -> None:
+def test_latest_financial_values_are_direct_and_percentages_are_not_scaled() -> None:
     facts = normalize_latest_indicator_facts(
         latest_batch(),
         publication_times={date(2025, 6, 30): publication()},
@@ -81,9 +81,10 @@ def test_latest_financial_values_are_direct_and_ratios_are_not_scaled() -> None:
     )
     by_metric = {item.metric_id: item for item in facts}
 
-    assert by_metric[FinancialMetricId.REVENUE_YOY].value == Decimal("0.5322")
-    assert by_metric[FinancialMetricId.REVENUE_YOY].unit is FinancialUnit.RATIO
-    assert by_metric[FinancialMetricId.ROE].value == Decimal("0.0846")
+    assert by_metric[FinancialMetricId.REVENUE_YOY].value == Decimal("53.22")
+    assert by_metric[FinancialMetricId.REVENUE_YOY].unit is FinancialUnit.PERCENT
+    assert by_metric[FinancialMetricId.ROE].value == Decimal("8.46")
+    assert by_metric[FinancialMetricId.ROE].unit is FinancialUnit.PERCENT
     assert by_metric[FinancialMetricId.OPERATING_CASH_FLOW_PER_SHARE].value is None
     assert by_metric[FinancialMetricId.REVENUE].source_field == "TOTAL_OPERATE_INCOME"
     assert all(item.value_origin.value == "provider_raw" for item in facts)

@@ -35,6 +35,7 @@ DAILY_FIELD_ORDER = (
     "preclose",
     "volume",
     "amount",
+    "turn",
     "tradestatus",
     "isST",
 )
@@ -42,6 +43,10 @@ DAILY_FIELDS = ",".join(DAILY_FIELD_ORDER)
 FREQUENCY = "d"
 MAX_QUERY_CALENDAR_DAYS = 366
 VOLUME_SOURCE_UNIT = "share"
+TURNOVER_RATE_PROVIDER = PROVIDER
+TURNOVER_RATE_METHODOLOGY = (
+    "baostock.history_k_data_plus.turn.provider_reported_turnover_rate_pct.v1"
+)
 NORMALIZED_RESPONSE_HASH_SEMANTICS = "sha256_of_canonical_normalized_sdk_result_not_raw_wire_bytes"
 
 _REQUIRED_FIELDS = frozenset(DAILY_FIELD_ORDER)
@@ -142,6 +147,7 @@ class BaoStockDailyRow:
     preclose: Decimal
     volume: int
     amount: Decimal
+    turnover_rate_pct: Decimal
     tradestatus: Literal["0", "1"]
     is_st: bool
 
@@ -161,6 +167,9 @@ class BaoStockDailyRow:
             "close": self.close,
             "volume": self.volume,
             "amount": self.amount,
+            "turnover_rate_pct": self.turnover_rate_pct,
+            "turnover_rate_provider": TURNOVER_RATE_PROVIDER,
+            "turnover_rate_methodology": TURNOVER_RATE_METHODOLOGY,
         }
 
 
@@ -477,6 +486,7 @@ def _rows_from_audit(
 
         volume = _non_negative_whole_number(row["volume"], field_name="volume", index=index)
         amount = _non_negative_decimal(row["amount"], field_name="amount", index=index)
+        turnover_rate_pct = _non_negative_decimal(row["turn"], field_name="turn", index=index)
         tradestatus = row["tradestatus"]
         if tradestatus not in {"0", "1"}:
             raise BaoStockDailySourceError(f"row {index} tradestatus must be BaoStock 0 or 1")
@@ -510,6 +520,7 @@ def _rows_from_audit(
                 preclose=preclose_cny,
                 volume=volume,
                 amount=amount,
+                turnover_rate_pct=turnover_rate_pct,
                 tradestatus=typed_tradestatus,
                 is_st=raw_is_st == "1",
             )

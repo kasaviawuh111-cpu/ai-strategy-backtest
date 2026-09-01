@@ -34,7 +34,7 @@ import type {
 
 export type LiveCompileBody = {
   utterance: string
-  instrument_context: string
+  instrument_context: string | null
   as_of_date: string
 }
 
@@ -98,6 +98,8 @@ const triggerFallback = (trigger: string): string => ({
   published: '首次发布',
   above: '高于',
   below: '低于',
+  at_least: '不低于',
+  at_most: '不高于',
   crosses_above: '由下向上穿过阈值',
   crosses_below: '由上向下穿过阈值',
   price_crosses_above: '价格上穿',
@@ -129,6 +131,7 @@ const numericBoundary = (value: number | null | undefined, fallback: number) =>
 
 const diagnosticMessages: Record<string, string> = {
   'template_not_published/big_drop_rebound': '“大跌反弹”会按选股模板处理，当前模板尚未发布，暂时不能执行回测。',
+  previous_session_limit_up_capability_unavailable: '已理解为“前一交易日涨停、下一交易日买入”，但这个信号还缺逐证券逐交易日的涨停价/涨停状态，以及 DSL 的前一交易日引用；不能用单日涨 10% 替代。“做个短线”也没有说清卖出方式，请补充持有天数、止盈止损或技术卖出条件。原话会保留，系统不会猜。',
   event_catalog_not_published: '这类事件尚未进入可执行目录，请改用已支持的定期报告事件。',
   entry_rule_not_recognized: '已识别卖出条件，但没有识别到买入规则。请在原话中补充何时买入。',
   exit_rule_not_recognized: '已识别买入条件，但没有识别到卖出规则。请在原话中补充何时卖出。',
@@ -163,6 +166,9 @@ const diagnosticMessages: Record<string, string> = {
   empty_utterance: '请输入一条完整的买卖规则。',
   clarification_choice_not_supported: '这个补充选项不在当前后端契约内，请返回重新识别。',
   event_not_available_for_backtest: '当前运行环境既没有这类事件的固定快照，也没有声明可按本次请求准备数据。',
+  instrument_unconfirmed: '没能从可校验的 A 股证券主数据中唯一确认这个公司名称，请补充 6 位证券代码。',
+  instrument_resolution_unavailable: '证券名称查询服务暂时不可用，系统没有换用默认股票；请补充 6 位证券代码后再试。',
+  instrument_context_mismatch: '你说的股票与当前股票页不一致，系统已停止，不会偷换标的。',
 }
 
 export const dataAsOfDate = () => import.meta.env.VITE_DATA_AS_OF_DATE ?? '2026-08-06'
@@ -179,9 +185,13 @@ export const toLiveCompileBody = (
   }
 }
 
-function liveInstrumentContext(input: CompileRequest): string {
+function liveInstrumentContext(input: CompileRequest): string | null {
   const answer = input.clarification
-  if (!answer) return input.instrument.symbol
+  if (!answer) {
+    return input.instrumentContextSource === 'standalone_default'
+      ? null
+      : input.instrument.symbol
+  }
 
   // StrategyDraftRequest v2 has no generic clarification field. Its only
   // supported clarification is `instrument_required`, answered through the
@@ -202,6 +212,26 @@ function liveInstrumentContext(input: CompileRequest): string {
   return input.instrument.symbol
 }
 
+const clarificationProposalDescription = (
+  diagnosticCode: string,
+  proposal: IdeaRoute['proposals'][number],
+): string => {
+  const rationale = proposal.hypothesis.trim().replace(/[。；;,，]+$/, '')
+  if (diagnosticCode === 'entry_rule_not_recognized') {
+    return `${rationale}；补充买入：${proposal.entry_summary}`
+  }
+  if (diagnosticCode === 'exit_rule_not_recognized') {
+    return `${rationale}；补充卖出：${proposal.exit_summary}`
+  }
+  return `${rationale}；买入：${proposal.entry_summary}；卖出：${proposal.exit_summary}`
+}
+
+const instrumentClarificationCodes = new Set([
+  'instrument_required',
+  'instrument_unconfirmed',
+  'instrument_resolution_unavailable',
+])
+
 /**
  * 澄清态只保留原话中可以逐字指认的片段，不在前端补成 StrategySpec。
  * 后端再次返回 ready 前，这些内容只能帮助用户少改一句话。
@@ -210,12 +240,14 @@ function recognizedFragments(input: CompileRequest): Array<{ label: string; valu
   const fragments: Array<{ label: string; value: string }> = []
   const text = input.utterance
   const mentionedCompany = text.match(/([\u4e00-\u9fa5A-Za-z0-9]{2,16})(?:发|发布)(?:年度报告|年报)/)?.[1]
-  fragments.push({
-    label: '股票',
-    value: mentionedCompany
-      ? `${mentionedCompany}（原话提及；代码仍待服务端确认）`
-      : `${input.instrument.name} ${input.instrument.symbol}`,
-  })
+  if (mentionedCompany || input.instrumentContextSource !== 'standalone_default') {
+    fragments.push({
+      label: '股票',
+      value: mentionedCompany
+        ? `${mentionedCompany}（原话提及；代码仍待服务端确认）`
+        : `${input.instrument.name} ${input.instrument.symbol}`,
+    })
+  }
   if (/(?:年度报告|年报)/.test(text)) {
     fragments.push({ label: '事件', value: '年度报告发布' })
   }
@@ -252,13 +284,11 @@ export const fromLiveDraftResponse = (
   if (response.status === 'ready' && response.strategy) {
     return { status: 'compiled', draft: toDraft(response, input, capabilities) }
   }
-  if (response.status === 'needs_clarification') {
-    const diagnosticCode = response.diagnostic_code ?? 'strategy_clarification'
-    const ideaRoute = diagnosticCode === 'idea_guidance_required'
-      ? response.idea_route ?? undefined
-      : undefined
-    if (diagnosticCode === 'idea_guidance_required'
-      && (!ideaRoute || ideaRoute.proposals.length < 2)) {
+  const diagnosticCode = response.diagnostic_code ?? 'strategy_clarification'
+  const asksForInstrument = instrumentClarificationCodes.has(diagnosticCode)
+  if (response.status === 'needs_clarification' || asksForInstrument) {
+    const ideaRoute = response.idea_route ?? undefined
+    if (ideaRoute && ideaRoute.proposals.length < 2) {
       throw new ApiError({
         type: 'about:blank',
         title: '观点引导信息不完整',
@@ -267,49 +297,64 @@ export const fromLiveDraftResponse = (
         code: 'idea_route_invalid',
       })
     }
-    const asksForInstrument = diagnosticCode === 'instrument_required'
+    const canUseCurrentInstrument = asksForInstrument
+      && input.instrumentContextSource !== 'standalone_default'
     const asksForCompleteRule = diagnosticCode === 'strategy_rule_incomplete'
     const asksForEntry = diagnosticCode === 'entry_rule_not_recognized'
+    const groundedInstrumentName = response.candidate_grounding?.spans
+      .find((item) => item.path === '/instrument/symbol')?.text.trim()
     return {
       status: 'needs_clarification',
       draftId: response.draft_id,
       clarification: {
         id: diagnosticCode,
-        question: response.clarification
-          ?? (ideaRoute ? '选一个方向，我会把它变成完整买卖规则再识别。' : '请补充策略所需的信息。'),
+        question: asksForInstrument
+          ? canUseCurrentInstrument
+            ? `请确认使用当前股票“${input.instrument.name}”，或在下方输入其他股票名称或 6 位证券代码。`
+            : '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。'
+          : response.clarification
+            ?? (ideaRoute ? '挑一条，我把它变成完整规则再跑一次。' : '补一句我就能跑。'),
         reason: ideaRoute
-          ? '原话表达的是观点，还不是买卖规则。以下方向都需要你先选定，系统不会替你自动执行。'
+          ? ideaRoute.understanding.trim() || '我已经保留你说清楚的部分；还差一个关键条件，我不替你决定。'
           : asksForInstrument
-          ? '补齐股票后，系统才能生成可执行规则。'
+          ? '买卖条件已经保留，现在只缺回测标的。'
           : asksForEntry
-            ? '买入条件决定什么时候建立持仓。系统不会替你补一条默认策略。'
+            ? '买入条件我不能替你定——填哪个都是我在替你决定什么时候进场。'
           : diagnosticCode === 'exit_rule_not_recognized'
-            ? '卖出条件决定何时结束持仓。系统不会替你补一条默认策略。'
-            : '请回到原话补齐关键信息，系统不会自行猜测交易规则。',
+            ? '卖出条件我不能替你定——什么时候离场得你说了算。'
+            : '还差一点关键信息。我不猜规则，你补一句就能跑。',
         choices: ideaRoute ? ideaRoute.proposals.slice(0, 3).map((proposal) => ({
           id: proposal.id,
           label: proposal.title,
-          description: `${proposal.hypothesis}；买入：${proposal.entry_summary}；卖出：${proposal.exit_summary}`,
+          description: clarificationProposalDescription(diagnosticCode, proposal),
           action: 'replace_and_compile' as const,
           suggestedUtterance: proposal.suggested_utterance,
-        })) : [{
-          id: asksForInstrument ? 'use-current-instrument' : 'edit-utterance',
-          label: asksForInstrument
-            ? `使用 ${input.instrument.name}`
-            : asksForCompleteRule
+          instrumentSymbol: ideaRoute.asset_mapping.instrument_symbol,
+          instrumentName: groundedInstrumentName || undefined,
+        })) : asksForInstrument
+          ? canUseCurrentInstrument
+            ? [{
+                id: 'use-current-instrument',
+                label: `使用 ${input.instrument.name}`,
+                description: `继续回测 ${input.instrument.symbol}。`,
+                recommended: true,
+                action: 'submit_clarification' as const,
+              }]
+            : []
+          : [{
+          id: 'edit-utterance',
+          label: asksForCompleteRule
               ? '补充完整规则'
               : asksForEntry
                 ? '补充买入条件'
               : '补充卖出条件',
-          description: asksForInstrument
-            ? `继续回测 ${input.instrument.symbol}。`
-            : asksForCompleteRule
-              ? '返回输入框，一次写清买入条件和卖出条件。'
+          description: asksForCompleteRule
+              ? '回到输入框，把什么时候买、什么时候卖一起说清。'
               : asksForEntry
-                ? '返回输入框，在原话前补充明确的买入条件。'
-              : '返回输入框，在原话后补充明确的卖出条件。',
+                ? '回到输入框，说清什么时候买。'
+              : '回到输入框，说清什么时候卖。',
           recommended: true,
-          action: asksForInstrument ? 'submit_clarification' : 'edit_utterance',
+          action: 'edit_utterance',
         }],
         recognized: recognizedFragments(input),
         ideaRoute,
@@ -415,7 +460,7 @@ function toDraft(
     strategyHash: response.strategy_hash,
     sourceText: input.utterance,
     title: strategyTitle([...entry.conditions, ...exit.conditions]),
-    instrument: instrumentFrom(strategy, input.instrument),
+    instrument: instrumentFrom(strategy, input.instrument, response.candidate_grounding),
     confidence: null,
     entry,
     exit,
@@ -467,11 +512,18 @@ function toDraft(
   }
 }
 
-function instrumentFrom(strategy: StrategySpec, fallback: Instrument): Instrument {
+function instrumentFrom(
+  strategy: StrategySpec,
+  fallback: Instrument,
+  grounding?: CandidateGroundingPayload | null,
+): Instrument {
   const suffix = strategy.instrument.symbol.slice(-2)
   const exchange = suffix === 'SH' ? 'SSE' : suffix === 'BJ' ? 'BSE' : 'SZSE'
+  const symbolChanged = strategy.instrument.symbol !== fallback.symbol
+  const groundedName = grounding?.spans.find((item) => item.path === '/instrument/symbol')?.text.trim()
   return {
     ...fallback,
+    name: symbolChanged ? groundedName || strategy.instrument.symbol : fallback.name,
     symbol: strategy.instrument.symbol,
     exchange,
   }
@@ -552,20 +604,86 @@ function toUiCondition(
       value: condition.value,
       min: numericBoundary(trigger?.minimum, -1_000_000_000),
       max: numericBoundary(trigger?.maximum, 1_000_000_000),
-      unit: trigger?.unit ?? undefined,
+      unit: trigger?.unit ?? indicatorValueUnit(condition.indicator_id),
     })
   }
   const triggerName = trigger?.display_name ?? triggerFallback(condition.trigger)
+  const conditionOrder = conditionOrderLabel(condition)
+  const thresholdUnit = trigger?.unit ?? indicatorValueUnit(condition.indicator_id)
+  const thresholdLabel = condition.value != null && Number.isFinite(condition.value)
+    ? `${name} ${triggerName} ${formatConditionValue(condition.value)}${thresholdUnit ?? ''}`
+    : null
   return {
     id,
     kind: 'indicator',
     indicatorId: condition.indicator_id,
-    label: movingAverageLabel(condition, triggerName) ?? `${name} ${triggerName}`,
-    trigger: trigger?.description ?? `${name}：${triggerName}`,
+    label: conditionOrder
+      ?? movingAverageLabel(condition, triggerName)
+      ?? thresholdLabel
+      ?? `${name} ${triggerName}`,
+    trigger: conditionOrder
+      ? `日线收盘确认：${conditionOrder}`
+      : trigger?.description ?? `${name}：${triggerName}`,
     timeframe: condition.timeframe,
     evaluationMode: condition.evaluation_mode,
     parameters,
   }
+}
+
+function indicatorValueUnit(indicatorId: string): string | undefined {
+  if (indicatorId === 'price.close') return '元'
+  if (['price.return_pct', 'price.amplitude', 'market.turnover_rate'].includes(indicatorId)) return '%'
+  if (['volume.relative', 'market.volume'].includes(indicatorId)) return '倍'
+  if (['market.amount', 'amount.average'].includes(indicatorId)) return '元'
+  return undefined
+}
+
+function conditionOrderLabel(condition: StrategySpecIndicatorCondition): string | null {
+  if (condition.value == null || !Number.isFinite(condition.value)) return null
+  const value = formatConditionValue(condition.value)
+  if (condition.indicator_id === 'price.close') {
+    const operator = ({
+      crosses_above: '上穿',
+      crosses_below: '下穿',
+      above: '>',
+      below: '<',
+      at_least: '≥',
+      at_most: '≤',
+    } as Record<string, string>)[condition.trigger]
+    return operator ? `收盘价 ${operator} ${value} 元` : null
+  }
+  if (condition.indicator_id !== 'price.return_pct') return null
+
+  const period = typeof condition.params.period === 'number' ? condition.params.period : null
+  const scope = period === 1 ? '当日' : period == null ? '区间' : `近 ${period} 个交易日`
+  const isDecline = condition.value < 0
+  const operator = returnComparator(condition.trigger, isDecline)
+  if (!operator) return null
+  return `${scope}${isDecline ? '跌幅' : '涨幅'} ${operator} ${formatConditionValue(Math.abs(condition.value))}%`
+}
+
+function returnComparator(trigger: string, invert: boolean): string | null {
+  const normal = ({
+    crosses_above: '上穿',
+    crosses_below: '下穿',
+    above: '>',
+    below: '<',
+    at_least: '≥',
+    at_most: '≤',
+  } as Record<string, string>)[trigger]
+  if (!normal || !invert) return normal ?? null
+  return ({
+    '上穿': '下穿',
+    '下穿': '上穿',
+    '>': '<',
+    '<': '>',
+    '≥': '≤',
+    '≤': '≥',
+  } as Record<string, string>)[normal] ?? null
+}
+
+function formatConditionValue(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(6)))
 }
 
 function isIntegerIndicatorParameter(key: string): boolean {

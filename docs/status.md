@@ -12,7 +12,7 @@
 | 完整策略自然语言胶水 | `implemented / fixture-tested / Live-unverified` | 确定性解析器仍为默认快路；严格 JSON CandidateAst、最多 3 个候选、置信度门槛、模型 transport/bootstrap 配置路径和 fail-closed 错误已有实现；较早 provider 路径做过公网冒烟 | 当前 revision 的完整 provenance 与真实 API/H5 复验；旧冒烟不证明当前版本 |
 | 观点假设引导 `idea-route.v1` | `implemented / fixture-tested` | 任意有意义输入先被理解；纯观点只生成“观点 → 待检验假设 → 当前权威 A 股页价格代理 → 2—3 个服务端固定模板候选”，选择后重新进入现有严格编译 | 当前 revision 的真实 API/H5；本轮没有 Live 证据，不能声称政治/主题事件因果回测 |
 | 开源指标与采集 adapter | `implemented / fixture-tested / Live-unverified` | MOSS/pandas `IndicatorBackend` 的 EMA/MACD 已对拍，RSI 明确不兼容；Vibe/mootdx 接口已用 fake client 验证；Push2 请求协议已按固定 AKShare commit 补齐 | 指标未成为 Live 默认；mootdx 商业与数据条款待审；2026-08-30 Push2 直连被远端断开，未发布新快照 |
-| 日线策略与 A 股撮合 | `implemented / fixture-tested / Live-unverified` | 35 个透明指标；PIT 容量、T+1、停牌、涨跌停、费用、部分成交、过期均有代码和测试 | 最终 clean SHA 技术 run |
+| 日线策略与 A 股撮合 | `implemented / fixture-tested / local-real-data-verified / Live-unverified` | 37 个透明指标；换手率已用 BaoStock 原始字段完成本地真实回测；PIT 容量、T+1、停牌、涨跌停、费用、部分成交、过期均有代码和测试 | 最终 clean SHA 技术 run |
 | 事件策略 | `implemented / fixture-tested / local-real-data-verified / Live-unverified` | 五类定期报告的采集/覆盖门禁、26 条秒级观察和 strict Composite 已通过当前 loader | final clean-SHA 事件 run 与 Live H5 |
 | 定期报告正文词频 + 持有期退出 | `implemented / fixture-tested / Mock-verified / Live-unverified` | 初始完整正文门禁、确定性词频、首次实际成交后第 N 个 A 股交易日退出及 Mock 策略卡 | 当前 `1f26…` 的 26 条 observation 均为 `document_text=0`；需 opt-in 重采、发布新 v2 并跑 Live |
 | 公司行动与基准 | `implemented / fixture-tested / local-real-data-verified / Live-unverified` | 三阶段账本、配股默认不认购、整数股/非整手余额、同资金同约束买入持有；`300059.SZ` fresh 五年公司行动/session 快照 | 最终 clean-SHA strict 双 run 对账；个人税制仍受限 |

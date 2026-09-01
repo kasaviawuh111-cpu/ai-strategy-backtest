@@ -45,6 +45,11 @@ SIGNAL_FILENAME = "signal_daily_ohlcv.parquet"
 SESSION_FILENAME = "instrument_sessions.parquet"
 CORPORATE_ACTION_FILENAME = "corporate_actions.parquet"
 MANIFEST_FILENAME = "snapshot_manifest.json"
+_TURNOVER_RATE_FIELDS = (
+    "turnover_rate_pct",
+    "turnover_rate_provider",
+    "turnover_rate_methodology",
+)
 _HASH_CHUNK_BYTES = 1024 * 1024
 _SECRET_KEY_FRAGMENTS = ("password", "passwd", "token", "userinfo", "mobile", "phone")
 STRICT_CORPORATE_ACTION_COVERAGE_SCOPE = "all_corporate_action_categories"
@@ -443,6 +448,26 @@ def _canonicalize_rows(
             item["amount"] = _non_negative_decimal(
                 lowered.get("amount", 0),
                 f"row {index} amount",
+            )
+        turnover_rate_fields_present = tuple(
+            field_name in lowered for field_name in _TURNOVER_RATE_FIELDS
+        )
+        if any(turnover_rate_fields_present):
+            if not all(turnover_rate_fields_present):
+                raise ChoiceSnapshotError(
+                    f"row {index} has partial provider turnover-rate provenance"
+                )
+            item["turnover_rate_pct"] = _non_negative_decimal(
+                lowered["turnover_rate_pct"],
+                f"row {index} turnover_rate_pct",
+            )
+            item["turnover_rate_provider"] = _non_empty_text(
+                lowered["turnover_rate_provider"],
+                f"row {index} turnover_rate_provider",
+            )
+            item["turnover_rate_methodology"] = _non_empty_text(
+                lowered["turnover_rate_methodology"],
+                f"row {index} turnover_rate_methodology",
             )
         normalized.append(item)
     normalized.sort(key=lambda item: cast(date, item["date"]))
@@ -954,18 +979,19 @@ def _signal_rows_with_raw_liquidity(
 ) -> list[dict[str, object]]:
     output: list[dict[str, object]] = []
     for execution, signal in zip(execution_rows, signal_rows, strict=True):
-        output.append(
-            {
-                "stock_code": signal["stock_code"],
-                "date": signal["date"],
-                "open": signal["open"],
-                "high": signal["high"],
-                "low": signal["low"],
-                "close": signal["close"],
-                "volume": execution["volume"],
-                "amount": execution["amount"],
-            }
-        )
+        item: dict[str, object] = {
+            "stock_code": signal["stock_code"],
+            "date": signal["date"],
+            "open": signal["open"],
+            "high": signal["high"],
+            "low": signal["low"],
+            "close": signal["close"],
+            "volume": execution["volume"],
+            "amount": execution["amount"],
+        }
+        if all(field_name in execution for field_name in _TURNOVER_RATE_FIELDS):
+            item.update({field_name: execution[field_name] for field_name in _TURNOVER_RATE_FIELDS})
+        output.append(item)
     return output
 
 
@@ -1019,18 +1045,31 @@ def _derive_research_sessions(
 
 
 def _write_daily(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
-    schema = _ARROW.schema(
-        [
-            ("stock_code", _ARROW.string()),
-            ("date", _ARROW.date32()),
-            ("open", _ARROW.float64()),
-            ("high", _ARROW.float64()),
-            ("low", _ARROW.float64()),
-            ("close", _ARROW.float64()),
-            ("volume", _ARROW.int64()),
-            ("amount", _ARROW.float64()),
-        ]
+    turnover_rate_presence = tuple(
+        all(field_name in item for field_name in _TURNOVER_RATE_FIELDS) for item in rows
     )
+    if any(turnover_rate_presence) and not all(turnover_rate_presence):
+        raise ChoiceSnapshotError("daily snapshot has partial provider turnover-rate provenance")
+    includes_turnover_rate = bool(turnover_rate_presence and all(turnover_rate_presence))
+    fields = [
+        ("stock_code", _ARROW.string()),
+        ("date", _ARROW.date32()),
+        ("open", _ARROW.float64()),
+        ("high", _ARROW.float64()),
+        ("low", _ARROW.float64()),
+        ("close", _ARROW.float64()),
+        ("volume", _ARROW.int64()),
+        ("amount", _ARROW.float64()),
+    ]
+    if includes_turnover_rate:
+        fields.extend(
+            [
+                ("turnover_rate_pct", _ARROW.decimal128(38, 18)),
+                ("turnover_rate_provider", _ARROW.string()),
+                ("turnover_rate_methodology", _ARROW.string()),
+            ]
+        )
+    schema = _ARROW.schema(fields)
     projected = [
         {
             "stock_code": item["stock_code"],
@@ -1041,6 +1080,15 @@ def _write_daily(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
             "close": float(cast(Decimal, item["close"])),
             "volume": item["volume"],
             "amount": float(cast(Decimal, item["amount"])),
+            **(
+                {
+                    "turnover_rate_pct": cast(Decimal, item["turnover_rate_pct"]),
+                    "turnover_rate_provider": item["turnover_rate_provider"],
+                    "turnover_rate_methodology": item["turnover_rate_methodology"],
+                }
+                if includes_turnover_rate
+                else {}
+            ),
         }
         for item in rows
     ]
@@ -1814,6 +1862,12 @@ def _non_negative_decimal(value: object, field_name: str) -> Decimal:
     if converted < 0:
         raise ChoiceSnapshotError(f"{field_name} must be non-negative")
     return converted
+
+
+def _non_empty_text(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ChoiceSnapshotError(f"{field_name} must be non-empty text")
+    return value.strip()
 
 
 def _non_negative_integer(value: object, field_name: str) -> int:

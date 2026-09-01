@@ -44,7 +44,13 @@ SIGNAL_INDICATORS = ("OPEN", "HIGH", "LOW", "CLOSE")
 CALENDAR_OPTIONS = "Market=CNSESH,RECVtimeout=30"
 _TRANSIENT_READ_ERROR_CODES = frozenset({10002004})
 _TRANSIENT_LOGIN_ERROR_CODES = frozenset({10002002, 10002004})
-_PROVIDER_UNAVAILABLE_ERROR_CODES = frozenset({10000017, 10002002, 10002004})
+# A local SMS/terminal activation gap is an availability problem, not a market
+# data-integrity failure.  The server-owned preparation policy may therefore
+# continue with its separately validated daily-data fallback; malformed Choice
+# rows and entitlement/data errors still fail closed.
+_PROVIDER_UNAVAILABLE_ERROR_CODES = frozenset(
+    {10000017, 10001014, 10001020, 10002002, 10002004}
+)
 _MAX_READ_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = (0.25, 0.75)
 

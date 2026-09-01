@@ -2,7 +2,7 @@
   "schema_version": "strategy.v1",
   "catalog": {
     "catalog_id": "cn_a.signals",
-    "release_version": "2026.08.30"
+    "release_version": "2026.09.01"
   },
   "instrument": {
     "market": "CN_A",

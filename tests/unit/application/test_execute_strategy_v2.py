@@ -219,7 +219,7 @@ def _strategy() -> StrategySpecV2:
     )
     exit_condition = entry.model_copy(update={"trigger": "price_crosses_below"})
     return StrategySpecV2(
-        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.08.30"),
+        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.09.01"),
         instrument=_instrument(),
         entry=entry,
         exit=exit_condition,

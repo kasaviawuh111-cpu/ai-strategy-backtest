@@ -4,8 +4,6 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-import pytest
-
 from ashare_lab.adapters.financial_sources.eastmoney_operator import (
     OperatorDataset,
     OperatorReadingBatch,
@@ -13,7 +11,6 @@ from ashare_lab.adapters.financial_sources.eastmoney_operator import (
 )
 from ashare_lab.adapters.financial_sources.operator_loader import (
     EastmoneyOperatorFinancialFactLoader,
-    OperatorFinancialDataUnavailableError,
 )
 from ashare_lab.domain.financials import (
     FinancialMetricId,
@@ -99,13 +96,13 @@ def _strategy(metric: FinancialMetricId) -> StrategySpec:
         FinancialMetricId.PCF,
     }
     return StrategySpec(
-        catalog=CatalogRef(catalog_id="cn_a.signals", release_version="2026.08.30"),
+        catalog=CatalogRef(catalog_id="cn_a.signals", release_version="2026.09.01"),
         instrument=Instrument(symbol="300059.SZ"),
         entry=FinancialConditionV1(
             metric_id=metric,
             comparator="lt",
             value=Decimal("20"),
-            unit=FinancialUnit.TIMES if valuation else FinancialUnit.RATIO,
+            unit=FinancialUnit.TIMES if valuation else FinancialUnit.PERCENT,
             period_basis=(FinancialPeriodBasis.POINT_IN_TIME if valuation else None),
             statement_scope=(None if valuation else FinancialStatementScope.CONSOLIDATED),
         ),
@@ -149,19 +146,3 @@ def test_valuation_loader_pins_direct_provider_rows_and_hashes() -> None:
     assert bundle.coverage_end == date(2025, 8, 29)
     assert [item.value for item in bundle.facts] == [Decimal("22.0"), Decimal("18.0")]
     assert all(item.raw_response_sha256 == RAW_HASH for item in bundle.facts)
-
-
-def test_statement_metric_fails_closed_before_provider_call() -> None:
-    loader = EastmoneyOperatorFinancialFactLoader(
-        source_factory=lambda: pytest.fail("source must not be called"),
-    )
-
-    with pytest.raises(
-        OperatorFinancialDataUnavailableError,
-        match="revision_history_unavailable",
-    ):
-        loader.load(
-            _strategy(FinancialMetricId.ROE),
-            DateRange(start=date(2025, 1, 1), end=date(2025, 12, 31)),
-            retrieved_at=RETRIEVED_AT,
-        )

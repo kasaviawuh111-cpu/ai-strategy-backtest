@@ -80,6 +80,12 @@ class AppSettings(BaseSettings):
     composite_snapshot_root: Path = Path("var/snapshots/internal-demo/composite")
     snapshot_preparation_root: Path = Path("var/snapshots/internal-demo/preparations")
     on_demand_refresh_each_submission: bool = True
+    # Server-owned selection for the daily price producer.  A browser, model,
+    # or strategy payload must never choose or override this policy.
+    on_demand_daily_source: Literal[
+        "choice_then_eastmoney",
+        "baostock_stock_only",
+    ] = "choice_then_eastmoney"
 
     data_root: Path = Field(
         default=Path("../astock-data-toolkit/astock_data"),
@@ -91,6 +97,7 @@ class AppSettings(BaseSettings):
     engine_version: str = "2.0.0a0"
     max_body_bytes: int = Field(default=16 * 1024, ge=1, le=1_048_576)
     cors_allowed_origins: str = ""
+    web_dist_root: Path | None = None
 
     candidate_provider_mode: Literal["disabled", "openai_compatible"] = "disabled"
     candidate_provider_name: str = Field(

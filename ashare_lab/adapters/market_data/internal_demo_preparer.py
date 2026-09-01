@@ -100,7 +100,7 @@ class SubprocessPreparationCommandRunner:
 
 
 class InternalDemoSnapshotPreparer:
-    """Acquire reference, Choice daily, Event v2, and Composite v2 snapshots.
+    """Acquire reference, selected daily, Event v2, and Composite v2 snapshots.
 
     Network-capable provider CLIs are invoked only while a fresh submission is
     being prepared.  They publish content-addressed producer directories.  The
@@ -118,6 +118,7 @@ class InternalDemoSnapshotPreparer:
         event_output_root: str | Path = "var/snapshots/events",
         composite_output_root: str | Path = "var/snapshots/composite",
         temporary_root: str | Path = "var/preparations",
+        daily_source: str = "choice_then_eastmoney",
         command_runner: PreparationCommandRunner | None = None,
     ) -> None:
         self._repository_root = Path(repository_root).expanduser().resolve()
@@ -157,6 +158,9 @@ class InternalDemoSnapshotPreparer:
             raise ValueError(
                 "Choice, technical, event, and composite snapshot roots must be distinct"
             )
+        if daily_source not in {"choice_then_eastmoney", "baostock_stock_only"}:
+            raise ValueError("daily_source is not a supported server-owned source policy")
+        self._daily_source = daily_source
         self._temporary_root = _resolve_under(self._repository_root, temporary_root)
         self._runner = command_runner or SubprocessPreparationCommandRunner()
 
@@ -246,86 +250,36 @@ class InternalDemoSnapshotPreparer:
                     f"security-master asset type is not executable: {asset_type}"
                 )
 
-            choice_command = (
-                self._python_executable,
-                "scripts/prepare_choice_snapshot.py",
-                "--symbol",
-                str(instrument),
-                "--start",
-                period.start.isoformat(),
-                "--end",
-                period.end.isoformat(),
-                "--prefix-end",
-                prefix_end.isoformat(),
-                "--listing-date",
-                listing_date.isoformat(),
-                "--board",
-                board,
-                "--output-root",
-                str(self._choice_output_root),
-                "--session-reference-json",
-                str(reference_path),
-                "--corporate-actions-json",
-                str(corporate_action_path),
-            )
-            choice_result = self._runner.run(choice_command, cwd=self._repository_root)
-            if choice_result.returncode == 0:
-                daily_payload = _stdout_json_object(
-                    choice_result.stdout,
-                    "Choice daily snapshot acquisition",
-                )
-                _daily_id, daily_path = _published_snapshot(
-                    daily_payload,
-                    id_key="snapshotId",
-                    path_key="path",
-                    prefix="choice",
-                    output_root=self._choice_output_root,
-                )
-            elif choice_result.returncode == CHOICE_PROVIDER_UNAVAILABLE_EXIT_CODE:
-                fallback_reason = _choice_fallback_reason(choice_result)
-                fallback_script = (
-                    "scripts/prepare_etf_snapshot.py"
-                    if asset_type == "ETF"
-                    else "scripts/prepare_eastmoney_snapshot.py"
-                )
-                fallback_command: list[str] = [
-                    self._python_executable,
-                    fallback_script,
-                    "--symbol",
-                    str(instrument),
-                    "--start",
-                    period.start.isoformat(),
-                    "--end",
-                    period.end.isoformat(),
-                    "--prefix-end",
-                    prefix_end.isoformat(),
-                    "--output-root",
-                    str(self._technical_output_root),
-                    "--fallback-reason",
-                    fallback_reason,
-                ]
-                if asset_type == "ETF":
-                    fallback_command.extend(("--reference-json", str(reference_path)))
-                else:
-                    fallback_command.extend(
-                        (
-                            "--listing-date",
-                            listing_date.isoformat(),
-                            "--board",
-                            board,
-                            "--session-reference-json",
-                            str(reference_path),
-                            "--corporate-actions-json",
-                            str(corporate_action_path),
-                        )
+            if self._daily_source == "baostock_stock_only":
+                if asset_type != "STOCK":
+                    raise SnapshotPreparationUnsupportedError(
+                        "explicit BaoStock daily source does not cover ETFs; "
+                        "use the Choice-first source policy for an ETF"
                     )
                 daily_payload = self._run_json(
-                    tuple(fallback_command),
-                    label=(
-                        "strict public ETF daily snapshot fallback acquisition"
-                        if asset_type == "ETF"
-                        else "Eastmoney Push2 daily snapshot fallback acquisition"
+                    (
+                        self._python_executable,
+                        "scripts/prepare_baostock_snapshot.py",
+                        "--symbol",
+                        str(instrument),
+                        "--start",
+                        period.start.isoformat(),
+                        "--end",
+                        period.end.isoformat(),
+                        "--prefix-end",
+                        prefix_end.isoformat(),
+                        "--listing-date",
+                        listing_date.isoformat(),
+                        "--board",
+                        board,
+                        "--output-root",
+                        str(self._technical_output_root),
+                        "--session-reference-json",
+                        str(reference_path),
+                        "--corporate-actions-json",
+                        str(corporate_action_path),
                     ),
+                    label="explicit BaoStock daily snapshot acquisition",
                 )
                 _daily_id, daily_path = _published_snapshot(
                     daily_payload,
@@ -335,11 +289,100 @@ class InternalDemoSnapshotPreparer:
                     output_root=self._technical_output_root,
                 )
             else:
-                diagnostic = _bounded_diagnostic(choice_result.stdout, choice_result.stderr)
-                raise SnapshotPreparationFailedError(
-                    "Choice daily snapshot failed integrity validation; Push2 fallback "
-                    f"is forbidden: {diagnostic}"
+                choice_command = (
+                    self._python_executable,
+                    "scripts/prepare_choice_snapshot.py",
+                    "--symbol",
+                    str(instrument),
+                    "--start",
+                    period.start.isoformat(),
+                    "--end",
+                    period.end.isoformat(),
+                    "--prefix-end",
+                    prefix_end.isoformat(),
+                    "--listing-date",
+                    listing_date.isoformat(),
+                    "--board",
+                    board,
+                    "--output-root",
+                    str(self._choice_output_root),
+                    "--session-reference-json",
+                    str(reference_path),
+                    "--corporate-actions-json",
+                    str(corporate_action_path),
                 )
+                choice_result = self._runner.run(choice_command, cwd=self._repository_root)
+                if choice_result.returncode == 0:
+                    daily_payload = _stdout_json_object(
+                        choice_result.stdout,
+                        "Choice daily snapshot acquisition",
+                    )
+                    _daily_id, daily_path = _published_snapshot(
+                        daily_payload,
+                        id_key="snapshotId",
+                        path_key="path",
+                        prefix="choice",
+                        output_root=self._choice_output_root,
+                    )
+                elif choice_result.returncode == CHOICE_PROVIDER_UNAVAILABLE_EXIT_CODE:
+                    fallback_reason = _choice_fallback_reason(choice_result)
+                    fallback_script = (
+                        "scripts/prepare_etf_snapshot.py"
+                        if asset_type == "ETF"
+                        else "scripts/prepare_eastmoney_snapshot.py"
+                    )
+                    fallback_command: list[str] = [
+                        self._python_executable,
+                        fallback_script,
+                        "--symbol",
+                        str(instrument),
+                        "--start",
+                        period.start.isoformat(),
+                        "--end",
+                        period.end.isoformat(),
+                        "--prefix-end",
+                        prefix_end.isoformat(),
+                        "--output-root",
+                        str(self._technical_output_root),
+                        "--fallback-reason",
+                        fallback_reason,
+                    ]
+                    if asset_type == "ETF":
+                        fallback_command.extend(("--reference-json", str(reference_path)))
+                    else:
+                        fallback_command.extend(
+                            (
+                                "--listing-date",
+                                listing_date.isoformat(),
+                                "--board",
+                                board,
+                                "--session-reference-json",
+                                str(reference_path),
+                                "--corporate-actions-json",
+                                str(corporate_action_path),
+                            )
+                        )
+                    daily_payload = self._run_json(
+                        tuple(fallback_command),
+                        label=(
+                            "strict public ETF daily snapshot fallback acquisition"
+                            if asset_type == "ETF"
+                            else "Eastmoney Push2 daily snapshot fallback acquisition"
+                        ),
+                    )
+                    _daily_id, daily_path = _published_snapshot(
+                        daily_payload,
+                        id_key="snapshotId",
+                        path_key="path",
+                        prefix="technical",
+                        output_root=self._technical_output_root,
+                    )
+                else:
+                    diagnostic = _bounded_diagnostic(choice_result.stdout, choice_result.stderr)
+                    raise SnapshotPreparationFailedError(
+                        "Choice daily snapshot failed integrity validation; Push2 fallback "
+                        f"is forbidden: {diagnostic}"
+                    )
             command: list[str] = [
                 self._python_executable,
                 "scripts/prepare_event_snapshot.py",

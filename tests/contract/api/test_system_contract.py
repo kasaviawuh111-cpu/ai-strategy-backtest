@@ -60,7 +60,7 @@ def test_version_pins_catalog_release(client: TestClient) -> None:
     assert payload["catalog_releases"] == [
         {
             "catalog_id": "cn_a.signals",
-            "release_version": "2026.08.30",
+            "release_version": "2026.09.01",
             "content_hash": payload["catalog_releases"][0]["content_hash"],
         }
     ]
@@ -115,8 +115,10 @@ def test_capabilities_are_machine_readable_and_do_not_claim_backtest_execution(
     assert {item["indicator_id"] for item in payload["indicators"]} == {
         "amount.average",
         "market.amount",
+        "market.turnover_rate",
         "market.volume",
         "price.amplitude",
+        "price.close",
         "price.consecutive_up",
         "price.return_pct",
         "price.rolling_high",
@@ -163,7 +165,7 @@ def test_all_stable_indicator_capabilities_match_both_active_catalogs(
     indicators: list[dict[str, Any]] = response.json()["indicators"]
 
     assert response.status_code == 200
-    assert len(indicators) == len(executable) == len(coverage) == 35
+    assert len(indicators) == len(executable) == len(coverage) == 37
     assert set(executable) == set(coverage)
     assert [item["indicator_id"] for item in indicators] == sorted(executable)
     for item in indicators:

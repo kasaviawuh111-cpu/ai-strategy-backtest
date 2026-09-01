@@ -546,3 +546,18 @@ button.grow:hover{background:rgba(255,119,0,.05)}
 .identity-missing .k small{display:block;color:var(--ink-4);font-size:11px;line-height:17px;margin-top:2px;
   overflow-wrap:anywhere}
 .identity-missing .v.wrap{color:var(--ink-3);font-size:12px;line-height:18px}
+
+.proposals{display:flex;flex-direction:column;gap:8px;margin-top:2px}
+.proposal{display:flex;align-items:center;gap:10px;width:100%;padding:12px 14px;
+  background:var(--surface-card);border:0;border-radius:var(--r-inner);
+  font:inherit;text-align:left;color:var(--ink-1);transition:background .14s ease}
+.proposal:active{background:var(--color-primary-weak)}
+.proposal:disabled{opacity:.5}
+.proposal-text{flex:1;display:flex;flex-direction:column;gap:2px;min-width:0}
+.proposal-text b{font-size:14.5px;font-weight:600;line-height:1.4}
+.proposal-text span{font-size:12.5px;line-height:1.5;color:var(--ink-3)}
+.proposal-go{flex:none;color:var(--ink-4)}
+.proposal:active .proposal-go{color:var(--color-primary)}
+@media (min-width:560px){
+  .proposals{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+}

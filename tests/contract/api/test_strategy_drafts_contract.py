@@ -3,6 +3,7 @@
 
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -10,11 +11,22 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from ashare_lab.adapters.language import RuleBasedCandidateGenerator
+from ashare_lab.adapters.language.vibe_candidates import HybridCandidateGenerator
 from ashare_lab.api import create_app
 from ashare_lab.api.schemas import StrategyDraftResponse
-from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus
+from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus, StrategyCompiler
+from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.strategy import StrategySpec, canonical_hash
+from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
 from ashare_lab.ports.idea_routing import IdeaAssetMapping, IdeaProposal, IdeaRoute
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+class _UnexpectedFallback:
+    async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]:
+        raise AssertionError(f"bounded fallback must not run: {request!r}")
 
 
 class _ExplodingCompiler:
@@ -110,8 +122,45 @@ def test_idea_guidance_is_typed_and_remains_non_executable() -> None:
         StrategyDraftResponse.model_validate({**payload, "idea_route": None})
     with pytest.raises(ValidationError):
         StrategyDraftResponse.model_validate(
-            {**payload, "diagnostic_code": "strategy_rule_incomplete"}
+            {**payload, "diagnostic_code": "non_daily_timeframe_not_supported"}
         )
+    StrategyDraftResponse.model_validate({**payload, "diagnostic_code": "strategy_rule_incomplete"})
+    StrategyDraftResponse.model_validate(
+        {**payload, "diagnostic_code": "ambiguous_cross_indicator"}
+    )
+
+
+def test_bare_cross_api_preserves_instrument_and_clarification_grounding() -> None:
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_UnexpectedFallback(),
+        instrument_name_resolver=lambda name: {"汤姆猫": "300459.SZ"}[name],
+    )
+    compiler = StrategyCompiler(
+        generator=generator,
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals",
+        release_version="2026.09.01",
+    )
+    app = create_app()
+    app.state.container = replace(app.state.container, compiler=compiler)
+
+    with TestClient(app) as grounded_client:
+        response = grounded_client.post(
+            "/api/v1/strategy-drafts",
+            json={"utterance": "汤姆猫金叉买死叉卖", "as_of_date": "2026-08-20"},
+        )
+
+    assert response.status_code == 201
+    payload: dict[str, Any] = response.json()
+    assert payload["status"] == "needs_clarification"
+    assert payload["diagnostic_code"] == "ambiguous_cross_indicator"
+    assert payload["idea_route"]["asset_mapping"]["instrument_symbol"] == "300459.SZ"
+    assert payload["candidate_grounding"]["matched_spans"] == ["汤姆猫", "汤姆猫金叉"]
+    assert [(item["path"], item["text"]) for item in payload["candidate_grounding"]["spans"]] == [
+        ("/instrument/symbol", "汤姆猫"),
+        ("/clarification", "汤姆猫金叉"),
+    ]
 
 
 def test_instrument_context_rejects_a_different_symbol_named_in_the_utterance(
@@ -434,18 +483,22 @@ def test_compiler_statuses_are_preserved_as_domain_results(client: TestClient) -
     assert missing_exit.json()["status"] == "needs_clarification"
     assert missing_exit.json()["diagnostic_code"] == "exit_rule_not_recognized"
     assert "什么条件下卖出" in missing_exit.json()["clarification"]
+    assert missing_exit.json()["idea_route"] is None
     assert missing_exit.json()["strategy"] is None
     assert incomplete_rule.json()["status"] == "needs_clarification"
     assert incomplete_rule.json()["diagnostic_code"] == "strategy_rule_incomplete"
-    assert "什么时候买入、什么时候卖出" in incomplete_rule.json()["clarification"]
+    assert incomplete_rule.json()["clarification"] == "想怎么把它变成买卖规则？"
+    assert len(incomplete_rule.json()["idea_route"]["proposals"]) >= 2
     assert incomplete_rule.json()["strategy"] is None
     assert missing_entry.json()["status"] == "needs_clarification"
     assert missing_entry.json()["diagnostic_code"] == "entry_rule_not_recognized"
-    assert "什么条件下买入" in missing_entry.json()["clarification"]
+    assert missing_entry.json()["clarification"] == "什么时候买？"
+    assert len(missing_entry.json()["idea_route"]["proposals"]) == 3
     assert missing_entry.json()["strategy"] is None
     assert unrecognized_entry.json()["status"] == "needs_clarification"
     assert unrecognized_entry.json()["diagnostic_code"] == "entry_rule_not_recognized"
-    assert "什么条件下买入" in unrecognized_entry.json()["clarification"]
+    assert unrecognized_entry.json()["clarification"] == "什么时候买？"
+    assert len(unrecognized_entry.json()["idea_route"]["proposals"]) == 3
     assert unrecognized_entry.json()["strategy"] is None
 
 

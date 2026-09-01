@@ -27,7 +27,7 @@ def compiler() -> StrategyCompiler:
         generator=RuleBasedCandidateGenerator(),
         catalog=load_catalog_directory(ROOT / "catalogs"),
         catalog_id="cn_a.signals",
-        release_version="2026.08.30",
+        release_version="2026.09.01",
     )
 
 
@@ -151,7 +151,7 @@ async def test_snapshot_anchor_replaces_client_date_for_relative_period() -> Non
         generator=generator,
         catalog=load_catalog_directory(ROOT / "catalogs"),
         catalog_id="cn_a.signals",
-        release_version="2026.08.30",
+        release_version="2026.09.01",
         trusted_date_provider=lambda: date(2026, 8, 31),
         backtest_anchor_date=date(2026, 8, 20),
     )

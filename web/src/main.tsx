@@ -14,6 +14,7 @@ createRoot(root).render(
     <AppProviders>
       <App
         instrument={instrumentContext.instrument}
+        instrumentContextSource={instrumentContext.source}
         instrumentContextError={instrumentContext.error}
       />
     </AppProviders>

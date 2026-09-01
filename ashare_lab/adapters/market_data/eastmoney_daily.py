@@ -40,6 +40,7 @@ AKSHARE_SOURCE_LICENSE = "MIT"
 AKSHARE_REQUEST_TOKEN = "7eea3edcaed734bea9cbfc24409ed989"
 PROVIDER = "eastmoney_push2his_public"
 DATASET = "stock_daily_kline"
+TURNOVER_RATE_METHODOLOGY = "eastmoney_push2his.f61.provider_reported_turnover_rate_pct.v1"
 FIELDS1 = ("f1", "f2", "f3", "f4", "f5", "f6")
 DAILY_FIELD_CODES = tuple(f"f{number}" for number in range(51, 62))
 DAILY_REQUEST_FIELD_CODES = (*DAILY_FIELD_CODES, "f116")
@@ -103,6 +104,9 @@ class EastmoneyDailyRow:
             "close": self.close,
             "volume": self.volume_shares,
             "amount": self.amount,
+            "turnover_rate_pct": self.turnover_rate_pct,
+            "turnover_rate_provider": PROVIDER,
+            "turnover_rate_methodology": TURNOVER_RATE_METHODOLOGY,
         }
 
 

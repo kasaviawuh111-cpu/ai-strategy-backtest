@@ -384,7 +384,10 @@ def test_normalizes_complete_rights_terms_from_filtered_dataset() -> None:
     assert rights.rights_listing_date == date(2025, 1, 9)
 
 
-@pytest.mark.parametrize("reason", ["网下配售股份上市", "战略配售上市"])
+@pytest.mark.parametrize(
+    "reason",
+    ["首发限售股份上市", "网下配售股份上市", "战略配售上市"],
+)
 def test_negative_split_proof_accepts_known_placement_listing_change(reason: str) -> None:
     result = _prepare(
         _transport(

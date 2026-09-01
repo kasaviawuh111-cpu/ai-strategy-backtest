@@ -28,7 +28,7 @@ def compiler() -> StrategyCompiler:
         generator=RuleBasedCandidateGenerator(),
         catalog=load_catalog_directory(ROOT / "catalogs"),
         catalog_id="cn_a.signals",
-        release_version="2026.08.30",
+        release_version="2026.09.01",
     )
 
 
@@ -56,8 +56,8 @@ async def test_macd_sentence_compiles_without_unnecessary_question(
 @pytest.mark.parametrize(
     ("utterance", "metric_id", "value"),
     [
-        ("营收同比超过20%买入，MACD死叉卖出", FinancialMetricId.REVENUE_YOY, "0.2"),
-        ("ROE高于10%买入，MACD死叉卖出", FinancialMetricId.ROE, "0.1"),
+        ("营收同比超过20%买入，MACD死叉卖出", FinancialMetricId.REVENUE_YOY, "20"),
+        ("ROE高于10%买入，MACD死叉卖出", FinancialMetricId.ROE, "10"),
         ("市盈率低于20倍买入，MACD死叉卖出", FinancialMetricId.PE, "20"),
     ],
 )
@@ -80,7 +80,7 @@ async def test_operator_reading_financial_language_compiles_to_direct_fact_condi
     assert isinstance(outcome.strategy.entry, FinancialConditionV1)
     assert outcome.strategy.entry.metric_id is metric_id
     assert str(outcome.strategy.entry.value) == value
-    assert outcome.strategy.entry.unit in {FinancialUnit.RATIO, FinancialUnit.TIMES}
+    assert outcome.strategy.entry.unit in {FinancialUnit.PERCENT, FinancialUnit.TIMES}
     assert outcome.strategy.execution.data_capability == "daily_ohlcv_financials"
     assert outcome.strategy.execution.evaluation_frequency == "financial_available_plus_1d_close"
 
@@ -356,7 +356,6 @@ async def test_technical_event_exit_and_or_are_preserved(compiler: StrategyCompi
     [
         "MACD金叉并且RSI低于30或者重大诉讼买入，MACD死叉卖出",
         "（MACD金叉或者RSI低于30）并且重大诉讼买入，MACD死叉卖出",
-        "MACD金叉RSI低于30买入，MACD死叉卖出",
     ],
 )
 async def test_mixed_or_nested_boolean_expression_fails_closed(
@@ -380,11 +379,11 @@ async def test_mixed_or_nested_boolean_expression_fails_closed(
 @pytest.mark.parametrize(
     "utterance",
     [
-        "MACD金叉买入，RSI低于30买入，MACD死叉卖出",
-        "MACD金叉买入，止盈20%卖出，持有3个交易日卖出",
+        "MACD金叉并且RSI低于30买入，KDJ金叉买入，MACD死叉卖出",
+        "MACD金叉买入，RSI高于70并且KDJ死叉卖出，持有3个交易日卖出",
     ],
 )
-async def test_repeated_action_clauses_without_a_boolean_connector_fail_closed(
+async def test_repeated_action_clauses_with_nested_all_group_fail_closed(
     compiler: StrategyCompiler,
     utterance: str,
 ) -> None:
@@ -399,6 +398,452 @@ async def test_repeated_action_clauses_without_a_boolean_connector_fail_closed(
     assert outcome.status is CompileStatus.UNSUPPORTED
     assert outcome.diagnostic_code == "ambiguous_boolean_expression"
     assert outcome.strategy is None
+
+
+@pytest.mark.asyncio
+async def test_flat_boolean_ambiguity_offers_two_revalidated_choices(
+    compiler: StrategyCompiler,
+) -> None:
+    request = CompileInput(
+        utterance="MACD金叉RSI低于30买入，MACD死叉卖出",
+        instrument_context="300059.SZ",
+        as_of_date=date(2026, 8, 27),
+    )
+
+    outcome = await compiler.compile(request)
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "ambiguous_boolean_expression"
+    assert outcome.clarification == "这些条件是“且”还是“或”？"
+    assert outcome.idea_route is not None
+    assert len(outcome.idea_route.proposals) == 2
+    for proposal in outcome.idea_route.proposals:
+        selected = await compiler.compile(
+            CompileInput(
+                utterance=proposal.suggested_utterance,
+                instrument_context=request.instrument_context,
+                as_of_date=request.as_of_date,
+            )
+        )
+        assert selected.status is CompileStatus.READY
+
+
+@pytest.mark.asyncio
+async def test_repeated_signal_entries_ask_for_boolean_relationship(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="MACD金叉买入，RSI低于30买入，MACD死叉卖出",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "ambiguous_boolean_expression"
+    assert outcome.strategy is None
+    assert outcome.idea_route is not None
+    assert len(outcome.idea_route.proposals) == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_same_action_clauses_default_to_any_condition(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="MACD金叉买入，当日涨5%卖出，跌5%卖出",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert len(outcome.strategy.exit.children) == 2
+    assert all(isinstance(item, IndicatorCondition) for item in outcome.strategy.exit.children)
+    assert {
+        (item.indicator_id, item.trigger, item.params["period"], item.value)
+        for item in outcome.strategy.exit.children
+        if isinstance(item, IndicatorCondition)
+    } == {
+        ("price.return_pct", "at_least", 1, 5.0),
+        ("price.return_pct", "at_most", 1, -5.0),
+    }
+
+
+@pytest.mark.asyncio
+async def test_repeated_action_does_not_flatten_an_intrinsic_compound_clause(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="KDJ低位金叉买入，MACD金叉买入，MACD死叉卖出",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is not CompileStatus.READY
+    assert outcome.strategy is None
+    assert outcome.diagnostic_code == "ambiguous_boolean_expression"
+
+
+@pytest.mark.asyncio
+async def test_intrinsic_kdj_exit_keeps_high_zone_and_cross_as_all_conditions(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="MACD金叉买入，KDJ高位死叉卖出",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert len(outcome.strategy.exit.children) == 1
+    compound_exit = outcome.strategy.exit.children[0]
+    assert isinstance(compound_exit, AllCondition)
+    assert {
+        (child.indicator_id, child.trigger, child.value)
+        for child in compound_exit.children
+        if isinstance(child, IndicatorCondition)
+    } == {
+        ("technical.kdj", "death_cross", None),
+        ("technical.kdj", "j_above", 80.0),
+    }
+
+
+@pytest.mark.asyncio
+async def test_bare_second_price_level_is_grounded_by_the_price_pair(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="东方财富涨超19块买，17.8卖",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, IndicatorCondition)
+    assert outcome.strategy.entry.indicator_id == "price.close"
+    assert outcome.strategy.entry.trigger == "crosses_above"
+    assert outcome.strategy.entry.value == 19.0
+    exit_condition = outcome.strategy.exit.children[0]
+    assert isinstance(exit_condition, IndicatorCondition)
+    assert exit_condition.indicator_id == "price.close"
+    assert exit_condition.trigger == "crosses_below"
+    assert exit_condition.value == 17.8
+
+
+@pytest.mark.asyncio
+async def test_company_prefixed_bare_price_pair_keeps_the_existing_pair_inference(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="东方财富19元买，17.8元卖，回测近1年",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, IndicatorCondition)
+    assert outcome.strategy.entry.indicator_id == "price.close"
+    assert outcome.strategy.entry.trigger == "crosses_above"
+    assert outcome.strategy.entry.value == 19.0
+    exit_condition = outcome.strategy.exit.children[0]
+    assert isinstance(exit_condition, IndicatorCondition)
+    assert exit_condition.indicator_id == "price.close"
+    assert exit_condition.trigger == "crosses_below"
+    assert exit_condition.value == 17.8
+
+
+@pytest.mark.asyncio
+async def test_price_move_in_cny_is_not_silently_rewritten_as_an_absolute_price(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="股价涨5元买入，MACD死叉卖出",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.strategy is None
+    assert outcome.diagnostic_code == "ambiguous_price_direction"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "entry_trigger", "exit_trigger"),
+    [
+        ("股价高于19元买入，低于17.8元卖出", "above", "below"),
+        ("收盘价不低于19元买入，不高于17.8元卖出", "at_least", "at_most"),
+        ("股价不小于19元买入，不大于17.8元卖出", "at_least", "at_most"),
+        ("股价大于等于19元买入，小于等于17.8元卖出", "at_least", "at_most"),
+        ("10元买，20元卖", "crosses_below", "crosses_above"),
+    ],
+)
+async def test_common_fixed_price_phrasings_keep_direction(
+    compiler: StrategyCompiler,
+    utterance: str,
+    entry_trigger: str,
+    exit_trigger: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, IndicatorCondition)
+    assert outcome.strategy.entry.indicator_id == "price.close"
+    assert outcome.strategy.entry.trigger == entry_trigger
+    exit_condition = outcome.strategy.exit.children[0]
+    assert isinstance(exit_condition, IndicatorCondition)
+    assert exit_condition.indicator_id == "price.close"
+    assert exit_condition.trigger == exit_trigger
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "entry_value", "exit_value"),
+    [
+        ("当日涨幅5%买，跌幅5%卖", 5.0, -5.0),
+        ("当天涨了5%买，跌了5%卖", 5.0, -5.0),
+    ],
+)
+async def test_daily_return_colloquialisms_mean_one_session(
+    compiler: StrategyCompiler,
+    utterance: str,
+    entry_value: float,
+    exit_value: float,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, IndicatorCondition)
+    assert outcome.strategy.entry.indicator_id == "price.return_pct"
+    assert outcome.strategy.entry.params["period"] == 1
+    assert outcome.strategy.entry.trigger == "at_least"
+    assert outcome.strategy.entry.value == entry_value
+    exit_condition = outcome.strategy.exit.children[0]
+    assert isinstance(exit_condition, IndicatorCondition)
+    assert exit_condition.indicator_id == "price.return_pct"
+    assert exit_condition.params["period"] == 1
+    assert exit_condition.trigger == "at_most"
+    assert exit_condition.value == exit_value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "entry_trigger", "exit_trigger"),
+    [
+        ("当日涨幅不低于5%买入，跌幅不低于5%卖出", "at_least", "at_most"),
+        ("当日涨幅不超过5%买入，跌幅不超过5%卖出", "at_most", "at_least"),
+    ],
+)
+async def test_daily_return_inclusive_phrasings_preserve_magnitude_direction(
+    compiler: StrategyCompiler,
+    utterance: str,
+    entry_trigger: str,
+    exit_trigger: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, IndicatorCondition)
+    assert outcome.strategy.entry.params["period"] == 1
+    assert outcome.strategy.entry.trigger == entry_trigger
+    assert outcome.strategy.entry.value == 5
+    exit_condition = outcome.strategy.exit.children[0]
+    assert isinstance(exit_condition, IndicatorCondition)
+    assert exit_condition.params["period"] == 1
+    assert exit_condition.trigger == exit_trigger
+    assert exit_condition.value == -5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "entry_trigger", "exit_trigger"),
+    [
+        ("当日涨幅高于5%买入，跌幅高于5%卖出", "above", "below"),
+        ("今日涨幅小于5%买入，跌幅小于5%卖出", "below", "above"),
+        ("当日上涨5%以上买入，下跌5%以上卖出", "at_least", "at_most"),
+        ("涨幅高于5%买入，跌幅高于5%卖出", "above", "below"),
+    ],
+)
+async def test_daily_return_comparator_variants_are_one_session_not_same_session_execution(
+    compiler: StrategyCompiler,
+    utterance: str,
+    entry_trigger: str,
+    exit_trigger: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, IndicatorCondition)
+    assert outcome.strategy.entry.indicator_id == "price.return_pct"
+    assert outcome.strategy.entry.params["period"] == 1
+    assert outcome.strategy.entry.trigger == entry_trigger
+    assert outcome.strategy.entry.value == 5
+    exit_condition = outcome.strategy.exit.children[0]
+    assert isinstance(exit_condition, IndicatorCondition)
+    assert exit_condition.indicator_id == "price.return_pct"
+    assert exit_condition.params["period"] == 1
+    assert exit_condition.trigger == exit_trigger
+    assert exit_condition.value == -5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "涨跌幅高于5%买入，MACD死叉卖出",
+        "收益率低于-3%买入，MACD死叉卖出",
+    ],
+)
+async def test_ambiguous_return_metric_without_period_fails_closed(
+    compiler: StrategyCompiler,
+    utterance: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.strategy is None
+    assert outcome.diagnostic_code == "return_period_requires_clarification"
+    assert outcome.clarification is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "metric_id"),
+    [
+        ("每股收益超过1元买入，MACD死叉卖出", FinancialMetricId.BASIC_EPS),
+        ("每股净资产低于10元买入，MACD死叉卖出", FinancialMetricId.BOOK_VALUE_PER_SHARE),
+    ],
+)
+async def test_per_share_financial_cny_is_not_misread_as_fixed_stock_price(
+    compiler: StrategyCompiler,
+    utterance: str,
+    metric_id: FinancialMetricId,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, FinancialConditionV1)
+    assert outcome.strategy.entry.metric_id is metric_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "每股收益超过1元且股价低于19元买入，MACD死叉卖出",
+        "股价低于19元且每股收益超过1元买入，MACD死叉卖出",
+        "收盘价小于19元并且EPS高于1元买入，MACD死叉卖出",
+    ],
+)
+async def test_financial_and_explicit_stock_price_conditions_are_both_preserved(
+    compiler: StrategyCompiler,
+    utterance: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert isinstance(outcome.strategy.entry, AllCondition)
+    financial_condition = next(
+        child
+        for child in outcome.strategy.entry.children
+        if isinstance(child, FinancialConditionV1)
+    )
+    assert financial_condition.metric_id is FinancialMetricId.BASIC_EPS
+    assert financial_condition.comparator == "gt"
+    assert financial_condition.value == 1
+    assert {
+        child.metric_id if isinstance(child, FinancialConditionV1) else child.indicator_id
+        for child in outcome.strategy.entry.children
+    } == {FinancialMetricId.BASIC_EPS, "price.close"}
+    price_condition = next(
+        child for child in outcome.strategy.entry.children if isinstance(child, IndicatorCondition)
+    )
+    assert price_condition.trigger == "below"
+    assert price_condition.value == 19.0
+
+
+@pytest.mark.asyncio
+async def test_sell_only_daily_return_rules_are_understood_before_entry_clarification(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="东方财富当日涨5%卖，跌5%卖",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "entry_rule_not_recognized"
+    assert outcome.clarification is not None
+    assert outcome.clarification == "什么时候买？"
+    assert outcome.idea_route is not None
 
 
 @pytest.mark.asyncio
@@ -495,8 +940,13 @@ async def test_entry_without_exit_requires_one_explicit_clarification(
     assert outcome.diagnostic_code == "exit_rule_not_recognized"
     assert outcome.strategy is None
     assert outcome.clarification is not None
-    assert "什么条件下卖出" in outcome.clarification
-    assert "不会替你补默认卖出规则" in outcome.clarification
+    if "业绩预告" in utterance:
+        assert "什么条件下卖出" in outcome.clarification
+        assert outcome.idea_route is None
+    else:
+        assert outcome.clarification == "什么时候卖？"
+        assert outcome.idea_route is not None
+        assert len(outcome.idea_route.proposals) >= 2
 
 
 @pytest.mark.asyncio
@@ -517,8 +967,105 @@ async def test_exit_without_entry_requires_one_symmetric_clarification(
     assert outcome.diagnostic_code == "entry_rule_not_recognized"
     assert outcome.strategy is None
     assert outcome.clarification is not None
-    assert "什么条件下买入" in outcome.clarification
-    assert "不会替你补默认买入规则" in outcome.clarification
+    if "年度报告" in utterance:
+        assert "什么条件下买入" in outcome.clarification
+        assert outcome.idea_route is None
+    else:
+        assert outcome.clarification == "什么时候买？"
+        assert outcome.idea_route is not None
+        assert len(outcome.idea_route.proposals) == 3
+
+
+@pytest.mark.asyncio
+async def test_missing_entry_choices_preserve_exit_and_compile(
+    compiler: StrategyCompiler,
+) -> None:
+    request = CompileInput(
+        utterance="东方财富跌破20日线卖出",
+        instrument_context="300059.SZ",
+        as_of_date=date(2026, 8, 27),
+    )
+
+    outcome = await compiler.compile(request)
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "entry_rule_not_recognized"
+    assert outcome.idea_route is not None
+    assert len(outcome.idea_route.proposals) == 3
+    assert outcome.candidate_grounding
+    assert "跌破20日线卖出" in outcome.candidate_grounding[0].text
+    for proposal in outcome.idea_route.proposals:
+        assert proposal.hypothesis.strip()
+        assert "跌破20日线卖出" in proposal.suggested_utterance
+        selected = await compiler.compile(
+            CompileInput(
+                utterance=proposal.suggested_utterance,
+                instrument_context=request.instrument_context,
+                as_of_date=request.as_of_date,
+            )
+        )
+        assert selected.status is CompileStatus.READY
+
+
+@pytest.mark.asyncio
+async def test_missing_exit_choices_preserve_entry_and_compile(
+    compiler: StrategyCompiler,
+) -> None:
+    request = CompileInput(
+        utterance="东方财富MACD金叉买入",
+        instrument_context="300059.SZ",
+        as_of_date=date(2026, 8, 27),
+    )
+
+    outcome = await compiler.compile(request)
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "exit_rule_not_recognized"
+    assert outcome.idea_route is not None
+    assert len(outcome.idea_route.proposals) == 3
+    assert {proposal.title for proposal in outcome.idea_route.proposals} == {
+        "动能转弱",
+        "持有 5 日",
+        "亏损 8%",
+    }
+    for proposal in outcome.idea_route.proposals:
+        assert proposal.hypothesis.strip()
+        assert "MACD金叉买入" in proposal.suggested_utterance
+        selected = await compiler.compile(
+            CompileInput(
+                utterance=proposal.suggested_utterance,
+                instrument_context=request.instrument_context,
+                as_of_date=request.as_of_date,
+            )
+        )
+        assert selected.status is CompileStatus.READY
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_obv_direction_offers_two_complete_compilable_rules(
+    compiler: StrategyCompiler,
+) -> None:
+    request = CompileInput(
+        utterance="东方财富OBV变化时买入",
+        instrument_context="300059.SZ",
+        as_of_date=date(2026, 8, 27),
+    )
+
+    outcome = await compiler.compile(request)
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "ambiguous_obv_direction"
+    assert outcome.idea_route is not None
+    assert len(outcome.idea_route.proposals) == 2
+    for proposal in outcome.idea_route.proposals:
+        selected = await compiler.compile(
+            CompileInput(
+                utterance=proposal.suggested_utterance,
+                instrument_context=request.instrument_context,
+                as_of_date=request.as_of_date,
+            )
+        )
+        assert selected.status is CompileStatus.READY
 
 
 @pytest.mark.asyncio
@@ -539,8 +1086,14 @@ async def test_named_signal_without_buy_or_sell_does_not_invent_a_strategy(
     assert outcome.diagnostic_code == "strategy_rule_incomplete"
     assert outcome.strategy is None
     assert outcome.clarification is not None
-    assert "什么时候买入、什么时候卖出" in outcome.clarification
-    assert "不会替你生成默认交易策略" in outcome.clarification
+    if "年度报告" in utterance:
+        assert "什么时候买入、什么时候卖出" in outcome.clarification
+        assert outcome.idea_route is None
+    else:
+        assert outcome.clarification == "想怎么把它变成买卖规则？"
+        assert outcome.idea_route is not None
+        assert len(outcome.idea_route.proposals) >= 2
+        assert all(proposal.hypothesis.strip() for proposal in outcome.idea_route.proposals)
 
 
 @pytest.mark.asyncio
@@ -577,6 +1130,28 @@ async def test_named_indicator_actions_without_triggers_request_one_clarificatio
     assert outcome.clarification is not None
     assert "一次写清每个条件" in outcome.clarification
     assert "不会替你补默认触发规则" in outcome.clarification
+
+
+@pytest.mark.asyncio
+async def test_previous_limit_up_next_session_entry_explains_missing_capability(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="涨停第二天买入，做个短线",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.diagnostic_code == "previous_session_limit_up_capability_unavailable"
+    assert outcome.strategy is None
+    assert outcome.idea_route is None
+    assert outcome.clarification is not None
+    assert "前一交易日涨停、下一交易日买入" in outcome.clarification
+    assert "不能用单日涨 10% 替代" in outcome.clarification
+    assert "卖出方式" in outcome.clarification
 
 
 @pytest.mark.asyncio
@@ -651,6 +1226,12 @@ async def test_five_periodic_report_entries_preserve_event_lane_and_technical_ex
             "MACD金叉当天收盘买入，死叉当天收盘卖出",
             "same_session_execution_not_supported",
         ),
+        ("当日涨5%立即买入，跌5%卖出", "same_session_execution_not_supported"),
+        ("当日涨5%尾盘买入，跌5%卖出", "same_session_execution_not_supported"),
+        ("当日涨5%收盘买入，跌5%卖出", "same_session_execution_not_supported"),
+        ("当日涨5%立即买，跌5%卖", "same_session_execution_not_supported"),
+        ("当日涨5%马上买，跌5%卖", "same_session_execution_not_supported"),
+        ("今日涨5%尾盘买，跌5%卖", "same_session_execution_not_supported"),
         (
             "MACD金叉后下一交易日收盘买入，死叉后下一交易日收盘卖出",
             "execution_price_time_not_supported",
@@ -1529,8 +2110,24 @@ async def test_bare_cross_requires_indicator_disambiguation(compiler: StrategyCo
         )
     )
 
-    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
     assert outcome.diagnostic_code == "ambiguous_cross_indicator"
+    assert outcome.clarification == "‘金叉/死叉’指的是哪一类指标？"
+    assert outcome.idea_route is not None
+    assert outcome.idea_route.asset_mapping.instrument_symbol == "300059.SZ"
+    assert {proposal.title for proposal in outcome.idea_route.proposals} == {
+        "MACD",
+        "KDJ",
+        "5/20 日均线",
+    }
+    assert {
+        (proposal.entry_summary, proposal.exit_summary) for proposal in outcome.idea_route.proposals
+    } == {
+        ("MACD 金叉", "MACD 死叉"),
+        ("KDJ 金叉", "KDJ 死叉"),
+        ("5 日均线上穿 20 日均线", "5 日均线下穿 20 日均线"),
+    }
+    assert all(proposal.hypothesis.strip() for proposal in outcome.idea_route.proposals)
 
 
 @pytest.mark.asyncio

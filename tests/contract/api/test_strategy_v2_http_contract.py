@@ -69,7 +69,7 @@ def _strategy() -> StrategySpecV2:
     )
     exit_condition = entry.model_copy(update={"trigger": "death_cross"})
     return StrategySpecV2(
-        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.08.30"),
+        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.09.01"),
         instrument=InstrumentRef(
             symbol="300059.SZ",
             name="东方财富",

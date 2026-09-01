@@ -74,7 +74,7 @@ def _compiler(*, generator: object, idea_router: _RecordingIdeaRouter) -> Strate
         idea_router=idea_router,
         catalog=load_catalog_directory(ROOT / "catalogs"),
         catalog_id="cn_a.signals",
-        release_version="2026.08.30",
+        release_version="2026.09.01",
     )
 
 

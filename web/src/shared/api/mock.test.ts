@@ -12,9 +12,42 @@ const request = (utterance: string): CompileRequest => ({
 })
 
 describe('mock API trust boundary', () => {
+  it('keeps the default Mock draft, result, series, and activities inside the one-year window', async () => {
+    const outcome = await mockApi.compile(request('东方财富 MACD 金叉买入，死叉卖出'))
+    expect(outcome.status).toBe('compiled')
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled MACD strategy')
+
+    expect(outcome.draft.backtest).toMatchObject({
+      start: '2025-08-06',
+      end: '2026-08-06',
+    })
+    expect(outcome.draft.strategySpec.backtest).toMatchObject({
+      start: '2025-08-06',
+      end: '2026-08-06',
+    })
+
+    const run = await mockApi.createRun(outcome.draft)
+    const [summary, series, activities] = await Promise.all([
+      mockApi.getSummary(run.id),
+      mockApi.getSeries(run.id),
+      mockApi.getActivities(run.id),
+    ])
+    expect(summary.dataRange).toEqual({
+      start: '2025-08-06',
+      end: '2026-08-06',
+      sessions: 243,
+    })
+    expect(series.at(0)?.date).toBe('2025-08-06')
+    expect(series.at(-1)?.date).toBe('2026-08-06')
+    expect(activities.every((activity) => (
+      activity.occurredAt >= '2025-08-06T00:00:00+08:00'
+      && activity.occurredAt <= '2026-08-06T23:59:59+08:00'
+    ))).toBe(true)
+  })
+
   it('keeps the trend example as an explicit MACD and MA20 conjunction', async () => {
     const outcome = await mockApi.compile(request(
-      '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 5 年效果',
+      '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果',
     ))
     expect(outcome.status).toBe('compiled')
     if (outcome.status !== 'compiled') throw new Error('expected a compiled trend strategy')

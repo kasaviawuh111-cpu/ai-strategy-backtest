@@ -62,6 +62,47 @@ def _write_daily_file(path: Path, *, first_close: float = 10.1) -> None:
         connection.execute("COPY daily TO ? (FORMAT PARQUET)", [str(path)])
 
 
+def _write_daily_file_with_turnover_rate_provenance(path: Path) -> None:
+    rows = [
+        (
+            "000001",
+            date(2025, 1, 2),
+            10.0,
+            10.2,
+            9.8,
+            10.1,
+            1000,
+            10100.0,
+            3.25,
+            "eastmoney_push2his_public",
+            "eastmoney_push2his.f61.provider_reported_turnover_rate_pct.v1",
+        )
+    ]
+    with duckdb.connect(database=":memory:") as connection:
+        connection.execute(
+            """
+            CREATE TABLE daily (
+                stock_code VARCHAR,
+                "date" DATE,
+                "open" DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                "close" DOUBLE,
+                volume BIGINT,
+                amount DOUBLE,
+                turnover_rate_pct DOUBLE,
+                turnover_rate_provider VARCHAR,
+                turnover_rate_methodology VARCHAR
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        connection.execute("COPY daily TO ? (FORMAT PARQUET)", [str(path)])
+
+
 def _write_events_file(path: Path, *, source: str = "fixture") -> None:
     rows = [
         (
@@ -231,6 +272,21 @@ def test_load_daily_bars_prunes_instrument_range_and_columns(data_root: Path) ->
     assert all(bar.available_at.tzinfo == SHANGHAI for bar in bars)
     assert all(bar.available_at.hour == 15 and bar.available_at.minute == 0 for bar in bars)
     assert [int(bar.volume) for bar in bars] == [1200, 1500]
+
+
+def test_load_daily_bars_reads_provider_turnover_rate_without_derivation(tmp_path: Path) -> None:
+    _write_daily_file_with_turnover_rate_provenance(tmp_path / "daily_ohlcv.parquet")
+    repository = LocalParquetMarketDataRepository(tmp_path)
+    period = DateRange(date(2025, 1, 2), date(2025, 1, 2))
+    snapshot = repository.pin_snapshot(_requirements("000001"), period)
+
+    bars = repository.load_daily_bars(snapshot, InstrumentId("000001.SZ"), period)
+
+    assert bars[0].turnover_rate_pct == Decimal("3.25")
+    assert bars[0].turnover_rate_provider == "eastmoney_push2his_public"
+    assert bars[0].turnover_rate_methodology == (
+        "eastmoney_push2his.f61.provider_reported_turnover_rate_pct.v1"
+    )
 
 
 def test_snapshot_rejects_file_changed_after_pin(data_root: Path) -> None:

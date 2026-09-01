@@ -54,6 +54,7 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
     for name in (
         "container_healthcheck.py",
         "prepare_baostock_reference.py",
+        "prepare_baostock_snapshot.py",
         "prepare_choice_snapshot.py",
         "prepare_eastmoney_corporate_actions.py",
         "prepare_eastmoney_snapshot.py",
@@ -80,6 +81,30 @@ def _repository(tmp_path: Path) -> tuple[Path, str]:
         "ephemeral.env.example",
     ):
         (repository / "deploy" / "cloudbase" / name).write_text(name, encoding="utf-8")
+    web_dist = repository / "web" / "dist"
+    (web_dist / "assets").mkdir(parents=True)
+    (web_dist / "index.html").write_text(
+        '<!doctype html><script type="module" src="/assets/index-test.js"></script>\n',
+        encoding="utf-8",
+    )
+    (web_dist / "assets" / "index-test.js").write_text(
+        "fetch('/api/v1/ready')\n",
+        encoding="utf-8",
+    )
+    (web_dist / "assets" / "index-test.css").write_text(
+        ":root{color:#111}\n",
+        encoding="utf-8",
+    )
+    (repository / "web" / "src").mkdir()
+    (repository / "web" / "src" / "do-not-copy.ts").write_text(
+        "throw new Error('source must not ship')\n",
+        encoding="utf-8",
+    )
+    (repository / "web" / "node_modules").mkdir()
+    (repository / "web" / "node_modules" / "do-not-copy").write_text(
+        "dependency cache",
+        encoding="utf-8",
+    )
 
     instrument = InstrumentId("300059.SZ")
     start = date(2025, 1, 2)
@@ -192,7 +217,7 @@ def test_bundle_contains_only_allowlisted_sources_and_selected_snapshot(tmp_path
     )
 
     assert metadata["producerSnapshotId"] == f"composite:{digest}"
-    assert metadata["bundleSchemaVersion"] == "ashare-lab.cloudbase-source-bundle.v2"
+    assert metadata["bundleSchemaVersion"] == "ashare-lab.cloudbase-source-bundle.v3"
     assert metadata["deploymentProfiles"] == {
         "ephemeral_candidate": {
             "persistence": "ephemeral",
@@ -224,6 +249,40 @@ def test_bundle_contains_only_allowlisted_sources_and_selected_snapshot(tmp_path
     assert (output / "alembic" / "kept.txt").is_file()
     assert (output / "scripts" / "prepare_event_snapshot.py").is_file()
     assert (output / "deploy" / "cloudbase" / "production_db.py").is_file()
+    assert (output / "web" / "dist" / "index.html").is_file()
+    assert (output / "web" / "dist" / "assets" / "index-test.js").is_file()
+    assert not (output / "web" / "src").exists()
+    assert not (output / "web" / "node_modules").exists()
+
+    release = json.loads((output / "release.json").read_text(encoding="utf-8"))
+    assert release["schemaVersion"] == "ashare-lab.atomic-release.v1"
+    assert release["codeRevision"] == "a" * 40
+    assert release["webDistRoot"] == "web/dist"
+    assert release["webBundleHash"] == metadata["webBundleHash"]
+    assert release["webFiles"] == metadata["webFiles"]
+    assert set(release["webFiles"]) == {
+        "assets/index-test.css",
+        "assets/index-test.js",
+        "index.html",
+    }
+    for relative, evidence in release["webFiles"].items():
+        payload = (output / "web" / "dist" / relative).read_bytes()
+        assert evidence == {
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+    assert len(release["webBundleHash"]) == 64
+    assert (
+        release["webBundleHash"]
+        == hashlib.sha256(
+            json.dumps(
+                release["webFiles"],
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+    )
 
 
 def test_bundle_keeps_multiple_content_addressed_seed_snapshots(tmp_path: Path) -> None:
@@ -287,13 +346,77 @@ def test_cloudbase_dockerfile_uses_portable_source_build_contract() -> None:
     assert "COMPOSITE_SNAPSHOT_ROOT=/app/var/snapshots/composite" in dockerfile
     assert "deploy-snapshot/ /app/var/snapshots/composite/" in dockerfile
     assert "COPY --chown=app:app scripts ./scripts" in dockerfile
+    assert "COPY --chown=app:app web/dist ./web/dist" in dockerfile
+    assert "COPY --chown=app:app release.json ./release.json" in dockerfile
+    assert "COPY --chown=app:app bundle-metadata.json ./bundle-metadata.json" in dockerfile
+    assert "WEB_DIST_ROOT=/app/web/dist" in dockerfile
     assert 'CMD ["python", "deploy/cloudbase/deployment_entrypoint.py"]' in dockerfile
-    assert (
-        "CORS_ALLOWED_ORIGINS="
-        "https://59ac3319a9594be59fa3034fcae82a8f.app.workbuddy.link,"
-        "https://8ae96e06a2b3404ea1b9470810cccd7c.app.workbuddy.link,"
-        "https://test-d6gwxiamcd87743af-1330091763.tcloudbaseapp.com" in dockerfile
+    assert 'CORS_ALLOWED_ORIGINS=""' in dockerfile
+    assert "app.workbuddy.link" not in dockerfile
+    assert "tcloudbaseapp.com" not in dockerfile
+
+
+def test_cloudbase_environment_templates_default_to_same_origin_cors() -> None:
+    for name in ("env.example", "ephemeral.env.example"):
+        template = (REPOSITORY / "deploy" / "cloudbase" / name).read_text(encoding="utf-8")
+        assert "CORS_ALLOWED_ORIGINS=" in template
+        assert "app.workbuddy.link" not in template
+        assert "tcloudbaseapp.com" not in template
+
+
+def test_bundle_rejects_missing_or_unsafe_web_dist(tmp_path: Path) -> None:
+    repository, digest = _repository(tmp_path)
+    shutil.rmtree(repository / "web" / "dist")
+
+    with pytest.raises(BundleError, match="web/dist"):
+        prepare_bundle(
+            repository=repository,
+            output=tmp_path / "missing-bundle",
+            snapshot_digest=digest,
+            code_revision="a" * 40,
+            verify_git=False,
+        )
+
+    unsafe_root = tmp_path / "unsafe"
+    unsafe_root.mkdir()
+    repository, digest = _repository(unsafe_root)
+    asset = repository / "web" / "dist" / "assets" / "index-test.js"
+    asset.unlink()
+    asset.symlink_to(repository / "web" / "src" / "do-not-copy.ts")
+
+    with pytest.raises(BundleError, match=r"web/dist.*symlink"):
+        prepare_bundle(
+            repository=repository,
+            output=tmp_path / "unsafe-bundle",
+            snapshot_digest=digest,
+            code_revision="a" * 40,
+            verify_git=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "mock_demo",
+        "https://ashare-backtest-api-305722-11-1330091763.sh.run.tcloudbase.com",
+        "演示",
+    ],
+)
+def test_bundle_rejects_non_same_origin_web_artifacts(tmp_path: Path, marker: str) -> None:
+    repository, digest = _repository(tmp_path)
+    (repository / "web" / "dist" / "assets" / "index-test.js").write_text(
+        f"const forbidden={marker!r}\n",
+        encoding="utf-8",
     )
+
+    with pytest.raises(BundleError, match="same-origin Live build"):
+        prepare_bundle(
+            repository=repository,
+            output=tmp_path / "bundle",
+            snapshot_digest=digest,
+            code_revision="a" * 40,
+            verify_git=False,
+        )
 
 
 def test_bundle_rejects_snapshot_tampering_and_nonempty_output(tmp_path: Path) -> None:

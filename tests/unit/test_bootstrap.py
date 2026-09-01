@@ -767,6 +767,50 @@ def test_on_demand_runtime_requires_baostock_and_one_daily_provider(
     assert bootstrap_module._on_demand_provider_runtime_available() is expected
 
 
+@pytest.mark.parametrize(
+    ("available_modules", "expected"),
+    [
+        (frozenset({"baostock", "httpx"}), True),
+        (frozenset({"baostock", "EmQuantAPI"}), False),
+        (frozenset({"httpx", "EmQuantAPI"}), False),
+    ],
+)
+def test_explicit_baostock_daily_source_requires_baostock_and_corporate_action_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    available_modules: frozenset[str],
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(
+        bootstrap_module.importlib.util,
+        "find_spec",
+        lambda name: object() if name in available_modules else None,
+    )
+
+    assert bootstrap_module._on_demand_provider_runtime_available("baostock_stock_only") is expected
+
+
+def test_on_demand_provider_readiness_uses_the_server_daily_source_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def probe(daily_source: str = "choice_then_eastmoney") -> bool:
+        seen.append(daily_source)
+        return True
+
+    monkeypatch.setattr(bootstrap_module, "_on_demand_provider_runtime_available", probe)
+    settings = AppSettings(
+        app_env="test",
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'runs.db'}",
+        catalog_root=Path(__file__).parents[2] / "catalogs",
+        on_demand_daily_source="baostock_stock_only",
+    )
+
+    assert bootstrap_module._on_demand_provider_runtime_for_settings(settings)
+    assert seen == ["baostock_stock_only"]
+
+
 def test_on_demand_readiness_requires_push2_fallback_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

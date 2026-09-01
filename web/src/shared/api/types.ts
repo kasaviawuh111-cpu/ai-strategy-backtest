@@ -355,6 +355,10 @@ export type ClarificationChoice = {
   recommended?: boolean
   action?: 'submit_clarification' | 'edit_utterance' | 'replace_and_compile'
   suggestedUtterance?: string
+  /** 服务端已确认的候选标的；仅用于下一次编译上下文。 */
+  instrumentSymbol?: string
+  /** 与上述代码同次服务端 grounding 得到的公司名。 */
+  instrumentName?: string
 }
 
 export type Clarification = {
@@ -370,6 +374,7 @@ export type Clarification = {
 
 export type CompileRequest = {
   instrument: Instrument
+  instrumentContextSource?: 'stock_page' | 'standalone_default'
   utterance: string
   clarification?: { id: string; choiceId: string }
 }

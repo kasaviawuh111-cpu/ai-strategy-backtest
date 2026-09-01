@@ -40,6 +40,7 @@ class OperatorDataset(StrEnum):
     """The narrowed, documented datasets used by the financial MVP."""
 
     LATEST_INDICATORS = "RPT_F10_FN_LATESTINDIC"
+    MAIN_FINANCIAL_DATA = "RPT_F10_FINANCE_MAINFINADATA"
     QUARTERLY_TRENDS = "RPT_F10_FN_QUARTER"
     VALUATION_TREND = "RPT_CUSTOM_DMSK_TREND"
     VALUATION_PERCENTILES = "RPT_STOCKVALUATIONTANTILE"
@@ -47,6 +48,10 @@ class OperatorDataset(StrEnum):
 
 _DATASET_FIELDS: Mapping[OperatorDataset, str] = {
     OperatorDataset.LATEST_INDICATORS: "ALL",
+    # This F10 report dataset is the provider source that exposes the direct
+    # report value together with REPORT_DATE / NOTICE_DATE / UPDATE_DATE.  The
+    # latter are consumed by the separate strict announcement-PIT binder.
+    OperatorDataset.MAIN_FINANCIAL_DATA: "ALL",
     OperatorDataset.QUARTERLY_TRENDS: "ALL",
     OperatorDataset.VALUATION_TREND: (
         "SECURITY_CODE,TRADE_DATE,INDICATORTYPE,INDICATOR_VALUE,SECUCODE"
@@ -54,6 +59,14 @@ _DATASET_FIELDS: Mapping[OperatorDataset, str] = {
     OperatorDataset.VALUATION_PERCENTILES: (
         "SECUCODE,STATISTICS_CYCLE,INDEX_TYPE,PERCENTILE_THIRTY,PERCENTILE_FIFTY,PERCENTILE_SEVENTY"
     ),
+}
+
+_DATASET_SOURCES: Mapping[OperatorDataset, str] = {
+    OperatorDataset.LATEST_INDICATORS: "SECURITIES",
+    OperatorDataset.MAIN_FINANCIAL_DATA: "HSF10",
+    OperatorDataset.QUARTERLY_TRENDS: "SECURITIES",
+    OperatorDataset.VALUATION_TREND: "SECURITIES",
+    OperatorDataset.VALUATION_PERCENTILES: "SECURITIES",
 }
 
 
@@ -139,6 +152,29 @@ class EastmoneyOperatorReadingSource:
             sort_order="1",
         )
 
+    def fetch_main_financial_data(
+        self,
+        instrument_id: str,
+        *,
+        retrieved_at: datetime,
+    ) -> OperatorReadingBatch:
+        """Fetch direct F10 statement values and their provider publication dates.
+
+        This preserves provider-returned fields verbatim.  It deliberately
+        does not determine historical availability itself: that requires the
+        exact same-period primary announcement and is handled by the strict
+        financial-publication resolver.
+        """
+
+        return self._fetch_paged(
+            OperatorDataset.MAIN_FINANCIAL_DATA,
+            instrument_id,
+            filter_expression=f'(SECUCODE="{_instrument(instrument_id)}")',
+            retrieved_at=retrieved_at,
+            sort_field="REPORT_DATE",
+            sort_order="-1",
+        )
+
     def fetch_valuation_trends(
         self,
         instrument_id: str,
@@ -219,7 +255,7 @@ class EastmoneyOperatorReadingSource:
                 "filter": filter_expression,
                 "p": str(page),
                 "ps": str(_PAGE_SIZE),
-                "source": "SECURITIES",
+                "source": _DATASET_SOURCES[dataset],
                 "client": "APP",
             }
             if sort_field is not None:

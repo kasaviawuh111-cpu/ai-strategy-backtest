@@ -10,11 +10,14 @@
     "build": "tsc -b && vite build",
     "build:live": "tsc -b && VITE_USE_MOCK=false vite build --config vite.live.config.ts",
     "build:public-live": "tsc -b && VITE_USE_MOCK=false vite build --config vite.public.config.ts && node scripts/check_public_bundle.mjs",
+    "build:same-origin": "tsc -b && VITE_USE_MOCK=false VITE_API_BASE_URL= vite build --config vite.same-origin.config.ts && VITE_USE_MOCK=false VITE_API_BASE_URL= node scripts/check_same_origin_bundle.mjs",
     "check:public-live": "node scripts/check_public_bundle.mjs",
+    "check:same-origin": "VITE_USE_MOCK=false VITE_API_BASE_URL= node scripts/check_same_origin_bundle.mjs",
     "preview": "vite preview",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
+    "test:same-origin": "vitest run vite.same-origin.config.test.ts scripts/check_same_origin_bundle.test.mjs",
     "test:watch": "vitest"
   },
   "dependencies": {

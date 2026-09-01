@@ -25,21 +25,27 @@ import type {
 const useMock = import.meta.env.VITE_USE_MOCK !== 'false'
 const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 const REQUEST_TIMEOUT_MS = 20_000
+const BACKTEST_CREATE_TIMEOUT_MS = 120_000
 
-const requestFailure = (error: unknown): ApiError => {
+const requestFailure = (error: unknown, timeoutMs: number): ApiError => {
   const timedOut = error instanceof DOMException && error.name === 'TimeoutError'
+  const timeoutSeconds = Math.round(timeoutMs / 1_000)
   return new ApiError({
     type: 'about:blank',
     title: timedOut ? '接口响应超时' : '无法连接回测服务',
     status: 0,
     detail: timedOut
-      ? '回测服务超过 20 秒没有响应，请稍后重试。'
+      ? `回测服务超过 ${timeoutSeconds} 秒没有响应，请稍后重试。`
       : '浏览器没有连上回测服务，请检查网络、API 地址和跨域配置。',
     code: timedOut ? 'api_timeout' : 'api_network_unavailable',
   })
 }
 
-const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
+const request = async <T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<T> => {
   const headers = new Headers(init?.headers)
   headers.set('Accept', 'application/json, application/problem+json')
   if (init?.body) headers.set('Content-Type', 'application/json')
@@ -49,11 +55,11 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
     response = await fetch(`${baseUrl}${path}`, {
       ...init,
       headers,
-      signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: init?.signal ?? AbortSignal.timeout(timeoutMs),
     })
   } catch (error) {
     if (error instanceof ApiError) throw error
-    throw requestFailure(error)
+    throw requestFailure(error, timeoutMs)
   }
 
   if (!response.ok) {
@@ -276,7 +282,7 @@ export const backtestApi = {
     return request('/api/v1/backtest-runs', {
       method: 'POST',
       body: JSON.stringify(toLiveBacktestBody(draft)),
-    })
+    }, BACKTEST_CREATE_TIMEOUT_MS)
   },
 
   get: (runId: string): Promise<BacktestRun> =>

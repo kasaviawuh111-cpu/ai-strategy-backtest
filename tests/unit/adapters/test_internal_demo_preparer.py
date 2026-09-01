@@ -178,6 +178,23 @@ class FakeRunner:
                 ),
                 "",
             )
+        if script.endswith("prepare_baostock_snapshot.py"):
+            output_root = Path(command[command.index("--output-root") + 1])
+            digest = "e" * 64
+            path = output_root / digest
+            path.mkdir(parents=True)
+            (path / "snapshot_manifest.json").write_text("{}", encoding="utf-8")
+            return PreparationCommandResult(
+                0,
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "snapshotId": f"technical:{digest}",
+                        "path": str(path),
+                    }
+                ),
+                "",
+            )
         if script.endswith("prepare_eastmoney_snapshot.py"):
             output_root = Path(command[command.index("--output-root") + 1])
             digest = "c" * 64
@@ -231,7 +248,12 @@ class FakeRunner:
         raise AssertionError(f"unexpected command: {command}")
 
 
-def _preparer(tmp_path: Path, runner: FakeRunner) -> InternalDemoSnapshotPreparer:
+def _preparer(
+    tmp_path: Path,
+    runner: FakeRunner,
+    *,
+    daily_source: str = "choice_then_eastmoney",
+) -> InternalDemoSnapshotPreparer:
     return InternalDemoSnapshotPreparer(
         tmp_path,
         python_executable=Path("/usr/bin/python3"),
@@ -240,6 +262,7 @@ def _preparer(tmp_path: Path, runner: FakeRunner) -> InternalDemoSnapshotPrepare
         event_output_root="events",
         composite_output_root="composite",
         temporary_root="temporary",
+        daily_source=daily_source,
         command_runner=runner,
     )
 
@@ -305,6 +328,75 @@ def test_technical_request_publishes_no_event_event_v2_and_composite_v2(
     event_command = runner.calls[3]
     assert "--no-event-required" in event_command
     assert "--event-code" not in event_command
+
+
+def test_explicit_baostock_daily_source_uses_only_one_stock_daily_acquisition(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+
+    result = _preparer(
+        tmp_path,
+        runner,
+        daily_source="baostock_stock_only",
+    ).prepare(
+        _requirements(),
+        DateRange(date(2021, 1, 1), date(2026, 1, 1)),
+    )
+
+    assert result.producer_snapshot_id == f"composite:{'b' * 64}"
+    assert [Path(call[1]).name for call in runner.calls] == [
+        "prepare_baostock_reference.py",
+        "prepare_eastmoney_corporate_actions.py",
+        "prepare_baostock_snapshot.py",
+        "prepare_event_snapshot.py",
+    ]
+    assert not any("prepare_choice_snapshot.py" in call[1] for call in runner.calls)
+    assert not any("prepare_eastmoney_snapshot.py" in call[1] for call in runner.calls)
+    baostock_daily = runner.calls[2]
+    assert baostock_daily[baostock_daily.index("--symbol") + 1] == "300059.SZ"
+
+
+def test_explicit_baostock_daily_source_does_not_silently_fallback(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner(fail_label="prepare_baostock_snapshot.py")
+
+    with pytest.raises(SnapshotPreparationFailedError, match="network unavailable"):
+        _preparer(
+            tmp_path,
+            runner,
+            daily_source="baostock_stock_only",
+        ).prepare(
+            _requirements(),
+            DateRange(date(2021, 1, 1), date(2026, 1, 1)),
+        )
+
+    assert [Path(call[1]).name for call in runner.calls] == [
+        "prepare_baostock_reference.py",
+        "prepare_eastmoney_corporate_actions.py",
+        "prepare_baostock_snapshot.py",
+    ]
+
+
+def test_explicit_baostock_daily_source_rejects_etf_instead_of_masquerading(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+
+    with pytest.raises(SnapshotPreparationUnsupportedError, match="does not cover ETFs"):
+        _preparer(
+            tmp_path,
+            runner,
+            daily_source="baostock_stock_only",
+        ).prepare(
+            _requirements(instrument="510300.SH"),
+            DateRange(date(2021, 1, 1), date(2026, 1, 1)),
+        )
+
+    assert [Path(call[1]).name for call in runner.calls] == [
+        "prepare_baostock_reference.py",
+    ]
 
 
 def test_event_request_publishes_composite_with_exact_requested_codes(tmp_path: Path) -> None:

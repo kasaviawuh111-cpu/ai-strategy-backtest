@@ -5,6 +5,7 @@ import { FailureCard, ResultCard, RunningCard, StrategyCard } from './components
 import {
   Bubble, Chip, Chips, DayDivider, FollowUp, FollowUps, Say, ThinkBlock, ThinkingStream, Turn,
 } from './components/primitives'
+import { Proposals } from './components/Proposals'
 import { ChainScreen, ExecutionDetailsScreen, ParamsScreen, ReportScreen } from './screens'
 import { apiMode, backtestApi, strategyApi, systemApi } from './shared/api/client'
 import { ApiError } from './shared/api/types'
@@ -75,6 +76,37 @@ const terminalStates = new Set(['succeeded', 'failed', 'cancelled'])
 /** 点「开始回测」时替用户发出的那句话；和按钮文案保持同一个词。 */
 const RUN_COMMAND = '开始回测'
 const cloneDraft = (draft: StrategyDraft): StrategyDraft => JSON.parse(JSON.stringify(draft)) as StrategyDraft
+const instrumentClarificationIds = new Set([
+  'instrument_required',
+  'instrument_unconfirmed',
+  'instrument_resolution_unavailable',
+])
+const isInstrumentClarification = (
+  clarification: Clarification | undefined,
+): clarification is Clarification =>
+  Boolean(clarification && instrumentClarificationIds.has(clarification.id))
+
+const mergeInstrumentReplyWithRule = (reply: string, originalRule: string): string => {
+  if (/(?:买入|卖出|回测|止盈|止损|持有)/.test(reply)) return reply
+  return `${reply}，${originalRule}`
+}
+
+const instrumentFromConfirmedSymbol = (
+  symbol: string | undefined,
+  groundedName: string | undefined,
+  fallback: ApiInstrument,
+): ApiInstrument | undefined => {
+  if (!symbol) return undefined
+  const match = /^(\d{6})\.(SH|SZ|BJ)$/.exec(symbol)
+  if (!match) return undefined
+  const exchange = match[2] === 'SH' ? 'SSE' : match[2] === 'SZ' ? 'SZSE' : 'BSE'
+  return {
+    symbol,
+    name: fallback.symbol === symbol ? fallback.name : groundedName?.trim() || symbol,
+    market: 'CN_A',
+    exchange,
+  }
+}
 
 type QuickIconName = 'thinking' | 'skill' | 'task' | 'timer' | 'stock'
 
@@ -270,6 +302,7 @@ const draftValidation = (draft: StrategyDraft) => {
 
 type AppProps = {
   instrument?: ApiInstrument
+  instrumentContextSource?: 'stock_page' | 'standalone_default'
   instrumentContextError?: string
   onReturnToStockPage?: () => void
   onUseStandaloneExample?: () => void
@@ -277,6 +310,7 @@ type AppProps = {
 
 export default function App({
   instrument = DEFAULT_INSTRUMENT,
+  instrumentContextSource = 'standalone_default',
   instrumentContextError,
   onReturnToStockPage = () => window.history.back(),
   onUseStandaloneExample = () => {
@@ -320,8 +354,17 @@ export default function App({
   const back = () => setStack((current) => current.slice(0, -1))
 
   const compileMutation = useMutation({
-    mutationFn: ({ text, answer }: { text: string; answer?: CompileRequest['clarification'] }) =>
-      strategyApi.compile({ instrument, utterance: text, clarification: answer }),
+    mutationFn: ({ text, answer, instrumentOverride }: {
+      text: string
+      answer?: CompileRequest['clarification']
+      instrumentOverride?: ApiInstrument
+    }) =>
+      strategyApi.compile({
+        instrument: instrumentOverride ?? instrument,
+        instrumentContextSource: instrumentOverride ? 'stock_page' : instrumentContextSource,
+        utterance: text,
+        clarification: answer,
+      }),
     onSuccess: (outcome) => {
       setRunId(undefined)
       setStack([])
@@ -330,12 +373,21 @@ export default function App({
         setDraft(undefined)
         setBaselineDraft(undefined)
         setClarification(outcome.clarification)
+        if (isInstrumentClarification(outcome.clarification)) {
+          setUtterance('')
+          window.setTimeout(() => inputRef.current?.focus(), 0)
+        }
       } else {
         const nextDraft = cloneDraft(outcome.draft)
         setClarification(undefined)
         setDraft(nextDraft)
         setBaselineDraft(cloneDraft(nextDraft))
       }
+    },
+    onError: (error) => {
+      if (errorCode(error) !== 'previous_session_limit_up_capability_unavailable') return
+      setUtterance('')
+      window.setTimeout(() => inputRef.current?.focus(), 0)
     },
   })
 
@@ -404,6 +456,8 @@ export default function App({
     runQuery.data && !terminalStates.has(runQuery.data.state),
   )
   const validation = draft ? draftValidation(draft) : { valid: false, reason: undefined }
+  const needsLimitUpRuleRewrite = compileMutation.isError
+    && errorCode(compileMutation.error) === 'previous_session_limit_up_capability_unavailable'
 
   const uiStrategy = useMemo(() => draft ? toStrategySummary(draft) : undefined, [draft])
   const capability = useMemo(() => draft
@@ -493,6 +547,27 @@ export default function App({
   const submitText = (text: string) => {
     const normalized = text.trim()
     if (!normalized || isJourneyLocked || instrumentContextError) return
+    if (isInstrumentClarification(clarification) && submittedText && !clarificationRecord) {
+      const originalRule = submittedText
+      const nextText = mergeInstrumentReplyWithRule(normalized, originalRule)
+      setClarificationRecord({
+        question: clarification.question,
+        reason: clarification.reason,
+        answer: normalized,
+      })
+      setClarification(undefined)
+      setUtterance(nextText)
+      setDraft(undefined)
+      setBaselineDraft(undefined)
+      setRunId(undefined)
+      setRunCommand(undefined)
+      setReportSnapshot(undefined)
+      setReminderSet(false)
+      setStack([])
+      startMutation.reset()
+      compileMutation.mutate({ text: nextText })
+      return
+    }
     rememberCurrentJourney()
     setUtterance(normalized)
     setSubmittedText(normalized)
@@ -518,10 +593,15 @@ export default function App({
     if (choice.action === 'replace_and_compile') {
       const replacement = choice.suggestedUtterance?.trim()
       if (!replacement) return
+      const instrumentOverride = instrumentFromConfirmedSymbol(
+        choice.instrumentSymbol,
+        choice.instrumentName,
+        instrument,
+      )
       setUtterance(replacement)
       setSubmittedText(replacement)
       setClarification(undefined)
-      compileMutation.mutate({ text: replacement })
+      compileMutation.mutate({ text: replacement, instrumentOverride })
       return
     }
     setClarificationRecord({
@@ -581,7 +661,7 @@ export default function App({
       reason: instrumentContextError,
       actions: ['返回股票页', '使用东方财富示例'],
     }
-  } else if (compileMutation.isError) {
+  } else if (compileMutation.isError && !needsLimitUpRuleRewrite) {
     failure = failureFor(compileMutation.error, 'compile_failed', '这句话暂时不能还原', instrument)
   } else if (runQuery.isError && !resultReady) {
     failure = failureFor(runQuery.error, 'run_read_failed', '任务状态读取失败', instrument, runId)
@@ -629,6 +709,8 @@ export default function App({
     : 0
   const apiLabel = apiMode === 'mock' ? '界面预览' : '回测服务'
   const activeOverlay = stack.at(-1)
+  const typedInstrumentClarification = isInstrumentClarification(clarification)
+    && clarification?.choices.length === 0
 
   useEffect(() => {
     const node = scrollRef.current
@@ -763,35 +845,57 @@ export default function App({
 
               {clarification && !clarificationRecord && !compileMutation.isPending ? (
                 <Turn>
-                  <ThinkBlock
-                    meta={clarification.ideaRoute ? `${clarification.ideaRoute.proposals.length} 个可检验方向` : '只问这一次'}
-                    lines={clarification.ideaRoute ? [
-                      clarification.reason,
-                      '我先不假设因果，也不替你换股票。',
-                      '正在把这个观点收敛成当前 A 股上能真正编译的策略方向。',
-                    ] : [
-                      clarification.reason,
-                      ...(clarification.recognized ?? []).map((item) => `${item.label}：${item.value}`),
-                    ]}
-                  />
-                  {clarification.ideaRoute ? (
+                  {typedInstrumentClarification ? (
+                    <Say>{clarification.question}</Say>
+                  ) : (
                     <>
-                      <Say>
-                        <><b>已理解观点：</b>{clarification.ideaRoute.understanding}<br />
-                          <b>投资假设：</b>{clarification.ideaRoute.hypothesis}<br />
-                          <b>当前 A 股映射：</b>{clarification.ideaRoute.asset_mapping.instrument_symbol}，{clarification.ideaRoute.asset_mapping.rationale}</>
-                      </Say>
+                      <ThinkBlock
+                        meta={clarification.choices.some((choice) => choice.action === 'replace_and_compile')
+                          ? `${clarification.choices.filter((choice) => choice.action === 'replace_and_compile').length} 条可选规则`
+                          : '只问这一次'}
+                        lines={[
+                          ...(clarification.recognized ?? []).map((item) => `${item.label}：${item.value}`),
+                          ...(clarification.choices.some((choice) => choice.action === 'replace_and_compile')
+                            ? [
+                                '候选只使用当前已发布、能通过规则校验的能力，不是设想。',
+                                '我不替你换股票，也不替你决定买卖点。',
+                              ]
+                            : []),
+                        ]}
+                      />
+                      <Say>{clarification.reason}</Say>
                       <Say>{clarification.question}</Say>
+                      {clarification.choices.some((choice) => choice.action === 'replace_and_compile') ? (
+                        <Proposals
+                          items={clarification.choices
+                            .filter((choice) => choice.action === 'replace_and_compile')
+                            .map((choice) => {
+                              const unavailable = /盘中|分钟/.test(`${choice.label}${choice.description}`)
+                              return {
+                                id: choice.id,
+                                title: choice.label,
+                                detail: choice.description,
+                                disabled: unavailable,
+                                disabledReason: unavailable ? '分钟数据与撮合尚未接入' : undefined,
+                              }
+                            })}
+                          onPick={(id) => {
+                            const choice = clarification.choices.find((item) => item.id === id)
+                            if (choice) handleClarify(choice)
+                          }}
+                        />
+                      ) : (
+                        <Chips>
+                          {clarification.choices.map((choice) => {
+                            const unavailable = /盘中|分钟/.test(`${choice.label}${choice.description}`)
+                            return <Chip key={choice.id} pin={choice.recommended ? '推荐' : undefined}
+                              disabled={unavailable} title={unavailable ? '分钟数据与撮合尚未接入' : choice.description}
+                              onClick={() => handleClarify(choice)}>{choice.label}{unavailable ? ' · 暂不可用' : ''}</Chip>
+                          })}
+                        </Chips>
+                      )}
                     </>
-                  ) : <Say>{clarification.question}</Say>}
-                  <Chips>
-                    {clarification.choices.map((choice) => {
-                      const unavailable = /盘中|分钟/.test(`${choice.label}${choice.description}`)
-                      return <Chip key={choice.id} pin={choice.recommended ? '推荐' : undefined}
-                        disabled={unavailable} title={unavailable ? '分钟数据与撮合尚未接入' : choice.description}
-                        onClick={() => handleClarify(choice)}>{choice.label}{unavailable ? ' · 暂不可用' : ''}</Chip>
-                    })}
-                  </Chips>
+                  )}
                 </Turn>
               ) : null}
 
@@ -890,6 +994,15 @@ export default function App({
               {failure ? (
                 <Turn><FailureCard state={failure} onAction={handleFailureAction} /></Turn>
               ) : null}
+
+              {needsLimitUpRuleRewrite ? (
+                <Turn>
+                  <Say>
+                    我已理解你想用“前一交易日涨停”作为买入条件。当前回测还不能可靠执行这个信号；
+                    另外“短线”没有明确的卖出时点。请直接在下方补充卖出方式，或换一种买入条件。
+                  </Say>
+                </Turn>
+              ) : null}
             </div>
           </div>
 
@@ -925,7 +1038,13 @@ export default function App({
                 </button>
                 <input ref={inputRef} className="strategy-input" aria-label="交易规则" value={utterance}
                   disabled={isJourneyLocked || Boolean(instrumentContextError)} onChange={(event) => setUtterance(event.target.value)}
-                  placeholder="说出什么时候买、什么时候卖" />
+                  placeholder={isInstrumentClarification(clarification) && !clarificationRecord
+                    ? '输入股票名称或 6 位代码'
+                    : needsLimitUpRuleRewrite
+                      ? '补充卖出方式，或换一种买入条件'
+                    : clarification && !clarificationRecord
+                      ? '也可以直接打字告诉我'
+                    : '说出什么时候买、什么时候卖'} />
                 {utterance.trim() ? (
                   <button type="submit" className="send" aria-label="识别交易规则"
                     disabled={isJourneyLocked || compileMutation.isPending || Boolean(instrumentContextError)}>

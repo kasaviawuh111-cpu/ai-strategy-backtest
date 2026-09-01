@@ -1,9 +1,9 @@
 {
   "schema_version": "indicator-catalog.v1",
   "catalog_id": "cn_a.signals",
-  "release_version": "2026.08.30",
+  "release_version": "2026.09.01",
   "state": "active",
-  "published_on": "2026-08-30",
+  "published_on": "2026-09-01",
   "indicators": [
     {
       "id": "technical.macd",
@@ -228,6 +228,24 @@
       ]
     },
     {
+      "id": "price.close",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 2,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
+        {"id": "above", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
+        {"id": "below", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
+        {"id": "at_least", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
+        {"id": "at_most", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true}
+      ]
+    },
+    {
       "id": "price.return_pct",
       "version": "1.0.0",
       "status": "stable",
@@ -243,7 +261,9 @@
         {"id": "crosses_above", "value_requirement": "required"},
         {"id": "crosses_below", "value_requirement": "required"},
         {"id": "above", "value_requirement": "required"},
-        {"id": "below", "value_requirement": "required"}
+        {"id": "below", "value_requirement": "required"},
+        {"id": "at_least", "value_requirement": "required"},
+        {"id": "at_most", "value_requirement": "required"}
       ]
     },
     {
@@ -295,6 +315,22 @@
     },
     {
       "id": "market.amount",
+      "version": "1.0.0",
+      "status": "stable",
+      "warmup_bars": 2,
+      "timeframes": ["1d"],
+      "evaluation_modes": ["bar_close_confirmed"],
+      "parameters": [],
+      "parameter_relations": [],
+      "triggers": [
+        {"id": "crosses_above", "value_requirement": "required", "minimum": 0},
+        {"id": "crosses_below", "value_requirement": "required", "minimum": 0},
+        {"id": "above", "value_requirement": "required", "minimum": 0},
+        {"id": "below", "value_requirement": "required", "minimum": 0}
+      ]
+    },
+    {
+      "id": "market.turnover_rate",
       "version": "1.0.0",
       "status": "stable",
       "warmup_bars": 2,

@@ -33,6 +33,9 @@ type MockRunRecord = {
 const runs = new Map<string, MockRunRecord>()
 const MOCK_REFERENCE_INITIAL_CASH_CNY = 100_000
 const MOCK_TOTAL_RETURN = -0.0254315
+const MOCK_BACKTEST_START = '2025-08-06'
+const MOCK_BACKTEST_END = '2026-08-06'
+const MOCK_BACKTEST_SESSIONS = 243
 
 type MockStrategyKind =
   | 'annual_report'
@@ -348,8 +351,8 @@ const makeStrategySpec = (request: CompileRequest, kind: MockStrategyKind): Stra
     t_plus_one: true,
   },
   backtest: {
-    start: '2021-08-06',
-    end: '2026-08-06',
+    start: MOCK_BACKTEST_START,
+    end: MOCK_BACKTEST_END,
     initial_cash_cny: STANDARD_INITIAL_CASH_CNY,
   },
 })
@@ -617,8 +620,8 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
       runRobustness: true,
     },
     backtest: {
-      start: '2021-08-06',
-      end: '2026-08-06',
+      start: MOCK_BACKTEST_START,
+      end: MOCK_BACKTEST_END,
       initialCashCny: STANDARD_INITIAL_CASH_CNY,
     },
     assumptions: [
@@ -677,12 +680,11 @@ const incompleteRuleClarification: Clarification = {
 
 const makeSeries = (): EquityPoint[] => {
   const dates = [
-    '2021-08', '2021-12', '2022-04', '2022-08', '2022-12', '2023-04',
-    '2023-08', '2023-12', '2024-04', '2024-08', '2024-12', '2025-04',
-    '2025-08', '2025-12', '2026-04', '2026-08',
+    MOCK_BACKTEST_START, '2025-10-31', '2025-12-31', '2026-02-27',
+    '2026-04-30', '2026-06-30', MOCK_BACKTEST_END,
   ]
-  const equity = [100, 110, 112, 68, 64, 58, 56, 46.8, 52, 105, 102, 98, 101, 96, 94, 97.45685]
-  const benchmark = [100, 105, 95, 75, 70, 62, 55, 48, 40, 80, 74, 72, 68, 65, 62, 60.77]
+  const equity = [100, 110, 112, 68, 46.8, 94, 97.45685]
+  const benchmark = [100, 105, 95, 75, 48, 62, 60.77]
   let peak = equity[0] ?? 100
 
   return dates.map((date, index) => {
@@ -708,7 +710,7 @@ const baseActivities = (
   const activities: BacktestActivity[] = [
   {
     id: 'sig_01', chainId: 'decision_buy_01', decisionId: 'decision_buy_01', kind: 'signal',
-    occurredAt: eventStrategy ? '2024-03-14T20:57:33+08:00' : '2022-05-13T15:00:00+08:00', side: 'buy',
+    occurredAt: eventStrategy ? '2026-03-13T20:57:33+08:00' : '2025-09-12T15:00:00+08:00', side: 'buy',
     title: documentTermHold
       ? '年度报告正文词频条件确认'
       : eventStrategy ? '年度报告首次可得' : entrySignalTitle, status: 'confirmed',
@@ -723,7 +725,7 @@ const baseActivities = (
       sourceEventId: 'mock:annual-report-example',
       provider: 'mock_sample',
       sourceUrl: null,
-      availableAt: '2024-03-14T20:57:33+08:00',
+      availableAt: '2026-03-13T20:57:33+08:00',
       timeQuality: 'vendor_observed',
       timestampPrecision: 'second',
       validationStatus: 'demonstration_only',
@@ -732,7 +734,7 @@ const baseActivities = (
       type: 'daily_bar_snapshot',
       id: 'mock:daily-bar-example',
       provider: 'mock_sample',
-      availableAt: '2022-05-13T15:00:00+08:00',
+      availableAt: '2025-09-12T15:00:00+08:00',
       timeQuality: 'exact',
       validationStatus: 'demonstration_only',
       rawResponseSha256: null,
@@ -740,13 +742,13 @@ const baseActivities = (
   },
   {
     id: 'ord_01', chainId: 'decision_buy_01', decisionId: 'decision_buy_01', orderId: 'order_buy_01',
-    parentId: 'sig_01', kind: 'order', occurredAt: eventStrategy ? '2024-03-15T09:15:00+08:00' : '2022-05-16T09:15:00+08:00', side: 'buy',
+    parentId: 'sig_01', kind: 'order', occurredAt: eventStrategy ? '2026-03-16T09:15:00+08:00' : '2025-09-15T09:15:00+08:00', side: 'buy',
     title: '提交买入委托', price: 22.84, quantity: 4300, status: 'submitted',
     reason: '模拟生成当日日单；成交只使用日线开盘价代理。',
   },
   {
     id: 'fill_01', chainId: 'decision_buy_01', decisionId: 'decision_buy_01', orderId: 'order_buy_01', fillId: 'fill_buy_01',
-    parentId: 'ord_01', kind: 'fill', occurredAt: eventStrategy ? '2024-03-15T09:30:00+08:00' : '2022-05-16T09:30:00+08:00', side: 'buy',
+    parentId: 'ord_01', kind: 'fill', occurredAt: eventStrategy ? '2026-03-16T09:30:00+08:00' : '2025-09-15T09:30:00+08:00', side: 'buy',
     title: '买入成交', price: 22.86, quantity: 4300, status: 'filled',
     reason: '使用日线开盘价代理；成交价含 5 个基点滑点，费用另计。',
     capacityReasonCode: 'capacity_previous_session_volume_proxy',
@@ -756,8 +758,8 @@ const baseActivities = (
   {
     id: 'sig_02', chainId: 'decision_sell_01', decisionId: 'decision_sell_01', kind: 'signal',
     occurredAt: documentTermHold
-      ? '2024-03-20T09:15:00+08:00'
-      : eventStrategy ? '2024-07-01T15:00:00+08:00' : '2023-02-02T15:00:00+08:00', side: 'sell',
+      ? '2026-03-19T09:15:00+08:00'
+      : eventStrategy ? '2026-07-01T15:00:00+08:00' : '2025-11-13T15:00:00+08:00', side: 'sell',
     title: documentTermHold ? '持有 3 个交易日退出' : exitSignalTitle, status: 'confirmed',
     reason: documentTermHold
       ? '固定样例：从首次实际买入成交后的下一交易日起计，到第 3 个 A 股交易日退出。'
@@ -766,8 +768,8 @@ const baseActivities = (
   {
     id: 'ord_02', chainId: 'decision_sell_01', decisionId: 'decision_sell_01', orderId: 'order_sell_01',
     parentId: 'sig_02', kind: 'order', occurredAt: documentTermHold
-      ? '2024-03-20T09:15:00+08:00'
-      : eventStrategy ? '2024-07-02T09:15:00+08:00' : '2023-02-03T09:15:00+08:00', side: 'sell',
+      ? '2026-03-19T09:15:00+08:00'
+      : eventStrategy ? '2026-07-02T09:15:00+08:00' : '2025-11-14T09:15:00+08:00', side: 'sell',
     title: '提交卖出委托', price: 25.18, quantity: 4300, status: 'submitted',
     reason: documentTermHold
       ? '达到持有期退出日后提交卖出委托。'
@@ -776,8 +778,8 @@ const baseActivities = (
   {
     id: 'fill_02', chainId: 'decision_sell_01', decisionId: 'decision_sell_01', orderId: 'order_sell_01', fillId: 'fill_sell_01',
     parentId: 'ord_02', kind: 'fill', occurredAt: documentTermHold
-      ? '2024-03-20T09:30:00+08:00'
-      : eventStrategy ? '2024-07-02T09:30:00+08:00' : '2023-02-03T09:30:00+08:00', side: 'sell',
+      ? '2026-03-19T09:30:00+08:00'
+      : eventStrategy ? '2026-07-02T09:30:00+08:00' : '2025-11-14T09:30:00+08:00', side: 'sell',
     title: '卖出成交', price: 25.17, quantity: 4300, status: 'filled',
     reason: '持仓已满足 A 股次日可卖规则；成交价使用日线开盘价代理。',
     capacityReasonCode: 'capacity_previous_session_volume_proxy',
@@ -786,35 +788,35 @@ const baseActivities = (
   },
   {
     id: 'sig_03', chainId: 'decision_buy_blocked', decisionId: 'decision_buy_blocked', kind: 'signal',
-    occurredAt: '2024-10-07T15:00:00+08:00', side: 'buy', title: 'MACD 金叉确认', status: 'confirmed',
+    occurredAt: '2026-01-08T15:00:00+08:00', side: 'buy', title: 'MACD 金叉确认', status: 'confirmed',
     reason: 'DIF 由下向上穿过 DEA，买入信号成立。',
   },
   {
     id: 'ord_03', chainId: 'decision_buy_blocked', decisionId: 'decision_buy_blocked', orderId: 'order_buy_blocked',
-    parentId: 'sig_03', kind: 'order', occurredAt: '2024-10-08T09:15:00+08:00', side: 'buy',
+    parentId: 'sig_03', kind: 'order', occurredAt: '2026-01-09T09:15:00+08:00', side: 'buy',
     title: '提交买入委托', price: 19.37, quantity: 5100, status: 'submitted',
     reason: '信号确认后的下一可交易日提交买入委托。',
   },
   {
     id: 'reject_01', chainId: 'decision_buy_blocked', decisionId: 'decision_buy_blocked', orderId: 'order_buy_blocked',
-    parentId: 'ord_03', kind: 'unfilled', occurredAt: '2024-10-08T09:30:00+08:00', side: 'buy',
+    parentId: 'ord_03', kind: 'unfilled', occurredAt: '2026-01-09T09:30:00+08:00', side: 'buy',
     title: '涨停未成交', price: 19.37, quantity: 5100, status: 'cancelled',
     reason: '开盘一字涨停，日线数据无法证明实际排队位置，因此按保守规则不成交。',
   },
   {
     id: 'sig_04', chainId: 'decision_buy_partial', decisionId: 'decision_buy_partial', kind: 'signal',
-    occurredAt: '2025-01-16T15:00:00+08:00', side: 'buy', title: 'MACD 金叉确认', status: 'confirmed',
+    occurredAt: '2026-03-05T15:00:00+08:00', side: 'buy', title: 'MACD 金叉确认', status: 'confirmed',
     reason: 'DIF 由下向上穿过 DEA，买入信号成立。',
   },
   {
     id: 'ord_04', chainId: 'decision_buy_partial', decisionId: 'decision_buy_partial', orderId: 'order_buy_partial',
-    parentId: 'sig_04', kind: 'order', occurredAt: '2025-01-17T09:15:00+08:00', side: 'buy',
+    parentId: 'sig_04', kind: 'order', occurredAt: '2026-03-06T09:15:00+08:00', side: 'buy',
     title: '提交买入委托', price: 18.91, quantity: 5200, status: 'submitted',
     reason: '信号确认后的下一可交易日提交买入委托。',
   },
   {
     id: 'fill_03', chainId: 'decision_buy_partial', decisionId: 'decision_buy_partial', orderId: 'order_buy_partial', fillId: 'fill_buy_partial',
-    parentId: 'ord_04', kind: 'partial_fill', occurredAt: '2025-01-17T09:30:00+08:00', side: 'buy',
+    parentId: 'ord_04', kind: 'partial_fill', occurredAt: '2026-03-06T09:30:00+08:00', side: 'buy',
     title: '买入部分成交', price: 18.92, quantity: 3000, status: 'partially_filled',
     reason: '按委托前已知容量，以日线开盘价代理完成部分成交。', capacityReasonCode: 'capacity_previous_session_volume_proxy',
     timeQuality: 'daily_bar_open_proxy',
@@ -822,7 +824,7 @@ const baseActivities = (
   },
   {
     id: 'expire_01', chainId: 'decision_buy_partial', decisionId: 'decision_buy_partial', orderId: 'order_buy_partial',
-    parentId: 'ord_04', kind: 'expired', occurredAt: '2025-01-17T15:00:00+08:00', side: 'buy',
+    parentId: 'ord_04', kind: 'expired', occurredAt: '2026-03-06T15:00:00+08:00', side: 'buy',
     title: '剩余委托过期', price: 18.91, quantity: 2200, status: 'expired',
     reason: '当日剩余委托未成交，收盘后过期。', capacityReasonCode: 'capacity_previous_session_volume_proxy',
   },
@@ -1026,7 +1028,7 @@ export const mockApi = {
       totalReturn: MOCK_TOTAL_RETURN,
       benchmarkReturn: -0.3923,
       benchmarkComparisonStatus: 'comparable',
-      annualizedReturn: -0.005,
+      annualizedReturn: MOCK_TOTAL_RETURN,
       maxDrawdown: -0.5819,
       sharpeRatio: 0.16,
       winRate: 0.459,
@@ -1036,7 +1038,7 @@ export const mockApi = {
         (stored.initialCashCny * (1 + MOCK_TOTAL_RETURN)).toFixed(2),
       ),
       interpretation: '固定样例中，策略期内小幅亏损，但跌幅小于样例买入持有；最大回撤约 58.2%。',
-      dataRange: { start: '2021-08-06', end: '2026-08-06', sessions: 1211 },
+      dataRange: { start: MOCK_BACKTEST_START, end: MOCK_BACKTEST_END, sessions: MOCK_BACKTEST_SESSIONS },
       warnings: [
         '固定样例：收益、交易与事件用于界面预览，不来自回测服务。',
         '历史表现不代表未来收益。',

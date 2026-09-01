@@ -200,6 +200,11 @@ def test_fetch_unadjusted_sz_rows_preserves_request_raw_hashes_and_lot_resolutio
         "close": Decimal("25.18"),
         "volume": 1_234_500,
         "amount": Decimal("31000000"),
+        "turnover_rate_pct": Decimal("1.50"),
+        "turnover_rate_provider": "eastmoney_push2his_public",
+        "turnover_rate_methodology": (
+            "eastmoney_push2his.f61.provider_reported_turnover_rate_pct.v1"
+        ),
     }
 
 

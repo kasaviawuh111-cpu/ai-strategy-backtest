@@ -7,10 +7,12 @@ import importlib.util
 import json
 import re
 import sys
+import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -63,6 +65,7 @@ from ashare_lab.adapters.persistence import (
 )
 from ashare_lab.api import create_app as create_http_app
 from ashare_lab.api.app import build_hybrid_candidate_compiler
+from ashare_lab.api.web_hosting import validate_web_dist_root
 from ashare_lab.application.backtest_submission import (
     BacktestRunConfig,
     BacktestSubmissionService,
@@ -159,6 +162,9 @@ class _BaoStockRuntimeClient(BaoStockClient, Protocol):
     def login(self) -> _BaoStockLoginResult: ...
 
     def logout(self) -> _BaoStockLoginResult: ...
+
+
+_BAOSTOCK_RUNTIME_LOCK = threading.RLock()
 
 
 class _PinnedSnapshotSessionReference:
@@ -261,6 +267,7 @@ def _build_market_data_repository(
         event_output_root=event_root,
         composite_output_root=composite_root,
         temporary_root=preparation_root,
+        daily_source=settings.on_demand_daily_source,
     )
     return (
         OnDemandSnapshotMarketDataRepository(
@@ -306,6 +313,7 @@ def _build_strategy_v2_snapshot_repository(
         event_output_root=event_root,
         composite_output_root=composite_root,
         temporary_root=preparation_root,
+        daily_source=settings.on_demand_daily_source,
     )
     return OnDemandSnapshotMarketDataRepository(
         registry,
@@ -317,19 +325,20 @@ def _build_strategy_v2_snapshot_repository(
 def _resolve_strategy_v2_baostock_record(symbol: str) -> SecurityMasterRecord:
     """Query one exact server-selected symbol without acquiring price history."""
 
-    if re.fullmatch(r"[0-9]{6}\.(?:SH|SZ|BJ)", symbol) is None:
-        raise ValueError("Strategy v2 security-master preparation requires a canonical symbol")
-    try:
-        client = cast(_BaoStockRuntimeClient, importlib.import_module("baostock"))
-    except ImportError as error:
-        raise RuntimeError("BaoStock security-master runtime is unavailable") from error
-    login = client.login()
-    if str(login.error_code) != "0":
-        raise RuntimeError("BaoStock security-master login failed")
-    try:
-        return BaoStockReferenceAdapter(client).resolve_security_master(symbol=symbol).record
-    finally:
-        client.logout()
+    with _BAOSTOCK_RUNTIME_LOCK:
+        if re.fullmatch(r"[0-9]{6}\.(?:SH|SZ|BJ)", symbol) is None:
+            raise ValueError("Strategy v2 security-master preparation requires a canonical symbol")
+        try:
+            client = cast(_BaoStockRuntimeClient, importlib.import_module("baostock"))
+        except ImportError as error:
+            raise RuntimeError("BaoStock security-master runtime is unavailable") from error
+        login = client.login()
+        if str(login.error_code) != "0":
+            raise RuntimeError("BaoStock security-master login failed")
+        try:
+            return BaoStockReferenceAdapter(client).resolve_security_master(symbol=symbol).record
+        finally:
+            client.logout()
 
 
 def _search_strategy_v2_choice_candidates(identifier: str) -> tuple[str, ...]:
@@ -348,23 +357,51 @@ def _search_strategy_v2_choice_candidates(identifier: str) -> tuple[str, ...]:
 def _search_strategy_v2_baostock_candidates(identifier: str) -> tuple[str, ...]:
     """Discover bounded names/codes; exact identity is re-queried separately."""
 
-    try:
-        client = cast(_BaoStockRuntimeClient, importlib.import_module("baostock"))
-    except ImportError as error:
-        raise BaoStockSecuritySearchUnavailableError(
-            "BaoStock security candidate search is unavailable"
-        ) from error
-    login = client.login()
-    if str(login.error_code) != "0":
-        raise BaoStockSecuritySearchUnavailableError(
-            "BaoStock security candidate search login failed"
-        )
-    try:
-        return BaoStockSecurityCandidateSearch(cast(BaoStockSecuritySearchClient, client))(
-            identifier
-        )
-    finally:
-        client.logout()
+    with _BAOSTOCK_RUNTIME_LOCK:
+        try:
+            client = cast(_BaoStockRuntimeClient, importlib.import_module("baostock"))
+        except ImportError as error:
+            raise BaoStockSecuritySearchUnavailableError(
+                "BaoStock security candidate search is unavailable"
+            ) from error
+        login = client.login()
+        if str(login.error_code) != "0":
+            raise BaoStockSecuritySearchUnavailableError(
+                "BaoStock security candidate search login failed"
+            )
+        try:
+            return BaoStockSecurityCandidateSearch(cast(BaoStockSecuritySearchClient, client))(
+                identifier
+            )
+        finally:
+            client.logout()
+
+
+@lru_cache(maxsize=2_048)
+def _resolve_compiler_instrument_name(identifier: str) -> str:
+    """Resolve one exact name through BaoStock discovery plus master data.
+
+    Search results are discovery only.  Every candidate is reopened through
+    the exact BaoStock security-master adapter and the name must match one
+    unique record before its symbol may enter a strategy draft.
+    """
+
+    with _BAOSTOCK_RUNTIME_LOCK:
+        raw = "".join(identifier.split()).casefold()
+        if not raw:
+            raise LookupError("empty instrument name")
+        candidates = _search_strategy_v2_baostock_candidates(identifier)
+        if bool(getattr(candidates, "truncated", False)):
+            raise LookupError("ambiguous instrument name")
+        matches: dict[str, SecurityMasterRecord] = {}
+        for symbol in candidates:
+            record = _resolve_strategy_v2_baostock_record(symbol)
+            normalized_name = "".join(record.name.split()).casefold()
+            if raw == normalized_name or (len(raw) >= 2 and raw in normalized_name):
+                matches[record.symbol] = record
+        if len(matches) != 1:
+            raise LookupError("instrument name is unconfirmed or ambiguous")
+        return next(iter(matches))
 
 
 def build_api_runtime(
@@ -430,7 +467,16 @@ def create_configured_app(
     *,
     strategy_v2_service: StrategyV2HttpService | None = None,
 ) -> FastAPI:
-    runtime = build_api_runtime(settings, strategy_v2_service=strategy_v2_service)
+    selected_settings = settings or AppSettings()
+    configured_web_root = validate_web_dist_root(
+        _repository_path(Path(__file__).resolve().parents[1], selected_settings.web_dist_root)
+        if selected_settings.web_dist_root is not None
+        else None
+    )
+    runtime = build_api_runtime(
+        selected_settings,
+        strategy_v2_service=strategy_v2_service,
+    )
     selected = runtime.execution.settings
     coverage_catalog = load_coverage_catalog_directory(selected.catalog_root / "coverage")
     capability_matrix = build_candidate_capability_matrix(runtime.catalog, coverage_catalog)
@@ -440,6 +486,7 @@ def create_configured_app(
         candidate_transport=candidate_transport,
         capability_matrix=capability_matrix,
         backtest_anchor_date=runtime.execution.backtest_anchor_date,
+        instrument_name_resolver=_resolve_compiler_instrument_name,
     )
     if strategy_v2_service is None:
         configured_v2, unavailable_reason = _build_strategy_v2_http_service(
@@ -472,6 +519,7 @@ def create_configured_app(
             runtime.event_document_text_preparable_codes_probe
         ),
         cors_allowed_origins=selected.cors_origins,
+        web_dist_root=configured_web_root,
     )
     app.state.runtime = runtime
     app.state.candidate_provider_identity = asdict(candidate_transport.identity)
@@ -814,7 +862,7 @@ def _readiness_probe(runtime: ApiRuntime) -> Callable[[], dict[str, bool]]:
             )
             checks = {
                 "on_demand_snapshot_registry": dependencies_ready,
-                "on_demand_provider_runtime": _on_demand_provider_runtime_available(),
+                "on_demand_provider_runtime": _on_demand_provider_runtime_for_settings(settings),
             }
         else:
             checks = {
@@ -1045,13 +1093,20 @@ def _on_demand_dependencies_available(
     commands = (
         repository_root / "scripts/prepare_baostock_reference.py",
         repository_root / "scripts/prepare_eastmoney_corporate_actions.py",
-        repository_root / "scripts/prepare_choice_snapshot.py",
-        repository_root / "scripts/prepare_eastmoney_snapshot.py",
         repository_root / "scripts/prepare_event_snapshot.py",
+        *(
+            (repository_root / "scripts/prepare_baostock_snapshot.py",)
+            if settings.on_demand_daily_source == "baostock_stock_only"
+            else (
+                repository_root / "scripts/prepare_choice_snapshot.py",
+                repository_root / "scripts/prepare_eastmoney_snapshot.py",
+            )
+        ),
     )
     if not all(path.is_dir() for path in roots) or not all(path.is_file() for path in commands):
         return False
-    if not _on_demand_provider_runtime_available():
+    runtime_available = _on_demand_provider_runtime_for_settings(settings)
+    if not runtime_available:
         return False
     try:
         market_data.validate_registry()
@@ -1060,11 +1115,31 @@ def _on_demand_dependencies_available(
     return True
 
 
-def _on_demand_provider_runtime_available() -> bool:
+def _on_demand_provider_runtime_available(
+    daily_source: str = "choice_then_eastmoney",
+) -> bool:
     session_runtime = importlib.util.find_spec("baostock") is not None
     choice_runtime = importlib.util.find_spec("EmQuantAPI") is not None
     push2_runtime = importlib.util.find_spec("httpx") is not None
+    if daily_source == "baostock_stock_only":
+        # Eastmoney is still required for the immutable corporate-action ledger.
+        return session_runtime and push2_runtime
+    if daily_source != "choice_then_eastmoney":
+        return False
     return session_runtime and (choice_runtime or push2_runtime)
+
+
+def _on_demand_provider_runtime_for_settings(settings: AppSettings) -> bool:
+    """Probe exactly the provider path the server owns for on-demand snapshots.
+
+    Keep the default invocation argument-free for compatibility with legacy
+    local probes, while an explicit BaoStock policy is never reported ready
+    from the Choice/Push2 path by accident.
+    """
+
+    if settings.on_demand_daily_source == "choice_then_eastmoney":
+        return _on_demand_provider_runtime_available()
+    return _on_demand_provider_runtime_available(settings.on_demand_daily_source)
 
 
 def _on_demand_document_text_runtime_available() -> bool:

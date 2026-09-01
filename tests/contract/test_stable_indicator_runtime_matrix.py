@@ -80,6 +80,9 @@ def _synthetic_a_share_daily_bars(count: int = 420) -> tuple[DailyBar, ...]:
                     time(hour=15, minute=1),
                     tzinfo=SHANGHAI,
                 ),
+                turnover_rate_pct=Decimal("1.0") + Decimal(index % 17) * Decimal("0.25"),
+                turnover_rate_provider="fixture_provider_raw_turnover_rate",
+                turnover_rate_methodology="fixture.provider_reported_turnover_rate_pct.v1",
             )
         )
     return tuple(bars)
@@ -148,8 +151,8 @@ def _strategy_for(condition: IndicatorCondition) -> StrategySpec:
 
 
 def test_stable_catalog_and_daily_evaluator_registry_are_identical() -> None:
-    assert len(STABLE_DEFINITIONS) == 35
-    assert len(TRIGGER_CASES) == 126
+    assert len(STABLE_DEFINITIONS) == 37
+    assert len(TRIGGER_CASES) == 138
     validate_stable_indicator_evaluator_catalog(CATALOG)
 
 

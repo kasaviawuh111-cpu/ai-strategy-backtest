@@ -21,11 +21,24 @@ from ashare_lab.adapters.market_data import (
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_BUNDLE_SCHEMA_VERSION = "ashare-lab.cloudbase-source-bundle.v3"
+_RELEASE_SCHEMA_VERSION = "ashare-lab.atomic-release.v1"
+_FORBIDDEN_WEB_MARKERS = (
+    b"draft_mock_demo_001",
+    b"mock_demo",
+    b"https://ashare-backtest-api-305722-11-1330091763.sh.run.tcloudbase.com",
+    "演示".encode(),
+    "真实数据".encode(),
+    "正式数据".encode(),
+    "真实接口".encode(),
+    "真实回测".encode(),
+)
 _ROOT_FILES = ("pyproject.toml", "uv.lock", "README.md", "LICENSE", "alembic.ini")
 _SOURCE_DIRECTORIES = ("ashare_lab", "astock_backtest", "catalogs", "contracts", "alembic")
 _RUNTIME_SCRIPTS = (
     "container_healthcheck.py",
     "prepare_baostock_reference.py",
+    "prepare_baostock_snapshot.py",
     "prepare_choice_snapshot.py",
     "prepare_eastmoney_corporate_actions.py",
     "prepare_eastmoney_snapshot.py",
@@ -121,6 +134,10 @@ def prepare_bundle(
             raise BundleError("strict runtime pin returned a different producer snapshot")
         snapshots.append((snapshot, evidence))
     _validate_allowlisted_sources(repository)
+    release = _build_release_evidence(
+        web_dist=repository / "web" / "dist",
+        code_revision=code_revision,
+    )
 
     output.mkdir(parents=True, exist_ok=True)
     for name in _ROOT_FILES:
@@ -134,6 +151,13 @@ def prepare_bundle(
     (output / "scripts").mkdir()
     for name in _RUNTIME_SCRIPTS:
         shutil.copy2(repository / "scripts" / name, output / "scripts" / name)
+    shutil.copytree(repository / "web" / "dist", output / "web" / "dist")
+    copied_release = _build_release_evidence(
+        web_dist=output / "web" / "dist",
+        code_revision=code_revision,
+    )
+    if copied_release != release:
+        raise BundleError("copied web/dist does not match its source release evidence")
     _copy_dockerfile_with_identity(
         repository / "deploy" / "cloudbase" / "Dockerfile",
         output / "Dockerfile",
@@ -153,7 +177,7 @@ def prepare_bundle(
 
     primary = snapshots[0][1]
     metadata: dict[str, object] = {
-        "bundleSchemaVersion": "ashare-lab.cloudbase-source-bundle.v2",
+        "bundleSchemaVersion": _BUNDLE_SCHEMA_VERSION,
         "codeRevision": code_revision,
         "deploymentProfiles": {
             "ephemeral_candidate": {
@@ -169,6 +193,9 @@ def prepare_bundle(
         # the first/legacy DATA_ROOT snapshot, never an implicit replacement.
         "producerSnapshotId": primary.producer_snapshot_id,
         "snapshotManifestSha256": primary.manifest_sha256,
+        "webDistRoot": release["webDistRoot"],
+        "webBundleHash": release["webBundleHash"],
+        "webFiles": release["webFiles"],
         "producerSnapshotIds": [item.producer_snapshot_id for _, item in snapshots],
         "snapshotRegistry": {
             "contractVersion": "ashare-lab.durable-snapshot-store.v1",
@@ -185,11 +212,69 @@ def prepare_bundle(
             for _, item in snapshots
         ],
     }
+    (output / "release.json").write_text(
+        json.dumps(release, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     (output / "bundle-metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=True, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return metadata
+
+
+def _build_release_evidence(*, web_dist: Path, code_revision: str) -> dict[str, object]:
+    files = _collect_web_dist_files(web_dist)
+    web_bundle_hash = hashlib.sha256(
+        json.dumps(
+            files,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schemaVersion": _RELEASE_SCHEMA_VERSION,
+        "codeRevision": code_revision,
+        "webDistRoot": "web/dist",
+        "webBundleHash": web_bundle_hash,
+        "webFiles": files,
+    }
+
+
+def _collect_web_dist_files(web_dist: Path) -> dict[str, dict[str, object]]:
+    if not web_dist.is_dir() or web_dist.is_symlink():
+        raise BundleError("web/dist is missing or unsafe")
+    paths = sorted(web_dist.rglob("*"), key=lambda item: item.relative_to(web_dist).as_posix())
+    if any(path.is_symlink() for path in paths):
+        raise BundleError("web/dist cannot contain symlinks")
+    if not (web_dist / "index.html").is_file():
+        raise BundleError("web/dist must contain index.html")
+
+    files: dict[str, dict[str, object]] = {}
+    javascript_payloads: list[bytes] = []
+    for path in paths:
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise BundleError("web/dist can contain only regular files and directories")
+        payload = path.read_bytes()
+        relative = path.relative_to(web_dist).as_posix()
+        if path.suffix == ".js":
+            javascript_payloads.append(payload)
+        files[relative] = {
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+    if not files:
+        raise BundleError("web/dist cannot be empty")
+    if not javascript_payloads:
+        raise BundleError("web/dist must contain a JavaScript application asset")
+    javascript = b"\n".join(javascript_payloads)
+    for marker in _FORBIDDEN_WEB_MARKERS:
+        if marker in javascript:
+            raise BundleError("web/dist is not a verified same-origin Live build")
+    return files
 
 
 def _normalize_snapshot_digests(

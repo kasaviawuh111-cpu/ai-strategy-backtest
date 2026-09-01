@@ -37,6 +37,7 @@ from .routes.strategy_drafts import router as strategy_drafts_router
 from .routes.strategy_v2 import router as strategy_v2_router
 from .routes.system import router as system_router
 from .store import InMemoryDraftStore
+from .web_hosting import install_web_hosting
 
 DEFAULT_MAX_BODY_BYTES = 16 * 1024
 
@@ -71,6 +72,7 @@ def create_app(
     event_document_text_backtest_codes_probe: Callable[[], frozenset[str]] | None = None,
     event_document_text_preparable_codes_probe: Callable[[], frozenset[str]] | None = None,
     cors_allowed_origins: tuple[str, ...] = (),
+    web_dist_root: str | Path | None = None,
 ) -> FastAPI:
     """Build an isolated app instance suitable for tests and multiple workers."""
 
@@ -139,6 +141,7 @@ def create_app(
     app.include_router(strategy_drafts_router)
     app.include_router(backtest_runs_router)
     app.include_router(strategy_v2_router)
+    install_web_hosting(app, web_dist_root)
     return app
 
 
@@ -152,6 +155,7 @@ def build_hybrid_candidate_compiler(
     candidate_transport: IdentifiedCandidateJsonTransport,
     capability_matrix: CandidateCapabilityMatrix,
     backtest_anchor_date: date | None = None,
+    instrument_name_resolver: Callable[[str], str] | None = None,
 ) -> StrategyCompiler:
     """Compose rule-first interpretation with one Catalog-bounded fallback."""
 
@@ -164,6 +168,7 @@ def build_hybrid_candidate_compiler(
                 capability_matrix=capability_matrix,
                 provider_identity=candidate_transport.identity,
             ),
+            instrument_name_resolver=instrument_name_resolver,
         ),
         backtest_anchor_date=backtest_anchor_date,
         idea_router=VibeIdeaRouter(

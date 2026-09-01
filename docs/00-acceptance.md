@@ -31,7 +31,7 @@
 → 收益、风险、基准与逐笔因果轨迹
 ```
 
-当前范围：A 股、单股、只做多、日线；35 个透明日线指标；当前 strict 真实事件范围为年报、半年报、季报、业绩预告和业绩快报，年度报告 Mock 作为主演示；初始完整定期报告正文确定性词频；首次真实买入成交后第 N 个 A 股交易日退出；一次集中澄清；T+1、停牌、涨跌停、整手、费用、滑点、PIT 容量、部分成交、订单过期、公司行动、同约束买入持有基准；异步 API 与 H5/WebView。当前真实 Composite 已达到 `local-real-data-verified`，但最终 clean-SHA Live H5 仍未验收。
+当前范围：A 股、单股、只做多、日线；37 个透明日线指标；当前 strict 真实事件范围为年报、半年报、季报、业绩预告和业绩快报，年度报告 Mock 作为主演示；初始完整定期报告正文确定性词频；首次真实买入成交后第 N 个 A 股交易日退出；一次集中澄清；T+1、停牌、涨跌停、整手、费用、滑点、PIT 容量、部分成交、订单过期、公司行动、同约束买入持有基准；异步 API 与 H5/WebView。当前真实 Composite 已达到 `local-real-data-verified`，但最终 clean-SHA Live H5 仍未验收。
 
 `/capabilities` 必须把 69 个 Catalog 可编译事件与当前 pinned strict snapshot 的逐码运行可用性分开；当前 Composite 只对五类定期报告返回 `backtest_available=true + pinned_snapshot`。Mock 主演示只开放 `event.financial_results.annual_report`。69 个事件代码路径不能写成 69 类真实历史覆盖或 69 类均可回测。
 
@@ -43,7 +43,7 @@
 
 - [x] `implemented`：中文规则只编译到受限 `StrategySpec`，不执行任意代码。
 - [x] `implemented / fixture-tested`：只说指标/事件名称、只有买入条件或只有卖出条件时，分别只集中澄清一次缺失的买入/卖出条件，不生成默认交易策略。
-- [x] `fixture-tested`：35 个透明日线指标通过 Catalog/Schema、运行时覆盖、黄金值、预热和前缀不变性门禁。
+- [x] `fixture-tested`：37 个透明日线指标通过 Catalog/Schema、运行时覆盖、黄金值或供应商字段契约、预热和前缀不变性门禁。
 - [x] `implemented`：技术与事件策略共用 Signal → Decision → Order → Fill → Ledger → Analytics。
 - [x] `implemented`：日线收盘信号不按同一收盘价成交；默认在下一可交易 session 使用已发布的日线开盘价代理尝试。
 - [x] `implemented / fixture-tested`：事件加固定 1 秒处理延迟；不晚于 09:15 完成决策时可使用当日已发布的日线开盘价代理，否则顺延至下一可交易 session。日线 OHLCV 无法证明集合竞价逐笔成交，活动中的 `filledAt=09:30` 只是统一记录边界，并非声称实际在 09:25 或 09:30 成交。

@@ -87,6 +87,7 @@ TECHNICAL: tuple[tuple[str, str], ...] = (
 )
 
 PRICE_ACTION: tuple[tuple[str, str], ...] = (
+    ("price.close", "收盘价阈值"),
     ("price.return_pct", "区间涨跌幅"),
     ("price.log_return", "对数收益率"),
     ("price.amplitude", "振幅"),
@@ -441,6 +442,7 @@ STABLE_IMPLEMENTATIONS = {
     "technical.donchian": "ashare_lab.domain.signals.indicators:donchian_channel",
     "technical.return_stddev": "ashare_lab.domain.signals.indicators:return_stddev",
     "technical.historical_volatility": "ashare_lab.domain.signals.indicators:historical_volatility",
+    "price.close": "ashare_lab.domain.signals.runtime:SignalRuntime[price.close]",
     "price.return_pct": "ashare_lab.domain.signals.indicators:period_return_pct",
     "price.rolling_high": "ashare_lab.domain.signals.indicators:rolling_high",
     "price.consecutive_up": "ashare_lab.domain.signals.indicators:consecutive_up",
@@ -448,6 +450,7 @@ STABLE_IMPLEMENTATIONS = {
     "price.true_range": "ashare_lab.domain.signals.indicators:true_range",
     "market.volume": "ashare_lab.domain.signals.indicators:volume_average",
     "market.amount": "ashare_lab.domain.signals.indicators:market_amount",
+    "market.turnover_rate": "ashare_lab.domain.signals.runtime:SignalRuntime[market.turnover_rate]",
     "amount.average": "ashare_lab.domain.signals.indicators:amount_average",
     "volume.relative": "ashare_lab.domain.signals.indicators:relative_volume",
     "volume.price_confirmation": "ashare_lab.domain.signals.indicators:volume_price_points",
@@ -474,6 +477,7 @@ STABLE_FORMULAS = {
     ),
     "technical.cci": "CCI=(典型价-period 日均典型价)/(constant*period 日平均绝对偏差)。",
     "technical.ema_bias": "EMA 乖离率=100*(price/EMA(period)-1)，默认 period=28。",
+    "price.close": "直接比较规范日线的不复权收盘价与人民币固定阈值；信号收盘确认。",
     "price.return_pct": "区间涨跌幅=100*(price_t/price_(t-period)-1)，数值单位为百分点。",
     "price.rolling_high": "当日价格严格高于此前 period 个完整交易日的最高价；窗口排除当日。",
     "price.consecutive_up": "连续比较相邻收盘价；收盘价严格上涨累计一天，平盘或下跌归零。",
@@ -484,6 +488,10 @@ STABLE_FORMULAS = {
     "price.amplitude": "振幅=100*(当日最高价-当日最低价)/前一交易日收盘价。",
     "market.volume": "兼容口径：当日成交量与含当日的 N 日简单平均成交量比较。",
     "market.amount": "直接使用规范日线中的当日成交额，单位为人民币元。",
+    "market.turnover_rate": (
+        "直接比较供应商保存的原始换手率百分点；不由成交量、成交额或流通股本推导。"
+        "缺失原始值、provider 或 methodology 时拒绝运行。"
+    ),
     "amount.average": "含当日在内的 period 日成交额简单平均值，单位为人民币元。",
     "volume.relative": (
         "RVOL=当日成交量/此前 baseline_period 个正成交量交易日均量；基线排除当日，"
@@ -641,8 +649,6 @@ def _metric_payloads() -> list[dict[str, Any]]:
         for metric_id, name_zh in definitions:
             if metric_id in STABLE_IMPLEMENTATIONS:
                 status = "stable"
-            elif metric_id == "market.turnover_rate":
-                status = "unavailable"
             elif family in {"technical", "price_action"} or metric_id in research_volume_ids:
                 status = "research_only"
             else:
@@ -661,16 +667,13 @@ def _metric_payloads() -> list[dict[str, Any]]:
             }
             if metric_id == "market.turnover_rate":
                 requirement = {
-                    "dataset_id": "market.provider_factors.point_in_time",
+                    "dataset_id": "market.ohlcv.daily",
                     "fields": [
                         "instrument_id",
                         "session_date",
-                        "field_code",
-                        "value",
-                        "unit",
-                        "provider",
-                        "methodology_version",
-                        "revision_id",
+                        "turnover_rate_pct",
+                        "turnover_rate_provider",
+                        "turnover_rate_methodology",
                     ],
                     "frequency": "1d",
                     "point_in_time_required": True,
@@ -680,18 +683,18 @@ def _metric_payloads() -> list[dict[str, Any]]:
                         "ingested_at",
                         "revision_id",
                     ],
-                    "license_status": "not_acquired",
+                    "license_status": "cleared",
                 }
                 time_semantics = {
-                    "observation_basis": "available_at",
-                    "required_quality": "date_only",
-                    "date_only_policy": "conservative_after_close",
+                    "observation_basis": "bar_close",
+                    "required_quality": "exchange_session",
+                    "date_only_policy": "not_applicable",
                     "revision_policy": "as_known_at_cutoff",
                     "default_order_time": "next_tradable_session_open",
-                    "daily_bar_fallback": "reject",
+                    "daily_bar_fallback": "next_tradable_session_open",
                     "notes": (
-                        "成交量本身不能推出换手率；必须使用当时可得的流通股本，"
-                        "或保存供应商原始换手率及其方法学版本。"
+                        "只使用供应商原始换手率百分点；不得由成交量、成交额或流通股本推导。"
+                        "原始值、provider 或 methodology 缺一即拒绝。"
                     ),
                 }
             elif family == "fundamental_valuation":
@@ -748,12 +751,6 @@ def _metric_payloads() -> list[dict[str, Any]]:
                     "status": status,
                     "formula_summary": STABLE_FORMULAS.get(metric_id)
                     or (
-                        "换手率=当日成交股数/当时可得流通股本；若使用供应商原始值，"
-                        "必须固定 provider 与 methodology_version。"
-                        if metric_id == "market.turnover_rate"
-                        else None
-                    )
-                    or (
                         f"按版本化定义计算{name_zh}，参数、复权口径和缺失值规则须在实现前冻结。"
                         if status == "research_only"
                         else None
@@ -770,8 +767,8 @@ def _metric_payloads() -> list[dict[str, Any]]:
                     "blockers": blockers if not stable else [],
                 }
             )
-    if len(payloads) != 181:
-        raise AssertionError(f"expected 181 metrics, got {len(payloads)}")
+    if len(payloads) != 182:
+        raise AssertionError(f"expected 182 metrics, got {len(payloads)}")
     return payloads
 
 
@@ -816,13 +813,20 @@ def _parameters(metric_id: str) -> list[str]:
         return ["period", "price_field"]
     if metric_id == "technical.historical_volatility":
         return ["period", "annualization_sessions", "price_field"]
+    if metric_id == "price.close":
+        return []
     if metric_id in {"price.return_pct", "price.rolling_high"}:
         return ["period", "price_field"]
     if metric_id == "price.consecutive_up":
         return ["days"]
     if metric_id == "price.opening_gap":
         return []
-    if metric_id in {"price.amplitude", "price.true_range", "market.amount"}:
+    if metric_id in {
+        "price.amplitude",
+        "price.true_range",
+        "market.amount",
+        "market.turnover_rate",
+    }:
         return []
     if metric_id == "amount.average":
         return ["period"]
@@ -895,11 +899,20 @@ def _triggers(metric_id: str) -> list[str]:
             "price_above_upper",
             "price_below_lower",
         ]
+    if metric_id in {"price.close", "price.return_pct"}:
+        return [
+            "crosses_above",
+            "crosses_below",
+            "above",
+            "below",
+            "at_least",
+            "at_most",
+        ]
     if metric_id in {
-        "price.return_pct",
         "price.amplitude",
         "price.true_range",
         "market.amount",
+        "market.turnover_rate",
         "amount.average",
     }:
         return ["crosses_above", "crosses_below", "above", "below"]
@@ -934,12 +947,14 @@ def _warmup(metric_id: str) -> int:
         "technical.cci": 15,
         "technical.bbi": 25,
         "technical.ema_bias": 29,
+        "price.close": 2,
         "price.return_pct": 7,
         "price.rolling_high": 21,
         "price.consecutive_up": 4,
         "price.opening_gap": 2,
         "price.amplitude": 3,
         "market.amount": 2,
+        "market.turnover_rate": 2,
         "amount.average": 21,
         "volume.relative": 23,
         "volume.price_confirmation": 21,
@@ -1129,9 +1144,9 @@ def build_release() -> CoverageCatalogRelease:
         {
             "schema_version": "catalog-coverage.v1",
             "catalog_id": "cn_a.coverage",
-            "release_version": "2026.08.30",
+            "release_version": "2026.09.01",
             "state": "active",
-            "published_on": "2026-08-30",
+            "published_on": "2026-09-01",
             "metrics": _metric_payloads(),
             "events": _event_payloads(),
         }

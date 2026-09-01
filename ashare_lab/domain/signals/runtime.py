@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from ashare_lab.domain.catalog import CatalogSnapshot
 from ashare_lab.domain.events.runtime import EventRuntimeError, evaluate_event_condition_aligned
 from ashare_lab.domain.financials import FinancialFactRecord
-from ashare_lab.domain.market_data import DailyBar, EventEnvelope
+from ashare_lab.domain.market_data import DailyBar, EventEnvelope, PriceBasis
 from ashare_lab.domain.strategy import (
     AllCondition,
     AnyCondition,
@@ -70,8 +70,10 @@ STABLE_INDICATOR_EVALUATOR_IDS = frozenset(
     {
         "amount.average",
         "market.amount",
+        "market.turnover_rate",
         "market.volume",
         "price.amplitude",
+        "price.close",
         "price.consecutive_up",
         "price.return_pct",
         "price.rolling_high",
@@ -136,12 +138,20 @@ class SignalRuntime:
         bars: Sequence[DailyBar],
         events: Sequence[EventEnvelope] = (),
         financial_facts: Sequence[FinancialFactRecord] = (),
+        *,
+        execution_bars: Sequence[DailyBar] | None = None,
     ) -> tuple[SignalFact, ...]:
         """Return facts in session order, omitting bars still in warmup."""
 
         return tuple(
             fact
-            for fact in self.evaluate_aligned(condition, bars, events, financial_facts)
+            for fact in self.evaluate_aligned(
+                condition,
+                bars,
+                events,
+                financial_facts,
+                execution_bars=execution_bars,
+            )
             if fact is not None
         )
 
@@ -151,14 +161,42 @@ class SignalRuntime:
         bars: Sequence[DailyBar],
         events: Sequence[EventEnvelope] = (),
         financial_facts: Sequence[FinancialFactRecord] = (),
+        *,
+        execution_bars: Sequence[DailyBar] | None = None,
     ) -> tuple[SignalFact | None, ...]:
         """Return one slot per input bar; ``None`` means insufficient history."""
 
         canonical_bars = tuple(bars)
         _validate_bars(canonical_bars)
+        canonical_execution_bars = (
+            canonical_bars if execution_bars is None else tuple(execution_bars)
+        )
+        _validate_bars(canonical_execution_bars)
+        signal_keys = tuple((bar.instrument_id, bar.session_date) for bar in canonical_bars)
+        execution_keys = tuple(
+            (bar.instrument_id, bar.session_date) for bar in canonical_execution_bars
+        )
+        if execution_keys != signal_keys:
+            raise SignalRuntimeError("execution bars must align one-to-one with signal bars")
+        if any(
+            execution.available_at != signal.available_at
+            for signal, execution in zip(
+                canonical_bars,
+                canonical_execution_bars,
+                strict=True,
+            )
+        ):
+            raise SignalRuntimeError(
+                "execution and signal bars must have identical availability times"
+            )
+        if _uses_close_price(condition) and any(
+            bar.price_basis is not PriceBasis.UNADJUSTED for bar in canonical_execution_bars
+        ):
+            raise SignalRuntimeError("price.close requires unadjusted execution bars")
         return self._evaluate_node(
             condition,
             canonical_bars,
+            canonical_execution_bars,
             tuple(events),
             tuple(financial_facts),
         )
@@ -169,19 +207,31 @@ class SignalRuntime:
         bars: Sequence[DailyBar],
         events: Sequence[EventEnvelope] = (),
         financial_facts: Sequence[FinancialFactRecord] = (),
+        *,
+        execution_bars: Sequence[DailyBar] | None = None,
     ) -> SignalFact | None:
-        aligned = self.evaluate_aligned(condition, bars, events, financial_facts)
+        aligned = self.evaluate_aligned(
+            condition,
+            bars,
+            events,
+            financial_facts,
+            execution_bars=execution_bars,
+        )
         return aligned[-1] if aligned else None
 
     def _evaluate_node(
         self,
         condition: Condition,
         bars: tuple[DailyBar, ...],
+        execution_bars: tuple[DailyBar, ...],
         events: tuple[EventEnvelope, ...],
         financial_facts: tuple[FinancialFactRecord, ...],
     ) -> tuple[SignalFact | None, ...]:
         if isinstance(condition, IndicatorCondition):
-            return _evaluate_indicator(condition, bars)
+            return _evaluate_indicator(
+                condition,
+                execution_bars if condition.indicator_id == "price.close" else bars,
+            )
         if isinstance(condition, FinancialConditionV1):
             return _evaluate_financial(condition, bars, financial_facts)
         if isinstance(condition, EventCondition):
@@ -208,12 +258,28 @@ class SignalRuntime:
             )
         if isinstance(condition, (AllCondition, AnyCondition)):
             child_timelines = tuple(
-                self._evaluate_node(child, bars, events, financial_facts)
+                self._evaluate_node(child, bars, execution_bars, events, financial_facts)
                 for child in condition.children
             )
             return _combine(condition.type, child_timelines, bars)
-        child_timeline = self._evaluate_node(condition.child, bars, events, financial_facts)
+        child_timeline = self._evaluate_node(
+            condition.child,
+            bars,
+            execution_bars,
+            events,
+            financial_facts,
+        )
         return _combine("not", (child_timeline,), bars)
+
+
+def _uses_close_price(condition: Condition) -> bool:
+    if isinstance(condition, IndicatorCondition):
+        return condition.indicator_id == "price.close"
+    if isinstance(condition, (FinancialConditionV1, EventCondition)):
+        return False
+    if isinstance(condition, (AllCondition, AnyCondition)):
+        return any(_uses_close_price(child) for child in condition.children)
+    return _uses_close_price(condition.child)
 
 
 def _evaluate_financial(
@@ -374,6 +440,8 @@ def _evaluate_indicator_on_valid_bars(
         return _evaluate_bbi(condition, bars)
     if condition.indicator_id == "technical.ema_bias":
         return _evaluate_ema_bias(condition, bars)
+    if condition.indicator_id == "price.close":
+        return _evaluate_close_price(condition, bars)
     if condition.indicator_id == "price.return_pct":
         return _evaluate_return_pct(condition, bars)
     if condition.indicator_id == "price.rolling_high":
@@ -384,6 +452,8 @@ def _evaluate_indicator_on_valid_bars(
         return _evaluate_amplitude(condition, bars)
     if condition.indicator_id == "market.amount":
         return _evaluate_amount(condition, bars)
+    if condition.indicator_id == "market.turnover_rate":
+        return _evaluate_turnover_rate(condition, bars)
     if condition.indicator_id == "amount.average":
         return _evaluate_amount_average(condition, bars)
     if condition.indicator_id == "technical.macd":
@@ -727,6 +797,19 @@ def _evaluate_ema_bias(
     )
 
 
+def _evaluate_close_price(
+    condition: IndicatorCondition,
+    bars: tuple[DailyBar, ...],
+) -> tuple[SignalFact | None, ...]:
+    return _evaluate_threshold_series(
+        condition,
+        bars,
+        tuple(bar.close.amount for bar in bars),
+        label="close_cny",
+        dependency_start=lambda index, is_cross: max(0, index - int(is_cross)),
+    )
+
+
 def _evaluate_return_pct(
     condition: IndicatorCondition,
     bars: tuple[DailyBar, ...],
@@ -826,6 +909,36 @@ def _evaluate_amount(
         market_amount(bars),
         label="amount",
         dependency_start=lambda index, is_cross: max(0, index - 1 if is_cross else index),
+    )
+
+
+def _evaluate_turnover_rate(
+    condition: IndicatorCondition,
+    bars: tuple[DailyBar, ...],
+) -> tuple[SignalFact | None, ...]:
+    """Evaluate only the provider's raw percentage-point turnover-rate field.
+
+    The engine intentionally does not reconstruct turnover rate from daily
+    volume and a later float-share value.  That would silently alter the
+    supplier methodology and can introduce point-in-time leakage.
+    """
+
+    if any(
+        bar.turnover_rate_pct is None
+        or bar.turnover_rate_provider is None
+        or bar.turnover_rate_methodology is None
+        for bar in bars
+    ):
+        raise SignalRuntimeError(
+            "market.turnover_rate requires provider-supplied turnover_rate_pct "
+            "with provider and methodology"
+        )
+    return _evaluate_threshold_series(
+        condition,
+        bars,
+        tuple(cast(Decimal, bar.turnover_rate_pct) for bar in bars),
+        label="turnover_rate_pct",
+        dependency_start=lambda index, is_cross: max(0, index - int(is_cross)),
     )
 
 
@@ -1533,6 +1646,13 @@ def _evaluate_threshold_series(
     label: str,
     dependency_start: Callable[[int, bool], int],
 ) -> tuple[SignalFact | None, ...]:
+    if condition.trigger in {"at_least", "at_most"} and condition.indicator_id not in {
+        "price.close",
+        "price.return_pct",
+    }:
+        raise SignalRuntimeError(
+            f"inclusive threshold trigger is not supported for {condition.indicator_id}"
+        )
     comparator = _resolve_trigger(
         condition,
         {
@@ -1540,6 +1660,8 @@ def _evaluate_threshold_series(
             "crosses_below": Comparator.CROSSES_BELOW,
             "above": Comparator.GT,
             "below": Comparator.LT,
+            "at_least": Comparator.GTE,
+            "at_most": Comparator.LTE,
         },
         value_required=True,
     )

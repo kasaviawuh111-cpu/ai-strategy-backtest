@@ -24,7 +24,7 @@ def compiler() -> StrategyCompiler:
         generator=RuleBasedCandidateGenerator(),
         catalog=load_catalog_directory(ROOT / "catalogs"),
         catalog_id="cn_a.signals",
-        release_version="2026.08.30",
+        release_version="2026.09.01",
         trusted_date_provider=lambda: date(2026, 8, 30),
     )
 

@@ -25,9 +25,9 @@ def test_coverage_release_has_required_counts_and_unique_ids() -> None:
     snapshot = load_coverage_catalog_directory(COVERAGE_ROOT)
 
     assert len(snapshot.releases) == 1
-    assert len(snapshot.metrics) == 181
+    assert len(snapshot.metrics) == 182
     assert len(snapshot.events) == 160
-    assert len({item.id for item in snapshot.metrics}) == 181
+    assert len({item.id for item in snapshot.metrics}) == 182
     assert len({item.id for item in snapshot.events}) == 160
     assert snapshot.content_hash.startswith("sha256:")
 
@@ -37,12 +37,12 @@ def test_metric_family_and_status_counts_are_explicit() -> None:
 
     assert Counter(item.family for item in snapshot.metrics) == {
         "technical": 63,
-        "price_action": 38,
+        "price_action": 39,
         "volume_liquidity": 30,
         "fundamental_valuation": 50,
     }
     assert Counter(item.status for item in snapshot.metrics) == {
-        "stable": 35,
+        "stable": 36,
         "research_only": 74,
         "unavailable": 72,
     }
@@ -59,6 +59,7 @@ def test_only_authoritative_runtime_indicators_are_stable() -> None:
         "market.amount",
         "market.volume",
         "price.amplitude",
+        "price.close",
         "price.consecutive_up",
         "price.return_pct",
         "price.rolling_high",

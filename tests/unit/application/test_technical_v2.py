@@ -4,7 +4,6 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -34,6 +33,7 @@ from ashare_lab.domain.market_data import (
     Board,
     DailyBar,
     InstrumentSession,
+    PriceBasis,
     TradingStatus,
 )
 from ashare_lab.domain.orders import OrderSide
@@ -47,13 +47,15 @@ from ashare_lab.domain.shared import (
     Quantity,
 )
 from ashare_lab.domain.strategy.models_v2 import (
+    AllConditionV2,
     BacktestConfigV2,
     CatalogRefV2,
     ConditionGrounding,
+    ConditionV2,
     InterpretationCoverage,
-    LeafConditionV2,
     StrategySpecV2,
     TechnicalConditionV2,
+    iter_condition_leaf_paths,
 )
 from ashare_lab.domain.strategy.validation_v2 import (
     ConditionGroundingExpectation,
@@ -128,44 +130,78 @@ def _condition(trigger: str) -> TechnicalConditionV2:
     )
 
 
+def _close_condition(trigger: str, value: int | float) -> TechnicalConditionV2:
+    return TechnicalConditionV2(
+        indicator_id="price.close",
+        definition_version="1.0.0",
+        params={},
+        trigger=trigger,
+        value=value,
+    )
+
+
 def _spec(
     asset_type: AssetType = AssetType.STOCK,
     exchange: Exchange = Exchange.SH,
+    *,
+    entry: ConditionV2 | None = None,
+    exit: ConditionV2 | None = None,
 ) -> StrategySpecV2:
-    return StrategySpecV2(
-        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.08.30"),
+    entry_condition = entry or _condition("price_crosses_above")
+    exit_condition = exit or _condition("price_crosses_below")
+    draft = StrategySpecV2(
+        catalog=CatalogRefV2(catalog_id="cn_a.signals", release_version="2026.09.01"),
         instrument=_instrument(asset_type, exchange),
-        entry=_condition("price_crosses_above"),
-        exit=_condition("price_crosses_below"),
-        interpretation_coverage=InterpretationCoverage(
-            groundings=(
-                ConditionGrounding(
-                    dsl_path="$.entry",
-                    source_start=0,
-                    source_end=10,
-                    source_text=ORIGINAL_INPUT[0:10],
-                ),
-                ConditionGrounding(
-                    dsl_path="$.exit",
-                    source_start=11,
-                    source_end=len(ORIGINAL_INPUT),
-                    source_text=ORIGINAL_INPUT[11:],
-                ),
-            )
-        ),
+        entry=entry_condition,
+        exit=exit_condition,
+        interpretation_coverage=InterpretationCoverage(),
         backtest=BacktestConfigV2(
             start=START,
             end=END,
             initial_cash_cny=100_000,
         ),
     )
+    leaf_paths = tuple(path for path, _ in iter_condition_leaf_paths(draft))
+    if leaf_paths == ("$.entry", "$.exit"):
+        groundings = (
+            ConditionGrounding(
+                dsl_path="$.entry",
+                source_start=0,
+                source_end=10,
+                source_text=ORIGINAL_INPUT[0:10],
+            ),
+            ConditionGrounding(
+                dsl_path="$.exit",
+                source_start=11,
+                source_end=len(ORIGINAL_INPUT),
+                source_text=ORIGINAL_INPUT[11:],
+            ),
+        )
+    else:
+        groundings = tuple(
+            ConditionGrounding(
+                dsl_path=path,
+                source_start=0,
+                source_end=len(ORIGINAL_INPUT),
+                source_text=ORIGINAL_INPUT,
+            )
+            for path in leaf_paths
+        )
+    return draft.model_copy(
+        update={
+            "interpretation_coverage": InterpretationCoverage(groundings=groundings),
+        }
+    )
 
 
 def _plan(
     asset_type: AssetType = AssetType.STOCK,
     exchange: Exchange = Exchange.SH,
+    *,
+    entry: ConditionV2 | None = None,
+    exit: ConditionV2 | None = None,
 ):
-    spec = _spec(asset_type, exchange)
+    spec = _spec(asset_type, exchange, entry=entry, exit=exit)
     symbol = spec.instrument.symbol
     from ashare_lab.domain.provenance import SourceRef
 
@@ -187,19 +223,16 @@ def _plan(
         missing_value_policy="null_or_no_signal",
         source_refs=(source,),
     )
+    leaf_by_path = dict(iter_condition_leaf_paths(spec))
     expectations = tuple(
         ConditionGroundingExpectation(
             dsl_path=grounding.dsl_path,
             source_start=grounding.source_start,
             source_end=grounding.source_end,
             source_text=grounding.source_text,
-            condition_hash=condition_semantics_hash(cast(LeafConditionV2, condition)),
+            condition_hash=condition_semantics_hash(leaf_by_path[grounding.dsl_path]),
         )
-        for grounding, condition in zip(
-            spec.interpretation_coverage.groundings,
-            (spec.entry, spec.exit),
-            strict=True,
-        )
+        for grounding in spec.interpretation_coverage.groundings
     )
     candidate = StrategyCandidateV2(
         original_input=ORIGINAL_INPUT,
@@ -263,6 +296,23 @@ def _bars(
             ),
         )
         for index, close in enumerate(closes)
+    )
+
+
+def _adjusted_bars(
+    source: tuple[DailyBar, ...],
+    closes: tuple[str, ...],
+) -> tuple[DailyBar, ...]:
+    return tuple(
+        replace(
+            bar,
+            open=Price(Decimal(close)),
+            high=Price(Decimal(close)),
+            low=Price(Decimal(close)),
+            close=Price(Decimal(close)),
+            price_basis=PriceBasis.BACK_ADJUSTED,
+        )
+        for bar, close in zip(source, closes, strict=True)
     )
 
 
@@ -393,6 +443,148 @@ def test_signal_factory_is_deterministic_and_rejects_snapshot_or_future_mismatch
     with pytest.raises(TechnicalV2ExecutionError) as captured:
         build_technical_signal_records(request.plan, request.market_snapshot, tuple(future))
     assert captured.value.code == "lookahead_detected"
+
+
+def test_close_price_signal_and_provenance_use_unadjusted_execution_bars() -> None:
+    execution_bars = _bars()
+    signal_bars = _adjusted_bars(
+        execution_bars,
+        ("100", "90", "110", "120", "80", "70", "70"),
+    )
+    plan = _plan(
+        entry=_close_condition("at_least", 11),
+        exit=_close_condition("at_most", 8),
+    )
+
+    first = build_technical_signal_records(
+        plan,
+        _binding(),
+        signal_bars,
+        execution_bars=execution_bars,
+    )
+    changed_signal_bars = _adjusted_bars(
+        execution_bars,
+        ("900", "800", "700", "600", "500", "400", "300"),
+    )
+    second = build_technical_signal_records(
+        plan,
+        _binding(),
+        changed_signal_bars,
+        execution_bars=execution_bars,
+    )
+
+    assert first
+    assert tuple(item.record.fingerprint for item in first) == tuple(
+        item.record.fingerprint for item in second
+    )
+    assert {item.fact.left_value for item in first} <= {
+        Decimal("7"),
+        Decimal("8"),
+        Decimal("11"),
+        Decimal("12"),
+    }
+    assert all(len(item.record.input_envelopes) == 1 for item in first)
+    assert all("execution-unadjusted" in item.record.input_envelopes[0].data_id for item in first)
+    assert all(
+        all("back_adjusted" not in source.source_id for source in item.record.source_refs)
+        for item in first
+    )
+
+
+def test_close_price_v2_rejects_misaligned_execution_bars() -> None:
+    execution_bars = _bars()
+    signal_bars = _adjusted_bars(
+        execution_bars,
+        ("100", "90", "110", "120", "80", "70", "70"),
+    )
+    changed = list(execution_bars)
+    changed[2] = replace(
+        changed[2],
+        available_at=changed[2].available_at.replace(minute=1),
+    )
+    plan = _plan(
+        entry=_close_condition("at_least", 11),
+        exit=_close_condition("at_most", 8),
+    )
+
+    with pytest.raises(TechnicalV2ExecutionError) as captured:
+        build_technical_signal_records(
+            plan,
+            _binding(),
+            signal_bars,
+            execution_bars=tuple(changed),
+        )
+    assert captured.value.code == "data_unavailable"
+
+
+def test_close_price_v2_run_matches_raw_signal_trace_with_adjusted_signal_bars() -> None:
+    request = _engine_input()
+    plan = _plan(
+        entry=_close_condition("at_least", 11),
+        exit=_close_condition("at_most", 8),
+    )
+    signal_bars = _adjusted_bars(
+        request.bars,
+        ("100", "90", "110", "120", "80", "70", "70"),
+    )
+
+    completed = run_validated_technical_v2(replace(request, plan=plan, signal_bars=signal_bars))
+
+    assert completed.result.fills
+    assert {fact.left_value for fact in completed.result.signals} <= {
+        Decimal("7"),
+        Decimal("8"),
+        Decimal("11"),
+        Decimal("12"),
+    }
+    assert all(
+        "execution-unadjusted" in record.input_envelopes[0].data_id
+        for record in completed.signal_records
+    )
+
+
+def test_mixed_price_and_ma_provenance_binds_both_aligned_bar_series() -> None:
+    execution_bars = _bars()
+    signal_bars = _adjusted_bars(
+        execution_bars,
+        ("100", "90", "110", "120", "80", "70", "70"),
+    )
+    plan = _plan(
+        entry=AllConditionV2(
+            children=(
+                _close_condition("at_least", 11),
+                _condition("price_crosses_above"),
+            )
+        ),
+        exit=_close_condition("at_most", 8),
+    )
+
+    first = build_technical_signal_records(
+        plan,
+        _binding(),
+        signal_bars,
+        execution_bars=execution_bars,
+    )
+    second = build_technical_signal_records(
+        plan,
+        _binding(),
+        signal_bars,
+        execution_bars=execution_bars,
+    )
+    entry = next(item for item in first if item.record.condition_ref == "$.entry")
+
+    assert len(entry.record.input_envelopes) == 2
+    assert {
+        envelope.data_id.split("-prefix:", maxsplit=1)[0]
+        for envelope in entry.record.input_envelopes
+    } == {
+        "daily_ohlcv-execution-unadjusted",
+        "daily_ohlcv-technical-signal-back_adjusted",
+    }
+    assert len(entry.record.source_refs) == 3
+    assert tuple(item.record.fingerprint for item in first) == tuple(
+        item.record.fingerprint for item in second
+    )
 
 
 def test_stock_v2_is_a_thin_adapter_with_identical_v1_trades_and_result_hash() -> None:

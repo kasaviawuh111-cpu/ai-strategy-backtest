@@ -305,6 +305,7 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         signal_bars,
         request.events,
         request.financial_facts,
+        execution_bars=bars,
     )
     market_exit_condition = _exit_condition(request.strategy)
     exit_timeline: tuple[SignalFact | None, ...] = (
@@ -313,6 +314,7 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
             signal_bars,
             request.events,
             request.financial_facts,
+            execution_bars=bars,
         )
         if market_exit_condition is not None
         else (None,) * len(signal_bars)

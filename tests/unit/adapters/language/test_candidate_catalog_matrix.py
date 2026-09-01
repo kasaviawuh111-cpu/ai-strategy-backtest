@@ -227,12 +227,12 @@ def _event_payload(event_code: str) -> dict[str, object]:
     }
 
 
-def test_projection_exactly_matches_current_35_indicator_and_69_event_release() -> None:
+def test_projection_exactly_matches_current_37_indicator_and_69_event_release() -> None:
     stable_indicators = {item.id: item for item in CATALOG.indicators if item.status == "stable"}
     stable_metrics = {item.id: item for item in COVERAGE.metrics if item.status == "stable"}
     stable_events = {item.id: item for item in COVERAGE.events if item.status == "stable"}
 
-    assert len(MATRIX.indicators) == 35
+    assert len(MATRIX.indicators) == 37
     assert len(MATRIX.events) == 69
     assert {item.indicator_id for item in MATRIX.indicators} == set(stable_indicators)
     assert set(stable_indicators) == set(stable_metrics)

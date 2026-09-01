@@ -37,7 +37,7 @@ AI 在这里是受约束的理解与翻译层，不是收益预测器。它可�
 
 | 能力 | 当前结论 |
 |---|---|
-| 单股日线技术策略 | `implemented / fixture-tested / Live-unverified`：主链和 35 个透明日线定义已实现；旧公网 revision 的技术 API run 已通过，最终 clean-SHA H5 技术旅程未完成 |
+| 单股日线技术策略 | `implemented / fixture-tested / local-real-data-verified / Live-unverified`：主链和 37 个透明日线定义已实现；换手率已使用 BaoStock 原始字段完成本地真实回测；旧公网 revision 的技术 API run 已通过，最终 clean-SHA H5 技术旅程未完成 |
 | 单股日线事件策略 | `implemented / fixture-tested / local-real-data-verified / Live-unverified`：五类定期报告共有 26 条真实秒级观察，当前 producer 为 `composite:1f26…`、strict loader pin 为 `snapshot:4bd9…`；旧公网 revision 的事件 API run 已通过，最终 clean-SHA H5 事件旅程未完成 |
 | 定期报告正文词频 + 成交后持有期 | `implemented / fixture-tested / Mock-verified / Live-unverified`：初始完整正文确定性计数和首次真实买入成交后第 N 个 A 股交易日退出已落地；当前 `1f26…` 的 26 条 observation 均为 `document_text=0`，需 opt-in 重采后才能 Live |
 | 自然语言与观点引导 | 完整策略的确定性快路、受限 CandidateAst 与严格编译保持不变；模型 transport/bootstrap 路径已配置，较早版本有公网冒烟记录，但当前 revision 仍为 `Live-unverified`。不可执行的 `idea-route.v1` 已达到 `implemented / fixture-tested`：任意有意义输入先被理解；纯观点只生成“观点 → 可检验假设 → 当前权威 A 股页价格代理 → 2—3 个固定模板候选”，用户一次选择后才重新编译；本轮没有 Live 证据 |
@@ -74,7 +74,7 @@ AI 在这里是受约束的理解与翻译层，不是收益预测器。它可�
 
 ### 0.5 不允许出现的“完成假象”
 
-- Coverage Catalog 共登记 181 个 A 股单股指标/数据项：技术、价格行为、量能与流动性 131 项中只有 35 个 `stable`、74 个 `research_only`、22 个 `unavailable`，另有 50 个不可用的单股基本面/估值条目；目录登记不等于可回测。
+- Coverage Catalog 共登记 182 个 A 股单股指标/数据项：技术、价格行为、量能与流动性 132 项中只有 37 个 `stable`、74 个 `research_only`、21 个 `unavailable`，另有 50 个不可用的单股基本面/估值条目；目录登记不等于可回测。
 - Event Taxonomy 有 160 个事件代码，不等于 160 个事件已经有真实历史数据；当前 69 个代码路径也不等于 69 类都完成了 strict E2E。
 - Mock 页面跑通不等于真实 API、真实数据和真实撮合跑通。
 - 有 checksum 不等于原始数据已经进入不可变对象存储。
@@ -432,7 +432,7 @@ utterance + instrument_context + as_of_date
 → canonical JSON + SHA-256
 ```
 
-35 个可执行指标定义不等于任意中文说法都能直接变成 StrategySpec；每个新增同义词、参数表达和组合语法都需要 golden case 和回归测试。完整策略的最终执行仍只允许落入受限 DSL 的合法候选，不能为了显得灵活而猜错规则。
+37 个可执行指标定义不等于任意中文说法都能直接变成 StrategySpec；每个新增同义词、参数表达和组合语法都需要 golden case 和回归测试。完整策略的最终执行仍只允许落入受限 DSL 的合法候选，不能为了显得灵活而猜错规则。
 
 只输入“MACD”“RSI”这类裸指标时，买入、卖出方向都不完整，必须集中澄清一次，不能静默补成产品预设策略；只有补齐关键交易方向后才进入确认卡。这是当前 P0 真实入口验收项。
 
@@ -758,7 +758,7 @@ OHLCV、session 和公司行动是正式运行的关键依赖，snapshot 用户�
 
 ## 7. 指标与事件算法
 
-### 7.1 A 股单股指标总账（131 项）
+### 7.1 A 股单股指标总账（132 项）
 
 本节只登记可绑定到当前 A 股单只标的的技术指标、价格行为、成交量与流动性数据；基本面估值和事件代码分别列账。
 
@@ -769,9 +769,9 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 | 家族 | 总数 | `stable` 可执行 | `research_only` 研究候选 | `unavailable` 当前不可用 |
 |---|---:|---:|---:|---:|
 | 技术指标 `technical` | 63 | 24 | 39 | 0 |
-| 价格行为 `price_action` | 38 | 5 | 33 | 0 |
+| 价格行为 `price_action` | 39 | 6 | 33 | 0 |
 | 量能与流动性 `volume_liquidity` | 30 | 6 | 2 | 22 |
-| **合计** | **131** | **35** | **74** | **22** |
+| **合计** | **132** | **36** | **74** | **22** |
 
 另外 50 个 `fundamental_valuation` 基本面/估值条目不计入本节；它们仍在 Coverage Catalog 中，但没有通过 PIT 数据门禁，不能借目录登记混入当前策略回测。事件信号另见 7.4。
 
@@ -782,23 +782,23 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 - `unavailable`：Catalog 尚未接受它成为研究运行候选，通常被 PIT 数据、授权、快照或上游序列阻塞；禁止用相似的日线字段伪造；
 - `rejected`：黑盒包装名、无法解释的评分或证据不足的数据，不进入 Catalog；只有取得原公式或合规的供应商原样历史序列后才能重新评审。
 
-当前 35/74/22 数量严格反映现有 Catalog 状态，不按本 Spec 自行改写。`technical.volume_profile` 是已知元数据例外：它当前仍计入 74 个 `research_only`，但真实价位分布缺分钟/逐笔输入，运营上按 P4 阻塞处理；若后续修正为 `unavailable`，必须同时更新生成器、Catalog、测试和本节数量，不能只改文档。
+当前 36/74/22 数量严格反映现有 Catalog 状态，不按本 Spec 自行改写。`technical.volume_profile` 是已知元数据例外：它当前仍计入 74 个 `research_only`，但真实价位分布缺分钟/逐笔输入，运营上按 P4 阻塞处理；若后续修正为 `unavailable`，必须同时更新生成器、Catalog、测试和本节数量，不能只改文档。
 
 三个“覆盖数”必须分别表达：
 
 | 层次 | 当前数量 | 准确含义 |
 |---|---:|---|
-| 权威运行时 | 35 | DSL 已可执行的 `stable` 定义 |
-| 受限候选投影 | 35 | 可由确定性快路或受限 Candidate AST 映射；并不表示任意中文表达都已验收 |
+| 权威运行时 | 36 | DSL 已可执行的 `stable` 定义 |
+| 受限候选投影 | 36 | 可由确定性快路或受限 Candidate AST 映射；并不表示任意中文表达都已验收 |
 | 前端 Mock 技术策略生成 | 3 | 当前生成并演示 `technical.ma`、`technical.rsi`、`technical.macd` |
 | 前端 Mock 事件策略生成 | 1 | 当前只演示 `event.financial_results.annual_report`，并持续标记为 Mock |
 
-因此不能说“35 个指标已经在前端完整演示”，更不能说“131 项已接入”。
+因此不能说“37 个指标已经在前端完整演示”，更不能说“132 项已接入”。
 
-#### 7.1.2 35 个 `stable` 指标的共同契约
+#### 7.1.2 37 个 `stable` 指标的共同契约
 
 - 当前版本全部为 `1.0.0`，只支持 `1d + bar_close_confirmed`；指标事实时间为交易日 `15:00 Asia/Shanghai`，最早在下一可交易 session 使用日线开盘价代理尝试；
-- 价格类指标读取后复权 `signal_daily_ohlcv` 以保持序列连续；成交、费用、持仓和估值仍使用不复权执行价格；成交量和成交额原样复制，不做复权；
+- 除固定名义价格 `price.close` 外，价格类技术指标读取后复权 `signal_daily_ohlcv` 以保持序列连续；`price.close`、成交、费用、持仓和估值使用不复权执行价格；成交量和成交额原样复制，不做复权；
 - 所有计算使用确定性 `Decimal`；预热不足返回未知值，不把未知当 0；
 - 运行时剔除成交量为 0 的停牌观察：它不推进有效窗口、不产生信号，但输出仍与原始交易日对齐；
 - 除非某个定义另有明确声明，公式中的 N 根、`t-N`、连续天数、前 N 日和预热 bars 都按过滤后的“有效信号观察”计数，而不是按日历日或包含停牌的原始 session 数；
@@ -807,7 +807,7 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 - 下表的预热是默认参数下的 Catalog 安全值。提交时仍根据实际参数、交叉需求和复合条件动态重算；
 - 供应商技术序列只可用于黄金值对拍，不能静默覆盖本地透明定义。
 
-#### 7.1.3 35 个 `stable` 指标明细
+#### 7.1.3 37 个 `stable` 指标明细
 
 | 分组 | 定义 ID / 中文能力 | 公式与默认参数 | 可执行触发 | 默认预热与关键边界 |
 |---|---|---|---|---|
@@ -821,6 +821,7 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 | 摆动 | `technical.kdj` KDJ | 9 日 RSV，K/D 平滑 3/3，K/D 初值 50，`J=3K-2D` | K 金叉/死叉 D、J 高于/低于阈值 | 10 根；零振幅 RSV=50，J 不强制在 0—100 |
 | 摆动 | `technical.cci` CCI | `TP=(H+L+C)/3`；`(TP-SMA(TP))/(0.015×总体平均绝对偏差)`；`period=14` | 上穿/下穿阈值、持续高于/低于阈值 | 15 根；平坦窗口 CCI=0 |
 | 乖离 | `technical.ema_bias` EMA 乖离率 | `100×(price/EMA28-1)` | 上穿/下穿阈值、持续高于/低于阈值 | 29 根；数值 5 表示 5 个百分点，EMA 依赖完整历史前缀 |
+| 价格 | `price.close` 固定收盘价阈值 | 直接比较不复权日线收盘价与人民币阈值 | 上穿/下穿阈值、持续高于/低于或不低于/不高于阈值 | 2 根；收盘后确认，最早下一可交易时点执行；不以后复权价格偷换用户的名义价位 |
 | 价格 | `price.return_pct` 区间涨跌幅 | `100×(P_t/P_(t-N)-1)`；默认 5 条有效日线收盘价 | 上穿/下穿阈值、持续高于/低于阈值 | 7 根；与第 5 条此前有效观察比，单位为百分点 |
 | 价格 | `price.rolling_high` 滚动新高 | 当日价格严格高于此前 N 条完整有效观察的最高值；`period=20` | 创新高 | 21 根；当日不进入基线，相等不触发 |
 | 价格 | `price.consecutive_up` 连续上涨 | 收盘价连续严格上涨；`days=3` | 至少连续 N 天 | 4 根；平盘或下跌都清零 |
@@ -860,7 +861,7 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 | 放量 / 缩量 | 推荐映射为 `volume.relative`：默认 RVOL `>=1.5` / `<=0.7` |
 | 连续或持续放量 | 默认连续 3 个有效交易日且 RVOL `>=1.2` |
 
-35 个运行时定义不等于任意中文都能调用：当前中文解析通常固定使用 `close`；`market.volume` 只保留旧策略兼容；“RSI 上涨”“20 日均线向上”“OBV 不下降”等未建模方向或否定表达必须 fail closed。每个定义后续还要维护“可执行 Trigger”和“已验收中文说法”两列，不能把 DSL 能力写成自然语言能力。
+37 个运行时定义不等于任意中文都能调用：当前中文解析通常固定使用 `close`；`market.volume` 只保留旧策略兼容；“RSI 上涨”“20 日均线向上”“OBV 不下降”等未建模方向或否定表达必须 fail closed。每个定义后续还要维护“可执行 Trigger”和“已验收中文说法”两列，不能把 DSL 能力写成自然语言能力。
 
 #### 7.1.5 74 个 `research_only` 指标完整清单
 
@@ -879,14 +880,14 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 
 `technical.volume_profile` 当前只声明日线 OHLCV，无法还原真实“各价位成交量分布”；除非改成明确的日线近似算法并换名，或取得分钟/逐笔/供应商原样序列，否则不得升级为 `stable`。
 
-#### 7.1.6 22 个 `unavailable` 单股数据项完整清单
+#### 7.1.6 21 个 `unavailable` 单股数据项完整清单
 
 这些指标不是“以后补一个公式”就能使用。升级时必须把所需数据集、PIT 可得时间、授权、修订政策和回放快照一起交付。
 
 | 数据门槛 | 完整清单 |
 |---|---|
 | 可从日线候选数据推导、但尚未完成权威实现与测试（10） | 成交量 Z 分数 `volume.zscore`；成交量分位 `volume.percentile`；成交额分位 `amount.percentile`；成交量 ROC `volume.roc`；成交量新高 `volume.rolling_high`；成交量枯竭 `volume.dry_up`；Amihud 非流动性 `liquidity.amihud`；零收益日占比 `liquidity.zero_return_ratio`；Corwin-Schultz 价差 `liquidity.corwin_schultz_spread`；Roll 隐含价差 `liquidity.roll_spread` |
-| 需要 PIT 股本/流通盘参考序列（3） | 换手率 `market.turnover_rate`；换手速度 `liquidity.turnover_velocity`；自由流通股换手率 `liquidity.free_float_turnover` |
+| 需要 PIT 股本/流通盘参考序列（2） | 换手速度 `liquidity.turnover_velocity`；自由流通股换手率 `liquidity.free_float_turnover` |
 | 需要分钟、逐笔或 L2/供应商原样序列（9） | 委托不平衡 `liquidity.order_imbalance`；买卖价差 `liquidity.bid_ask_spread`；盘口深度 `liquidity.depth`；成交笔数 `liquidity.trade_count`；平均单笔成交额 `liquidity.average_trade_size`；大单成交占比 `liquidity.large_order_ratio`；撤单率 `liquidity.cancel_ratio`；涨跌停排队量 `liquidity.limit_queue`；冲击成本 `liquidity.impact_cost` |
 
 日线可推导的 10 项可以作为下一批透明指标候选，但当前仍是 `unavailable`，不能因“公式常见”就绕过 Catalog 发布门禁。
@@ -899,7 +900,7 @@ Canonical 来源为 `catalogs/coverage/cn_a.v1.catalog.json`；真正允许写�
 |---|---:|---|---|
 | P1：主要基于日线，可透明复算 | 31 = 21 `research_only` + 10 `unavailable` | 技术 8、价格 11、量能 12 | 大多不依赖新的供应商体系；涨跌停状态项先补准确 session/limit 数据，再评审公式、边界和无未来数据测试 |
 | P2：日线可算但重复度或定义争议较高 | 52 `research_only` | 技术 30、价格/K 线 22 | 先避免堆同质指标和模糊 K 线包装 |
-| P3：必须增加单股 PIT 参考数据 | 3 `unavailable` | 换手率、换手速度、自由流通股换手率 | 需要完整历史流通股本、可得时间、修订和授权快照 |
+| P3：必须增加单股 PIT 参考数据 | 2 `unavailable` | 换手速度、自由流通股换手率 | 需要完整历史流通股本、可得时间、修订和授权快照；普通换手率已改为使用带来源证明的供应商原始字段 |
 | P4：必须有分钟、逐笔或 L2 | 10 = 1 `research_only` + 9 `unavailable` | `technical.volume_profile` 和 9 个单股流动性微观结构指标 | 当前日线无法还原，严禁近似冒充 |
 
 P1 的完整候选为：
@@ -929,7 +930,7 @@ P4 的 10 项是：`technical.volume_profile`、`liquidity.average_trade_size`�
 
 | 数据主题 | 当前或候选路由 | 在本项目中的口径 |
 |---|---|---|
-| 单股日线 OHLCV/成交额 | Choice 快照；东方财富 Push2 日线仅为采集候选 | 当前 35 个稳定指标的主要输入仍是已校验快照；Push2 返回必须先通过身份、单位、session、公司行动和 coverage 校验并发布不可变快照，回测运行时不直接请求 API |
+| 单股日线 OHLCV/成交额/换手率 | Choice、BaoStock 快照；东方财富 Push2 日线为采集候选 | 当前 37 个稳定指标的主要输入仍是已校验快照；换手率只使用带 provider/methodology 的供应商原始字段；采集返回必须先通过身份、单位、session、公司行动和 coverage 校验并发布不可变快照，回测运行时不直接请求 API |
 | 换手率、流通股本、市值等 | Choice `cfc` 验证后的字段，或 Tushare `daily_basic` 候选 | 尚未形成全区间 PIT 快照与授权验收，当前不可用 |
 | 主力/资金流 | Tushare `moneyflow_dc`、`moneyflow`，以及独立 Push2 研究快照 | 不同供应商、不同方法学的序列禁止拼接；Push2 当前每行均不得进入历史回测 |
 | 筹码分布 | Tushare `cyq_perf` / `cyq_chips` 或 Choice 对应原样序列候选 | 需要供应商原样历史、首次可得时间和修订政策；不能由日线 OHLCV 反推 |
@@ -948,7 +949,7 @@ Choice 个人研究账号只用于 Demo 建链；生产必须换公司授权。�
 - 技术包装：蓝粉彩带、中期彩带、紧贴彩带、四合一、底部出击、操盘提醒；
 - 机构与筹码：机构新进、机构连续增持、筹码集中度、平均持仓成本、获利盘比例。
 
-其中估值擒龙、价值策略、业绩超预期、彼得林奇成长指标属于基本面/估值候选；扫雷、事件驱动、消息观测台属于事件产品包装；它们记录在这里是为了防止误仿造，不计入 131 项 A 股单股指标。
+其中估值擒龙、价值策略、业绩超预期、彼得林奇成长指标属于基本面/估值候选；扫雷、事件驱动、消息观测台属于事件产品包装；它们记录在这里是为了防止误仿造，不计入 132 项 A 股单股指标。
 
 处理原则只有三种：
 
@@ -958,11 +959,11 @@ Choice 个人研究账号只用于 Demo 建链；生产必须换公司授权。�
 
 每个新指标从候选升级为 `stable` 时，必须同时交付：definition ID/version、中文可用说法、公式与初始化、参数/关系/单位、输入数据与复权口径、`available_at`、默认和动态预热、触发器、停牌/零值/缺失值规则、黄金值对拍、前缀不变性、自然语言编译矩阵和结果解释文案；缺一项都不能发布。
 
-当前 35 个定义的主要工程证据位于 `tests/unit/signals/test_indicators.py`、`tests/unit/signals/test_runtime.py`、`tests/unit/strategy/test_catalog.py`、`tests/unit/application/test_backtest_submission.py` 和 `tests/unit/application/test_compile_strategy.py`。指标/Catalog/动态预热与中文编译矩阵已有定向夹具证据；本轮不沿用旧测试数量，最终仍须在 clean integration SHA 重跑，且这些测试不替代当前 strict composite 下的 Live E2E。
+当前 37 个定义的主要工程证据位于 `tests/unit/signals/test_indicators.py`、`tests/unit/signals/test_runtime.py`、`tests/unit/signals/test_turnover_rate_runtime.py`、`tests/unit/strategy/test_catalog.py`、`tests/unit/application/test_backtest_submission.py` 和 `tests/unit/application/test_compile_strategy.py`。指标/Catalog/动态预热与中文编译矩阵已有定向夹具证据；本轮不沿用旧测试数量，最终仍须在 clean integration SHA 重跑，且这些测试不替代当前 strict composite 下的 Live E2E。
 
 ### 7.2 指标确认与预热
 
-- 当前 35 个定义全部是 `1d + bar_close_confirmed`；
+- 当前 37 个定义全部是 `1d + bar_close_confirmed`；
 - 交叉必须比较两个已经完成的指标点；
 - 停牌/零量日按各指标的显式规则处理，不用前值冒充新信号；
 - 枢轴背离只在右侧 K 线全部完成后的确认日产生，绝不回填到历史高低点；
@@ -1607,11 +1608,11 @@ flowchart LR
 | 规则输入、标的身份与受限 DSL | `implemented / fixture-tested / Live-unverified` | 编译、修订、hash、Schema 与契约测试存在 | 最终 clean-SHA Live 双策略 |
 | Vibe 风格受限策略候选 adapter | `implemented / fixture-tested / Live-unverified` | 确定性快路、严格 JSON CandidateAst、最多 3 个候选、置信度门槛、模型 transport/bootstrap 配置路径与一次集中澄清已落地；旧 provider 路径曾做公网冒烟 | 当前 revision 的完整 provenance、真实 API/H5 复验；旧冒烟不证明当前版本 |
 | 观点假设引导 `idea-route.v1` | `implemented / fixture-tested` | 任意有意义输入先被理解；纯观点只映射当前权威 A 股页价格代理，并从服务端固定模板给出 2—3 个不可执行候选；选择后重新走原编译器 | 当前版本真实 API/H5、provider 故障态与全链 provenance 复验；本轮不得写成 Live |
-| 35 个日线指标 | `implemented / fixture-tested / Live-unverified` | 公式、黄金值、预热、停牌和前缀测试通过 | 最终 clean-SHA 技术 run 与真实常用问句验收 |
+| 37 个日线指标 | `implemented / fixture-tested / local-real-data-verified / Live-unverified` | 公式或供应商字段契约、黄金值、预热、停牌和前缀测试通过；换手率本地真实 run 已完成 | 最终 clean-SHA 技术 run 与真实常用问句验收 |
 | MOSS/pandas 指标 adapter | `implemented / fixture-tested / Live-unverified` | `IndicatorBackend` 已建立；EMA/MACD 通过显式容差与前缀门禁，RSI 因口径不兼容被排除 | 尚非运行时默认；其余指标需逐项对拍和版本化迁移 |
 | Vibe/mootdx 日线采集 adapter | `implemented / fixture-tested / Live-unverified` | 注入式 A 股日线 Protocol、session 完整性、单位转换和证据形状已用 fake client 验证 | `mootdx` 商业/数据条款待审，未安装、未联网、未发布不可变快照 |
 | AKShare-shaped Push2 日线采集 adapter | `implemented / fixture-tested / Live-unverified` | 固定 AKShare commit 的完整请求协议；A 股身份、raw hash、量纲、区间与 session/公司行动交叉校验已有夹具 | 直连被远端断开；无真实 batch、不可变 snapshot 或生产授权；AKShare 不作为运行依赖 |
-| 181 项覆盖目录 | `implemented` 的 Catalog | 仅 35 个单股指标为 `stable`；其他仍为 Catalog 的 `research_only/unavailable` | 不能称 181 项可执行 |
+| 182 项覆盖目录 | `implemented` 的 Catalog | 仅 37 个单股指标为 `stable`；其他仍为 Catalog 的 `research_only/unavailable` | 不能称 182 项可执行 |
 | 160 项事件 Taxonomy | `decided` | 统一分类词典 | 不代表代码或真实数据覆盖 |
 | 69 个事件代码路径 | `implemented / Live-unverified` | Catalog、编译、适配/运行时代码路径存在；`/capabilities` 另按 pinned snapshot coverage 逐码给出运行可用性 | 当前 `1f26…/4bd9…` 只允许五类定期报告；不能称 69 类 E2E |
 | 四源事件观察与融合 | `implemented / fixture-tested / Live-unverified` | 固定优先级与隔离有测试；东方财富有本地真实观察 | iFinD/RQData/Tushare 缺授权实网验证 |

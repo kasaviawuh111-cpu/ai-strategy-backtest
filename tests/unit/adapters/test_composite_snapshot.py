@@ -539,6 +539,16 @@ def test_technical_only_composite_keeps_event_v2_without_advertising_event_capab
     assert (result.path / "event_observations.parquet").is_file()
 
 
+def test_strict_pin_accepts_a_technical_only_composite(tmp_path: Path) -> None:
+    result = _technical_only_composite(tmp_path)
+    repository = LocalParquetMarketDataRepository(result.path, profile="composite_snapshot")
+
+    snapshot = repository.pin_strict_composite_snapshot()
+
+    assert snapshot.producer_snapshot_id == result.snapshot_id
+    assert repository.strict_composite_event_codes() == frozenset()
+
+
 def test_composite_accepts_allowlisted_provider_neutral_technical_source(
     tmp_path: Path,
 ) -> None:

@@ -34,7 +34,12 @@ from ashare_lab.application.daily_backtest import (
 )
 from ashare_lab.domain.execution import FeeCalculator
 from ashare_lab.domain.instruments import AssetType, Exchange
-from ashare_lab.domain.market_data import CorporateAction, DailyBar, InstrumentSession
+from ashare_lab.domain.market_data import (
+    CorporateAction,
+    DailyBar,
+    InstrumentSession,
+    PriceBasis,
+)
 from ashare_lab.domain.orders import OrderSide
 from ashare_lab.domain.portfolio import FeeBreakdown
 from ashare_lab.domain.provenance import DataEnvelope, SignalRecord, SourceKind, SourceRef
@@ -46,8 +51,14 @@ from ashare_lab.domain.shared import (
     Price,
     Quantity,
 )
-from ashare_lab.domain.signals import SignalFact, SignalRuntime
-from ashare_lab.domain.strategy import StrategySpec
+from ashare_lab.domain.signals import SignalFact, SignalRuntime, SignalRuntimeError
+from ashare_lab.domain.strategy import (
+    AllCondition,
+    AnyCondition,
+    IndicatorCondition,
+    NotCondition,
+    StrategySpec,
+)
 from ashare_lab.domain.strategy.canonical import canonical_hash
 from ashare_lab.domain.strategy.models import Condition
 from ashare_lab.domain.strategy.models_v2 import FrozenV2Model
@@ -315,12 +326,24 @@ def build_technical_signal_records(
     plan: object,
     market_snapshot: SnapshotBindingV2,
     bars: tuple[DailyBar, ...],
+    *,
+    execution_bars: tuple[DailyBar, ...] | None = None,
 ) -> tuple[TechnicalSignalArtifact, ...]:
     """Evaluate technical conditions and derive all provenance server-side."""
 
     strategy = adapt_validated_technical_plan(plan)
     validated = _validated_plan(plan)
-    canonical_bars = _validate_snapshot_inputs(validated, market_snapshot, bars)
+    canonical_signal_bars = _validate_snapshot_inputs(validated, market_snapshot, bars)
+    canonical_execution_bars = (
+        canonical_signal_bars
+        if execution_bars is None
+        else _validate_snapshot_inputs(validated, market_snapshot, execution_bars)
+    )
+    _validate_bar_series_pair(
+        canonical_signal_bars,
+        canonical_execution_bars,
+        execution_series_explicit=execution_bars is not None,
+    )
     roots = (
         ("$.entry", validated.strategy.entry, strategy.entry),
         ("$.exit", validated.strategy.exit, strategy.exit.children[0]),
@@ -333,25 +356,32 @@ def build_technical_signal_records(
             condition_ref,
             v2_condition,
         )
-        timeline = runtime.evaluate_aligned(cast(Condition, v1_condition), canonical_bars)
+        condition = cast(Condition, v1_condition)
+        try:
+            timeline = runtime.evaluate_aligned(
+                condition,
+                canonical_signal_bars,
+                execution_bars=canonical_execution_bars,
+            )
+        except SignalRuntimeError as error:
+            raise TechnicalV2ExecutionError("data_unavailable", str(error)) from error
         for index, fact in enumerate(timeline):
             if fact is None or not fact.triggered:
                 continue
-            dependencies = tuple(
-                bar for bar in canonical_bars[: index + 1] if bar.available_at <= fact.available_at
+            bar_series = _provenance_bar_series(
+                condition,
+                canonical_signal_bars,
+                canonical_execution_bars,
+                index=index,
+                fact=fact,
             )
-            if not dependencies or canonical_bars[index] not in dependencies:
-                raise TechnicalV2ExecutionError(
-                    "lookahead_detected",
-                    "signal input is not available at signal_at",
-                )
             record = _signal_record(
                 plan=validated,
                 snapshot=market_snapshot,
                 condition_id=condition_id,
                 condition_ref=condition_ref,
                 fact=fact,
-                bars=dependencies,
+                bar_series=bar_series,
             )
             artifacts.append(
                 TechnicalSignalArtifact(
@@ -376,11 +406,19 @@ def generate_technical_signal_records(
     plan: object,
     bars: tuple[DailyBar, ...],
     market_snapshot: SnapshotBindingV2,
+    *,
+    execution_bars: tuple[DailyBar, ...] | None = None,
 ) -> tuple[SignalRecord, ...]:
     """Return triggered records in deterministic time/path/fingerprint order."""
 
     return tuple(
-        artifact.record for artifact in build_technical_signal_records(plan, market_snapshot, bars)
+        artifact.record
+        for artifact in build_technical_signal_records(
+            plan,
+            market_snapshot,
+            bars,
+            execution_bars=execution_bars,
+        )
     )
 
 
@@ -394,6 +432,7 @@ def run_validated_technical_v2(request: TechnicalV2BacktestInput) -> TechnicalV2
         request.plan,
         request.market_snapshot,
         trace_bars,
+        execution_bars=request.bars,
     )
     result = run_daily_backtest(
         DailyBacktestInput(
@@ -489,6 +528,100 @@ def _decimal_identity(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+def _validate_bar_series_pair(
+    signal_bars: tuple[DailyBar, ...],
+    execution_bars: tuple[DailyBar, ...],
+    *,
+    execution_series_explicit: bool,
+) -> None:
+    signal_keys = tuple((bar.instrument_id, bar.session_date) for bar in signal_bars)
+    execution_keys = tuple((bar.instrument_id, bar.session_date) for bar in execution_bars)
+    if signal_keys != execution_keys:
+        raise TechnicalV2ExecutionError(
+            "data_unavailable",
+            "signal and execution bars must align one-to-one by instrument and date",
+        )
+    if any(
+        signal.available_at != execution.available_at
+        for signal, execution in zip(signal_bars, execution_bars, strict=True)
+    ):
+        raise TechnicalV2ExecutionError(
+            "data_unavailable",
+            "signal and execution bars must have identical availability times",
+        )
+    if execution_series_explicit and any(
+        bar.price_basis is not PriceBasis.UNADJUSTED for bar in execution_bars
+    ):
+        raise TechnicalV2ExecutionError(
+            "data_unavailable",
+            "explicit execution bars must be unadjusted",
+        )
+
+
+def _bar_series_requirements(condition: Condition) -> tuple[bool, bool]:
+    """Return ``(execution_price, technical_signal)`` requirements."""
+
+    if isinstance(condition, IndicatorCondition):
+        return (condition.indicator_id == "price.close", condition.indicator_id != "price.close")
+    if isinstance(condition, (AllCondition, AnyCondition)):
+        requirements = tuple(_bar_series_requirements(child) for child in condition.children)
+        return (
+            any(execution for execution, _ in requirements),
+            any(signal for _, signal in requirements),
+        )
+    if isinstance(condition, NotCondition):
+        return _bar_series_requirements(condition.child)
+    raise TechnicalV2ExecutionError(
+        "capability_unavailable",
+        "technical signal records cannot contain financial or event conditions",
+    )
+
+
+def _provenance_bar_series(
+    condition: Condition,
+    signal_bars: tuple[DailyBar, ...],
+    execution_bars: tuple[DailyBar, ...],
+    *,
+    index: int,
+    fact: SignalFact,
+) -> tuple[tuple[str, tuple[DailyBar, ...]], ...]:
+    needs_execution, needs_signal = _bar_series_requirements(condition)
+    if needs_execution and any(
+        bar.price_basis is not PriceBasis.UNADJUSTED for bar in execution_bars
+    ):
+        raise TechnicalV2ExecutionError(
+            "data_unavailable",
+            "price.close provenance requires unadjusted execution bars",
+        )
+
+    def available_prefix(source: tuple[DailyBar, ...]) -> tuple[DailyBar, ...]:
+        dependencies = tuple(
+            bar for bar in source[: index + 1] if bar.available_at <= fact.available_at
+        )
+        if not dependencies or source[index] not in dependencies:
+            raise TechnicalV2ExecutionError(
+                "lookahead_detected",
+                "signal input is not available at signal_at",
+            )
+        return dependencies
+
+    if needs_execution and needs_signal and signal_bars == execution_bars:
+        return (("shared-unadjusted", available_prefix(execution_bars)),)
+
+    selected: list[tuple[str, tuple[DailyBar, ...]]] = []
+    if needs_execution:
+        selected.append(("execution-unadjusted", available_prefix(execution_bars)))
+    if needs_signal:
+        signal_basis = signal_bars[0].price_basis.value
+        selected.append((f"technical-signal-{signal_basis}", available_prefix(signal_bars)))
+    if not selected:
+        raise TechnicalV2ExecutionError(
+            "capability_unavailable",
+            "technical signal provenance has no market-data dependency",
+        )
+    return tuple(selected)
+
+
 def _validate_snapshot_inputs(
     plan: ExecutableStrategyPlan,
     snapshot: SnapshotBindingV2,
@@ -562,7 +695,7 @@ def _signal_record(
     condition_id: str,
     condition_ref: str,
     fact: SignalFact,
-    bars: tuple[DailyBar, ...],
+    bar_series: tuple[tuple[str, tuple[DailyBar, ...]], ...],
 ) -> SignalRecord:
     signal_at = fact.available_at.astimezone(_SHANGHAI)
     retrieved_at = snapshot.generated_at.astimezone(_SHANGHAI)
@@ -574,11 +707,51 @@ def _signal_record(
         content_sha256=snapshot.content_hash,
         source_kind=SourceKind.PROVIDER_RECORD,
     )
+    envelopes = tuple(
+        _bar_prefix_envelope(
+            label=label,
+            bars=bars,
+            snapshot=snapshot,
+            snapshot_source=snapshot_source,
+            signal_at=signal_at,
+            retrieved_at=retrieved_at,
+        )
+        for label, bars in bar_series
+    )
+    source_refs = tuple(
+        sorted(
+            {source for envelope in envelopes for source in envelope.source_refs},
+            key=lambda source: source.sort_key,
+        )
+    )
+    return SignalRecord(
+        instrument_id=plan.strategy.instrument.symbol,
+        condition_id=condition_id,
+        condition_ref=condition_ref,
+        triggered=fact.triggered,
+        signal_at=signal_at,
+        plan_id=plan.plan_id,
+        strategy_hash=plan.strategy_hash,
+        dsl_schema_version=plan.strategy.schema_version,
+        code_revision=plan.code_revision,
+        input_envelopes=envelopes,
+        source_refs=source_refs,
+    )
+
+
+def _bar_prefix_envelope(
+    *,
+    label: str,
+    bars: tuple[DailyBar, ...],
+    snapshot: SnapshotBindingV2,
+    snapshot_source: SourceRef,
+    signal_at: datetime,
+    retrieved_at: datetime,
+) -> DataEnvelope:
     digest = hashlib.sha256()
     for bar in bars:
-        row_payload = _bar_payload(bar)
         row_json = json.dumps(
-            row_payload,
+            _bar_payload(bar),
             ensure_ascii=False,
             allow_nan=False,
             sort_keys=True,
@@ -592,7 +765,7 @@ def _signal_record(
     prefix_source = SourceRef(
         provider=_BAR_TRANSFORM_PROVIDER,
         source_id=(
-            f"daily_ohlcv-prefix:{last_bar.instrument_id.value}:"
+            f"daily_ohlcv-{label}-prefix:{last_bar.instrument_id.value}:"
             f"{first_bar.session_date.isoformat()}:{last_bar.session_date.isoformat()}"
         ),
         snapshot_id=snapshot.snapshot_id,
@@ -600,19 +773,15 @@ def _signal_record(
         content_sha256=prefix_hash,
         source_kind=SourceKind.DETERMINISTIC_TRANSFORM,
     )
-    envelope = DataEnvelope(
+    return DataEnvelope(
         data_id=(
-            f"daily_ohlcv-prefix:{first_bar.session_date.isoformat()}:"
+            f"daily_ohlcv-{label}-prefix:{first_bar.session_date.isoformat()}:"
             f"{last_bar.session_date.isoformat()}"
         ),
         value=prefix_hash,
         unit=None,
         availability=PointInTimeAvailability(
-            observed_at=datetime.combine(
-                last_bar.session_date,
-                time(15),
-                tzinfo=_SHANGHAI,
-            ),
+            observed_at=datetime.combine(last_bar.session_date, time(15), tzinfo=_SHANGHAI),
             announced_at=None,
             first_available_at=max(bar.available_at for bar in bars).astimezone(_SHANGHAI),
             signal_at=signal_at,
@@ -623,19 +792,6 @@ def _signal_record(
             revision_id=prefix_source.source_id,
         ),
         source_refs=(snapshot_source, prefix_source),
-    )
-    return SignalRecord(
-        instrument_id=plan.strategy.instrument.symbol,
-        condition_id=condition_id,
-        condition_ref=condition_ref,
-        triggered=fact.triggered,
-        signal_at=signal_at,
-        plan_id=plan.plan_id,
-        strategy_hash=plan.strategy_hash,
-        dsl_schema_version=plan.strategy.schema_version,
-        code_revision=plan.code_revision,
-        input_envelopes=(envelope,),
-        source_refs=envelope.source_refs,
     )
 
 
