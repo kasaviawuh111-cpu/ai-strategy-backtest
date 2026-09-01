@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import date
 from typing import Any, cast
+
+_RESULT_HASH = re.compile(r"sha256:[0-9a-f]{64}")
+_CLEAN_REVISION = re.compile(r"[0-9a-f]{40}")
 
 
 class SmokeFailure(RuntimeError):
@@ -105,7 +109,11 @@ def run_smoke(
             {
                 "utterance": {
                     "event": "年报发布后买入，MACD死叉卖出",
-                    "financial": "东方财富市盈率低于20倍买入，MACD死叉卖出，回测近1年",
+                    # The trusted Eastmoney series is 23.10-41.08x in the
+                    # fixed one-year release window.  35x crosses with margin
+                    # and therefore exercises financial signal -> order -> fill
+                    # provenance instead of accepting a zero-activity run.
+                    "financial": "东方财富市盈率低于35倍买入，MACD死叉卖出，回测近1年",
                     "technical": "MACD金叉买入，死叉卖出",
                 }[strategy_mode],
                 "instrument_context": "300059.SZ",
@@ -178,14 +186,30 @@ def run_smoke(
             raise SmokeFailure("backtest returned no equity series")
         if not isinstance(trades, list) or not trades:
             raise SmokeFailure("backtest returned no auditable activities")
+        series_items = cast(list[Any], series)
+        trade_items = cast(list[Any], trades)
+        result_hash, code_revision = validate_completed_evidence(
+            strategy_mode=strategy_mode,
+            completed=completed,
+            summary=summary,
+            activities=trade_items,
+        )
+        verified = _object(
+            client.request("GET", f"/api/v1/backtest-runs/{run_id}"),
+            "verified backtest",
+        )
+        if _completed_result_hash(verified) != result_hash:
+            raise SmokeFailure("backtest result hash changed while reading result views")
         if strategy_mode == "event" and strategy.get("entry", {}).get("type") != "event_condition":
             raise SmokeFailure("event smoke did not compile an event entry condition")
         result.update(
             {
                 "backtestRunId": run_id,
                 "backtestState": completed.get("state"),
-                "equityPoints": len(series),
-                "activities": len(trades),
+                "codeRevision": code_revision,
+                "equityPoints": len(series_items),
+                "activities": len(trade_items),
+                "resultHash": result_hash,
                 "tradeCount": summary.get("tradeCount"),
                 "totalReturn": summary.get("totalReturn"),
             }
@@ -210,6 +234,59 @@ def wait_for_backtest(client: ApiClient, run_id: str, wait_seconds: float) -> di
             )
         time.sleep(0.25)
     raise SmokeFailure(f"backtest {run_id} did not finish within {wait_seconds:g} seconds")
+
+
+def validate_completed_evidence(
+    *,
+    strategy_mode: str,
+    completed: dict[str, Any],
+    summary: dict[str, Any],
+    activities: list[Any],
+) -> tuple[str, str]:
+    """Require a complete, provenance-bearing buy/sell replay for release smoke."""
+
+    result_hash = _completed_result_hash(completed)
+    trade_count = summary.get("tradeCount")
+    if type(trade_count) is not int or trade_count < 1:
+        raise SmokeFailure("backtest produced no complete trades")
+    run_evidence = _object(summary.get("runEvidence"), "run evidence")
+    code_revision = run_evidence.get("codeRevision")
+    if not isinstance(code_revision, str) or _CLEAN_REVISION.fullmatch(code_revision) is None:
+        raise SmokeFailure("backtest run evidence has no clean Git revision")
+
+    typed_activities = tuple(_object(item, "backtest activity") for item in activities)
+    fill_sides = {
+        item.get("side")
+        for item in typed_activities
+        if item.get("kind") in {"fill", "partial_fill"}
+        and item.get("status") in {"filled", "partially_filled"}
+    }
+    if not {"buy", "sell"}.issubset(fill_sides):
+        raise SmokeFailure("backtest did not preserve both buy and sell fills")
+
+    if strategy_mode == "financial":
+        has_financial_entry = any(
+            item.get("kind") == "signal"
+            and item.get("side") == "buy"
+            and str(item.get("reason", "")).startswith("valuation.pe=")
+            and any(
+                _object(evidence, "signal evidence").get("type") == "financial_fact"
+                for evidence in item.get("evidence", ())
+            )
+            for item in typed_activities
+        )
+        if not has_financial_entry:
+            raise SmokeFailure("financial smoke has no valuation.pe source provenance")
+    return result_hash, code_revision
+
+
+def _completed_result_hash(status: dict[str, Any]) -> str:
+    if status.get("state") != "succeeded" or status.get("resultAvailable") is not True:
+        raise SmokeFailure("backtest did not expose a completed result")
+    result_hash = status.get("resultHash")
+    if not isinstance(result_hash, str) or _RESULT_HASH.fullmatch(result_hash) is None:
+        raise SmokeFailure("backtest did not expose a valid result hash")
+    return result_hash
 
 
 def _object(value: Any, label: str) -> dict[str, Any]:
