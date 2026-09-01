@@ -36,9 +36,25 @@ class FinancialMetricId(StrEnum):
     GROSS_MARGIN = "financial.gross_margin"
     NET_MARGIN = "financial.net_margin"
     OPERATING_CASH_FLOW = "financial.operating_cash_flow"
+    BASIC_EPS = "financial.basic_eps"
+    BOOK_VALUE_PER_SHARE = "financial.book_value_per_share"
+    CAPITAL_RESERVE_PER_SHARE = "financial.capital_reserve_per_share"
+    UNASSIGNED_PROFIT_PER_SHARE = "financial.unassigned_profit_per_share"
+    OPERATING_CASH_FLOW_PER_SHARE = "financial.operating_cash_flow_per_share"
+    GROSS_PROFIT = "financial.gross_profit"
+    DEDUCTED_NET_PROFIT = "financial.deducted_net_profit"
+    DEDUCTED_NET_PROFIT_YOY = "financial.deducted_net_profit_yoy"
+    ROTA = "financial.rota"
+    TOTAL_ASSETS_TURNOVER = "financial.total_assets_turnover"
+    INVENTORY_TURNOVER = "financial.inventory_turnover"
+    ACCOUNTS_RECEIVABLE_TURNOVER = "financial.accounts_receivable_turnover"
     PE_TTM = "valuation.pe_ttm"
     PB_MRQ = "valuation.pb_mrq"
     DIVIDEND_YIELD_TTM = "valuation.dividend_yield_ttm"
+    PE = "valuation.pe"
+    PB = "valuation.pb"
+    PS = "valuation.ps"
+    PCF = "valuation.pcf"
 
 
 class FinancialDataKind(StrEnum):
@@ -52,6 +68,7 @@ class FinancialPeriodBasis(StrEnum):
     FULL_YEAR = "full_year"
     TTM = "ttm"
     MRQ = "mrq"
+    POINT_IN_TIME = "point_in_time"
 
 
 class FinancialReportType(StrEnum):
@@ -68,7 +85,9 @@ class FinancialStatementScope(StrEnum):
 
 class FinancialUnit(StrEnum):
     CNY = "CNY"
+    CNY_PER_SHARE = "CNY_PER_SHARE"
     PERCENT = "PERCENT"
+    RATIO = "RATIO"
     TIMES = "TIMES"
 
 
@@ -118,6 +137,22 @@ _STATEMENT_SCOPES = (
     FinancialStatementScope.PARENT_COMPANY,
 )
 
+
+def _statement_definition(
+    metric_id: FinancialMetricId,
+    unit: FinancialUnit,
+    *,
+    scopes: tuple[FinancialStatementScope, ...] = _STATEMENT_SCOPES,
+) -> FinancialMetricDefinition:
+    return FinancialMetricDefinition(
+        metric_id=metric_id,
+        data_kind=FinancialDataKind.STATEMENT,
+        unit=unit,
+        allowed_period_bases=_STATEMENT_BASES,
+        allowed_statement_scopes=scopes,
+    )
+
+
 _FIRST_METRIC_DEFINITIONS = (
     FinancialMetricDefinition(
         metric_id=FinancialMetricId.REVENUE,
@@ -136,35 +171,35 @@ _FIRST_METRIC_DEFINITIONS = (
     FinancialMetricDefinition(
         metric_id=FinancialMetricId.REVENUE_YOY,
         data_kind=FinancialDataKind.STATEMENT,
-        unit=FinancialUnit.PERCENT,
+        unit=FinancialUnit.RATIO,
         allowed_period_bases=_STATEMENT_BASES,
         allowed_statement_scopes=_STATEMENT_SCOPES,
     ),
     FinancialMetricDefinition(
         metric_id=FinancialMetricId.NET_PROFIT_PARENT_YOY,
         data_kind=FinancialDataKind.STATEMENT,
-        unit=FinancialUnit.PERCENT,
+        unit=FinancialUnit.RATIO,
         allowed_period_bases=_STATEMENT_BASES,
         allowed_statement_scopes=(FinancialStatementScope.CONSOLIDATED,),
     ),
     FinancialMetricDefinition(
         metric_id=FinancialMetricId.ROE,
         data_kind=FinancialDataKind.STATEMENT,
-        unit=FinancialUnit.PERCENT,
+        unit=FinancialUnit.RATIO,
         allowed_period_bases=_STATEMENT_BASES,
         allowed_statement_scopes=_STATEMENT_SCOPES,
     ),
     FinancialMetricDefinition(
         metric_id=FinancialMetricId.GROSS_MARGIN,
         data_kind=FinancialDataKind.STATEMENT,
-        unit=FinancialUnit.PERCENT,
+        unit=FinancialUnit.RATIO,
         allowed_period_bases=_STATEMENT_BASES,
         allowed_statement_scopes=_STATEMENT_SCOPES,
     ),
     FinancialMetricDefinition(
         metric_id=FinancialMetricId.NET_MARGIN,
         data_kind=FinancialDataKind.STATEMENT,
-        unit=FinancialUnit.PERCENT,
+        unit=FinancialUnit.RATIO,
         allowed_period_bases=_STATEMENT_BASES,
         allowed_statement_scopes=_STATEMENT_SCOPES,
     ),
@@ -175,6 +210,22 @@ _FIRST_METRIC_DEFINITIONS = (
         allowed_period_bases=_STATEMENT_BASES,
         allowed_statement_scopes=_STATEMENT_SCOPES,
     ),
+    _statement_definition(FinancialMetricId.BASIC_EPS, FinancialUnit.CNY_PER_SHARE),
+    _statement_definition(FinancialMetricId.BOOK_VALUE_PER_SHARE, FinancialUnit.CNY_PER_SHARE),
+    _statement_definition(FinancialMetricId.CAPITAL_RESERVE_PER_SHARE, FinancialUnit.CNY_PER_SHARE),
+    _statement_definition(
+        FinancialMetricId.UNASSIGNED_PROFIT_PER_SHARE, FinancialUnit.CNY_PER_SHARE
+    ),
+    _statement_definition(
+        FinancialMetricId.OPERATING_CASH_FLOW_PER_SHARE, FinancialUnit.CNY_PER_SHARE
+    ),
+    _statement_definition(FinancialMetricId.GROSS_PROFIT, FinancialUnit.CNY),
+    _statement_definition(FinancialMetricId.DEDUCTED_NET_PROFIT, FinancialUnit.CNY),
+    _statement_definition(FinancialMetricId.DEDUCTED_NET_PROFIT_YOY, FinancialUnit.RATIO),
+    _statement_definition(FinancialMetricId.ROTA, FinancialUnit.RATIO),
+    _statement_definition(FinancialMetricId.TOTAL_ASSETS_TURNOVER, FinancialUnit.TIMES),
+    _statement_definition(FinancialMetricId.INVENTORY_TURNOVER, FinancialUnit.TIMES),
+    _statement_definition(FinancialMetricId.ACCOUNTS_RECEIVABLE_TURNOVER, FinancialUnit.TIMES),
     FinancialMetricDefinition(
         metric_id=FinancialMetricId.PE_TTM,
         data_kind=FinancialDataKind.VALUATION,
@@ -192,6 +243,20 @@ _FIRST_METRIC_DEFINITIONS = (
         data_kind=FinancialDataKind.VALUATION,
         unit=FinancialUnit.PERCENT,
         allowed_period_bases=(FinancialPeriodBasis.TTM,),
+    ),
+    *(
+        FinancialMetricDefinition(
+            metric_id=metric_id,
+            data_kind=FinancialDataKind.VALUATION,
+            unit=FinancialUnit.TIMES,
+            allowed_period_bases=(FinancialPeriodBasis.POINT_IN_TIME,),
+        )
+        for metric_id in (
+            FinancialMetricId.PE,
+            FinancialMetricId.PB,
+            FinancialMetricId.PS,
+            FinancialMetricId.PCF,
+        )
     ),
 )
 

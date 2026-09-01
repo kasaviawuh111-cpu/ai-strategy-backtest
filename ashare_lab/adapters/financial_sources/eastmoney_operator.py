@@ -75,6 +75,8 @@ class OperatorReadingBatch:
     dataset: OperatorDataset
     instrument_id: str
     rows: tuple[Mapping[str, object], ...]
+    row_raw_response_sha256: tuple[str, ...]
+    row_retrieved_at: tuple[datetime, ...]
     requests: tuple[OperatorRequestAudit, ...]
     canonical_rows_sha256: str
     indicator_type: int | None = None
@@ -205,6 +207,8 @@ class EastmoneyOperatorReadingSource:
         require_aware(retrieved_at, "retrieved_at")
         rows: list[Mapping[str, object]] = []
         audits: list[OperatorRequestAudit] = []
+        row_hashes: list[str] = []
+        row_retrieved_times: list[datetime] = []
         expected_pages: int | None = None
         seen_rows: set[str] = set()
         page = 1
@@ -264,6 +268,8 @@ class EastmoneyOperatorReadingSource:
                     raise EastmoneyOperatorReadingError(f"{dataset.value} contains duplicate rows")
                 seen_rows.add(identity)
                 rows.append(item)
+                row_hashes.append(raw_hash)
+                row_retrieved_times.append(retrieved_at)
             audits.append(
                 OperatorRequestAudit(
                     dataset=dataset,
@@ -282,6 +288,8 @@ class EastmoneyOperatorReadingSource:
             dataset=dataset,
             instrument_id=symbol,
             rows=tuple(rows),
+            row_raw_response_sha256=tuple(row_hashes),
+            row_retrieved_at=tuple(row_retrieved_times),
             requests=tuple(audits),
             canonical_rows_sha256=canonical_rows_sha256,
             indicator_type=indicator_type,

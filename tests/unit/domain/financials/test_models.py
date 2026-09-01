@@ -38,9 +38,25 @@ EXPECTED_METRIC_IDS = (
     "financial.gross_margin",
     "financial.net_margin",
     "financial.operating_cash_flow",
+    "financial.basic_eps",
+    "financial.book_value_per_share",
+    "financial.capital_reserve_per_share",
+    "financial.unassigned_profit_per_share",
+    "financial.operating_cash_flow_per_share",
+    "financial.gross_profit",
+    "financial.deducted_net_profit",
+    "financial.deducted_net_profit_yoy",
+    "financial.rota",
+    "financial.total_assets_turnover",
+    "financial.inventory_turnover",
+    "financial.accounts_receivable_turnover",
     "valuation.pe_ttm",
     "valuation.pb_mrq",
     "valuation.dividend_yield_ttm",
+    "valuation.pe",
+    "valuation.pb",
+    "valuation.ps",
+    "valuation.pcf",
 )
 
 
@@ -136,7 +152,7 @@ def valuation_fact(**overrides: object) -> FinancialFactRecord:
     return FinancialFactRecord(**values)  # type: ignore[arg-type]
 
 
-def test_catalog_is_closed_to_the_exact_first_eleven_metrics() -> None:
+def test_catalog_is_closed_to_operator_reading_and_legacy_compatibility_metrics() -> None:
     catalog = FIRST_FINANCIAL_METRIC_CATALOG
 
     assert catalog.schema_version == "financial-metric-catalog.v1"
