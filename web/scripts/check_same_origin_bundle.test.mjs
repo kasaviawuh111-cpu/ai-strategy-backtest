@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   FORBIDDEN_SAME_ORIGIN_MARKERS,
+  REQUIRED_DATA_AS_OF_DATE,
   assertSameOriginJavaScript,
   checkSameOriginBundle,
 } from './check_same_origin_bundle.mjs'
@@ -22,12 +23,14 @@ describe('same-origin bundle verifier', () => {
 
   it('accepts normal interface text and relative API requests', () => {
     expect(() => assertSameOriginJavaScript(
-      'fetch("/api/v1/strategy-drafts");document.title="A 股策略回测";',
+      `fetch("/api/v1/strategy-drafts");document.title="A 股策略回测";const cutoff="${REQUIRED_DATA_AS_OF_DATE}";`,
     )).not.toThrow()
   })
 
   it.each(FORBIDDEN_SAME_ORIGIN_MARKERS)('rejects forbidden marker %s', (marker) => {
-    expect(() => assertSameOriginJavaScript(`const leaked=${JSON.stringify(marker)}`))
+    expect(() => assertSameOriginJavaScript(
+      `const leaked=${JSON.stringify(marker)};const cutoff="${REQUIRED_DATA_AS_OF_DATE}";`,
+    ))
       .toThrow(`forbidden marker: ${marker}`)
   })
 
@@ -37,11 +40,12 @@ describe('same-origin bundle verifier', () => {
     await mkdir(resolve(distDirectory, 'assets'))
     await writeFile(
       resolve(distDirectory, 'assets', 'index.js'),
-      'fetch("/api/v1/strategy-drafts")',
+      `fetch("/api/v1/strategy-drafts");const cutoff="${REQUIRED_DATA_AS_OF_DATE}";`,
       'utf8',
     )
     vi.stubEnv('VITE_USE_MOCK', 'false')
     vi.stubEnv('VITE_API_BASE_URL', '')
+    vi.stubEnv('VITE_DATA_AS_OF_DATE', REQUIRED_DATA_AS_OF_DATE)
 
     await expect(checkSameOriginBundle(distDirectory)).resolves.toBe(1)
   })
@@ -49,8 +53,18 @@ describe('same-origin bundle verifier', () => {
   it('rejects bundle verification when the environment is not explicitly same-origin', async () => {
     vi.stubEnv('VITE_USE_MOCK', 'false')
     vi.stubEnv('VITE_API_BASE_URL', 'https://api.example.cn')
+    vi.stubEnv('VITE_DATA_AS_OF_DATE', REQUIRED_DATA_AS_OF_DATE)
 
     await expect(checkSameOriginBundle('/unused')).rejects
       .toThrow('explicitly empty VITE_API_BASE_URL')
+  })
+
+  it('rejects a bundle built for a data cutoff outside the frozen user window', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    vi.stubEnv('VITE_API_BASE_URL', '')
+    vi.stubEnv('VITE_DATA_AS_OF_DATE', '2026-08-20')
+
+    await expect(checkSameOriginBundle('/unused')).rejects
+      .toThrow(`VITE_DATA_AS_OF_DATE=${REQUIRED_DATA_AS_OF_DATE}`)
   })
 })
