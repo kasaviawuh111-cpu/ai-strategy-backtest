@@ -1350,7 +1350,8 @@ async def test_candidates_are_ranked_and_low_confidence_requests_one_clarificati
     assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
     assert outcome.diagnostic_code == "candidate_provider_low_confidence"
     assert outcome.clarification is not None
-    assert "不会替你猜默认策略" in outcome.clarification
+    assert "严格按你提供的条件进行回测" in outcome.clarification
+    assert "不擅自补充默认策略" in outcome.clarification
 
 
 @pytest.mark.asyncio

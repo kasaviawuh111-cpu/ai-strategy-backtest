@@ -687,8 +687,9 @@ class StrategyCompiler:
                 return CompileOutcome(
                     status=CompileStatus.NEEDS_CLARIFICATION,
                     clarification=(
-                        "我不够确定这句话里的买卖条件。请在一句话里同时写清："
-                        "什么条件买入、什么条件卖出；系统不会替你猜默认策略。"
+                        "我还没有完全理解这条交易规则。为了准确还原你的想法，"
+                        "麻烦在一句话里说明：什么条件买入、什么条件卖出。"
+                        "我会严格按你提供的条件进行回测，不擅自补充默认策略。"
                     ),
                     diagnostic_code=candidate.unsupported_code,
                     candidate_provenance=candidate.provenance,
