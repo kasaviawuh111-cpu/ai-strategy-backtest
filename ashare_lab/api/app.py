@@ -181,6 +181,7 @@ def build_hybrid_candidate_compiler(
             candidate_transport,
             capability_matrix=capability_matrix,
         ),
+        instrument_name_resolver=instrument_name_resolver,
     )
 
 
@@ -191,6 +192,7 @@ def _compiler_for_generator(
     backtest_anchor_date: date | None = None,
     idea_router: VibeIdeaRouter | None = None,
     clarification_dialogue_router: VibeClarificationDialogueRouter | None = None,
+    instrument_name_resolver: Callable[[str], str] | None = None,
 ) -> StrategyCompiler:
     manifest = next(
         (item for item in catalog.manifests if item.catalog_id == "cn_a.signals"),
@@ -204,6 +206,7 @@ def _compiler_for_generator(
         backtest_anchor_date=backtest_anchor_date,
         idea_router=idea_router,
         clarification_dialogue_router=clarification_dialogue_router,
+        instrument_name_resolver=instrument_name_resolver,
     )
 
 

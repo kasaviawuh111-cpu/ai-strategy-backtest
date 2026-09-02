@@ -1,8 +1,8 @@
 """Bounded provider boundary for one clarification answer.
 
-The provider may classify and acknowledge an answer, then rank server-owned
-choice ids.  It cannot create strategy text, securities, signals, or execution
-instructions.
+The provider may classify an answer, write one display-only acknowledgement,
+and rank server-owned choice ids.  The server still owns the missing question,
+strategy text, securities, signals, and every execution decision.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ class ClarificationOption:
 @dataclass(frozen=True, slots=True)
 class ClarificationDialogueRequest:
     answer: str
+    prior_utterance: str
     diagnostic_code: str
     question: str
     context_summary: str
@@ -46,6 +47,7 @@ class ClarificationDialogueRequest:
 class ClarificationDialogueAssessment:
     reply_kind: ClarificationReplyKind
     acknowledgement_id: ClarificationAcknowledgementId
+    natural_reply: str
     recommended_option_ids: tuple[str, ...] = ()
 
 

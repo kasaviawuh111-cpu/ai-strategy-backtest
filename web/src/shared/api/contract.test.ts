@@ -212,7 +212,7 @@ describe('live API contract adapter', () => {
     expect(outcome).toMatchObject({
       status: 'needs_clarification',
       clarification: {
-        question: '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
+        question: '请确认要回测哪一只 A 股。',
         choices: [],
       },
     })
@@ -237,7 +237,7 @@ describe('live API contract adapter', () => {
       status: 'needs_clarification',
       clarification: {
         id: 'instrument_unconfirmed',
-        question: '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
+        question: '请直接输入股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
         choices: [],
       },
     })
@@ -480,6 +480,57 @@ describe('live API contract adapter', () => {
         proposals: [],
       },
     }, request)).toThrow('服务没有返回至少两个可供选择的完整策略方向')
+  })
+
+  it('shows the model analysis for an unbound viewpoint without guessing a stock', () => {
+    const outcome = fromLiveDraftResponse({
+      ...response,
+      status: 'needs_clarification',
+      strategy: null,
+      strategy_hash: null,
+      clarification: '选一个验证方向，并告诉我想回测的具体 A 股。',
+      diagnostic_code: 'idea_guidance_required',
+      idea_route: {
+        schema_version: 'idea-route.v1',
+        understanding: '你在表达对特朗普相关政策的不认同。',
+        hypothesis: '如果这种政策不确定性影响风险偏好，价格趋势或超跌反弹可能出现可检验差异。',
+        asset_mapping: {
+          instrument_symbol: null,
+          relation: 'unbound',
+          rationale: '尚未绑定证券；选择方向后仍需补充具体 A 股。',
+          evidence_status: 'instrument_required',
+        },
+        proposals: [{
+          id: 'idea_000000000001',
+          title: '等趋势确认后参与',
+          hypothesis: '用趋势行为代理检验。',
+          entry_summary: '股价上穿 20 日均线',
+          exit_summary: '股价跌破 20 日均线',
+          suggested_utterance: '股价上穿20日均线买入，跌破20日均线卖出，回测近1年',
+          capability_ids: ['technical.ma'],
+          assumptions: ['尚未绑定证券'],
+          confidence: 0.75,
+        }, {
+          id: 'idea_000000000002',
+          title: '检验超跌后的反转',
+          hypothesis: '用超跌反弹代理检验。',
+          entry_summary: 'RSI 低于 30',
+          exit_summary: 'RSI 高于 70',
+          suggested_utterance: 'RSI低于30买入，高于70卖出，回测近1年',
+          capability_ids: ['technical.rsi'],
+          assumptions: ['尚未绑定证券'],
+          confidence: 0.75,
+        }],
+      },
+    }, { ...request, instrumentContextSource: 'standalone_default' })
+
+    expect(outcome.status).toBe('needs_clarification')
+    if (outcome.status !== 'needs_clarification') throw new Error('expected clarification')
+    expect(outcome.clarification.reason).toContain('你在表达对特朗普相关政策的不认同')
+    expect(outcome.clarification.reason).toContain('如果这种政策不确定性影响风险偏好')
+    expect(outcome.clarification.reason).toContain('尚未绑定证券')
+    expect(outcome.clarification.choices.every((choice) => choice.instrumentSymbol === undefined))
+      .toBe(true)
   })
 
   it('fails closed for clarification choices that the backend v2 request cannot represent', () => {

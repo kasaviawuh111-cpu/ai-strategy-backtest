@@ -295,8 +295,6 @@ def _to_response(stored: StoredDraftRevision) -> StrategyDraftResponse:
 
 def _to_idea_route_payload(idea_route: IdeaRoute) -> IdeaRoutePayload:
     instrument_symbol = idea_route.asset_mapping.instrument_symbol
-    if instrument_symbol is None:
-        raise ValueError("idea guidance cannot be exposed without an instrument")
     return IdeaRoutePayload(
         schema_version=idea_route.schema_version,
         understanding=idea_route.understanding,

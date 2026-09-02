@@ -32,9 +32,9 @@ class IdeaAssetMapping:
     """The only asset mapping the first slice is allowed to make."""
 
     instrument_symbol: str | None
-    relation: Literal["current_page_proxy"] = "current_page_proxy"
+    relation: Literal["current_page_proxy", "unbound"] = "current_page_proxy"
     rationale: str = ""
-    evidence_status: Literal["host_context_only"] = "host_context_only"
+    evidence_status: Literal["host_context_only", "instrument_required"] = "host_context_only"
 
 
 @dataclass(frozen=True, slots=True)

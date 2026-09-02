@@ -115,10 +115,10 @@ class IdeaRouteProvenancePayload(ApiModel):
 
 
 class IdeaAssetMappingPayload(ApiModel):
-    instrument_symbol: str = Field(pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$")
-    relation: Literal["current_page_proxy"]
+    instrument_symbol: str | None = Field(default=None, pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$")
+    relation: Literal["current_page_proxy", "unbound"]
     rationale: str = Field(min_length=1, max_length=512)
-    evidence_status: Literal["host_context_only"]
+    evidence_status: Literal["host_context_only", "instrument_required"]
 
 
 class IdeaProposalPayload(ApiModel):

@@ -19,6 +19,23 @@ class _UnexpectedFallback:
         raise AssertionError(f"bounded fallback must not run: {request!r}")
 
 
+class _RecordingFallback:
+    def __init__(self) -> None:
+        self.requests: list[CompileInput] = []
+
+    async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]:
+        self.requests.append(request)
+        return (
+            CandidateAst(
+                instrument_symbol=request.instrument_context,
+                entry=(),
+                exit=(),
+                confidence=0.0,
+                unsupported_code="candidate_provider_unavailable",
+            ),
+        )
+
+
 @pytest.mark.asyncio
 async def test_standalone_company_name_is_resolved_before_rule_parsing() -> None:
     generator = HybridCandidateGenerator(
@@ -41,6 +58,38 @@ async def test_standalone_company_name_is_resolved_before_rule_parsing() -> None
     assert candidate.instrument_symbol == "300033.SZ"
     assert candidate.grounding_evidence[0].path == "/instrument/symbol"
     assert candidate.grounding_evidence[0].text == "同花顺"
+
+
+@pytest.mark.asyncio
+async def test_long_form_indicator_is_not_misread_as_a_company_name_before_model_fallback() -> None:
+    fallback = _RecordingFallback()
+    resolver_calls: list[str] = []
+
+    def resolver(name: str) -> str:
+        resolver_calls.append(name)
+        raise AssertionError("indicator wording must not enter the security resolver")
+
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=fallback,
+        instrument_name_resolver=resolver,
+    )
+    utterance = (
+        "指数平滑异同移动平均线快线上穿时买入，"
+        "指数平滑异同移动平均线快线下穿时卖出"
+    )
+
+    candidates = await generator.generate(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert resolver_calls == []
+    assert [item.utterance for item in fallback.requests] == [utterance]
+    assert candidates[0].unsupported_code == "candidate_provider_unavailable"
 
 
 @pytest.mark.asyncio
@@ -176,6 +225,72 @@ async def test_resolved_standalone_company_name_enables_validated_clarification_
         "持有 5 日",
         "亏损 8%",
     }
+
+
+@pytest.mark.asyncio
+async def test_source_ambiguity_keeps_resolved_company_and_asks_the_real_next_question() -> None:
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_UnexpectedFallback(),
+        instrument_name_resolver=lambda name: {"东方财富": "300059.SZ"}[name],
+    )
+    compiler = StrategyCompiler(
+        generator=generator,
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals",
+        release_version="2026.09.01",
+    )
+
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="东方财富OBV变化时买入",
+            instrument_context=None,
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "ambiguous_obv_direction"
+    assert outcome.idea_route is not None
+    assert outcome.idea_route.asset_mapping.instrument_symbol == "300059.SZ"
+    assert "OBV" in (outcome.clarification or "")
+    assert [(item.path, item.text) for item in outcome.candidate_grounding][:1] == [
+        ("/instrument/symbol", "东方财富")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_instrument_clarification_accepts_partial_rule_without_forgetting_stock() -> None:
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_UnexpectedFallback(),
+        instrument_name_resolver=lambda name: {"东方财富": "300059.SZ"}[name],
+    )
+    compiler = StrategyCompiler(
+        generator=generator,
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals",
+        release_version="2026.09.01",
+    )
+    original = CompileInput(
+        utterance="MACD金叉买入，死叉卖出",
+        instrument_context=None,
+        as_of_date=date(2026, 8, 20),
+    )
+    prior = await compiler.compile(original)
+
+    turn = await compiler.answer_clarification(
+        original_input=original,
+        prior_outcome=prior,
+        answer="东方财富OBV变化时买入",
+    )
+
+    assert turn.reply_kind == "accepted"
+    assert turn.outcome.diagnostic_code == "ambiguous_obv_direction"
+    assert turn.outcome.idea_route is not None
+    assert turn.outcome.idea_route.asset_mapping.instrument_symbol == "300059.SZ"
+    assert "哪只 A 股" not in turn.assistant_message
+    assert "OBV" in turn.assistant_message
 
 
 @pytest.mark.asyncio

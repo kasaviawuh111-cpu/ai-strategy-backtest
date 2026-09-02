@@ -310,6 +310,34 @@ async def test_json_object_mode_is_explicit_and_still_returns_only_local_json() 
 
 
 @pytest.mark.asyncio
+async def test_deepseek_structured_requests_disable_default_thinking() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json=_completion({"candidates": [{"confidence": 0.91}]}),
+            request=request,
+        )
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://api.deepseek.com/chat/completions",
+        provider="deepseek-official",
+        model="deepseek-v4-pro",
+        prompt_version="prompt.v1",
+        schema_version="schema.v1",
+        response_mode="json_object",
+        transport=httpx.MockTransport(handler),
+    )
+
+    await provider.generate_json(_request())
+
+    body = json.loads(requests[0].content)
+    assert body["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.asyncio
 async def test_disabled_transport_is_explicit_and_never_attempts_network() -> None:
     provider = DisabledCandidateJsonTransport(
         prompt_version="prompt.v1",

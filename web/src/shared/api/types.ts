@@ -330,10 +330,10 @@ export type IdeaRoute = {
   understanding: string
   hypothesis: string
   asset_mapping: {
-    instrument_symbol: string
-    relation: 'current_page_proxy'
+    instrument_symbol: string | null
+    relation: 'current_page_proxy' | 'unbound'
     rationale: string
-    evidence_status: 'host_context_only'
+    evidence_status: 'host_context_only' | 'instrument_required'
   }
   proposals: IdeaRouteProposal[]
   provenance?: {

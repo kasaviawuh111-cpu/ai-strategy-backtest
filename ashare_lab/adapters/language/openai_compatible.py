@@ -225,6 +225,11 @@ class OpenAICompatibleCandidateTransport:
             "n": 1,
             "response_format": response_format,
         }
+        # DeepSeek V4 enables long-form thinking by default.  These calls only
+        # classify or translate into a server-owned JSON contract, so disable
+        # thinking to avoid turning one clarification into a minute-long wait.
+        if self._identity.provider.casefold().startswith("deepseek"):
+            body["thinking"] = {"type": "disabled"}
         try:
             request_bytes = json.dumps(
                 body,

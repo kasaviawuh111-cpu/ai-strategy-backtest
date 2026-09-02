@@ -100,6 +100,34 @@ async def test_provider_only_selects_templates_and_server_builds_utterances(
 
 
 @pytest.mark.asyncio
+async def test_viewpoint_without_instrument_returns_unbound_directions(
+    capability_matrix: CandidateCapabilityMatrix,
+) -> None:
+    router = VibeIdeaRouter(
+        _RecordingTransport([_provider_payload()]),
+        capability_matrix=capability_matrix,
+    )
+
+    route = await router.route(
+        CompileInput(
+            utterance="我讨厌特朗普",
+            instrument_context=None,
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert route is not None
+    assert route.asset_mapping.instrument_symbol is None
+    assert route.asset_mapping.relation == "unbound"
+    assert route.asset_mapping.evidence_status == "instrument_required"
+    assert len(route.proposals) >= 2
+    assert all(
+        any("补充具体 A 股" in assumption for assumption in item.assumptions)
+        for item in route.proposals
+    )
+
+
+@pytest.mark.asyncio
 async def test_every_server_owned_template_recompiles_through_the_existing_dsl(
     capability_matrix,
 ) -> None:
@@ -138,7 +166,7 @@ async def test_every_server_owned_template_recompiles_through_the_existing_dsl(
 
 
 @pytest.mark.asyncio
-async def test_router_does_not_call_provider_without_authoritative_instrument(
+async def test_router_guides_without_instrument_but_keeps_asset_unbound(
     capability_matrix: CandidateCapabilityMatrix,
 ) -> None:
     transport = _RecordingTransport([_provider_payload()])
@@ -152,8 +180,10 @@ async def test_router_does_not_call_provider_without_authoritative_instrument(
         )
     )
 
-    assert route is None
-    assert transport.requests == []
+    assert route is not None
+    assert route.asset_mapping.instrument_symbol is None
+    assert route.asset_mapping.relation == "unbound"
+    assert len(transport.requests) == 1
 
 
 @pytest.mark.asyncio

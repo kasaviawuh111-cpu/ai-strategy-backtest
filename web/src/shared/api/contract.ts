@@ -312,26 +312,38 @@ export const fromLiveDraftResponse = (
     const asksForEntry = diagnosticCode === 'entry_rule_not_recognized'
     const groundedInstrumentName = response.candidate_grounding?.spans
       .find((item) => item.path === '/instrument/symbol')?.text.trim()
+    const ideaAnalysis = ideaRoute
+      ? diagnosticCode === 'idea_guidance_required'
+        ? [
+            ideaRoute.understanding.trim(),
+            `从回测角度，一个待验证的假设是：${ideaRoute.hypothesis.trim()}`,
+            ideaRoute.asset_mapping.rationale.trim(),
+          ].filter(Boolean).join(' ')
+        : ideaRoute.understanding.trim()
+      : undefined
     return {
       status: 'needs_clarification',
       draftId: response.draft_id,
       revision: response.revision,
       clarification: {
         id: diagnosticCode,
-        question: asksForInstrument
-          ? canUseCurrentInstrument
-            ? `请确认使用当前股票“${input.instrument.name}”，或在下方输入其他股票名称或 6 位证券代码。`
-            : '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。'
-          : response.clarification
+        question: response.clarification
+          ?? (asksForInstrument
+            ? canUseCurrentInstrument
+              ? `请确认使用当前股票“${input.instrument.name}”，或直接输入其他股票名称或 6 位证券代码。`
+              : '请直接输入股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。'
+            : undefined)
             ?? (ideaRoute ? '挑一条，我把它变成完整规则再跑一次。' : '补一句我就能跑。'),
         reason: ideaRoute
-          ? ideaRoute.understanding.trim() || '我已经保留你说清楚的部分；还差一个关键条件，我不替你决定。'
-          : asksForInstrument
-          ? '买卖条件已经保留，现在只缺回测标的。'
+          ? ideaAnalysis || '我已经保留你说清楚的部分；还差一个关键条件，我不替你决定。'
           : asksForEntry
             ? '买入条件我不能替你定——填哪个都是我在替你决定什么时候进场。'
           : diagnosticCode === 'exit_rule_not_recognized'
             ? '卖出条件我不能替你定——什么时候离场得你说了算。'
+          : response.clarification
+          ? ''
+          : asksForInstrument
+          ? '买卖条件已经保留，请继续补充回测标的。'
             : '还差一点关键信息。我不猜规则，你补一句就能跑。',
         choices: ideaRoute ? ideaRoute.proposals.slice(0, 3).map((proposal) => ({
           id: proposal.id,
@@ -339,8 +351,11 @@ export const fromLiveDraftResponse = (
           description: clarificationProposalDescription(diagnosticCode, proposal),
           action: 'replace_and_compile' as const,
           suggestedUtterance: proposal.suggested_utterance,
-          instrumentSymbol: ideaRoute.asset_mapping.instrument_symbol,
-          instrumentName: groundedInstrumentName || undefined,
+          instrumentSymbol: ideaRoute.asset_mapping.instrument_symbol ?? undefined,
+          instrumentName: groundedInstrumentName
+            || (input.instrumentContextSource !== 'standalone_default'
+              ? input.instrument.name
+              : undefined),
         })) : asksForInstrument
           ? canUseCurrentInstrument
             ? [{

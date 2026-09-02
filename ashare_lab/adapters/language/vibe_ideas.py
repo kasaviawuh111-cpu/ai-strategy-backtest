@@ -119,12 +119,12 @@ class VibeIdeaRouter:
         if len(templates) < 2:
             return None
 
-        if request.instrument_context is None:
-            return None
-        try:
-            instrument_symbol = normalize_a_share_instrument(request.instrument_context).value
-        except AshareInstrumentCodeError:
-            return None
+        instrument_symbol: str | None = None
+        if request.instrument_context is not None:
+            try:
+                instrument_symbol = normalize_a_share_instrument(request.instrument_context).value
+            except AshareInstrumentCodeError:
+                return None
 
         template_by_id = {item.id: item for item in templates}
         transport_request = CandidateTransportRequest(
@@ -302,11 +302,14 @@ def _system_contract(templates: tuple[_IdeaTemplate, ...]) -> str:
     )
     return (
         "你只做非执行的投资假设引导，返回给定 JSON Schema。"
-        "先用一句话复述用户观点，再写一个可检验但未被证明的假设。"
+        "先自然承接并用一句话复述用户观点，再从可能的影响机制写一个"
+        "可检验但未被证明的假设。没有联网检索证据时，不得声称最新新闻、"
+        "行情、政策结果或因果关系已经核验。"
         "不得生成股票代码、股票名称、自由交易规则、指标参数、事件时间、"
         "Python、SQL、Pine Script 或任何可执行代码。"
-        "instrumentContext 只是当前页面标的；不得替换它，不得宣称观点与该股存在因果关系。"
-        "mapping_rationale 必须明确这只是用当前页面股票做价格行为代理。"
+        "instrumentContext 如果存在，只是当前页面标的；不得替换它。"
+        "instrumentContext 缺失时只做未绑定的方向建议，不得猜股票。"
+        "不得宣称观点与任何股票存在因果关系。"
         "template_ids 只能从下列服务端模板中选 2 至 3 个，不得改写模板："
         f"{template_lines}。"
     )
@@ -324,7 +327,14 @@ def _parse_provider_route(
     return route
 
 
-def _asset_mapping(instrument_symbol: str) -> IdeaAssetMapping:
+def _asset_mapping(instrument_symbol: str | None) -> IdeaAssetMapping:
+    if instrument_symbol is None:
+        return IdeaAssetMapping(
+            instrument_symbol=None,
+            relation="unbound",
+            rationale="当前只分析观点并给出可回测方向；用户选定方向后仍需补充具体 A 股。",
+            evidence_status="instrument_required",
+        )
     return IdeaAssetMapping(
         instrument_symbol=instrument_symbol,
         rationale=(
@@ -337,12 +347,22 @@ def _asset_mapping(instrument_symbol: str) -> IdeaAssetMapping:
 def _to_proposal(
     template: _IdeaTemplate,
     *,
-    instrument_symbol: str,
+    instrument_symbol: str | None,
     route_hypothesis: str,
 ) -> IdeaProposal:
     digest = hashlib.sha256(
         f"{instrument_symbol}|{template.id}|{template.suggested_utterance}".encode()
     ).hexdigest()[:12]
+    assumptions = [
+        "候选只是价格行为代理，不证明原观点与股价存在因果关系。",
+        "候选为日线、只做多、近 1 年；选择后仍需通过现有 DSL 与 Catalog 校验。",
+    ]
+    assumptions.insert(
+        1,
+        "仅使用当前 A 股页面标的，模型不能替换股票。"
+        if instrument_symbol is not None
+        else "尚未绑定证券；选定方向后还需用户补充具体 A 股。",
+    )
     return IdeaProposal(
         id=f"idea_{digest}",
         title=template.title,
@@ -351,11 +371,7 @@ def _to_proposal(
         exit_summary=template.exit_summary,
         suggested_utterance=template.suggested_utterance,
         capability_ids=template.capability_ids,
-        assumptions=(
-            "候选只是价格行为代理，不证明原观点与股价存在因果关系。",
-            "仅使用当前 A 股页面标的，模型不能替换股票。",
-            "候选为日线、只做多、近 1 年；选择后仍需通过现有 DSL 与 Catalog 校验。",
-        ),
+        assumptions=tuple(assumptions),
         confidence=_PROPOSAL_CONFIDENCE,
     )
 

@@ -42,7 +42,11 @@ class _RecordingIdeaRouter:
         return self.result
 
 
-def _idea_route(*, proposal_count: int = 2) -> IdeaRoute:
+def _idea_route(
+    *,
+    proposal_count: int = 2,
+    instrument_symbol: str | None = "300059.SZ",
+) -> IdeaRoute:
     proposals = tuple(
         IdeaProposal(
             id=f"idea_{index:012x}",
@@ -61,8 +65,16 @@ def _idea_route(*, proposal_count: int = 2) -> IdeaRoute:
         understanding="用户表达了一个政治态度。",
         hypothesis="相关不确定性可能与当前股票的价格行为同期出现。",
         asset_mapping=IdeaAssetMapping(
-            instrument_symbol="300059.SZ",
-            rationale="只使用当前股票页作为价格代理。",
+            instrument_symbol=instrument_symbol,
+            relation="current_page_proxy" if instrument_symbol is not None else "unbound",
+            rationale=(
+                "只使用当前股票页作为价格代理。"
+                if instrument_symbol is not None
+                else "尚未绑定证券；选择方向后仍需补充具体 A 股。"
+            ),
+            evidence_status=(
+                "host_context_only" if instrument_symbol is not None else "instrument_required"
+            ),
         ),
         proposals=proposals,
     )
@@ -231,8 +243,8 @@ async def test_explicit_unsupported_semantics_never_enter_idea_routing() -> None
 
 
 @pytest.mark.asyncio
-async def test_view_without_authoritative_stock_asks_for_instrument_first() -> None:
-    idea_router = _RecordingIdeaRouter(_idea_route())
+async def test_view_without_stock_is_guided_first_and_remains_non_executable() -> None:
+    idea_router = _RecordingIdeaRouter(_idea_route(instrument_symbol=None))
     compiler = _compiler(
         generator=_UnsupportedGenerator("no_supported_signal_recognized"),
         idea_router=idea_router,
@@ -247,9 +259,67 @@ async def test_view_without_authoritative_stock_asks_for_instrument_first() -> N
     )
 
     assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
-    assert outcome.diagnostic_code == "instrument_required"
-    assert outcome.idea_route is None
-    assert idea_router.requests == []
+    assert outcome.diagnostic_code == "idea_guidance_required"
+    assert outcome.idea_route is not None
+    assert outcome.idea_route.asset_mapping.instrument_symbol is None
+    assert len(idea_router.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_selected_viewpoint_direction_keeps_the_resolved_stock_context() -> None:
+    idea_router = _RecordingIdeaRouter(_idea_route())
+    compiler = _compiler(
+        generator=RuleBasedCandidateGenerator(),
+        idea_router=idea_router,
+    )
+    original = CompileInput(
+        utterance="我看好东方财富",
+        instrument_context=None,
+        as_of_date=date(2026, 8, 30),
+    )
+    prior = await compiler.compile(original)
+
+    turn = await compiler.answer_clarification(
+        original_input=original,
+        prior_outcome=prior,
+        answer="1",
+    )
+
+    assert turn.outcome.status is CompileStatus.READY
+    assert turn.outcome.strategy is not None
+    assert turn.outcome.strategy.instrument.symbol == "300059.SZ"
+
+
+@pytest.mark.asyncio
+async def test_negative_theme_viewpoint_is_not_misread_as_a_company_name() -> None:
+    resolved_names: list[str] = []
+
+    def resolver(name: str) -> str:
+        resolved_names.append(name)
+        raise LookupError(name)
+
+    idea_router = _RecordingIdeaRouter(_idea_route(instrument_symbol=None))
+    compiler = StrategyCompiler(
+        generator=_UnsupportedGenerator("no_supported_signal_recognized"),
+        idea_router=idea_router,
+        instrument_name_resolver=resolver,
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals",
+        release_version="2026.09.01",
+    )
+
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="我不喜欢新能源",
+            instrument_context=None,
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.diagnostic_code == "idea_guidance_required"
+    assert outcome.idea_route is not None
+    assert outcome.idea_route.asset_mapping.instrument_symbol is None
+    assert resolved_names == []
 
 
 @pytest.mark.asyncio

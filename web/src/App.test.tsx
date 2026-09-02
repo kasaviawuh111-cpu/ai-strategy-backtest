@@ -84,6 +84,7 @@ describe('formal main.tsx App journey', () => {
 
     await user.type(input, '同花顺 MACD金叉买入，死叉卖出')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(input).toHaveValue('')
     await waitFor(() => expect(compile).toHaveBeenCalledWith(expect.objectContaining({
       utterance: '同花顺 MACD金叉买入，死叉卖出',
     })))
@@ -106,6 +107,7 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', {
       name: '贵州茅台创20日新高且放量1.5倍买入，跌破20日线卖出',
     }))
+    expect(screen.getByLabelText('交易规则')).toHaveValue('')
     const thinking = screen.getByRole('status', { name: '思考进度' })
     expect(thinking).toHaveTextContent('正在识别买入、卖出和回测区间')
     expect(thinking.closest('.thinking-stream')).not.toHaveClass('mcard')
@@ -376,8 +378,8 @@ describe('formal main.tsx App journey', () => {
       revision: 1,
       clarification: {
         id: 'instrument_required',
-        question: '请补充股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
-        reason: '买卖条件已经保留，现在只缺回测标的。',
+        question: '请直接输入股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。',
+        reason: '',
         choices: [],
       },
     })
@@ -398,8 +400,8 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, original)
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
-    const prompt = await screen.findByText(/请补充股票名称或 6 位证券代码/)
-    expect(prompt).toHaveTextContent('买卖条件已经保留')
+    const prompt = await screen.findByText(/请直接输入股票名称或 6 位证券代码/)
+    expect(prompt).not.toHaveTextContent('现在只缺回测标的')
     expect(screen.queryByRole('button', { name: '补充股票代码' })).not.toBeInTheDocument()
     expect(input).toBeEnabled()
     expect(input).toHaveValue('')
@@ -408,6 +410,7 @@ describe('formal main.tsx App journey', () => {
 
     await user.type(input, '同花顺')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(input).toHaveValue('')
 
     await waitFor(() => expect(answerClarification).toHaveBeenCalledTimes(1))
     expect(compile).toHaveBeenCalledTimes(1)
@@ -432,8 +435,8 @@ describe('formal main.tsx App journey', () => {
       draftId: 'draft_stock_page_instrument',
       clarification: {
         id: 'instrument_required',
-        question: '请确认使用当前股票“贵州茅台”，或在下方输入其他股票名称或 6 位证券代码。',
-        reason: '买卖条件已经保留，现在只缺回测标的。',
+        question: '请确认使用当前股票“贵州茅台”，或直接输入其他股票名称或 6 位证券代码。',
+        reason: '',
         choices: [{
           id: 'use-current-instrument',
           label: '使用 贵州茅台',
@@ -615,12 +618,12 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
 
     const guidance = await screen.findByText(/你在表达对特朗普相关政策的不认同/)
-    expect(guidance).toHaveTextContent('“MACD 金叉且站上 20 日均线买入')
-    expect(guidance).toHaveTextContent('“RSI 低于 30 买入')
+    expect(guidance).toHaveTextContent('1. 等趋势确认：MACD 金叉且站上 20 日均线买入')
+    expect(guidance).toHaveTextContent('2. 等超跌反弹：RSI 低于 30 买入')
     expect(screen.queryByRole('button', { name: /等趋势确认/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /等超跌反弹/ })).not.toBeInTheDocument()
     expect(input).toHaveValue('')
-    expect(input).toHaveAttribute('placeholder', '用一句话写下你选择的买卖规则')
+    expect(input).toHaveAttribute('placeholder', '回复序号，或直接说完整规则')
     await waitFor(() => expect(input).toHaveFocus())
     expect(screen.queryByText('已理解观点：')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
@@ -701,7 +704,7 @@ describe('formal main.tsx App journey', () => {
     await user.type(input, '汤姆猫金叉买死叉卖')
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
     const guidance = await screen.findByText(/已确认标的为汤姆猫/)
-    expect(guidance).toHaveTextContent('“汤姆猫MACD金叉买入')
+    expect(guidance).toHaveTextContent('1. MACD 金叉 / 死叉：汤姆猫MACD金叉买入')
     expect(screen.queryByRole('button', { name: /MACD 金叉/ })).not.toBeInTheDocument()
     expect(input).toHaveValue('')
     await waitFor(() => expect(input).toHaveFocus())
@@ -885,6 +888,7 @@ describe('formal main.tsx App journey', () => {
     expect(followUp).toHaveTextContent('1. RSI 低于 30 买入：RSI低于30买入，MACD死叉卖出')
     expect(followUp).toHaveTextContent('2. RSI 低于 25 买入：RSI低于25买入，MACD死叉卖出')
     expect(screen.queryByRole('button', { name: /RSI 低于/ })).not.toBeInTheDocument()
+    expect(input).toHaveValue('')
     await waitFor(() => expect(input).toHaveFocus())
   })
 

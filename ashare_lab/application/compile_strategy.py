@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import unicodedata
 from collections.abc import Callable
@@ -62,6 +63,13 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 POSITION_AWARE_EXIT_AND_UNSUPPORTED = "position_aware_exit_and_not_supported"
 _IDEA_ROUTE_DIAGNOSTIC_CODES = frozenset(
     {"no_supported_signal_recognized", "candidate_provider_invalid_output"}
+)
+_INSTRUMENT_CLARIFICATION_CODES = frozenset(
+    {
+        "instrument_required",
+        "instrument_unconfirmed",
+        "instrument_resolution_unavailable",
+    }
 )
 _LOCAL_CLARIFICATION_ROUTE_CODES = frozenset(
     {
@@ -127,6 +135,26 @@ _CLARIFICATION_QUESTION_RE = re.compile(
     r"(?:你觉得|你认为|是不是|能不能|可不可以|合适吗|好吗|行吗|怎么样|如何|[吗呢][？?]?$|[？?]$)"
 )
 _CLARIFICATION_EXAMPLE_RE = re.compile(r"^(?:比如|例如|举例|比方说|譬如|打个比方)")
+_CLARIFICATION_CONVERSATION_RE = re.compile(
+    r"^(?:[!！?？。…]+|[123一二三]|"
+    r"我(?:是|不是|喜欢|讨厌|觉得).+|"
+    r"你(?:是|不是).+|"
+    r"哈哈+|呵呵+|谢谢|谢了|好的|好吧|算了|取消)$"
+)
+_INITIAL_CONVERSATION_RE = re.compile(
+    r"^(?:[!！?？。…]+|我(?:是|不是).+|你(?:是|不是).+|"
+    r"哈哈+|呵呵+|谢谢|谢了|好的|好吧|算了|取消)$",
+    re.IGNORECASE,
+)
+_LEADING_GREETING_RE = re.compile(
+    r"^(?:你好|您好|嗨|哈喽|hello)[,，。!！?？\s]*",
+    re.IGNORECASE,
+)
+_VIEWPOINT_INSTRUMENT_RE = re.compile(
+    r"(?:我)?(?:看好|看多|关注|喜欢)\s*"
+    r"(?P<name>[\u4e00-\u9fffA-Za-z0-9*STst·\-]{2,32})(?:[,，。！!？?]|$)"
+)
+_NEGATED_VIEWPOINT_INSTRUMENT_RE = re.compile(r"(?:不|不太|不怎么|并不)(?:看好|看多|关注|喜欢)")
 _POSITION_AWARE_EXIT_AND_EXPLANATION = (
     "当前回测只支持把持有期、止盈、止损、回撤与其他卖出条件按“任一先触发即卖出”执行，"
     "尚不能正确执行“同时满足才卖出”。请改用“或”，或只保留一个这类卖出条件。"
@@ -348,6 +376,7 @@ class StrategyCompiler:
         backtest_anchor_date: date | None = None,
         idea_router: IdeaRouter | None = None,
         clarification_dialogue_router: ClarificationDialogueRouter | None = None,
+        instrument_name_resolver: Callable[[str], str] | None = None,
     ) -> None:
         self._generator = generator
         self._catalog = catalog
@@ -359,6 +388,7 @@ class StrategyCompiler:
         self._backtest_anchor_date = backtest_anchor_date
         self._idea_router = idea_router
         self._clarification_dialogue_router = clarification_dialogue_router
+        self._instrument_name_resolver = instrument_name_resolver
 
     async def answer_clarification(
         self,
@@ -374,25 +404,55 @@ class StrategyCompiler:
             or prior_outcome.diagnostic_code is None
         ):
             raise ValueError("draft revision is not awaiting clarification")
+        preserved_instrument_context = _clarification_instrument_context(
+            original_input,
+            prior_outcome,
+        )
         selected_utterance = _selected_clarification_utterance(prior_outcome, answer)
         pragmatic_issue = (
             None if selected_utterance is not None else _clarification_pragmatic_issue(answer)
         )
-        if pragmatic_issue is None:
+        accepted_as_replacement = False
+        if selected_utterance is not None:
             merged_input = CompileInput(
-                utterance=(
-                    selected_utterance
-                    if selected_utterance is not None
-                    else _merge_clarification_answer(
-                        original_input.utterance,
-                        answer,
-                        diagnostic_code=prior_outcome.diagnostic_code,
-                    )
-                ),
-                instrument_context=original_input.instrument_context,
+                utterance=selected_utterance,
+                instrument_context=preserved_instrument_context,
                 as_of_date=original_input.as_of_date,
             )
             recompiled = await self.compile(merged_input)
+            accepted_as_replacement = True
+        elif pragmatic_issue is None:
+            standalone_input = CompileInput(
+                utterance=answer.strip(),
+                instrument_context=preserved_instrument_context,
+                as_of_date=original_input.as_of_date,
+            )
+            standalone_outcome = await self.compile(standalone_input)
+            if standalone_outcome.status is CompileStatus.READY:
+                merged_input = standalone_input
+                recompiled = standalone_outcome
+                accepted_as_replacement = True
+            else:
+                merged_input = CompileInput(
+                    utterance=_merge_clarification_answer(
+                        original_input.utterance,
+                        answer,
+                        diagnostic_code=prior_outcome.diagnostic_code,
+                    ),
+                    instrument_context=preserved_instrument_context,
+                    as_of_date=original_input.as_of_date,
+                )
+                recompiled = await self.compile(merged_input)
+                if (
+                    recompiled.status is not CompileStatus.READY
+                    and prior_outcome.diagnostic_code in _INSTRUMENT_CLARIFICATION_CODES
+                    and standalone_outcome.status is CompileStatus.NEEDS_CLARIFICATION
+                    and standalone_outcome.diagnostic_code not in _INSTRUMENT_CLARIFICATION_CODES
+                    and _has_grounded_instrument(standalone_outcome)
+                ):
+                    merged_input = standalone_input
+                    recompiled = standalone_outcome
+                    accepted_as_replacement = True
         else:
             merged_input = original_input
             recompiled = prior_outcome
@@ -402,10 +462,19 @@ class StrategyCompiler:
         )
         if progressed:
             if recompiled.status is CompileStatus.READY:
-                message = "好，我已经把这句补充接到刚才的规则里，买入和卖出条件都完整了。"
+                if accepted_as_replacement:
+                    message = "好，我会按你刚刚说的完整新规则重新开始，旧规则不会混进来。"
+                else:
+                    message = "好，我已经把这句补充接到刚才的规则里，买入和卖出条件都完整了。"
             else:
                 next_question = recompiled.clarification or "还需要再补充一项信息。"
-                message = f"明白，这部分已经接上了。接下来只差：{next_question}"
+                if accepted_as_replacement:
+                    message = (
+                        "好，我会按你刚刚说的新规则重新开始。"
+                        f"{_clarification_followup(next_question)}"
+                    )
+                else:
+                    message = f"明白，这部分已经接上了。{_clarification_followup(next_question)}"
             return ClarificationTurnOutcome(
                 reply_kind="accepted",
                 assistant_message=message,
@@ -429,6 +498,7 @@ class StrategyCompiler:
             assessment = await self._clarification_dialogue_router.assess(
                 ClarificationDialogueRequest(
                     answer=answer.strip(),
+                    prior_utterance=original_input.utterance,
                     diagnostic_code=prior_outcome.diagnostic_code,
                     question=prior_outcome.clarification or "请补充缺失的策略条件。",
                     context_summary=context_summary,
@@ -447,19 +517,20 @@ class StrategyCompiler:
                 suggestions,
                 assessment.recommended_option_ids,
             )
-            acknowledgement = _provider_acknowledgement(assessment.acknowledgement_id)
+            acknowledgement = assessment.natural_reply.rstrip("。！! ")
+            next_action = "你可以从这些建议里选，也可以直接在输入框告诉我。" if suggestions else ""
             message = (
-                f"{acknowledgement}。{context_summary}。"
-                f"接下来只差：{prior_outcome.clarification or '请补充缺失条件。'}"
-                "你可以从下面选，也可以直接打字告诉我。"
+                f"{acknowledgement}。"
+                f"{_clarification_followup(prior_outcome.clarification)}"
+                f"{next_action}"
             )
         else:
             acknowledgement = _pragmatic_fallback(pragmatic_issue)
+            next_action = "你可以从这些建议里选，也可以直接在输入框告诉我。" if suggestions else ""
             message = (
                 f"{acknowledgement}{context_summary}。"
-                f"接下来只差："
-                f"{prior_outcome.clarification or '请补充缺失条件。'}"
-                "你可以从下面选，也可以直接打字告诉我。"
+                f"{_clarification_followup(prior_outcome.clarification)}"
+                f"{next_action}"
             )
         return ClarificationTurnOutcome(
             reply_kind="clarification",
@@ -499,9 +570,39 @@ class StrategyCompiler:
         source_semantic_diagnostic = _unsupported_source_semantics(request.utterance)
         if source_semantic_diagnostic is not None:
             if source_semantic_diagnostic in _LOCAL_CLARIFICATION_ROUTE_CODES:
+                clarification_request = effective_request
+                candidate_grounding: tuple[CandidateGroundingEvidence, ...] = ()
+                candidate_provenance: CandidateProvenance | None = None
+                if effective_request.instrument_context is None:
+                    # Source-level ambiguity is checked before strategy
+                    # translation, but a trusted name resolver may still have
+                    # enough information to identify the A-share.  Run the
+                    # existing generator only as an identity preflight and
+                    # discard every strategy field it returns.  This lets a
+                    # sentence such as ``东方财富OBV变化时买入`` ask
+                    # about OBV direction instead of forgetting the stock.
+                    identity_candidates = await self._generator.generate(effective_request)
+                    if identity_candidates:
+                        identity_candidate = identity_candidates[0]
+                        if _candidate_instrument_is_grounded(
+                            identity_candidate,
+                            effective_request.utterance,
+                        ):
+                            assert identity_candidate.instrument_symbol is not None
+                            clarification_request = CompileInput(
+                                utterance=effective_request.utterance,
+                                instrument_context=normalize_a_share_instrument(
+                                    identity_candidate.instrument_symbol
+                                ).value,
+                                as_of_date=effective_request.as_of_date,
+                            )
+                            candidate_grounding = identity_candidate.grounding_evidence
+                            candidate_provenance = identity_candidate.provenance
                 clarification_outcome = await self._compile_local_clarification(
-                    effective_request,
+                    clarification_request,
                     source_semantic_diagnostic,
+                    candidate_grounding=candidate_grounding,
+                    candidate_provenance=candidate_provenance,
                 )
                 if clarification_outcome is not None:
                     return clarification_outcome
@@ -514,6 +615,9 @@ class StrategyCompiler:
                 clarification=_SOURCE_SEMANTIC_EXPLANATIONS.get(source_semantic_diagnostic),
                 diagnostic_code=source_semantic_diagnostic,
             )
+        initial_conversation = await self._compile_initial_conversation(effective_request)
+        if initial_conversation is not None:
+            return initial_conversation
         if self._idea_router is not None and _looks_like_broad_viewpoint(
             effective_request.utterance
         ):
@@ -688,7 +792,7 @@ class StrategyCompiler:
             if all(item.diagnostic_code == "instrument_required" for item in rejections):
                 return CompileOutcome(
                     status=CompileStatus.NEEDS_CLARIFICATION,
-                    clarification="我只差股票：请确认要回测哪一只 A 股（6 位代码）？",
+                    clarification="请告诉我想回测哪一只 A 股（股票名称或 6 位代码）。",
                     diagnostic_code="instrument_required",
                     candidate_provenance=first_provenance,
                     candidate_grounding=candidates[0].grounding_evidence,
@@ -775,34 +879,100 @@ class StrategyCompiler:
             candidate_alternatives=alternatives,
         )
 
+    async def _compile_initial_conversation(
+        self,
+        request: CompileInput,
+    ) -> CompileOutcome | None:
+        """Let the dialogue model handle a first-turn greeting or aside.
+
+        This display-only route runs before viewpoint routing and candidate
+        generation.  It cannot create a strategy, security, signal or fact;
+        the server still owns the exact information needed to continue.
+        """
+
+        if self._clarification_dialogue_router is None or not _looks_like_initial_conversation(
+            request.utterance
+        ):
+            return None
+        question = "如果你想做回测，请直接在输入框告诉我：哪只 A 股、什么时候买、什么时候卖。"
+        assessment = await self._clarification_dialogue_router.assess(
+            ClarificationDialogueRequest(
+                answer=request.utterance.strip(),
+                prior_utterance="",
+                diagnostic_code="strategy_rule_incomplete",
+                question=question,
+                context_summary="这是一条新的对话，目前还没有形成可回测规则。",
+                options=(),
+            )
+        )
+        acknowledgement = (
+            assessment.natural_reply.rstrip("。！! ")
+            if assessment is not None
+            else "你好，这句话暂时还不是一条可回测的交易规则"
+        )
+        return CompileOutcome(
+            status=CompileStatus.NEEDS_CLARIFICATION,
+            clarification=f"{acknowledgement}。{question}",
+            diagnostic_code="strategy_rule_incomplete",
+        )
+
     async def _compile_idea_guidance(
         self,
         request: CompileInput,
     ) -> CompileOutcome | None:
         if self._idea_router is None:
             return None
-        if request.instrument_context is None:
-            return CompileOutcome(
-                status=CompileStatus.NEEDS_CLARIFICATION,
-                clarification="我只差股票：请确认要回测哪一只 A 股（6 位代码）？",
-                diagnostic_code="instrument_required",
+        routed_request = request
+        viewpoint_grounding: tuple[CandidateGroundingEvidence, ...] = ()
+        if request.instrument_context is None and self._instrument_name_resolver is not None:
+            mention = (
+                None
+                if _NEGATED_VIEWPOINT_INSTRUMENT_RE.search(request.utterance)
+                else _VIEWPOINT_INSTRUMENT_RE.search(request.utterance)
             )
-        idea_route = await self._idea_router.route(request)
-        if (
-            idea_route is None
-            or idea_route.asset_mapping.instrument_symbol is None
-            or not 2 <= len(idea_route.proposals) <= 3
-        ):
+            if mention is not None:
+                try:
+                    resolved_symbol = await asyncio.to_thread(
+                        self._instrument_name_resolver,
+                        mention.group("name"),
+                    )
+                except (LookupError, OSError, TimeoutError):
+                    # A theme such as “国产算力” is not necessarily a
+                    # listed company.  Keep the idea unbound rather than
+                    # pretending it is a security or blocking the analysis.
+                    pass
+                else:
+                    name = mention.group("name")
+                    routed_request = CompileInput(
+                        utterance=request.utterance,
+                        instrument_context=normalize_a_share_instrument(resolved_symbol).value,
+                        as_of_date=request.as_of_date,
+                    )
+                    viewpoint_grounding = (
+                        CandidateGroundingEvidence(
+                            path="/instrument/symbol",
+                            start=mention.start("name"),
+                            end=mention.end("name"),
+                            text=name,
+                        ),
+                    )
+        idea_route = await self._idea_router.route(routed_request)
+        if idea_route is None or not 2 <= len(idea_route.proposals) <= 3:
             return None
+        has_instrument = idea_route.asset_mapping.instrument_symbol is not None
         return CompileOutcome(
             status=CompileStatus.NEEDS_CLARIFICATION,
             clarification=(
-                "我理解这是一个观点，还不是可直接执行的交易规则。"
-                "请从下面的价格行为代理中选一种，选择后仍会通过现有"
-                " DSL 和 Catalog 校验，系统不会自动执行。"
+                "你可以选一个方向继续，也可以直接说自己的完整买卖规则。"
+                if has_instrument
+                else (
+                    "你可以先选一个验证方向，再告诉我想回测的具体 A 股；"
+                    "也可以直接说股票和完整买卖规则。"
+                )
             ),
             diagnostic_code="idea_guidance_required",
             idea_route=idea_route,
+            candidate_grounding=viewpoint_grounding,
         )
 
     async def _compile_local_clarification(
@@ -1257,7 +1427,46 @@ def _clarification_pragmatic_issue(answer: str) -> str | None:
         return "example"
     if _CLARIFICATION_QUESTION_RE.search(normalized):
         return "question"
+    normalized_casefold = normalized.casefold()
+    conversational_text = _LEADING_GREETING_RE.sub("", normalized).strip() or normalized
+    if not any(
+        marker in normalized_casefold for marker in _STRATEGY_SYNTAX_MARKERS
+    ) and _CLARIFICATION_CONVERSATION_RE.fullmatch(conversational_text):
+        return "conversation"
     return None
+
+
+def _looks_like_initial_conversation(utterance: str) -> bool:
+    normalized = utterance.strip()
+    without_greeting = _LEADING_GREETING_RE.sub("", normalized).strip()
+    if without_greeting != normalized and not without_greeting:
+        return True
+    strategy_text = (without_greeting or normalized).casefold()
+    if any(marker in strategy_text for marker in _STRATEGY_SYNTAX_MARKERS):
+        return False
+    return bool(_INITIAL_CONVERSATION_RE.fullmatch(without_greeting or normalized))
+
+
+def _candidate_instrument_is_grounded(candidate: CandidateAst, utterance: str) -> bool:
+    """Accept only a code in the source or server-resolver grounding evidence."""
+
+    if candidate.instrument_symbol is None:
+        return False
+    try:
+        symbol = normalize_a_share_instrument(candidate.instrument_symbol).value
+    except AshareInstrumentCodeError:
+        return False
+    if any(item.path == "/instrument/symbol" for item in candidate.grounding_evidence):
+        return True
+    digits = symbol.split(".", 1)[0]
+    return (
+        re.search(
+            rf"(?<!\d){re.escape(digits)}(?:\.(?:SH|SZ|BJ))?(?!\d)",
+            utterance,
+            re.I,
+        )
+        is not None
+    )
 
 
 def _pragmatic_fallback(issue: str | None) -> str:
@@ -1272,14 +1481,19 @@ def _pragmatic_fallback(issue: str | None) -> str:
     return "我听到了，不过这句还没有补上刚才缺的内容。"
 
 
-def _provider_acknowledgement(acknowledgement_id: str) -> str:
-    return {
-        "light_redirect": "我听到了，我们先把刚才没说完的规则补完整",
-        "respect_preference": "明白，这代表你的偏好，我不会替你直接定成规则",
-        "answer_question": "你是在问这个方向是否合适，我先不把提问当作确认",
-        "ask_rephrase": "我还没完全理解这句补充，先保留原来的规则",
-        "confirm_cancel": "明白，你暂时不想继续这个方向，我不会改动原规则",
-    }[acknowledgement_id]
+def _clarification_followup(question: str | None) -> str:
+    normalized = (question or "请补充缺失条件。").strip()
+    for prefix in ("接下来只差：", "现在只差：", "只差："):
+        if normalized.startswith(prefix):
+            normalized = normalized.removeprefix(prefix).strip()
+            break
+    if normalized.startswith(("请", "还需要", "请选择")):
+        followup = normalized
+    else:
+        followup = f"还需要你补充：{normalized}"
+    if not followup.endswith(("。", "！", "!", "？", "?")):
+        followup += "。"
+    return followup
 
 
 def _merge_clarification_answer(
@@ -1292,13 +1506,31 @@ def _merge_clarification_answer(
     base = original.strip(" ，,。；;\n\t")
     if diagnostic_code == "idea_guidance_required":
         return supplement
-    if diagnostic_code in {
-        "instrument_required",
-        "instrument_unconfirmed",
-        "instrument_resolution_unavailable",
-    }:
+    if diagnostic_code in _INSTRUMENT_CLARIFICATION_CODES:
         return f"{supplement}，{base}"
     return f"{base}，{supplement}"
+
+
+def _has_grounded_instrument(outcome: CompileOutcome) -> bool:
+    """Return whether the server resolved an instrument from the new answer."""
+
+    return any(item.path == "/instrument/symbol" for item in outcome.candidate_grounding)
+
+
+def _clarification_instrument_context(
+    original_input: CompileInput,
+    prior_outcome: CompileOutcome,
+) -> str | None:
+    """Reuse only a server-resolved instrument from the stored clarification state."""
+
+    if original_input.instrument_context is not None:
+        return original_input.instrument_context
+    if prior_outcome.idea_route is None:
+        return None
+    symbol = prior_outcome.idea_route.asset_mapping.instrument_symbol
+    if symbol is None:
+        return None
+    return normalize_a_share_instrument(symbol).value
 
 
 def _clarification_suggestions(

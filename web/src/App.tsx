@@ -87,7 +87,7 @@ const instrumentClarificationIds = new Set([
 ])
 const isInstrumentClarification = (
   clarification: Clarification | undefined,
-): clarification is Clarification =>
+): boolean =>
   Boolean(clarification && instrumentClarificationIds.has(clarification.id))
 
 const suggestionText = (clarification: Clarification): string[] => {
@@ -104,7 +104,7 @@ const suggestionText = (clarification: Clarification): string[] => {
 
   let fallback: string[]
   if (isInstrumentClarification(clarification)) {
-    fallback = ['输入公司名称', '输入 6 位证券代码']
+    fallback = []
   } else if (clarification.id === 'entry_rule_not_recognized') {
     fallback = ['MACD 金叉买入', '突破 20 日均线买入', '跌幅达到你设定的比例时买入']
   } else if (clarification.id === 'exit_rule_not_recognized') {
@@ -132,15 +132,26 @@ const clarificationMessage = (clarification: Clarification): string => {
       .map((item) => `${item.label}是${item.value}`)
       .join('；')}。`
     : ''
-  const suggestions = suggestionText(clarification)
-    .map((item) => `“${item}”`)
-    .join('、')
+  const suggestionItems = clarification.ideaRoute
+    ? clarification.choices.slice(0, 3).map((choice, index) => {
+        const sentence = suggestionText({ ...clarification, choices: [choice] })[0]
+          ?? choice.label
+        return `${index + 1}. ${choice.label}：${sentence}`
+      })
+    : []
+  const suggestions = clarification.ideaRoute
+    ? suggestionItems.join('\n')
+    : suggestionText(clarification).map((item) => `“${item}”`).join('、')
   return [
     clarification.reason,
     recognized,
     clarification.question,
-    suggestions ? `你可以在下方输入${suggestions}，也可以直接说自己的规则。` : '',
-  ].filter(Boolean).join(' ')
+    suggestions
+      ? clarification.ideaRoute
+        ? `可以回复 1、2、3，也可以自己描述：\n${suggestions}`
+        : `你可以直接输入${suggestions}，也可以自己描述。`
+      : '',
+  ].filter(Boolean).join('\n')
 }
 
 const clarificationPlaceholder = (clarification: Clarification | undefined): string => {
@@ -148,7 +159,11 @@ const clarificationPlaceholder = (clarification: Clarification | undefined): str
   if (isInstrumentClarification(clarification)) return '输入股票名称或 6 位代码'
   if (clarification.id === 'entry_rule_not_recognized') return '补充什么时候买入'
   if (clarification.id === 'exit_rule_not_recognized') return '补充什么时候卖出'
-  if (clarification.ideaRoute) return '用一句话写下你选择的买卖规则'
+  if (clarification.ideaRoute
+    && clarification.ideaRoute.asset_mapping.instrument_symbol == null) {
+    return '输入股票，并说想验证哪个方向'
+  }
+  if (clarification.ideaRoute) return '回复序号，或直接说完整规则'
   return '补充完整规则，或直接换一种说法'
 }
 
@@ -670,7 +685,7 @@ export default function App({
   const submitText = (text: string) => {
     const normalized = text.trim()
     if (!normalized || isJourneyLocked) return
-    if (clarification && clarificationTarget && submittedText) {
+    if (clarification && clarificationTarget) {
       const prompt = clarificationPrompt ?? clarificationMessage(clarification)
       setClarificationMessages((current) => [
         ...current,
@@ -695,7 +710,7 @@ export default function App({
       return
     }
     rememberCurrentJourney()
-    setUtterance(normalized)
+    setUtterance('')
     setSubmittedText(normalized)
     setDraft(undefined)
     setBaselineDraft(undefined)
