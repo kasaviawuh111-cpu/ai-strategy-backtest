@@ -42,6 +42,14 @@ class _Choice:
     capability_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _ActionClause:
+    side: str
+    start: int
+    end: int
+    text: str
+
+
 def build_clarification_guidance(
     request: CompileInput,
     diagnostic_code: str,
@@ -107,6 +115,7 @@ def build_clarification_guidance(
             ),
         )
     elif diagnostic_code == "exit_rule_not_recognized":
+        preserved_entry = _preserved_entry_rule(original)
         if re.search(r"(?:MACD|金叉)", evidence, re.IGNORECASE):
             insight = "这是在动能转强时进场"
         elif re.search(r"(?:上穿|突破|新高)", evidence):
@@ -124,7 +133,7 @@ def build_clarification_guidance(
             _Choice(
                 "动能转弱",
                 "MACD 死叉时离场",
-                f"{original}，MACD死叉卖出",
+                f"{preserved_entry}，MACD死叉卖出",
                 evidence,
                 "MACD 死叉",
                 ("technical.macd",),
@@ -132,7 +141,7 @@ def build_clarification_guidance(
             _Choice(
                 "持有 5 日",
                 "买入成交后持有 5 个交易日",
-                f"{original}，持有5个交易日卖出",
+                f"{preserved_entry}，持有5个交易日卖出",
                 evidence,
                 "持有 5 个交易日",
                 ("strategy.holding_period",),
@@ -140,7 +149,7 @@ def build_clarification_guidance(
             _Choice(
                 "亏损 8%",
                 "持仓亏损达到 8% 时止损",
-                f"{original}，止损8%卖出",
+                f"{preserved_entry}，止损8%卖出",
                 evidence,
                 "持仓亏损 8%",
                 ("strategy.stop_loss",),
@@ -301,14 +310,26 @@ def _grounding(
     diagnostic_code: str,
 ) -> tuple[CandidateGroundingEvidence, ...]:
     if diagnostic_code == "entry_rule_not_recognized":
-        match = _EXIT_ACTION_RE.search(utterance)
+        clause = _unique_action_clause(utterance, side="exit")
         path = "/exit/0"
     elif diagnostic_code == "exit_rule_not_recognized":
-        match = _ENTRY_ACTION_RE.search(utterance)
+        clause = _unique_action_clause(utterance, side="entry")
         path = "/entry/0"
     else:
+        clause = None
         match = _INDICATOR_RE.search(utterance) or _ACTION_RE.search(utterance)
         path = "/clarification"
+    if clause is not None:
+        return (
+            CandidateGroundingEvidence(
+                path=path,
+                start=clause.start,
+                end=clause.end,
+                text=clause.text,
+            ),
+        )
+    if diagnostic_code in {"entry_rule_not_recognized", "exit_rule_not_recognized"}:
+        return ()
     if match is None:
         return ()
     start = (
@@ -453,26 +474,119 @@ def _action_rule_bodies(original: str, *, entry: bool) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _preserved_exit_rule(original: str) -> str:
-    """Keep the stated exit, dropping an unrecognized pseudo-entry if present."""
+def merge_clarification_supplement(original: str, answer: str) -> str:
+    """Replace the answered action side while preserving one unambiguous opposite side.
 
-    actions = tuple(_ACTION_RE.finditer(original))
-    for index, action in enumerate(actions):
-        if not action.group().startswith("卖"):
+    This is text normalization only.  The returned sentence must still pass the
+    normal compiler and Catalog gates before it can become executable.
+    """
+
+    supplement_clauses = _action_clauses(answer)
+    replacement_sides = {item.side for item in supplement_clauses}
+    if not replacement_sides:
+        return f"{original.strip()}，{answer.strip()}"
+    if any(
+        sum(item.side == side for item in supplement_clauses) != 1 for side in replacement_sides
+    ):
+        return f"{original.strip()}，{answer.strip()}"
+
+    original_clauses = _action_clauses(original)
+    selected: dict[str, _ActionClause] = {item.side: item for item in supplement_clauses}
+    for side in ("entry", "exit"):
+        if side in selected:
             continue
-        previous = actions[index - 1] if index else None
-        if previous is None or not previous.group().startswith("买"):
-            return original
-        boundary = max(
-            original.rfind("，", previous.end(), action.start()),
-            original.rfind(",", previous.end(), action.start()),
-            original.rfind("。", previous.end(), action.start()),
-            original.rfind("；", previous.end(), action.start()),
-            original.rfind(";", previous.end(), action.start()),
-        )
-        if boundary >= previous.end():
-            return original[boundary + 1 :].strip("，,。；; ")
-    return original
+        matches = [item for item in original_clauses if item.side == side]
+        if len(matches) != 1:
+            return f"{original.strip()}，{answer.strip()}"
+        selected[side] = matches[0]
+
+    parts: list[str] = []
+    prefix = _leading_context_prefix(original)
+    normalized_clauses = [
+        _normalize_supplement_clause(selected[side].text)
+        if side in replacement_sides
+        else selected[side].text
+        for side in ("entry", "exit")
+        if side in selected
+    ]
+    if prefix and not any(prefix in item for item in normalized_clauses):
+        parts.append(prefix)
+    parts.extend(normalized_clauses)
+    period = _trailing_backtest_period(original)
+    if period and period not in parts:
+        parts.append(period)
+    return "，".join(item.strip("，,。；; ") for item in parts if item.strip())
+
+
+def _action_clauses(original: str) -> tuple[_ActionClause, ...]:
+    actions = tuple(_ACTION_RE.finditer(original))
+    clauses: list[_ActionClause] = []
+    cursor = 0
+    for action in actions:
+        raw_start = cursor
+        raw = original[raw_start : action.end()]
+        stripped = raw.strip("，,。；; \n\t")
+        if stripped:
+            start = original.find(stripped, raw_start, action.end())
+            side = "entry" if _ENTRY_ACTION_RE.fullmatch(action.group()) else "exit"
+            clauses.append(
+                _ActionClause(
+                    side=side,
+                    start=start,
+                    end=start + len(stripped),
+                    text=stripped,
+                )
+            )
+        cursor = action.end()
+    return tuple(clauses)
+
+
+def _unique_action_clause(original: str, *, side: str) -> _ActionClause | None:
+    matches = [item for item in _action_clauses(original) if item.side == side]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _normalize_supplement_clause(value: str) -> str:
+    return re.sub(r"^(?:那就|再|补充|改成|更正为|改为)\s*", "", value).strip()
+
+
+def _leading_context_prefix(original: str) -> str | None:
+    marker = re.search(
+        r"(?:MACD|RSI|KDJ|CCI|OBV|BBI|EMA|均线|布林|股价|价格|收盘价|"
+        r"上涨|下跌|涨幅|跌幅|突破|跌破|高于|低于|金叉|死叉)",
+        original,
+        re.IGNORECASE,
+    )
+    if marker is None:
+        return None
+    prefix = original[: marker.start()].strip("，,。；; ")
+    if not prefix or _ACTION_RE.search(prefix):
+        return None
+    return prefix
+
+
+def _trailing_backtest_period(original: str) -> str | None:
+    actions = tuple(_ACTION_RE.finditer(original))
+    if not actions:
+        return None
+    suffix = original[actions[-1].end() :].strip("，,。；; ")
+    if not suffix or re.search(r"(?:回测|近\s*\d+\s*年|从\s*\d{4})", suffix) is None:
+        return None
+    return suffix
+
+
+def _preserved_exit_rule(original: str) -> str:
+    """Keep one explicit exit, independent of whether it appeared before entry."""
+
+    clause = _unique_action_clause(original, side="exit")
+    return clause.text if clause is not None else original
+
+
+def _preserved_entry_rule(original: str) -> str:
+    """Keep one explicit entry, dropping an unrecognized pseudo-exit if present."""
+
+    clause = _unique_action_clause(original, side="entry")
+    return clause.text if clause is not None else original
 
 
 def _complete_rule_choices(original: str) -> tuple[_Choice, ...]:

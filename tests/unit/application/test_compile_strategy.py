@@ -5,7 +5,11 @@ import pytest
 
 from ashare_lab.adapters.language import RuleBasedCandidateGenerator
 from ashare_lab.adapters.language.rule_based import _ANNOUNCEMENT_EVENT_DEFINITIONS
-from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
+from ashare_lab.application.compile_strategy import (
+    CompileOutcome,
+    CompileStatus,
+    StrategyCompiler,
+)
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.events.catalog import EXECUTABLE_EVENT_DEFINITIONS
 from ashare_lab.domain.financials import FinancialMetricId, FinancialUnit
@@ -50,6 +54,49 @@ async def test_macd_sentence_compiles_without_unnecessary_question(
     assert outcome.strategy.instrument.symbol == "300059.SZ"
     assert outcome.strategy.backtest.start == date(2025, 8, 27)
     assert outcome.strategy.backtest.initial_cash_cny == 1_000_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "diagnostic_code",
+    ["candidate_provider_low_confidence", "idea_guidance_required"],
+)
+async def test_clarification_replaces_entry_and_preserves_prior_exit(
+    compiler: StrategyCompiler,
+    diagnostic_code: str,
+) -> None:
+    original = CompileInput(
+        utterance="东方财富上涨5%卖出，2%买入",
+        instrument_context="300059.SZ",
+        as_of_date=date(2026, 8, 20),
+    )
+    prior = CompileOutcome(
+        status=CompileStatus.NEEDS_CLARIFICATION,
+        diagnostic_code=diagnostic_code,
+        clarification="请补充明确的买入条件。",
+    )
+
+    turn = await compiler.answer_clarification(
+        original_input=original,
+        prior_outcome=prior,
+        answer="补充下跌2%买入",
+    )
+
+    assert turn.reply_kind == "accepted"
+    assert turn.revision_changed is True
+    assert turn.outcome.status is CompileStatus.READY
+    assert turn.outcome.strategy is not None
+    assert turn.compile_input.utterance == "下跌2%买入，东方财富上涨5%卖出"
+    assert turn.outcome.strategy.instrument.symbol == "300059.SZ"
+    assert isinstance(turn.outcome.strategy.entry, IndicatorCondition)
+    assert turn.outcome.strategy.entry.indicator_id == "price.return_pct"
+    assert turn.outcome.strategy.entry.trigger == "at_most"
+    assert turn.outcome.strategy.entry.value == -2.0
+    exit_condition = turn.outcome.strategy.exit.children[0]
+    assert isinstance(exit_condition, IndicatorCondition)
+    assert exit_condition.indicator_id == "price.return_pct"
+    assert exit_condition.trigger == "at_least"
+    assert exit_condition.value == 5.0
 
 
 @pytest.mark.asyncio

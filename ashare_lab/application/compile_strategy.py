@@ -13,7 +13,10 @@ from itertools import pairwise
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from ashare_lab.application.clarification_guidance import build_clarification_guidance
+from ashare_lab.application.clarification_guidance import (
+    build_clarification_guidance,
+    merge_clarification_supplement,
+)
 from ashare_lab.domain.catalog import CatalogSnapshot
 from ashare_lab.domain.market_data import AshareInstrumentCodeError, normalize_a_share_instrument
 from ashare_lab.domain.strategy import (
@@ -1505,11 +1508,9 @@ def _merge_clarification_answer(
 ) -> str:
     supplement = answer.strip(" ，,。；;\n\t")
     base = original.strip(" ，,。；;\n\t")
-    if diagnostic_code == "idea_guidance_required":
-        return supplement
     if diagnostic_code in _INSTRUMENT_CLARIFICATION_CODES:
         return f"{supplement}，{base}"
-    return f"{base}，{supplement}"
+    return merge_clarification_supplement(base, supplement)
 
 
 def _has_grounded_instrument(outcome: CompileOutcome) -> bool:
