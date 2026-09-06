@@ -1,0 +1,127 @@
+{
+  "result": "PASS",
+  "revision": "sha256:14e9669dea94945130937d16bb103a5a71333245c8f52e0a3d287d6e6cb281ac",
+  "sourceCommit": "19220c1",
+  "taskId": 2090036,
+  "publicUrl": "https://ashare-strategy-preview-305722-11-1330091763.sh.run.tcloudbase.com",
+  "version": "ashare-strategy-preview-005",
+  "access": "public",
+  "runs": [
+    {
+      "id": "run:e5c985aa636d4f8e829905ca75c38b24",
+      "state": "succeeded",
+      "resultHash": "sha256:711552181e73307beec2b0f3feeed72072a884cac041a9eccb3382a71b1539fc"
+    },
+    {
+      "id": "run:d8ea5ddcc9014de68330a932750b9c93",
+      "state": "succeeded",
+      "resultHash": "sha256:4f6dd55b1d018e56592a6a4338c60efb7ff21afa6d5c57de0bb37c88638b6d92"
+    },
+    {
+      "id": "run:0db336ce8d6c4735ad50406ea1496266",
+      "state": "succeeded",
+      "resultHash": "sha256:3b5941188b0e4af0e53afe87dcafa5d7e29dda263b00020561b7ea4123f76504"
+    }
+  ],
+  "newRuns": [
+    {
+      "id": "run:d8ea5ddcc9014de68330a932750b9c93",
+      "symbol": "300059.SZ",
+      "seriesRows": 244,
+      "activityRows": 54
+    },
+    {
+      "id": "run:0db336ce8d6c4735ad50406ea1496266",
+      "symbol": "000333.SZ",
+      "seriesRows": 244,
+      "activityRows": 87
+    }
+  ],
+  "oldReview": {
+    "runId": "run:e5c985aa636d4f8e829905ca75c38b24",
+    "sourceResultHash": "sha256:711552181e73307beec2b0f3feeed72072a884cac041a9eccb3382a71b1539fc",
+    "modelProvenance": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "promptVersion": "backtest-review.prompt.v12",
+      "schemaVersion": "backtest-review.v2",
+      "responseHash": "sha256:21fa15586dea5a7f208c57f9a06b6d109f62917f2c8ac3fc093f5892bcaada4a"
+    }
+  },
+  "reasoningChars": 15801,
+  "reasoningBox": {
+    "height": 160,
+    "scrollHeight": 593,
+    "clientHeight": 160,
+    "textLength": 823
+  },
+  "events": [
+    {
+      "seconds": 94.05,
+      "kind": "customer_b_accepted",
+      "label": "b-seed",
+      "status": 202
+    },
+    {
+      "seconds": 100.93,
+      "kind": "customer_b_ready",
+      "label": "b-seed",
+      "draft": "6444f276-e368-48b2-9c59-d01953abedef"
+    },
+    {
+      "seconds": 820.57,
+      "kind": "old_review_started",
+      "path": "/api/v1/backtest-runs/run%3Ae5c985aa636d4f8e829905ca75c38b24/review"
+    },
+    {
+      "seconds": 915.44,
+      "kind": "customer_a_edit_submit",
+      "oldReviewStillRunning": true
+    },
+    {
+      "seconds": 924.9,
+      "kind": "customer_b_accepted",
+      "label": "b-edit",
+      "status": 202
+    },
+    {
+      "seconds": 928.54,
+      "kind": "customer_b_ready",
+      "label": "b-edit",
+      "draft": "538b50fd-7329-4999-afce-e91bd5c1e95d"
+    },
+    {
+      "seconds": 928.54,
+      "kind": "both_new_drafts_ready",
+      "a": "24f1695c-ac06-4254-8224-799fc1e607b1",
+      "b": "538b50fd-7329-4999-afce-e91bd5c1e95d",
+      "oldReviewStillRunning": true
+    },
+    {
+      "seconds": 941.48,
+      "kind": "backtest_succeeded",
+      "id": "run:d8ea5ddcc9014de68330a932750b9c93",
+      "points": 244,
+      "trades": 54,
+      "oldReviewStillRunning": true
+    },
+    {
+      "seconds": 952,
+      "kind": "backtest_succeeded",
+      "id": "run:0db336ce8d6c4735ad50406ea1496266",
+      "points": 244,
+      "trades": 87,
+      "oldReviewStillRunning": true
+    },
+    {
+      "seconds": 985.35,
+      "kind": "old_review_completed",
+      "id": "run:e5c985aa636d4f8e829905ca75c38b24"
+    }
+  ],
+  "boundaries": [
+    "Customer A used actual mobile-sized Chromium UI; customer B used a separate browser context API. Not two physical WeChat phones or high-load testing.",
+    "Browser collector stalled reading an already-cancelled response body before the first backtest. Abandoned one collector read only; did not replay any application POST. Its late response caused cleanup error after all assertions and evidence were saved. This independent audit re-read the same three runs and hashes successfully; no new jobs.",
+    "Model/data input failures B35, mobile recovery B30 and persistence B29 remain open or deferred."
+  ]
+}
