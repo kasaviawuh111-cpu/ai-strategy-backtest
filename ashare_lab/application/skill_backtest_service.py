@@ -35,6 +35,7 @@ from ashare_lab.adapters.market_data.mx_indicator_contract import (
 from ashare_lab.adapters.market_data.mx_saas import (
     MxRetryProgress,
     MxSaasProviderAuthError,
+    MxSaasProviderDataError,
     MxSaasProviderError,
     MxSaasProviderNoDataError,
     observe_mx_retries,
@@ -331,6 +332,28 @@ class SkillBacktestService:
                 elif isinstance(exc, MxSaasProviderNoDataError):
                     error_code = "skill_mx_no_data"
                     progress_label = f"{source}未返回本次回测所需的数据。"
+                elif isinstance(exc, MxSaasProviderDataError):
+                    reason = exc.data_reason
+                    failure_labels = {
+                        "protocol_invalid_json": "返回的响应不是有效 JSON",
+                        "protocol_invalid_payload": "返回的响应结构不完整",
+                        "protocol_tables_missing": "返回的响应缺少数据表",
+                        "protocol_table_invalid": "返回的数据表结构无法读取",
+                        "protocol_raw_table_missing": "返回的响应缺少逐日原始表 rawTable",
+                        "protocol_dates_missing": "返回的响应缺少逐日日期表头",
+                        "provider_query_rejected": "未接受本次数据查询",
+                        "provider_partial_result": "只返回了部分查询结果",
+                        "data_security_mismatch": "返回的数据未唯一对应本次股票",
+                        "data_dates_mismatch": "返回的数据日期未与本次查询对齐",
+                        "data_field_binding_mismatch": "返回的指标字段或计算参数未与请求匹配",
+                        "data_values_invalid": "返回的指标数值或数量未通过检查",
+                    }
+                    if reason not in failure_labels:
+                        reason = "data_validation_failed"
+                    failure = failure_labels.get(reason, "返回的数据未通过完整性校验")
+                    # Preserve the existing error-code contract while exposing
+                    # safe, actionable diagnostics in the status and server log.
+                    progress_label = f"{source}{failure}，本次回测已停止；原规则和设置已保留。"
                 else:
                     # Keep legacy/unclassified provider errors on their existing
                     # UI mapping; do not manufacture a precise transport cause.

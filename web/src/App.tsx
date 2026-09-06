@@ -505,7 +505,11 @@ const backtestFailureMessage = (run: BacktestRun): string => {
     case 'skill_MxSaasProviderNoDataError':
       return `${source}未返回本次回测所需的数据。`
     case 'skill_MxSaasProviderDataError':
-      return `${source}返回的数据未通过本次回测的数据检查，回测已停止。`
+      // This label is classified by the backend, not provider prose. Preserve
+      // the distinction between incomplete provider tables and invalid values.
+      return run.progressLabel && !run.progressLabel.includes('MxSaasProviderDataError')
+        ? run.progressLabel
+        : `${source}返回的数据未通过本次回测的数据检查，回测已停止。`
     case 'skill_MxDailyHistoryError':
       return '东方财富历史数据读取或检查失败，本次回测未完成。'
     case 'skill_history_fields_missing':

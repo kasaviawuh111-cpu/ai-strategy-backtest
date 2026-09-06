@@ -223,7 +223,7 @@ async def test_loss_feedback_keeps_user_goal_and_does_not_defend_or_execute_reco
     assert result is not None
     assert result.disposition == disposition and result.message == model_message
     assert result.strategy is None and not result.run_requested and not result.refresh_data
-    assert result.provenance.prompt_version == "strategy-edit.prompt.v23"
+    assert result.provenance.prompt_version == "strategy-edit.prompt.v24"
     assert len(requests) == 1
     payload = requests[0].user_payload
     assert payload is not None and payload["answer"] == answer
@@ -378,7 +378,7 @@ async def test_version_comparison_keeps_ordered_reports_and_distinguishes_previo
     assert result is not None and result.disposition == "discuss"
     assert result.message == model_message and result.strategy is None
     assert not result.run_requested and not result.refresh_data
-    assert result.provenance.prompt_version == "strategy-edit.prompt.v23"
+    assert result.provenance.prompt_version == "strategy-edit.prompt.v24"
     assert len(requests) == 1
     payload = requests[0].user_payload
     assert payload is not None and payload["answer"] == answer
@@ -629,7 +629,7 @@ async def test_instrument_reference_repair_is_exact_once_and_cannot_expand_autho
     assert result is not None and result.disposition == expected_disposition
     assert result.message == (original if repair_patch is None else repaired)["message"]
     assert result.strategy is None and not result.refresh_data
-    assert result.provenance.prompt_version == "strategy-edit.prompt.v23"
+    assert result.provenance.prompt_version == "strategy-edit.prompt.v24"
     if expected_disposition == "change_instrument":
         assert result.instrument_refs == ("贵州茅台", "300059")
         assert result.run_requested == original_run

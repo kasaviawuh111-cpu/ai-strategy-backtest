@@ -19,12 +19,19 @@ class TurnIntent(StrEnum):
     VIEWPOINT = "viewpoint"
     DATA_QUERY = "data_query"
     CASUAL = "casual"
+    SAFETY = "safety"
     CANCEL = "cancel"
     CHANGE_INSTRUMENT = "change_instrument"
     UNKNOWN = "unknown"
 
 
 _BUY_RE = re.compile(r"(?:买入|买进|买|建仓|开仓|低吸|抄底)", re.IGNORECASE)
+# A high-priority safety guard, not a general semantic classifier. Ordinary
+# conversation is still understood by the dialogue model, not keyword templates.
+_SAFETY_RE = re.compile(
+    r"(?:我(?:真的|现在|已经|快要|很)?(?:想死|不想活|想自杀|要自杀|想伤害自己)|"
+    r"(?:想|准备|打算)结束自己的生命|活不下去了)",
+)
 _SELL_RE = re.compile(
     r"(?:卖出|卖掉|卖|退出|平仓|止盈|止损|高抛)",
     re.IGNORECASE,
@@ -200,6 +207,9 @@ def classify_clarification_turn(
     has_options: bool = False,
 ) -> TurnIntent:
     """Classify the turn before the old clarification sentence is merged."""
+
+    if _SAFETY_RE.search(utterance):
+        return TurnIntent.SAFETY
 
     normalized = utterance.strip()
     if not normalized:

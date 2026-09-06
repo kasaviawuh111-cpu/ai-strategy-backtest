@@ -1655,6 +1655,7 @@ describe('formal main.tsx App journey', () => {
     ['skill_mx_read_timeout', '等待东方财富查数 Skill响应超时，本次取数未完成，可以重试。'],
     ['skill_history_before_listing', '这只股票于 2021-04-09 上市，你选择的区间从 2020-09-06 开始，包含上市前日期。请修改回测区间；买卖规则和成交设置已保留，不会自动缩短区间。'],
     ['skill_history_fields_missing', '查询 2010-03-09 至 2012-03-08 的历史数据时，东方财富未返回涨停价、跌停价。本次回测未完成，原区间和规则已保留；可修改区间或稍后重新读取。'],
+    ['skill_MxSaasProviderDataError', '东方财富已响应，但未返回本次计算需要的完整数据表。本次回测未完成，可以稍后重新读取。'],
   ])('retries and edits a failed run without resetting or replacing its strategy: %s', async (error, progressLabel) => {
     const instrument: Instrument = {
       name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE',

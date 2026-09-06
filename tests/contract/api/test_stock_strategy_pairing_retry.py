@@ -18,12 +18,17 @@ from ashare_lab.api.routes.strategy_drafts import (
     _to_response,  # pyright: ignore[reportPrivateUsage]
 )
 from ashare_lab.api.store import StoredDraftRevision
-from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
+from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus, StrategyCompiler
+from ashare_lab.application.dialogue_state import DialogueState, VerifiedInstrumentMemory
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.ports.candidate_generation import (
     CandidateAst,
     CandidateGroundingEvidence,
     CompileInput,
+)
+from ashare_lab.ports.clarification_dialogue import (
+    ClarificationDialogueAssessment,
+    ClarificationDialogueRequest,
 )
 from ashare_lab.ports.idea_routing import IdeaAssetMapping, IdeaProposal, IdeaRoute
 from ashare_lab.ports.live_market_data import (
@@ -133,6 +138,7 @@ async def test_complete_rules_are_preserved_across_ranked_stock_choices(
 class _PairingCall:
     screen: LiveMarketDataResult
     proposals: tuple[IdeaProposal, ...]
+    understanding: str
     supplements: tuple[LiveFinanceDataResult, ...]
     previous: tuple[StockStrategyDataRequest, ...]
     remaining: int
@@ -154,7 +160,7 @@ class _Advisor:
         assert utterance == "我是吕芳"
         index = len(self.calls)
         self.calls.append(_PairingCall(
-            result, proposals, supplemental_results, previous_requests,
+            result, proposals, understanding, supplemental_results, previous_requests,
             remaining_data_rounds, data_feedback,
         ))
         assert index < len(self.responses), "Unexpected extra pairing model request"
@@ -212,6 +218,67 @@ def _route() -> IdeaRoute:
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remembered", [True, False])
+async def test_unselected_persona_directions_survive_stock_reply_composition(
+    remembered: bool,
+) -> None:
+    route = replace(_route(), understanding="借秦始皇的果断劲儿，先给出可修改的趋势方案。")
+    original = CompileInput(utterance="我是秦始皇", as_of_date=date(2026, 9, 5))
+    pending = CompileOutcome(
+        status=CompileStatus.NEEDS_CLARIFICATION, diagnostic_code="idea_guidance_required",
+        clarification=route.understanding, idea_route=route,
+    )
+    requests: list[ClarificationDialogueRequest] = []
+    reply = "借秦始皇的果断劲儿，先给你可修改的趋势方案；东方财富也可以作为待测样本。"
+
+    class Dialogue:
+        async def assess(
+            self, request: ClarificationDialogueRequest,
+        ) -> ClarificationDialogueAssessment:
+            requests.append(request)
+            return ClarificationDialogueAssessment(
+                reply_kind="unclear", acknowledgement_id="ask_rephrase", natural_reply=reply,
+            )
+
+    class Data:
+        async def screen(self, *, query: str, asset_type: str) -> LiveMarketDataResult:
+            assert not remembered
+            return _screen()
+
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(),
+        catalog=load_catalog_directory(Path(__file__).parents[3] / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+        clarification_dialogue_router=Dialogue(),
+    )
+    state = DialogueState.project(
+        draft_id=uuid4(), revision=1, compile_input=original, outcome=pending,
+        created_at=datetime(2026, 9, 5, tzinfo=UTC), recent_turns=(),
+        pending_instrument_reuse=VerifiedInstrumentMemory(
+            symbol="300059.SZ", name="东方财富", source="draft_create_compile",
+            verified_at=datetime(2026, 9, 5, tzinfo=UTC), evidence="东方财富",
+        ),
+    ) if remembered else None
+    offered, candidate = await _offer_missing_instrument(
+        outcome=pending, compile_input=original, state=state,
+        container=cast(ApiContainer, SimpleNamespace(
+            compiler=compiler, live_market_data=Data(), strategy_advisor=None,
+        )),
+    )
+    assert len(requests) == 1
+    submitted = requests[0]
+    assert submitted.answer == original.utterance and submitted.question == ""
+    assert route.understanding in submitted.context_summary
+    assert all(item.title in submitted.context_summary for item in route.proposals)
+    assert "用户尚未选择任何策略" in submitted.context_summary
+    assert "用户已选策略：" not in submitted.context_summary
+    assert "身份信息不证明均线、量价或买入信号" in submitted.context_summary
+    assert offered.clarification == reply and offered.idea_route is route
+    assert offered.selected_idea_proposal is None and not offered.run_requested
+    assert candidate is not None
+
+
 def _need(field: str, *, symbol: str = "300059.SZ") -> StockStrategyPairing:
     return StockStrategyPairing(
         introduction="还需补充一些信息。", pairs=(),
@@ -226,6 +293,52 @@ def _matched() -> StockStrategyPairing:
         StockStrategyPair("idea_1", "600519.SH", "贵州茅台", "fixture reason"),
         StockStrategyPair("idea_0", "300059.SZ", "东方财富", "fixture reason"),
     ))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("understanding", [
+    "借秦始皇的果断劲儿，先给出可修改的趋势方案。",
+    "保留低估值偏好，历史估值条件尚未纳入回测，先给可修改的日线反转方案。",
+])
+async def test_pairing_keeps_original_direction_understanding(understanding: str) -> None:
+    route = replace(_route(), understanding=understanding)
+    pairing = _matched()
+
+    class Compiler:
+        def bind_idea_proposal(
+            self, request: CompileInput, proposal: IdeaProposal, symbol: str,
+        ) -> IdeaProposal:
+            return replace(proposal, instrument_symbol=symbol)
+
+    class Advisor:
+        async def pair_stock_strategies(
+            self, utterance: str, result: LiveMarketDataResult,
+            proposals: tuple[IdeaProposal, ...], original_understanding: str, **kwargs: object,
+        ) -> StockStrategyPairing:
+            assert original_understanding == understanding
+            assert proposals is route.proposals
+            return pairing
+
+    class Data:
+        async def screen(self, *, query: str, asset_type: str) -> LiveMarketDataResult:
+            return _screen()
+
+    pending = CompileOutcome(
+        status=CompileStatus.NEEDS_CLARIFICATION, diagnostic_code="idea_guidance_required",
+        idea_route=route, clarification=understanding,
+    )
+    offered, candidate = await _offer_missing_instrument(
+        outcome=pending, compile_input=CompileInput(
+            utterance="策略灵感", as_of_date=date(2026, 9, 5),
+        ), state=None, container=cast(ApiContainer, SimpleNamespace(
+            compiler=Compiler(), live_market_data=Data(), strategy_advisor=Advisor(),
+        )),
+    )
+    assert candidate is None and offered.idea_route is not None
+    assert offered.idea_route.understanding == understanding
+    assert offered.clarification == pairing.introduction
+    assert len(offered.idea_route.proposals) == 2
+    assert offered.strategy is None and not offered.run_requested
 
 
 def _finance(field: str) -> LiveFinanceDataResult:
@@ -260,6 +373,7 @@ async def _run(
     assert data.screen_calls == 0
     assert all(call.screen is screen and call.proposals is route.proposals
                for call in advisor.calls)
+    assert all(call.understanding == route.understanding for call in advisor.calls)
     return result
 
 

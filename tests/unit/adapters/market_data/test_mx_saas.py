@@ -6,10 +6,12 @@ import re
 import ssl
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import pytest
 
+from ashare_lab.adapters.market_data.eastmoney_instrument_search import EastmoneyInstrumentSearch
 from ashare_lab.adapters.market_data.mx_saas import (
     MxSaasMarketDataClient,
     MxSaasProviderAuthError,
@@ -20,6 +22,7 @@ from ashare_lab.adapters.market_data.mx_saas import (
 )
 from ashare_lab.domain.signals.provider_runtime import _field_value
 from ashare_lab.domain.strategy import IndicatorCondition
+from ashare_lab.ports.instrument_resolution import InstrumentNameAmbiguous
 
 
 async def _no_sleep(_delay: float) -> None:
@@ -33,6 +36,55 @@ def _client(handler: httpx.AsyncBaseTransport) -> MxSaasMarketDataClient:
         clock=lambda: datetime(2026, 9, 2, 10, 0, tzinfo=UTC),
         sleeper=_no_sleep,
     )
+
+
+@pytest.mark.parametrize("query,symbol", [
+    ("dfcf", "300059.SZ"), ("DFCF", "300059.SZ"), ("dongfangcaifu", "300059.SZ"),
+    ("gzmt", "600519.SH"), ("THS", "300033.SZ"),
+])
+def test_instrument_resolver_reuses_packaged_initials_without_provider(
+    query: str, symbol: str,
+) -> None:
+    def no_network(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("a verified local identity must not issue a provider request")
+
+    transport = httpx.MockTransport(no_network)
+    directory = Path(__file__).resolve().parents[4] / "ashare_lab/resources/a_share_directory.json"
+    search = EastmoneyInstrumentSearch(transport=transport, directory_path=directory)
+    client = MxSaasMarketDataClient(
+        api_key="test-provider-key", transport=transport, instrument_search=search,
+    )
+    assert client.resolve_instrument_name(query) == symbol
+    assert not search._refresh_tasks
+
+
+def test_instrument_resolver_local_partial_returns_candidates_not_a_guess() -> None:
+    def no_network(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("local ambiguity must not be overridden by a provider")
+
+    transport = httpx.MockTransport(no_network)
+    directory = Path(__file__).resolve().parents[4] / "ashare_lab/resources/a_share_directory.json"
+    search = EastmoneyInstrumentSearch(transport=transport, directory_path=directory)
+    client = MxSaasMarketDataClient(
+        api_key="test-provider-key", transport=transport, instrument_search=search,
+    )
+    with pytest.raises(InstrumentNameAmbiguous) as caught:
+        client.resolve_instrument_name("dongfangcaif")
+    assert [(item.symbol, item.name, item.source) for item in caught.value.candidates] == [
+        ("300059.SZ", "东方财富", "eastmoney_instrument_directory"),
+    ]
+    assert not search._refresh_tasks
+
+
+def test_runtime_instrument_resolver_enables_the_local_directory_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_provider(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("default runtime resolution must not request a verified local alias")
+
+    monkeypatch.setattr(MxSaasMarketDataClient, "screen", no_provider)
+    client = MxSaasMarketDataClient(api_key="test-provider-key")
+    assert client.resolve_instrument_name("DFCF") == "300059.SZ"
 
 
 def test_screen_preserves_provider_columns_rows_and_auditable_response_hash() -> None:
@@ -502,6 +554,61 @@ def test_finance_transport_failure_keeps_safe_cause_and_bounded_retries(failure:
     assert captured.value.http_status == (503 if failure == "http_error" else None)
     assert "private" not in str(captured.value)
     assert "test-provider-key" not in str(captured.value)
+
+
+def test_indicator_transport_retains_its_safe_call_id(caplog: pytest.LogCaptureFixture) -> None:
+    call_ids: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        call_ids.append(json.loads(request.content)["toolContext"]["callId"])
+        raise httpx.ReadTimeout("https://private.invalid/?token=secret", request=request)
+
+    with pytest.raises(MxSaasProviderUnavailableError) as caught:
+        asyncio.run(_client(httpx.MockTransport(handler)).query_indicator_history(
+            instrument_id="300059.SZ", indicator_id="technical.rsi",
+            provider_indicator_name="RSI", value_names=("RSI",),
+            start=date(2026, 9, 2), end=date(2026, 9, 3),
+        ))
+    assert len(call_ids) == 3
+    assert len(set(call_ids)) == 1
+    assert re.fullmatch(r"indicator_history_[0-9a-f]{32}", caught.value.call_id or "")
+    assert caught.value.call_id == call_ids[0]
+    assert caught.value.call_id in caplog.text
+    assert "private.invalid" not in str(caught.value) + caplog.text
+    assert "token=secret" not in str(caught.value) + caplog.text
+
+
+@pytest.mark.parametrize(("payload", "reason"), [
+    ({"dataTableDTOList": [{"entityCodes": ["300059.SZ"]}]}, "protocol_raw_table_missing"),
+    ({"dataTableDTOList": [{"entityCodes": ["300059.SZ"], "rawTable": {
+        "headName": ["2026-09-02", "2026-09-02"],
+    }}]}, "data_dates_mismatch"),
+    ({"dataTableDTOList": [{"entityCodes": ["600519.SH"]}]}, "data_security_mismatch"),
+    ({"code": 500, "message": "https://private.invalid/?token=secret"}, "provider_query_rejected"),
+    ({"data": {}}, "protocol_tables_missing"),
+])
+def test_indicator_bad_data_has_safe_reason_without_retry(
+    payload: dict[str, object], reason: str,
+) -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(MxSaasProviderDataError) as caught:
+        asyncio.run(_client(httpx.MockTransport(handler)).query_indicator_history(
+            instrument_id="300059.SZ", indicator_id="technical.rsi",
+            provider_indicator_name="RSI", value_names=("RSI",),
+            start=date(2026, 9, 2), end=date(2026, 9, 3),
+        ))
+    assert caught.value.data_reason == reason
+    assert caught.value.tool == "searchData"
+    assert re.fullmatch(r"indicator_history_[0-9a-f]{32}", caught.value.call_id or "")
+    assert "private.invalid" not in str(caught.value) + caught.value.data_reason
+    assert "test-provider-key" not in str(caught.value)
+    assert calls == 1
 
 
 def test_non_json_auth_failure_is_not_mistaken_for_bad_data() -> None:

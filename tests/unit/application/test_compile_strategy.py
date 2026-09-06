@@ -1274,8 +1274,7 @@ async def test_named_indicator_actions_without_triggers_request_one_clarificatio
     assert outcome.diagnostic_code == "indicator_trigger_requires_clarification"
     assert outcome.strategy is None
     assert outcome.clarification is not None
-    assert "一次写清每个条件" in outcome.clarification
-    assert "不会替你补默认触发规则" in outcome.clarification
+    assert outcome.strategy_hash is None
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,10 @@ _LOGGER = logging.getLogger(__name__)
 _RESPONSE_ONLY_CONTRACT = (
     "只把 contextSummary 中已核验的事实、当前进展和 question 写成用户直接阅读的完整中文回复。"
     "不重新识别交易意图，不生成策略，不新增证券、数字、规则或执行结论。"
+    "先辨别给定的选择状态：提出方案不等于用户已选，列表首项也不代表用户的选择。"
+    "尚未选择策略时，先自然承接给定的用户表达与模型方向理解，再介绍已有可编辑方案；"
+    "保留人物、比喻或风格与策略方向的联系，不把这层承接删成只有股票选择问题。"
+    "此阶段不能说‘你选的策略’，也不能替用户确认股票；没有事实依据不补造股票特征。"
     "通常一两句；处于已选策略的候选选股阶段时，完整回复80–140字，"
     "先用短句自然承接给定的所选策略方向，不逐条复述买卖规则。"
     "再简述给定的最多三只股票，每只保留名称及一项有依据的量价或均线等特征，"
@@ -191,6 +195,13 @@ class VibeClarificationDialogueRouter:
             system_contract=_IDENTITY_ONLY_CONTRACT if request.identity_only else (
                 _RESPONSE_ONLY_CONTRACT if request.response_only else (
                 "你是 A 股策略产品的意图承接与策略灵感路由层。只返回给定 JSON Schema。"
+                "最高优先级：自伤、自杀或人身安全求助必须先关心当下安全、给予支持，"
+                "不能转为买入条件、投资风格或策略灵感，也不催促回交易；必要时鼓励联系"
+                "身边可信任的人和当地急救，不推断地区、不编造号码。此时reply_kind=off_topic，"
+                "strategy_inspiration与所有选择字段为null或false，不请求任何行情或执行。"
+                "普通痛苦、饥饿、天气、时间和生活表达先按最新含义回应，不因旧问题在等"
+                "买入条件就解释为买入答案。情绪本身不代表愿意交易；已有交易意愿且适合"
+                "继续时才温和问一个关键缺项。已经提供的策略片段要承接，不要求全部重写。"
                 "natural_reply 是直接展示给用户的完整回复，不是供程序拼接的开场白；"
                 "程序不会再追加 question、提醒或示例。普通回答通常一两句，尽量80字以内；"
                 "来源回答的完整URL不计入这项简短要求，不得为了缩短而省略链接。"
@@ -235,7 +246,7 @@ class VibeClarificationDialogueRouter:
                 "本轮出现有文化意象的人物、角色、性格，就视为新的策略灵感，"
                 "reply_kind 用 preference，acknowledgement_id 用 respect_preference，"
                 "strategy_inspiration 必须填写，不得沿用 off_topic 或旧的转移话题回复。"
-                "用户用人物、角色、性格、情绪或比喻表达自己"
+                "用户用人物、角色、性格或投资比喻表达交易风格"
                 "或偏好时，默认填写 strategy_inspiration；这就是本产品的策略创作入口，"
                 "不需要用户另外说想交易或先给买卖规则。请用条件式解读形成交易风格假设，"
                 "交给下一层模型生成三种完整策略，而不是用玩笑接话后让用户重新聊股票。"
@@ -350,6 +361,9 @@ class VibeClarificationDialogueRouter:
                 "unsupported rules, search, or execute. Use preference/respect_preference only."
             ) if request.identity_only else (
                 "Return one classification and complete user-facing reply, never an executable "
+                "strategy. Safety or self-harm support overrides every trading or persona rule: "
+                "respond empathetically, check immediate safety, never create inspiration or "
+                "redirect to trading. Everyday distress is not an investment preference. "
                 "strategy. When responseOnly is false, interpret the LATEST answer first: "
                 "a named historical/fictional persona or personality metaphor is a NEW strategy "
                 "inspiration, even after jokes or weather chat; populate strategy_inspiration "
@@ -369,6 +383,10 @@ class VibeClarificationDialogueRouter:
                 payload = await self._transport.generate_json(transport_request)
                 assessment = _parse(payload)
             except CandidateTransportError as exc:
+                if request.diagnostic_code == "safety_support":
+                    # The compiler supplies a safe, non-executing fallback if
+                    # the model is unavailable; never strand a safety request.
+                    return None
                 if exc.is_classified:
                     raise
                 if attempt:
@@ -701,7 +719,8 @@ def _natural_reply_is_grounded(
     """Keep provider prose display-only and reject newly invented hard facts."""
 
     prose = _REPLY_URL_RE.sub("", reply)
-    if prose.count("?") + prose.count("？") > 1 or _UNSAFE_REPLY_RE.search(prose):
+    question_limit = 2 if request.diagnostic_code == "safety_support" else 1
+    if prose.count("?") + prose.count("？") > question_limit or _UNSAFE_REPLY_RE.search(prose):
         _LOGGER.warning("dialogue_reply_rejected reason=unsafe_reply_or_multiple_questions")
         return False
     allowed_urls: set[str] = ({source.url for source in request.research.sources}

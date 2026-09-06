@@ -25,6 +25,7 @@ from ashare_lab.domain.market_data.instruments import (
     AshareInstrumentCodeError,
     normalize_a_share_instrument,
 )
+from ashare_lab.ports.instrument_resolution import InstrumentNameAmbiguous, InstrumentNameCandidate
 
 from .a_share_directory import InstrumentDirectory
 from .a_share_directory import load as load_directory
@@ -216,6 +217,31 @@ class EastmoneyInstrumentSearch:
                 self._cache.popitem(last=False)
         except (OSError, TypeError, ValueError):
             return
+
+    def resolve_local_name(self, query: str) -> str | None:
+        """Resolve a unique complete directory alias without network or refresh.
+
+        Reuse the validated in-memory directory used by autocomplete. Its
+        acquisition time is identity evidence, not historical tradability.
+        ``None`` means the existing provider resolver may try an unlisted name.
+        Ambiguous aliases and partial matches must be confirmed by the user.
+        """
+        self._read_directory()
+        directory = self._directory
+        if directory is None:
+            return None
+        exact = directory.exact_matches(query)
+        if len(exact) == 1:
+            return exact[0].symbol
+        matches = exact or directory.search(query)
+        if matches:
+            raise InstrumentNameAmbiguous(tuple(
+                InstrumentNameCandidate(
+                    symbol=item.symbol, name=item.name, source=directory.source,
+                    retrieved_at=directory.retrieved_at,
+                ) for item in matches[:3]
+            ))
+        return None
 
     def _write_cache(self) -> None:
         if self._cache_dir is None:

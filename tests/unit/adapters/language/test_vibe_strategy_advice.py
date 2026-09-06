@@ -473,6 +473,29 @@ def _data_request_payload() -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_pairing_introduction_keeps_valuation_preference_and_execution_boundary() -> None:
+    understanding = "保留低估值偏好，历史估值条件尚未纳入回测，先给可修改的日线反转方案。"
+    reply = "低估值偏好先保留，历史估值条件尚未纳入回测；下面先给你可修改的日线反转组合。"
+    advisor, transport, screen, proposals = _data_pairing_fixture({
+        "introduction": reply, "pairs": [{
+            "proposal_id": "idea_fixture", "symbol": "300059.SZ",
+            "reason": "可以用来观察既有日线规则的研究样本。",
+        }], "data_request": None,
+    })
+    result = await advisor.pair_stock_strategies(
+        "估值过低的股票反转买", screen, proposals, understanding,
+    )
+    assert result is not None and result.introduction == reply
+    assert len(transport.requests) == 1
+    request = transport.requests[0]
+    assert request.user_payload is not None
+    assert request.user_payload["understanding"] == understanding
+    assert "不能把它缩成只有选股流程或选择问题" in request.system_contract
+    assert "introduction须保留这层边界" in request.system_contract
+    assert "列表首项不是用户已选" in request.system_contract
+
+
+@pytest.mark.asyncio
 async def test_pairing_returns_model_data_request_with_unmerged_supplemental_tables() -> None:
     advisor, transport, screen, proposals = _data_pairing_fixture(_data_request_payload())
     previous = StockStrategyDataRequest(

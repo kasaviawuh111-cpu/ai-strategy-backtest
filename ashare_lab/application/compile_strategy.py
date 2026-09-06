@@ -94,7 +94,11 @@ DEFAULT_INITIAL_CASH_CNY = 1_000_000
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 POSITION_AWARE_EXIT_AND_UNSUPPORTED = "position_aware_exit_and_not_supported"
 _LOGGER = logging.getLogger(__name__)
-_IDEA_ROUTE_DIAGNOSTIC_CODES = frozenset({"no_supported_signal_recognized"})
+_IDEA_ROUTE_DIAGNOSTIC_CODES = frozenset({
+    "no_supported_signal_recognized",
+    "candidate_provider_low_confidence",
+    "candidate_provider_invalid_output",
+})
 _INSTRUMENT_CLARIFICATION_CODES = frozenset(
     {
         "instrument_required",
@@ -349,9 +353,7 @@ _SOURCE_SEMANTIC_EXPLANATIONS = {
         "‘零轴上方金叉’这类组合限定精确执行。"
     ),
     "indicator_trigger_requires_clarification": (
-        "我识别到了指标和买卖动作，但没有识别到明确触发条件。请一次写清每个条件，"
-        "例如‘MACD 金叉买入、死叉卖出’或‘RSI 低于 30 买入、高于 70 卖出’；"
-        "系统不会替你补默认触发规则。"
+        "你说的指标在什么情况下触发交易？"
     ),
 }
 
@@ -493,6 +495,11 @@ class StrategyCompiler:
         answer: str, recent_turns: tuple[ClarificationDialogueTurn, ...] = (),
         backtest_results: tuple[Mapping[str, object], ...] = (),
     ) -> ClarificationTurnOutcome | None:
+        if classify_clarification_turn(answer) is TurnIntent.SAFETY:
+            return await self.safety_support_turn(
+                original_input=original_input, prior_outcome=prior_outcome,
+                answer=answer, recent_turns=recent_turns,
+            )
         base = prior_outcome.strategy or prior_outcome.revision_base_strategy
         if base is None or self._strategy_editor is None:
             return None
@@ -510,6 +517,12 @@ class StrategyCompiler:
         ))
         if result is not None and result.disposition == "not_edit":
             return None
+        if result is not None and result.disposition == "conversation":
+            return ClarificationTurnOutcome(
+                reply_kind="clarification", assistant_message=result.message,
+                outcome=replace(prior_outcome, run_requested=False, refresh_data=False),
+                compile_input=original_input, revision_changed=False,
+            )
         if result is not None and result.disposition == "change_instrument":
             # The model names the target; the existing resolver and binder own
             # the security identity and retain the exact server-side rules.
@@ -636,6 +649,22 @@ class StrategyCompiler:
                           and next_settings == current_settings
                           and not (backtest_results and result is not None
                                    and result.run_requested))
+        if unchanged_edit and classify_clarification_turn(answer) is TurnIntent.NEW_STRATEGY:
+            message = await self.compose_dialogue_response(
+                answer=answer, question="",
+                context=(
+                    "本轮解释得到的具体条件与当前策略完全一致，无需修改。"
+                    "当前策略仍可审阅、编辑，尚未发起新回测。请简短承接，"
+                    "不要求用户再补条件或反复确认；不要声称发生了修改。"
+                    f"当前策略：{base.model_dump_json()}"
+                ),
+                recent_turns=recent_turns,
+            )
+            return ClarificationTurnOutcome(
+                reply_kind="clarification", assistant_message=message,
+                outcome=replace(prior_outcome, run_requested=False, refresh_data=False),
+                compile_input=original_input, revision_changed=False,
+            )
         if unchanged_edit:
             strategy = None
         if strategy is not None:
@@ -650,6 +679,7 @@ class StrategyCompiler:
             except (ValueError, StrategyCatalogError):
                 strategy = None
         provenance = None if result is None else result.provenance
+        needs_clarification = False
         if strategy is not None:
             message = result.message if result is not None else "策略修改已完成。"
             outcome = CompileOutcome(
@@ -693,8 +723,8 @@ class StrategyCompiler:
             compile_input=CompileInput(
                 utterance=answer.strip(), instrument_context=base.instrument.symbol,
                 as_of_date=as_of,
-            ),
-            revision_changed=True,
+            ) if strategy is not None else original_input,
+            revision_changed=strategy is not None or needs_clarification,
         )
 
     async def resolve_instrument_context(
@@ -1007,6 +1037,12 @@ class StrategyCompiler:
     ) -> ClarificationTurnOutcome:
         """Continue dialogue; model-authored strategies still pass the DSL gate."""
 
+        if classify_clarification_turn(answer) is TurnIntent.SAFETY:
+            return await self.safety_support_turn(
+                original_input=original_input, prior_outcome=prior_outcome,
+                answer=answer, recent_turns=recent_turns,
+            )
+
         if (
             prior_outcome.status is not CompileStatus.NEEDS_CLARIFICATION
             or prior_outcome.diagnostic_code is None
@@ -1302,6 +1338,39 @@ class StrategyCompiler:
             suggestions=suggestions,
         )
 
+    async def safety_support_turn(
+        self, *, original_input: CompileInput, prior_outcome: CompileOutcome,
+        answer: str, recent_turns: tuple[ClarificationDialogueTurn, ...] = (),
+    ) -> ClarificationTurnOutcome:
+        """Safety support cannot mutate a strategy or trigger any market work."""
+        fallback = (
+            "听到你这样说，我很担心你。你现在安全吗，有没有马上伤害自己的危险？"
+            "如果有，请先远离可能伤害自己的东西，联系身边可信任的人陪着你，"
+            "并立即联系当地急救服务。"
+        )
+        message = fallback
+        if self._clarification_dialogue_router is not None:
+            assessment = await self._clarification_dialogue_router.assess(
+                ClarificationDialogueRequest(
+                    answer=answer, prior_utterance="", diagnostic_code="safety_support",
+                    question="关心用户现在是否安全、是否有马上伤害自己的危险。",
+                    context_summary=(
+                        "本轮含有自伤或自杀求助，即使来自交易编辑槽位也应暂停交易引导。"
+                        "温和认真地承接情绪，询问当下安全；鼓励联系可信任的人，"
+                        "如有迫在眉睫的危险则联系当地急救。不要推断所在地或提供未核验号码。"
+                        "不解释交易规则，不催补买入条件，不生成策略或盈利建议。"
+                    ),
+                    options=(), recent_turns=recent_turns[-20:], response_only=True,
+                ),
+            )
+            if assessment is not None:
+                message = assessment.natural_reply
+        return ClarificationTurnOutcome(
+            reply_kind="clarification", assistant_message=message,
+            outcome=replace(prior_outcome, run_requested=False, refresh_data=False),
+            compile_input=original_input, revision_changed=False,
+        )
+
     async def compose_dialogue_response(
         self, *, answer: str, question: str, context: str,
         recent_turns: tuple[ClarificationDialogueTurn, ...] = (),
@@ -1362,6 +1431,16 @@ class StrategyCompiler:
             if effective_as_of_date == request.as_of_date
             else replace(request, as_of_date=effective_as_of_date)
         )
+        if classify_clarification_turn(request.utterance) is TurnIntent.SAFETY:
+            turn = await self.safety_support_turn(
+                original_input=effective_request,
+                prior_outcome=CompileOutcome(
+                    status=CompileStatus.NEEDS_CLARIFICATION,
+                    diagnostic_code="conversation_only",
+                ),
+                answer=request.utterance,
+            )
+            return replace(turn.outcome, clarification=turn.assistant_message)
         source_semantic_diagnostic = _unsupported_source_semantics(request.utterance)
         candidates: tuple[CandidateAst, ...] | None = None
         if source_semantic_diagnostic == "ambiguous_boolean_expression":
@@ -1377,6 +1456,12 @@ class StrategyCompiler:
             ):
                 source_semantic_diagnostic = None
         if source_semantic_diagnostic is not None:
+            if (source_semantic_diagnostic == "indicator_trigger_requires_clarification"
+                    and self._idea_router is not None):
+                idea_outcome = await self._compile_idea_guidance(
+                    effective_request, propose_defaults=True,
+                )
+                return idea_outcome or self._idea_guidance_unavailable()
             if source_semantic_diagnostic in _LOCAL_CLARIFICATION_ROUTE_CODES:
                 clarification_request = effective_request
                 candidate_grounding: tuple[CandidateGroundingEvidence, ...] = ()
@@ -1504,11 +1589,13 @@ class StrategyCompiler:
                 status=CompileStatus.UNSUPPORTED,
                 diagnostic_code="no_candidate_generated",
             )
-        if self._idea_router is not None and all(
+        if (self._idea_router is not None and all(
             item.unsupported_code in _IDEA_ROUTE_DIAGNOSTIC_CODES for item in candidates
-        ):
+        ) and any(
+            item.unsupported_code != "candidate_provider_invalid_output" for item in candidates
+        )):
             idea_outcome = await self._compile_idea_guidance(
-                effective_request, known_candidate=candidates[0],
+                effective_request, known_candidate=candidates[0], propose_defaults=True,
             )
             if idea_outcome is not None:
                 return idea_outcome
@@ -1579,11 +1666,7 @@ class StrategyCompiler:
             if candidate.unsupported_code == "candidate_provider_low_confidence":
                 return CompileOutcome(
                     status=CompileStatus.NEEDS_CLARIFICATION,
-                    clarification=(
-                        "我还没有完全理解这条交易规则。为了准确还原你的想法，"
-                        "麻烦在一句话里说明：什么条件买入、什么条件卖出。"
-                        "我会严格按你提供的条件进行回测，不擅自补充默认策略。"
-                    ),
+                    clarification="这条交易想法还需要确认具体含义。",
                     diagnostic_code=candidate.unsupported_code,
                     candidate_provenance=candidate.provenance,
                     candidate_grounding=candidate.grounding_evidence,
@@ -1721,10 +1804,7 @@ class StrategyCompiler:
                 )
             return CompileOutcome(
                 status=CompileStatus.NEEDS_CLARIFICATION,
-                clarification=(
-                    "我已尝试按原话还原候选，但没有一个通过当前指标、事件和日期门禁。"
-                    "请一次写清买入条件、卖出条件和回测区间；系统不会执行未通过校验的候选。"
-                ),
+                clarification="候选尚未通过规则校验，需要确认其中的含义。",
                 diagnostic_code="candidate_batch_no_valid_strategy",
                 candidate_provenance=first_provenance,
                 candidate_grounding=candidates[0].grounding_evidence,
@@ -1794,7 +1874,10 @@ class StrategyCompiler:
     ) -> CompileOutcome | None:
         """Route greetings or creative inspiration without authorizing execution."""
 
-        if not _looks_like_initial_conversation(request.utterance):
+        if not _looks_like_initial_conversation(request.utterance) and not (
+            self._clarification_dialogue_router is not None
+            and classify_clarification_turn(request.utterance) is TurnIntent.UNKNOWN
+        ):
             return None
         assessment = None
         if self._clarification_dialogue_router is not None:
@@ -1966,11 +2049,17 @@ class StrategyCompiler:
     async def _compile_idea_guidance(
         self,
         request: CompileInput,
-        *, known_candidate: CandidateAst | None = None,
+        *, known_candidate: CandidateAst | None = None, propose_defaults: bool = False,
     ) -> CompileOutcome | None:
         if self._idea_router is None:
             return None
-        routed_request = request
+        # Missing rule details are strategy inspiration, not an assertion about
+        # current events. Reuse the idea router's existing inspiration contract
+        # while keeping the original utterance intact for subsequent turns.
+        routed_request = (
+            replace(request, idea_inspiration=request.idea_inspiration or request.utterance)
+            if propose_defaults else request
+        )
         viewpoint_grounding: tuple[CandidateGroundingEvidence, ...] = ()
         if (known_candidate is None and request.instrument_context is None
                 and _SOURCE_ACTION_RE.search(request.utterance)):
@@ -1979,7 +2068,9 @@ class StrategyCompiler:
         if known_candidate is not None and _candidate_instrument_is_grounded(
             known_candidate, request.utterance,
         ):
-            routed_request = replace(request, instrument_context=known_candidate.instrument_symbol)
+            routed_request = replace(
+                routed_request, instrument_context=known_candidate.instrument_symbol,
+            )
             viewpoint_grounding = known_candidate.grounding_evidence
         if routed_request.instrument_context is None:
             mention = _idea_guidance_instrument_mention(request.utterance)
@@ -2003,7 +2094,7 @@ class StrategyCompiler:
                             resolved_symbol = None
                 if resolved_symbol is not None:
                     name = mention.name
-                    routed_request = replace(request, instrument_context=resolved_symbol)
+                    routed_request = replace(routed_request, instrument_context=resolved_symbol)
                     viewpoint_grounding = (
                         CandidateGroundingEvidence(
                             path="/instrument/symbol",
@@ -2057,9 +2148,7 @@ class StrategyCompiler:
         ):
             return CompileOutcome(
                 status=CompileStatus.NEEDS_CLARIFICATION,
-                clarification=(
-                    "想试哪个方向？也可以告诉我你想用哪只股票。"
-                ),
+                clarification=idea_route.understanding,
                 diagnostic_code="idea_guidance_required",
                 idea_route=idea_route,
                 candidate_grounding=viewpoint_grounding,

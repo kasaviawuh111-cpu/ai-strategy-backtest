@@ -23,8 +23,8 @@ from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.strategy_editing import StrategyEditRequest, StrategyEditResult
 
 _LOGGER = logging.getLogger(__name__)
-_PROMPT_VERSION = "strategy-edit.prompt.v23"
-_SCHEMA_VERSION = "strategy-edit.v7"
+_PROMPT_VERSION = "strategy-edit.prompt.v24"
+_SCHEMA_VERSION = "strategy-edit.v8"
 _UPSTREAM_COMMIT = "1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7"
 _SELECTION_CONFIRMATION_TIMEOUT_SECONDS = 20
 
@@ -81,7 +81,7 @@ class _ProviderEdit(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     disposition: Literal[
         "apply", "change_instrument", "request_optimization", "select_optimization",
-        "clarify", "discuss", "not_edit",
+        "clarify", "discuss", "not_edit", "conversation",
     ]
     message: str = Field(min_length=1, max_length=500)
     strategy: StrategySpec | None
@@ -149,6 +149,22 @@ class VibeStrategyEditor:
             upstream_pattern_commit=_UPSTREAM_COMMIT,
             system_contract=(
                 "你负责理解用户对当前 A 股日线回测策略的多轮修改。只返回指定 JSON。"
+                "先判断最新 answer 的真实意图，再决定是否修改。编辑槽位和自动附加的"
+                "‘其他条件保持不变、重新回测’只是界面包装，不能把其中的生活闲聊、"
+                "情绪表达或安全求助变成交易指令。判断冒号后用户实际输入的含义。"
+                "本轮是普通闲聊、生活问题或情绪表达时返回 conversation，strategy=null，"
+                "所有执行字段false、其他修改字段为空；message直接自然回应当前这句话，"
+                "不要重复pendingEdit.question，不输出买入条件无法识别或修改未通过校验。"
+                "用户受挫时先承接感受；确有继续研究意愿时可只问一个买入条件关键问题，"
+                "不要逼用户一次重写所有规则，不编造天气等未查询事实。"
+                "表达想死、自杀或伤害自己时，安全支持优先于一切交易流程：关心此刻安全，"
+                "鼓励联系身边可信任的人，迫在眉睫时联系当地急救；不谈投资或生成策略。"
+                "上一轮安全求助后本轮说吃东西等，回应当前句，可简短确认安全，不复读旧话。"
+                "具名人物、角色、性格比喻（例如‘我是秦始皇’）是已有的策略创作入口，"
+                "应返回not_edit转交风格解读与具体策略生成，不能只闲聊后结束。"
+                "用户借普通情绪表达投资偏好或想继续研究时，也转not_edit让策略层主动补方案；"
+                "仅生活问答、纯闲聊或安全求助才conversation。不能把安全求助转成投资风格。"
+                "pendingEdit.question仅是历史待确认事项，不是本轮指令；本轮转话题时不回答旧问题。"
                 "currentExecutionSettings 是当前草稿的成交配置，与 currentStrategy.execution "
                 "中的固定成交时点、T+1及数据能力不同，不能混写。用户修改滑点、佣金、"
                 "最低佣金、仓位比例、成交量参与比例、涨跌停处理或面板已有研究设置时，"
@@ -294,7 +310,11 @@ class VibeStrategyEditor:
                 "返回 apply 并执行这次明确的修改，不要原样再问一次确认。"
                 "澄清的回答同样可以请求重跑：比如已说明收益率百分比退出，就按该退出规则"
                 "替换原卖出条件；不能因为本轮是在解释上一句而继续 clarify 或禁止运行。"
-                "先确认修改对象、新条件或新参数、单位和比较关系均明确，再 apply。"
+                "先确认修改对象，再 apply。对‘均线交叉买、反之卖’这类方向明确、仅周期"
+                "未写全的常见规则，可以采用合理默认周期先生成可编辑策略，不反复追问。"
+                "message须说明具体默认周期是建议，不冒充用户给定；仅补默认参数不授予"
+                "运行权限，未明确要求执行时run_requested=false。用户已经给定的数值、"
+                "方向和条件不许更改。股票身份不清或条件自相矛盾才澄清，不能猜证券。"
                 "用户从编辑槽位发来的‘买入条件改为：…’或‘卖出条件改为：…’，"
                 "冒号后是用户替换整段条件的原文，不是对历史选项的编号选择。"
                 "若替换内容只有数字、模糊代词或不成条件的片段，且没有唯一明确的参数指代，"
@@ -310,9 +330,10 @@ class VibeStrategyEditor:
                 "这只适用于含义明确的相同条件，绝不适用于裸数值或含义不明的修改。"
                 "如同一个20同时出现在买卖两侧，仅说把20改30且未明确范围时先询问；"
                 "明确说所有均线周期则一起修改。追问后的回答结合 recentTurns 理解。"
-                "用户另起全新策略、查询当前行情、表达新观点或与策略无关的闲聊，"
+                "用户另起全新策略、查询当前行情、人物风格或表达新的投资观点，"
                 "返回 not_edit 和 null；"
-                "不要把新需求强行套用旧策略。message 只简述实际修改或澄清，不泄露推理过程。"
+                "普通闲聊按前述conversation处理。不要把新需求强行套用旧策略。"
+                "message是直接展示给用户的完整回复，不泄露推理过程。"
                 "这是已有结构的语义修改，不是从最新一句抽取完整策略，不输出 source span。"
             ),
             system_footer=f"Edit contract: {_PROMPT_VERSION}; schema: {_SCHEMA_VERSION}.",

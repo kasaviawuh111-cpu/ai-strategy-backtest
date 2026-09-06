@@ -9,6 +9,10 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from ashare_lab.adapters.market_data.a_share_directory import (
+    DirectoryInstrument,
+    InstrumentDirectory,
+)
 from ashare_lab.adapters.market_data.eastmoney_instrument_search import (
     EastmoneyInstrumentSearch,
     InstrumentSearchInvalid,
@@ -17,12 +21,51 @@ from ashare_lab.adapters.market_data.eastmoney_instrument_search import (
 )
 from ashare_lab.api.app import create_app
 from ashare_lab.api.routes.instruments import get_instrument_search
+from ashare_lab.ports.instrument_resolution import InstrumentNameAmbiguous
 
 
 def _identity_response() -> httpx.Response:
     return httpx.Response(200, json={"code": "0", "result": [
         {"code": "300059", "shortName": "东方财富", "market": 0, "securityTypeName": "深A"},
     ]})
+
+
+def test_local_resolver_keeps_shared_initials_ambiguous_without_refresh() -> None:
+    def no_network(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("local resolution must never issue or schedule a network request")
+
+    search = EastmoneyInstrumentSearch(transport=httpx.MockTransport(no_network))
+    retrieved_at = datetime(2024, 1, 1, tzinfo=UTC)
+    # Deliberately stale identity data still uses its original acquisition date;
+    # resolution must not start autocomplete's async stale-refresh task.
+    search._directory = InstrumentDirectory(
+        items=(
+            DirectoryInstrument("300059.SZ", "甲公司", "SZ", "jiagongsi", "jgs"),
+            DirectoryInstrument("600519.SH", "嘉公司", "SH", "jiagongsi", "jgs"),
+            DirectoryInstrument("920799.BJ", "甲公司软件", "BJ", "jiagongsiruanjian", "jgsrj"),
+        ),
+        retrieved_at=retrieved_at, reported_total=3,
+        source_url="https://search-codetable.eastmoney.com/codetable/search/web",
+    )
+    with pytest.raises(InstrumentNameAmbiguous) as caught:
+        search.resolve_local_name("JGS")
+    assert [item.symbol for item in caught.value.candidates] == ["300059.SZ", "600519.SH"]
+    assert all(item.retrieved_at == retrieved_at for item in caught.value.candidates)
+    # Unique exact equality takes precedence over longer containing matches.
+    assert search.resolve_local_name("甲公司") == "300059.SZ"
+    assert search.resolve_local_name("unknown_alias") is None
+    assert search.resolve_local_name("300059.SH") is None
+    assert not search._refresh_tasks
+
+
+def test_local_resolver_without_validated_directory_leaves_provider_fallback_available(
+    tmp_path: Path,
+) -> None:
+    search = EastmoneyInstrumentSearch(
+        transport=httpx.MockTransport(lambda _: _identity_response()),
+        directory_path=tmp_path / "missing.json",
+    )
+    assert search.resolve_local_name("DFCF") is None
 
 
 def test_a_share_types_exclude_index_fund_hk_and_keep_beijing_star_st() -> None:

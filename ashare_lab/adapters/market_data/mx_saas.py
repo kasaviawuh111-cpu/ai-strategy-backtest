@@ -41,6 +41,7 @@ from ashare_lab.ports.provider_indicator_data import (
     ProviderIndicatorValue,
 )
 
+from .eastmoney_instrument_search import EastmoneyInstrumentSearch
 from .mx_indicator_contract import MxIndicatorFieldContract, build_indicator_contract
 
 _SCHEMA_VERSION = "eastmoney-mx.select-security.v1"
@@ -54,6 +55,7 @@ _RETRY_BASE_BACKOFF_SECONDS = 1.0
 _RETRY_MAX_BACKOFF_SECONDS = 4.0
 _LOGGER = logging.getLogger(__name__)
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 425, 429})
+_MX_CALL_ID_RE = re.compile(r"(?:finance|screen|indicator_history)_[0-9a-f]{32}")
 _DIRECT_ENTITY_LIMIT = 5
 _MAX_SCREENED_ENTITIES = 500
 _SECURITY_CODE_RE = re.compile(r"^\d{6}(?:\.(?:SH|SZ|BJ))?$", re.IGNORECASE)
@@ -191,9 +193,53 @@ class MxSaasProviderUnavailableError(MxSaasProviderError):
 class MxSaasProviderDataError(MxSaasProviderError):
     """The provider response cannot safely be interpreted."""
 
+    @property
+    def data_reason(self) -> str:
+        # Classify only application-owned messages. Raw provider text and
+        # dynamic field values never become a diagnostic code or log message.
+        message = str(self)
+        fixed = {
+            "real-time market-data provider returned non-JSON": "protocol_invalid_json",
+            "real-time market-data provider returned an invalid payload":
+                "protocol_invalid_payload",
+            "real-time financial provider omitted its tables": "protocol_tables_missing",
+            "real-time financial provider returned an invalid table": "protocol_table_invalid",
+            "historical indicator response omitted rawTable": "protocol_raw_table_missing",
+            "historical indicator response omitted session dates": "protocol_dates_missing",
+            "real-time market-data provider rejected the request": "provider_query_rejected",
+            "real-time market-data provider returned a partial business result":
+                "provider_partial_result",
+            "historical indicator response does not bind exactly one requested security":
+                "data_security_mismatch",
+            "historical indicator response contains duplicate dates": "data_dates_mismatch",
+            "historical indicator response has a different date window": "data_dates_mismatch",
+            "historical indicator session date is invalid": "data_dates_mismatch",
+            "historical indicator response is not a daily date axis": "data_dates_mismatch",
+            "historical indicator value count does not match session dates": "data_values_invalid",
+            "historical indicator value is missing": "data_values_invalid",
+            "historical indicator value is not numeric": "data_values_invalid",
+            "historical indicator value is not finite": "data_values_invalid",
+        }
+        if message in fixed:
+            return fixed[message]
+        if message.startswith("historical indicator field "):
+            return "data_field_binding_mismatch"
+        return "data_validation_failed"
+
 
 class MxSaasProviderNoDataError(MxSaasProviderDataError):
     """The provider answered successfully but selected no usable entity."""
+
+
+@contextmanager
+def _data_error_context(*, tool: MxTool, call_id: str) -> Generator[None, None, None]:
+    """Retain safe request correlation when validation fails after HTTP succeeds."""
+    try:
+        yield
+    except MxSaasProviderDataError as exc:
+        exc.tool = tool
+        exc.call_id = call_id if _MX_CALL_ID_RE.fullmatch(call_id) else "unknown"
+        raise
 
 
 class MxSaasMarketDataClient:
@@ -210,6 +256,7 @@ class MxSaasMarketDataClient:
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
         strict_indicator_contracts: bool = False,
+        instrument_search: EastmoneyInstrumentSearch | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("api_key must not be blank")
@@ -225,17 +272,23 @@ class MxSaasMarketDataClient:
         self._max_attempts = max_attempts
         self._sleeper = sleeper
         self._strict_indicator_contracts = strict_indicator_contracts
+        # Runtime reuses the packaged name/code/pinyin directory. Injected
+        # transports opt in explicitly so provider tests stay isolated.
+        self._instrument_search = instrument_search or (
+            EastmoneyInstrumentSearch() if transport is None else None
+        )
 
     async def screen(self, *, query: str, asset_type: str) -> LiveMarketDataResult:
         cleaned_query = query.strip()
         cleaned_asset_type = asset_type.strip()
         if not cleaned_query or not cleaned_asset_type:
             raise ValueError("query and asset_type must not be blank")
+        call_id = f"screen_{uuid4().hex}"
         payload = {
             "query": cleaned_query,
             "selectType": cleaned_asset_type,
             "toolContext": {
-                "callId": f"screen_{uuid4().hex}",
+                "callId": call_id,
                 "userInfo": {"userId": "ashare-backtest-service"},
             },
         }
@@ -244,23 +297,24 @@ class MxSaasMarketDataClient:
             payload=payload,
         )
         raw = response.content
-        decoded = _decode_provider_response(response)
-        _raise_for_provider_status(response, decoded, tool="selectSecurity")
-        result = _result_node(decoded)
-        columns: tuple[str, ...] = ()
-        rows: tuple[Mapping[str, Any], ...] = ()
-        if result is not None:
-            columns, column_labels = _column_metadata(result.get("columns"))
-            rows = _normalise_rows(result.get("dataList"), columns, column_labels)
-        if not rows:
-            partial_rows = _partial_result_rows(decoded)
-            if partial_rows:
-                columns = tuple(partial_rows[0])
-                rows = partial_rows
-        if not rows:
-            raise MxSaasProviderNoDataError(
-                "real-time screening provider returned no matching data"
-            )
+        with _data_error_context(tool="selectSecurity", call_id=call_id):
+            decoded = _decode_provider_response(response)
+            _raise_for_provider_status(response, decoded, tool="selectSecurity")
+            result = _result_node(decoded)
+            columns: tuple[str, ...] = ()
+            rows: tuple[Mapping[str, Any], ...] = ()
+            if result is not None:
+                columns, column_labels = _column_metadata(result.get("columns"))
+                rows = _normalise_rows(result.get("dataList"), columns, column_labels)
+            if not rows:
+                partial_rows = _partial_result_rows(decoded)
+                if partial_rows:
+                    columns = tuple(partial_rows[0])
+                    rows = partial_rows
+            if not rows:
+                raise MxSaasProviderNoDataError(
+                    "real-time screening provider returned no matching data"
+                )
         return LiveMarketDataResult(
             provider="eastmoney_mx_screener",
             query=cleaned_query,
@@ -293,10 +347,11 @@ class MxSaasMarketDataClient:
         if not cleaned_query:
             raise ValueError("query must not be blank")
         provider_query = _query_with_indicator_hint(cleaned_query, cleaned_indicators)
+        call_id = f"finance_{uuid4().hex}"
         payload = {
             "query": provider_query,
             "toolContext": {
-                "callId": f"finance_{uuid4().hex}",
+                "callId": call_id,
                 "userInfo": {"userId": "ashare-backtest-service"},
             },
         }
@@ -305,13 +360,14 @@ class MxSaasMarketDataClient:
             payload=payload,
         )
         raw = response.content
-        decoded = _decode_provider_response(response)
-        _raise_for_provider_status(response, decoded, tool="searchData")
-        tables = _finance_tables(decoded)
-        if not tables:
-            raise MxSaasProviderNoDataError(
-                "real-time financial provider returned no matching data"
-            )
+        with _data_error_context(tool="searchData", call_id=call_id):
+            decoded = _decode_provider_response(response)
+            _raise_for_provider_status(response, decoded, tool="searchData")
+            tables = _finance_tables(decoded)
+            if not tables:
+                raise MxSaasProviderNoDataError(
+                    "real-time financial provider returned no matching data"
+                )
         retrieved_at = self._validated_retrieved_at()
         return LiveFinanceDataResult(
             provider="eastmoney_mx_finance_data",
@@ -385,29 +441,31 @@ class MxSaasMarketDataClient:
                     if adjusted else "只返回逐日数据，不返回区间汇总。"
                 )
             )
+        call_id = f"indicator_history_{uuid4().hex}"
         response = await self._post(
             path="/proxy/b/mcp/tool/searchData",
             payload={
                 "query": query,
                 "toolContext": {
-                    "callId": f"indicator_history_{uuid4().hex}",
+                    "callId": call_id,
                     "userInfo": {"userId": "ashare-backtest-service"},
                 },
             },
         )
         raw = response.content
-        decoded = _decode_provider_response(response)
-        _raise_for_provider_status(response, decoded, tool="searchData")
-        tables = _finance_tables(decoded)
-        points = _provider_indicator_points(
-            tables=tables,
-            instrument_id=canonical_instrument,
-            provider_indicator_name=cleaned_provider_name,
-            value_names=cleaned_value_names,
-            start=start,
-            end=end,
-            contract=contract,
-        )
+        with _data_error_context(tool="searchData", call_id=call_id):
+            decoded = _decode_provider_response(response)
+            _raise_for_provider_status(response, decoded, tool="searchData")
+            tables = _finance_tables(decoded)
+            points = _provider_indicator_points(
+                tables=tables,
+                instrument_id=canonical_instrument,
+                provider_indicator_name=cleaned_provider_name,
+                value_names=cleaned_value_names,
+                start=start,
+                end=end,
+                contract=contract,
+            )
         return ProviderIndicatorSeries(
             provider="eastmoney_mx_finance_data",
             instrument_id=canonical_instrument,
@@ -521,7 +579,7 @@ class MxSaasMarketDataClient:
         )
 
     def resolve_instrument_name(self, name: str) -> str:
-        """Resolve an exact name, or retain provider identities for confirmation.
+        """Resolve a unique local alias, then an exact provider name if absent.
 
         A partial match never binds a strategy, even if only one row is found.
         Asking for containing names also gives an abbreviation its choices in
@@ -531,6 +589,10 @@ class MxSaasMarketDataClient:
         cleaned_name = "".join(name.split())
         if not cleaned_name:
             raise LookupError("empty instrument name")
+        if self._instrument_search is not None:
+            local_symbol = self._instrument_search.resolve_local_name(cleaned_name)
+            if local_symbol is not None:
+                return local_symbol
         try:
             result = asyncio.run(
                 self.screen(
@@ -587,7 +649,7 @@ class MxSaasMarketDataClient:
         )
         call_id = (
             raw_call_id if isinstance(raw_call_id, str)
-            and re.fullmatch(r"(?:finance|screen)_[0-9a-f]{32}", raw_call_id)
+            and _MX_CALL_ID_RE.fullmatch(raw_call_id)
             else "unknown"
         )
         # This provider currently advertises both address families, while its

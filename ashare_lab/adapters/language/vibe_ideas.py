@@ -69,7 +69,7 @@ from ashare_lab.ports.idea_routing import (
 )
 
 _UPSTREAM_COMMIT = "1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7"
-_PROMPT_VERSION = "idea-route.prompt.v11"
+_PROMPT_VERSION = "idea-route.prompt.v12"
 _PROVIDER_SCHEMA_VERSION = "idea-route-provider.v6"
 _PROPOSAL_CONFIDENCE = 0.75
 _BUY_ACTION_RE = re.compile(r"(?:买入|买进|建仓|开仓)")
@@ -549,9 +549,20 @@ def _system_contract(*, require_strategy: bool = False, unbound: bool = False) -
         "用户本轮明确请求帮忙推荐股票时，此字段为false，不取消推荐。"
         "不要机械添加免责声明，也不要说没有股票就不能继续。"
         "hypothesis 字段保留供内部核验，不要把它重复写进 understanding。"
-        "ideaInspiration 若非空，是人物、情绪、比喻或风格的待确认解读；结合 recentIdeaTurns，"
-        "把它当作创作灵感，转成三种有差异的交易方向，不当成投资事实。"
+        "ideaInspiration 若非空，是用户的交易意向或人物、情绪、比喻、风格的解读；"
+        "结合 recentIdeaTurns，把它当作策略灵感，转成三种有差异的交易方向，"
+        "不当成投资事实，也不改掉其中用户已明确的规则。"
         "不要重复闲聊或要求用户先自己提供完整规则，也不要根据人物给用户贴风险偏好标签。"
+        "缺少周期、阈值、交叉方向或退出细节时，直接按用户已经表达的方向生成可编辑方案，"
+        "合理选择缺失参数，不再追问用户或要求重写。understanding说明已先给出可修改的建议；"
+        "方案标题或entry_summary、exit_summary要把未指定参数标为模型建议，"
+        "不能称这些数值、周期或方向是用户给定的。用户明确指定的部分仍逐项保持。"
+        "用户表达低估值等选股偏好时，在understanding或方案短说明中保留该偏好。"
+        "如果当前可执行边界没有对应历史财务条件，明确说明低估值仅用于选股偏好、"
+        "当前方案回测的是具体日线反转条件，不能把价格超跌等同低估值，"
+        "也不能编造历史PE、PB或把当前估值当作过去的买入信号。"
+        "用户已明确要求某个估值阈值作为买入条件时，不得静默移除或声称技术条件满足它；"
+        "须在该方案的短说明中指出该条件尚未纳入回测，技术规则只是可编辑的部分方案。"
         "各方案应有买入、卖出及风险退出；积极短线风格也必须有退出约束，不能承诺收益。"
         "用户已明确的一侧规则必须在所有方案中逐项保持，不增加过滤或退出条件。"
         "只有买入时只生成不同卖出选择；只有卖出时只生成不同买入选择。"
@@ -844,6 +855,7 @@ def _to_proposal(
     ).hexdigest()[:12]
     assumptions = [
         "这是模型生成的待验证假设，不证明原观点与股价存在因果关系。",
+        "用户未指定的周期、阈值、触发方向或退出细节属于模型建议，可以修改；不是用户给定条件。",
         "候选只允许日线、只做多；服务端仍会逐条校验 DSL 并通过 Catalog 门禁。",
     ]
     assumptions.insert(

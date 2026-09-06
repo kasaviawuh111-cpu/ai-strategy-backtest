@@ -162,6 +162,39 @@ def _provider_payload() -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_suggested_parameters_and_unavailable_valuation_remain_visible_as_suggestions(
+    capability_matrix: CandidateCapabilityMatrix,
+) -> None:
+    payload = _provider_payload()
+    payload["understanding"] = "低估值保留为选股偏好，先给出可编辑的日线反转建议。"
+    proposals = cast(list[dict[str, object]], payload["proposals"])
+    for proposal in proposals:
+        proposal["title"] = "模型建议" + str(proposal["title"])
+        proposal["hypothesis"] = "周期和阈值为模型建议，当前只回测日线条件，没有历史估值过滤。"
+        proposal["entry_summary"] = (
+            str(proposal["entry_summary"]) + "（模型建议，未纳入历史估值过滤）"
+        )
+    transport = _RecordingTransport([payload])
+    router = VibeIdeaRouter(transport, capability_matrix=capability_matrix)
+    route = await router.route(CompileInput(
+        utterance="估值过低的股票反转买", as_of_date=date(2026, 9, 4),
+        idea_inspiration="估值过低的股票反转买",
+    ))
+    assert route is not None
+    assert route.understanding == payload["understanding"]
+    assert all("模型建议" in proposal.title for proposal in route.proposals)
+    assert all("没有历史估值过滤" in proposal.hypothesis for proposal in route.proposals)
+    assert all("未纳入历史估值过滤" in proposal.entry_summary for proposal in route.proposals)
+    assert all(any("不是用户给定条件" in item for item in proposal.assumptions)
+               for proposal in route.proposals)
+    assert len(transport.requests) == 1
+    contract = transport.requests[0].system_contract
+    assert "不再追问用户或要求重写" in contract
+    assert "不能编造历史PE、PB" in contract
+    assert "不得静默移除" in contract
+
+
+@pytest.mark.asyncio
 async def test_provider_authors_complete_strategies_but_server_owns_asset_and_capabilities(
     capability_matrix: CandidateCapabilityMatrix,
 ) -> None:
@@ -203,7 +236,7 @@ async def test_provider_authors_complete_strategies_but_server_owns_asset_and_ca
     assert all(item.capability_ids == () for item in route.proposals)
     assert route.provenance is not None
     assert route.provenance.provider == "deepseek"
-    assert route.provenance.prompt_version == "idea-route.prompt.v11"
+    assert route.provenance.prompt_version == "idea-route.prompt.v12"
     assert route.provenance.schema_version == "idea-route-provider.v6"
     assert route.execution_settings.model_dump(exclude_none=True) == {}
     assert transport.requests[0].response_schema["additionalProperties"] is False

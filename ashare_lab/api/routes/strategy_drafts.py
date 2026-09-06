@@ -199,8 +199,14 @@ async def create_strategy_draft(
             body.edit_current_strategy or compile_input.instrument_context is None
         ) else None
     )
-    if body.edit_current_strategy and edit_plan is None:
-        # A slot edit must never fall through to discovery or a fresh strategy.
+    if body.edit_current_strategy and (
+        parent_state is None or (
+            parent_state.outcome.strategy is None
+            and parent_state.outcome.revision_base_strategy is None
+        )
+    ):
+        # A slot edit needs a saved strategy; its presence does not force the
+        # latest utterance to be an edit when the model identifies a new intent.
         raise ApiProblem(
             status_code=409, code="strategy_edit_context_required",
             message="没有找到可修改的原策略。请从原回测报告重新进入修改。",
@@ -329,10 +335,24 @@ async def create_strategy_draft(
                 "entry_rule_not_recognized", "exit_rule_not_recognized",
                 "strategy_rule_incomplete", "return_period_requires_clarification",
                 "natural_day_holding_period_requires_clarification",
+                "candidate_provider_low_confidence", "candidate_batch_no_valid_strategy",
+                "indicator_trigger_requires_clarification",
             }):
         outcome = replace(outcome, clarification=await container.compiler.compose_dialogue_response(
             answer=body.utterance, question=outcome.clarification or "请补充交易条件。",
-            context=f"当前交易想法：{body.utterance}",
+            context=(
+                f"用户原始交易想法：{compile_input.utterance}\n"
+                f"当前诊断：{outcome.diagnostic_code}；"
+                "候选校验结果："
+                f"{','.join(item.diagnostic_code for item in outcome.candidate_rejections)}。"
+                "当前尚无通过校验的完整策略，没有启动回测。"
+                "请依据原话承接已经表达的买卖方向，只问最关键且尚未明确的一项；"
+                "每轮只推进一个决策，不把多个缺项或指标与阈值、买入与卖出打包追问。"
+                "未识别或低置信度不等于用户没有表达条件，不能要求用户重写整套买卖规则。"
+                "原话中的条件片段仍是后续澄清的上下文，不能丢弃或当作已验证可执行规则。"
+                "不自选股票，不补造指标、周期、阈值、买卖方向或默认退出条件。"
+                "question仅是待澄清状态参考，由模型写一段完整回复，不原样附加固定说明。"
+            ),
         ))
     outcome, offered_instrument = await _offer_missing_instrument(
         outcome=outcome, compile_input=compile_input, state=parent_state, container=container,
@@ -582,7 +602,7 @@ async def answer_strategy_draft_clarification(
         )
     instrument = await _complete_instrument_memory(
         instrument=instrument, state=dialogue_state, container=container,
-    )
+    ) if turn.revision_changed else (dialogue_state.last_verified_instrument or instrument)
     try:
         await container.drafts.record_dialogue_turn(
             draft_id=draft_id,
@@ -856,8 +876,7 @@ async def _offer_missing_instrument(
                 emit_progress("stock_strategy_pairs_ready", "股票与策略组合已准备好，可以选择。")
                 return replace(
                     outcome, clarification=pairing.introduction,
-                    idea_route=replace(outcome.idea_route, understanding=pairing.introduction,
-                                       proposals=tuple(matched)),
+                    idea_route=replace(outcome.idea_route, proposals=tuple(matched)),
                     suggested_strategy=None, suggested_strategy_hash=None,
                     suggested_strategy_choice_id=None, suggested_strategy_note=None,
                 ), None
@@ -953,17 +972,34 @@ async def _offer_missing_instrument(
             "stock_candidate", f"找到了一只候选股票：{candidate.name or symbol}。",
         )
     label = f"{candidate.name}（{candidate.symbol}）" if candidate.name else candidate.symbol
-    question = await container.compiler.compose_dialogue_response(
-        answer=compile_input.utterance,
-        question="你想用哪只股票试试，也可以告诉我自己的股票？",
-        context=(
+    if unbound_ideas and outcome.idea_route is not None:
+        direction_context = (
+            "当前是提出可编辑策略方向的阶段，用户尚未选择任何策略或本次回测股票。"
+            f"本轮原始表达：{compile_input.utterance}。"
+            f"模型已经给出的方向理解：{outcome.idea_route.understanding}。"
+            "待选方案：" + "；".join(
+                item.title for item in outcome.idea_route.proposals
+            ) + "。先自然承接原始表达和给定的方向理解，再说明已有可修改方案。"
+            "这些方案都是待选建议，不能把第一条说成用户已选；不要只剩股票选择问题。"
+            "候选股票只是可选样本，不要催用户先补股票或重述交易条件。"
+        )
+    else:
+        direction_context = (
             f"用户已选策略：{proposal.title if proposal else compile_input.utterance}。"
             f"买入规则：{proposal.entry_summary if proposal else compile_input.utterance}。"
             f"卖出规则：{proposal.exit_summary if proposal else ''}。"
-            f"候选股票：{recommendation_text or label}。"
-            f"来源：{candidate.source}。当前只完成选股，尚未回测。"
-            "承接用户选好的策略，简述这些候选的量价或均线特点为何值得尝试；"
+            "承接用户选好的策略，简述这些候选的已知特点为何值得尝试；"
             "用自然的一小段话介绍最多三只股票，邀请点击任一只或直接输入自己的股票。"
+        )
+    question = await container.compiler.compose_dialogue_response(
+        answer=compile_input.utterance,
+        question="" if unbound_ideas else "你想用哪只股票试试，也可以告诉我自己的股票？",
+        context=(
+            direction_context +
+            f"候选股票：{recommendation_text or label}。"
+            f"来源：{candidate.source}；已知依据：{candidate.evidence or '仅核验证券身份'}。"
+            "当前只有候选信息，尚未回测。身份信息不证明均线、量价或买入信号，"
+            "没有对应依据就不介绍这些特征；历史记住的股票不能说成本轮已重新选股。"
             "不堆砌全部报价，不说根据回测结果或效果更好，不指定默认首选，不改动原买卖规则。"
         ),
     )

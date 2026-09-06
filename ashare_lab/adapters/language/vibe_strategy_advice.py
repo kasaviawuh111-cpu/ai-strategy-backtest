@@ -449,6 +449,11 @@ class VibeVerifiedFactStrategyAdvisor:
                     "流动性与波动只用于解释测试取向，不能暗示更高收益、盈利优势或更适合投资。"
                     "不用固定搭配兜底。不得生成或修改DSL、买卖参数。"
                     "introduction 是直接回复用户的完整一句中文，最多120字、最多一个问号；"
+                    "先承接understanding中已经表达的用户方向和重要边界，再简短引出可编辑组合；"
+                    "不能把它缩成只有选股流程或选择问题。用户尚未选择任何方案，"
+                    "列表首项不是用户已选，不要写‘你选的策略’。"
+                    "保留低估值等用户明确偏好；understanding或方案短说明指出某条件未纳入"
+                    "回测时，introduction须保留这层边界，不能把技术反转说成已验证低估值。"
                     "自然承接人物或情绪风格，不列股票名和代码，不复述选股、匹配、Skill、"
                     "验证等内部流程。人物仅作创作灵感，不能认定用户身份、真实性别、"
                     "风险偏好或风险承受力，不承诺收益，不声称适合用户投资。"
@@ -457,7 +462,7 @@ class VibeVerifiedFactStrategyAdvisor:
                 ),
                 system_footer=(
                     "Pairing contract: verified-stock-strategy-pairing.v1; "
-                    "prompt: research-sample.v3."
+                    "prompt: research-sample.v4."
                 ),
                 json_object_contract=(
                     "Return introduction, pairs, and data_request (null or an object with only "

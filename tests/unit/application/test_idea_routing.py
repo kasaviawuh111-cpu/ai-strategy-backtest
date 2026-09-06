@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,9 +20,11 @@ from ashare_lab.application.dialogue_state import (
 from ashare_lab.application.dialogue_turn import DialogueTurnOrchestrator
 from ashare_lab.application.turn_intent import TurnIntent, classify_clarification_turn
 from ashare_lab.domain.catalog import load_catalog_directory
+from ashare_lab.domain.financials.models import FinancialMetricId, FinancialUnit
 from ashare_lab.domain.strategy import (
     BacktestConfig,
     CatalogRef,
+    FinancialConditionV1,
     FirstOfExit,
     IndicatorCondition,
     Instrument,
@@ -241,6 +244,104 @@ def _direct_idea_route() -> IdeaRoute:
             upstream_pattern_commit="1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7",
         ),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("utterance", "code", "count"), [
+    ("估值过低的股票反转买", "candidate_provider_low_confidence", 1),
+    ("估值过低的股票反转买", "candidate_provider_low_confidence", 2),
+    ("东方财富均线交叉买，反之卖", "candidate_provider_low_confidence", 1),
+])
+async def test_unresolved_intention_prefers_editable_model_ideas(
+    utterance: str, code: str, count: int,
+) -> None:
+    generator = _UnsupportedGenerator(code, count=count)
+    route = replace(
+        _direct_idea_route(),
+        understanding="先按模型建议给出可编辑的日线规则；低估值保留为选股偏好。",
+    )
+    router = _RecordingIdeaRouter(route)
+    compiler = _compiler(generator=generator, idea_router=router)
+    original = CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 4),
+    )
+    outcome = await compiler.compile(original)
+    assert len(router.requests) == 1
+    assert router.requests[0] == replace(original, idea_inspiration=original.utterance)
+    assert len(generator.requests) == (0 if "均线交叉" in utterance else 1)
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "idea_guidance_required"
+    assert outcome.clarification == route.understanding
+    assert outcome.idea_route is not None and len(outcome.idea_route.proposals) == 3
+    assert all(proposal.strategy is not None for proposal in outcome.idea_route.proposals)
+    assert outcome.strategy is None and not outcome.run_requested
+
+
+@pytest.mark.asyncio
+async def test_unbound_low_confidence_ideas_keep_model_explanation() -> None:
+    original = CompileInput(utterance="估值过低的股票反转买", as_of_date=date(2026, 9, 4))
+    route = replace(
+        _idea_route(instrument_symbol=None),
+        understanding="先给出日线反转建议，参数可以修改；低估值仅保留为选股偏好。",
+    )
+    router = _RecordingIdeaRouter(route)
+    generator = _UnsupportedGenerator("candidate_provider_low_confidence")
+    outcome = await _compiler(generator=generator, idea_router=router).compile(original)
+    assert outcome.idea_route is not None
+    assert outcome.clarification == route.understanding
+    assert len(generator.requests) == len(router.requests) == 1
+    assert router.requests[0].utterance == original.utterance
+    assert router.requests[0].idea_inspiration == original.utterance
+    assert outcome.strategy is None and not outcome.run_requested
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_mixed_with_invalid_candidates_offers_one_model_route() -> None:
+    class MixedGenerator(_UnsupportedGenerator):
+        async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]:
+            candidates = await super().generate(request)
+            return (*candidates, replace(
+                candidates[0], unsupported_code="candidate_provider_invalid_output",
+            ))
+
+    original = CompileInput(
+        utterance="估值过低的股票反转买", instrument_context="300059.SZ",
+        as_of_date=date(2026, 9, 4),
+    )
+    router = _RecordingIdeaRouter(_direct_idea_route())
+    generator = MixedGenerator("candidate_provider_low_confidence")
+    outcome = await _compiler(generator=generator, idea_router=router).compile(original)
+    assert outcome.diagnostic_code == "idea_guidance_required"
+    assert outcome.idea_route is not None
+    assert len(generator.requests) == len(router.requests) == 1
+    assert router.requests[0].idea_inspiration == original.utterance
+    assert outcome.strategy is None and not outcome.run_requested
+
+
+@pytest.mark.asyncio
+async def test_suggested_defaults_cannot_introduce_unavailable_historical_valuation() -> None:
+    route = _direct_idea_route()
+    proposals = []
+    for proposal in route.proposals:
+        assert proposal.strategy is not None
+        proposals.append(replace(proposal, strategy=proposal.strategy.model_copy(update={
+            "entry": FinancialConditionV1(
+                metric_id=FinancialMetricId.PE, comparator="lt",
+                value=Decimal(15), unit=FinancialUnit.TIMES,
+            ),
+        })))
+    router = _RecordingIdeaRouter(replace(route, proposals=tuple(proposals)))
+    outcome = await _compiler(
+        generator=_UnsupportedGenerator("candidate_provider_low_confidence"),
+        idea_router=router,
+    ).compile(CompileInput(
+        utterance="估值过低的股票反转买", instrument_context="300059.SZ",
+        as_of_date=date(2026, 9, 4),
+    ))
+    assert len(router.requests) == 1
+    assert outcome.diagnostic_code == "idea_guidance_execution_invalid"
+    assert outcome.idea_route is None and outcome.strategy is None
+    assert not outcome.run_requested
 
 
 @pytest.mark.asyncio
@@ -558,8 +659,9 @@ async def test_unbound_template_binds_stock_without_reinterpreting_model_rules(
         direct_route, asset_mapping=_idea_route(instrument_symbol=None).asset_mapping,
         proposals=tuple(proposals),
     )
+    generator = _RecordingRuleBasedGenerator()
     compiler = _compiler(
-        generator=_NeverCalledGenerator(), idea_router=_RecordingIdeaRouter(route),
+        generator=generator, idea_router=_RecordingIdeaRouter(route),
         backtest_anchor_date=date(2026, 9, 4),
     )
     original = CompileInput(utterance="低买高卖", as_of_date=date(2026, 9, 4))
@@ -577,6 +679,9 @@ async def test_unbound_template_binds_stock_without_reinterpreting_model_rules(
     plan = await DialogueTurnOrchestrator(compiler).plan(state=state, answer="600519")
     assert plan.clarification_turn is not None
     outcome = plan.clarification_turn.outcome
+    # Identity preflight may inspect the original request; the model's direct
+    # DSL must never be converted back to natural language and reinterpreted.
+    assert [item.utterance for item in generator.requests] == [original.utterance]
     if not valid_catalog:
         assert outcome.status is not CompileStatus.READY
         assert outcome.strategy is None
@@ -1268,7 +1373,7 @@ async def test_view_without_stock_keeps_model_directions_pending_confirmation() 
     assert outcome.idea_route.asset_mapping.evidence_status == "instrument_required"
     assert all(item.strategy is None for item in outcome.idea_route.proposals)
     assert outcome.strategy is None
-    assert outcome.clarification == "想试哪个方向？也可以告诉我你想用哪只股票。"
+    assert outcome.clarification == outcome.idea_route.understanding
     assert len(idea_router.requests) == 1
 
 

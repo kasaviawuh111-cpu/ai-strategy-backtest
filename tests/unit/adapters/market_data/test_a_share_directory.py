@@ -65,6 +65,30 @@ def test_ranks_exact_prefix_contains_and_keeps_all_matches(tmp_path: Path) -> No
     ]
 
 
+@pytest.mark.parametrize("query", ["dfcf", "DFCF", " ＤＦ ＣＦ ", "dongfangcaifu",
+                                  "东方财富", "300059", "300059.sz"])
+def test_exact_aliases_support_name_code_full_pinyin_and_initials(
+    tmp_path: Path, query: str,
+) -> None:
+    directory = load(_write(tmp_path, _payload()), min_items=3)
+    assert [item.symbol for item in directory.exact_matches(query)] == ["300059.SZ"]
+
+
+def test_exact_aliases_never_bind_a_unique_partial_or_wrong_suffix(tmp_path: Path) -> None:
+    directory = load(_write(tmp_path, _payload()), min_items=3)
+    for query in ("dfc", "dongfang", "东方", "30005", "300059.SH"):
+        assert directory.exact_matches(query) == ()
+
+
+def test_shared_initials_remain_ambiguous_before_result_limiting(tmp_path: Path) -> None:
+    payload = _payload()
+    payload["items"][1]["initials"] = "dfcf"
+    directory = load(_write(tmp_path, payload), min_items=3)
+    assert [item.symbol for item in directory.exact_matches("DFCF")] == [
+        "300059.SZ", "600519.SH",
+    ]
+
+
 @pytest.mark.parametrize("field,value", [
     ("version", True), ("version", 2), ("source", "model"),
     ("reported_total", True), ("reported_total", 4), ("reported_total", 15001),

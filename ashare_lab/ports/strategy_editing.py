@@ -34,6 +34,7 @@ class StrategyEditRequest:
 class StrategyEditResult:
     disposition: Literal[
         "apply", "change_instrument", "request_optimization", "clarify", "discuss", "not_edit",
+        "conversation",
     ]
     message: str
     strategy: StrategySpec | None

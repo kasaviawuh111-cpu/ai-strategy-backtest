@@ -20,7 +20,10 @@ from ashare_lab.adapters.market_data.mx_daily_history import (
     MxDailyRow,
     MxQueryEvidence,
 )
-from ashare_lab.adapters.market_data.mx_saas import MxSaasProviderUnavailableError
+from ashare_lab.adapters.market_data.mx_saas import (
+    MxSaasProviderDataError,
+    MxSaasProviderUnavailableError,
+)
 from ashare_lab.adapters.persistence.backtest_runs import InMemoryBacktestRunStore
 from ashare_lab.application.backtest_submission import BacktestRunConfig
 from ashare_lab.application.skill_backtest import run_skill_backtest
@@ -157,6 +160,44 @@ def test_skill_fetch_failure_reports_exact_step_without_leaking_provider_text(
         assert result.progress_percent == 10
         assert result.result_json is None
         assert "private" not in result.progress_label + caplog.text
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize(("message", "reason", "label"), [
+    ("historical indicator response omitted rawTable",
+     "protocol_raw_table_missing", "缺少逐日原始表"),
+    ("historical indicator response contains duplicate dates",
+     "data_dates_mismatch", "日期未与本次查询对齐"),
+    ("real-time market-data provider rejected the request",
+     "provider_query_rejected", "未接受本次数据查询"),
+    ("https://private.invalid/?token=secret", "data_validation_failed", "未通过完整性校验"),
+])
+def test_data_failure_keeps_protocol_and_validation_diagnostics_separate(
+    message: str, reason: str, label: str,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    failure = MxSaasProviderDataError(message, tool="searchData")
+    load = AsyncMock(side_effect=failure)
+    service = SkillBacktestService(
+        history=cast(MxDailyHistoryClient, SimpleNamespace(load=load)),
+        indicators=cast(HistoricalIndicatorData, object()), store=InMemoryBacktestRunStore(),
+    )
+    monkeypatch.setattr(service.queue, "enqueue", lambda _run_id: "manual-test")
+    try:
+        created = service.submit(
+            _strategy((START, START + timedelta(days=10))), BacktestRunConfig(),
+        )
+        result = service.execute(created.record.run_id)
+        assert result.error_code == "skill_MxSaasProviderDataError"
+        assert label in result.progress_label
+        assert f"reason={reason}" in caplog.text
+        assert result.result_json is None
+        assert result.strategy_json == created.record.strategy_json
+        assert result.config_json == created.record.config_json
+        assert load.await_count == 1
+        assert "private.invalid" not in result.progress_label + caplog.text
+        assert "token=secret" not in result.progress_label + caplog.text
     finally:
         service.shutdown()
 

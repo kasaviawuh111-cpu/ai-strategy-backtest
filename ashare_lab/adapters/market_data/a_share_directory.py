@@ -30,6 +30,20 @@ def _search_key(value: str) -> str:
     return "".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
+def _query_key(query: str) -> str | None:
+    if len(query) > 256:
+        raise ValueError("directory search query must be a string of at most 256 characters")
+    key = _search_key(query)
+    if not key:
+        raise ValueError("directory search query cannot be empty")
+    if "." in key:
+        try:
+            return normalize_a_share_instrument(key).value.casefold()
+        except ValueError:
+            return None
+    return key
+
+
 @dataclass(frozen=True, slots=True)
 class DirectoryInstrument:
     symbol: str
@@ -59,16 +73,9 @@ class InstrumentDirectory:
 
     def search(self, query: str) -> tuple[DirectoryInstrument, ...]:
         """Return all matches ranked exact, prefix, then contains; never fetch."""
-        if len(query) > 256:
-            raise ValueError("directory search query must be a string of at most 256 characters")
-        key = _search_key(query)
-        if not key:
-            raise ValueError("directory search query cannot be empty")
-        if "." in key:
-            try:
-                key = normalize_a_share_instrument(key).value.casefold()
-            except ValueError:
-                return ()
+        key = _query_key(query)
+        if key is None:
+            return ()
         ranked: list[tuple[int, str, DirectoryInstrument]] = []
         for item, fields in zip(self.items, self._keys, strict=True):
             rank = min((
@@ -79,6 +86,20 @@ class InstrumentDirectory:
                 ranked.append((rank, item.symbol, item))
         ranked.sort(key=lambda match: (match[0], match[1]))
         return tuple(item for _, _, item in ranked)
+
+    def exact_matches(self, query: str) -> tuple[DirectoryInstrument, ...]:
+        """Match complete names, codes, pinyin or initials, before any UI limit.
+
+        Search prefixes remain suggestions; even one partial result cannot
+        supply an executable identity. An alias shared by two stocks is ambiguous.
+        """
+        key = _query_key(query)
+        if key is None:
+            return ()
+        return tuple(sorted(
+            (item for item, fields in zip(self.items, self._keys, strict=True) if key in fields),
+            key=lambda item: item.symbol,
+        ))
 
 
 def _text(row: dict[str, object], key: str, maximum: int) -> str:

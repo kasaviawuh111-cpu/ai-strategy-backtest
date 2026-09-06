@@ -645,6 +645,32 @@ async def test_response_only_security_name_must_match_supplied_code_after_one_re
 
 
 @pytest.mark.asyncio
+async def test_unselected_directions_keep_persona_and_do_not_request_another_choice(
+    capability_matrix: CandidateCapabilityMatrix,
+) -> None:
+    context = "用户尚未选择任何策略。方向理解：借秦始皇的果断劲儿，先给可修改的趋势方案。"
+    reply = "借秦始皇的果断劲儿，先给你可修改的趋势方案，下面的方向都可以继续调整。"
+    transport = _RecordingTransport({
+        "reply_kind": "unclear", "acknowledgement_id": "ask_rephrase",
+        "natural_reply": reply, "recommended_option_ids": [],
+    })
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(replace(
+        _request(), answer="我是秦始皇", prior_utterance="", options=(),
+        response_only=True, question="", context_summary=context,
+    ))
+    assert result is not None and result.natural_reply == reply
+    assert result.selected_option_id is None and not result.instrument_selected
+    assert len(transport.requests) == 1
+    request = transport.requests[0]
+    assert request.user_payload is not None and request.user_payload["contextSummary"] == context
+    assert "列表首项也不代表用户的选择" in request.system_contract
+    assert "保留人物、比喻或风格与策略方向的联系" in request.system_contract
+    assert "question为空时不要提出任何新问题" in request.system_contract
+
+
+@pytest.mark.asyncio
 async def test_selected_strategy_stock_reply_uses_current_facts_and_keeps_full_model_text(
     capability_matrix: CandidateCapabilityMatrix,
 ) -> None:
