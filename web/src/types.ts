@@ -1,6 +1,6 @@
 /** 与 API v1 契约对齐的前端类型（SPEC 9.3） */
 
-import type { BacktestSignalEvidence } from './shared/api/types'
+import type { BacktestSignalEvidence, SkillDataProvenance } from './shared/api/types'
 
 /** SPEC 1.2 状态词 —— 任何对外文案都必须落在这组词上 */
 export type StatusWord =
@@ -189,6 +189,7 @@ export interface TradeRow {
   title: string;
   price?: number | null;
   quantity?: number | null;
+  notionalCny?: number | null;
   reason: string;
   chainId?: string | null;
   decisionId?: string | null;
@@ -281,6 +282,7 @@ export interface RunEvidence {
   strategyHash: string | null;
   engineVersion: string | null;
   executionAssumptions: Record<string, string>;
+  skillData?: SkillDataProvenance | null;
 }
 
 /** 空 / 失败 / 拒绝态（SPEC 4.10） */

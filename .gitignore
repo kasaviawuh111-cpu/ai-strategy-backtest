@@ -14,6 +14,9 @@ build/
 # Env / secrets
 .env
 .env.local
+.env.*
+!.env.example
+!.env.*.example
 *.key
 *.pem
 
@@ -56,6 +59,15 @@ artifacts/
 .work/
 .work-user-merge.*/
 backtesth5web-*.tar.gz
+/var/
+/web/dist-local/
+/.claude/
+/.design/
+/.tmp_xgcircle/
+/outputs/
+/recovered/
+/research/
+/ashare-backtest-h5-frontend-current-*.zip
 
 # Editor / OS
 .vscode/

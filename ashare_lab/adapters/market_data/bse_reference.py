@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
@@ -33,6 +34,8 @@ LISTING_DATE_SEMANTICS = "official_security_master_listing_date"
 PROVIDER_DATE_SEMANTICS = "undocumented_provider_xxjsrq_preserved_without_inference"
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _DEFAULT_TIMEOUT_SECONDS = 20.0
+_MAX_CURRENT_UNIVERSE_PAGES = 32
+_MAX_CURRENT_UNIVERSE_ROWS = 1_000
 _DATE = re.compile(r"^[0-9]{8}$")
 _TIME = re.compile(r"^[0-9]{6}$")
 _HEADERS = {
@@ -129,6 +132,16 @@ class BseReferenceAudit:
 class BseInstrumentReferenceResult:
     instrument: BseInstrumentReference
     audit: BseReferenceAudit
+    coverage: Mapping[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class BseCurrentNameSearchResult:
+    """Bounded discovery candidates from one fully audited current universe read."""
+
+    candidates: tuple[str, ...]
+    truncated: bool
+    page_audits: tuple[BseReferenceAudit, ...]
     coverage: Mapping[str, object]
 
 
@@ -258,6 +271,175 @@ class BseInstrumentReferenceSource:
         return BseInstrumentReferenceResult(
             instrument=instrument,
             audit=audit,
+            coverage=coverage,
+        )
+
+    def search_current_name(
+        self,
+        identifier: str,
+        *,
+        max_candidates: int = 20,
+    ) -> BseCurrentNameSearchResult:
+        """Discover exact normalized names from the complete official current list.
+
+        The public endpoint's name parameter is not used because it has not
+        proved to constrain the response.  Instead, every bounded page is
+        fetched and validated before local exact-name matching.  Results are
+        discovery-only and still require exact security-master confirmation.
+        """
+
+        raw_identifier = identifier.strip()
+        if not raw_identifier or len(raw_identifier) > 128:
+            raise BseInstrumentReferenceError("BSE security search identifier is invalid")
+        if not 1 <= max_candidates <= 100:
+            raise ValueError("max_candidates must be between 1 and 100")
+        normalized_identifier = _normalize_name(raw_identifier)
+        if not normalized_identifier:
+            raise BseInstrumentReferenceError("BSE security search identifier is invalid")
+
+        expected_total_elements: int | None = None
+        expected_total_pages: int | None = None
+        expected_page_size: int | None = None
+        page_audits: list[BseReferenceAudit] = []
+        canonical_rows: list[tuple[str, str]] = []
+        seen_codes: set[str] = set()
+        page_number = 0
+        while expected_total_pages is None or page_number < expected_total_pages:
+            if page_number >= _MAX_CURRENT_UNIVERSE_PAGES:
+                raise BseInstrumentReferenceError(
+                    "official BSE current universe exceeds the bounded limit"
+                )
+            params = {
+                "page": str(page_number),
+                "typejb": "T",
+                "xxfcbj[]": "2",
+                "sortfield": "xxzqdm",
+                "sorttype": "asc",
+            }
+            request_started_at = _read_clock(self._clock, "request_started_at")
+            response, retried = self._post_with_bounded_waf_retry(params)
+            response_received_at = _read_clock(self._clock, "response_received_at")
+            if response_received_at < request_started_at:
+                raise BseInstrumentReferenceError(
+                    "response_received_at precedes request_started_at"
+                )
+            try:
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise BseInstrumentReferenceError(
+                    "official BSE listed-company request failed with "
+                    f"HTTP {response.status_code}"
+                ) from exc
+
+            raw_bytes = response.content
+            payload = _decode_jsonp(raw_bytes)
+            page, rows = _parse_current_universe_page(
+                payload,
+                requested_page=page_number,
+            )
+            total_elements = _required_int(page.get("totalElements"), "root[0].totalElements")
+            total_pages = _required_int(page.get("totalPages"), "root[0].totalPages")
+            page_size = _required_int(page.get("size"), "root[0].size")
+            if page_size == 0 or total_elements == 0 or total_pages == 0:
+                raise BseInstrumentReferenceError(
+                    "official BSE current universe cannot be empty"
+                )
+            if total_pages != (total_elements + page_size - 1) // page_size:
+                raise BseInstrumentReferenceError(
+                    "official BSE current universe pagination is inconsistent"
+                )
+            if (
+                total_pages > _MAX_CURRENT_UNIVERSE_PAGES
+                or total_elements > _MAX_CURRENT_UNIVERSE_ROWS
+            ):
+                raise BseInstrumentReferenceError(
+                    "official BSE current universe exceeds the bounded limit"
+                )
+            if expected_total_pages is None:
+                expected_total_elements = total_elements
+                expected_total_pages = total_pages
+                expected_page_size = page_size
+            elif (
+                total_elements != expected_total_elements
+                or total_pages != expected_total_pages
+                or page_size != expected_page_size
+            ):
+                raise BseInstrumentReferenceError(
+                    "official BSE current universe pagination changed during acquisition"
+                )
+
+            for code, name in rows:
+                if code in seen_codes:
+                    raise BseInstrumentReferenceError(
+                        "official BSE current universe contains a duplicate code"
+                    )
+                seen_codes.add(code)
+                canonical_rows.append((code, name))
+            raw_response_sha256 = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
+            canonical_payload_sha256 = (
+                "sha256:" + hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+            )
+            page_audits.append(
+                BseReferenceAudit(
+                    provider=PROVIDER,
+                    request_url=BSE_LISTED_COMPANY_URL,
+                    request_params=tuple(sorted(params.items())),
+                    request_started_at=request_started_at,
+                    response_received_at=response_received_at,
+                    http_status=response.status_code,
+                    waf_cookie_retry=retried,
+                    raw_response_sha256=raw_response_sha256,
+                    canonical_payload_sha256=canonical_payload_sha256,
+                )
+            )
+            page_number += 1
+
+        assert expected_total_elements is not None
+        assert expected_total_pages is not None
+        if len(canonical_rows) != expected_total_elements:
+            raise BseInstrumentReferenceError(
+                "official BSE current universe row count does not match pagination"
+            )
+        if canonical_rows != sorted(canonical_rows, key=lambda item: item[0]):
+            raise BseInstrumentReferenceError(
+                "official BSE current universe is not sorted by security code"
+            )
+        matches = tuple(
+            f"{code}.BJ"
+            for code, name in canonical_rows
+            if _normalize_name(name) == normalized_identifier
+        )
+        candidates = matches[:max_candidates]
+        canonical_universe_sha256 = "sha256:" + hashlib.sha256(
+            _canonical_json_bytes(
+                [
+                    {
+                        "canonicalPayloadSha256": audit.canonical_payload_sha256,
+                        "page": index,
+                    }
+                    for index, audit in enumerate(page_audits)
+                ]
+            )
+        ).hexdigest()
+        coverage = {
+            "schemaVersion": "bse.current-name-discovery.v1",
+            "provider": PROVIDER,
+            "querySucceeded": True,
+            "currentListedUniverse": True,
+            "matchingSemantics": "local_nfkc_whitespace_insensitive_exact_name",
+            "totalElements": expected_total_elements,
+            "totalPages": expected_total_pages,
+            "pagesFetched": len(page_audits),
+            "candidateCount": len(candidates),
+            "candidateLimit": max_candidates,
+            "truncated": len(matches) > max_candidates,
+            "canonicalUniverseSha256": canonical_universe_sha256,
+            "pageRawResponseSha256": [audit.raw_response_sha256 for audit in page_audits],
+        }
+        return BseCurrentNameSearchResult(
+            candidates=candidates,
+            truncated=len(matches) > max_candidates,
+            page_audits=tuple(page_audits),
             coverage=coverage,
         )
 
@@ -434,6 +616,67 @@ def _decode_jsonp(raw_bytes: bytes) -> JsonValue:
         raise BseInstrumentReferenceError("official BSE response is not valid JSON") from exc
 
 
+def _parse_current_universe_page(
+    payload: JsonValue,
+    *,
+    requested_page: int,
+) -> tuple[dict[str, JsonValue], tuple[tuple[str, str], ...]]:
+    pages = _required_list(payload, "root")
+    if len(pages) != 1:
+        raise BseInstrumentReferenceError("official BSE response must contain one page object")
+    page = _required_object(pages[0], "root[0]")
+    content = _required_list(page.get("content"), "root[0].content")
+    page_number = _required_int(page.get("number"), "root[0].number")
+    number_of_elements = _required_int(
+        page.get("numberOfElements"),
+        "root[0].numberOfElements",
+    )
+    total_pages = _required_int(page.get("totalPages"), "root[0].totalPages")
+    first_page = _required_bool(page.get("firstPage"), "root[0].firstPage")
+    last_page = _required_bool(page.get("lastPage"), "root[0].lastPage")
+    if page_number != requested_page or number_of_elements != len(content):
+        raise BseInstrumentReferenceError(
+            "official BSE current universe returned an inconsistent page"
+        )
+    if first_page is not (page_number == 0):
+        raise BseInstrumentReferenceError(
+            "official BSE current universe returned an inconsistent first-page marker"
+        )
+    if total_pages == 0 or last_page is not (page_number == total_pages - 1):
+        raise BseInstrumentReferenceError(
+            "official BSE current universe returned an inconsistent last-page marker"
+        )
+
+    rows: list[tuple[str, str]] = []
+    for index, value in enumerate(content):
+        row = _required_object(value, f"root[0].content[{index}]")
+        code = _required_text(row.get("xxzqdm"), "xxzqdm")
+        try:
+            canonical = normalize_a_share_instrument(code)
+        except ValueError as exc:
+            raise BseInstrumentReferenceError(
+                "official BSE current universe contains an invalid security code"
+            ) from exc
+        if str(canonical) != f"{code}.BJ":
+            raise BseInstrumentReferenceError(
+                "official BSE current universe contains a non-BSE security"
+            )
+        if _required_text(row.get("xxzqjb"), "xxzqjb") != "T":
+            raise BseInstrumentReferenceError(
+                "official BSE current universe row is not a listed-company stock"
+            )
+        if _required_text(row.get("xxfcbj"), "xxfcbj") != "2":
+            raise BseInstrumentReferenceError(
+                "official BSE current universe row is outside the listed market level"
+            )
+        if _required_text(row.get("xxhbzl"), "xxhbzl") != "00":
+            raise BseInstrumentReferenceError(
+                "official BSE current universe row is not CNY-denominated"
+            )
+        rows.append((code, _required_text(row.get("xxzqjc"), "xxzqjc")))
+    return page, tuple(rows)
+
+
 def _required_object(value: JsonValue | None, label: str) -> dict[str, JsonValue]:
     if not isinstance(value, dict):
         raise BseInstrumentReferenceError(f"{label} must be an object")
@@ -499,6 +742,10 @@ def _read_clock(clock: Callable[[], datetime], label: str) -> datetime:
     return value
 
 
+def _normalize_name(value: str) -> str:
+    return "".join(unicodedata.normalize("NFKC", value).split()).casefold()
+
+
 def _canonical_json_bytes(value: JsonValue) -> bytes:
     return json.dumps(
         value,
@@ -514,6 +761,7 @@ __all__ = [
     "LISTING_DATE_SEMANTICS",
     "PROVIDER",
     "PROVIDER_DATE_SEMANTICS",
+    "BseCurrentNameSearchResult",
     "BseInstrumentNotFoundError",
     "BseInstrumentReference",
     "BseInstrumentReferenceError",

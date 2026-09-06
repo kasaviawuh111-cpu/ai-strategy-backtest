@@ -13,11 +13,15 @@ import pytest
 from ashare_lab.adapters.language.rule_based import RuleBasedCandidateGenerator
 from ashare_lab.adapters.language.vibe_candidates import (
     CandidateProviderIdentityView,
+    CandidateSourceSpan,
     CandidateTransportError,
     CandidateTransportRequest,
     CandidateTransportResponse,
     HybridCandidateGenerator,
     VibeBoundedCandidateGenerator,
+    _leading_instrument_name,
+    _safe_validation_reason,
+    _validate_join_grounding,  # pyright: ignore[reportPrivateUsage]
     build_candidate_capability_matrix,
 )
 from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
@@ -30,7 +34,7 @@ from ashare_lab.domain.strategy import (
     PositionReturnExit,
     TrailingDrawdownExit,
 )
-from ashare_lab.ports.candidate_generation import CompileInput
+from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
 
 ROOT = Path(__file__).parents[4]
 CATALOG = load_catalog_directory(ROOT / "catalogs")
@@ -88,6 +92,11 @@ class _FailingTransport:
         raise self.error
 
 
+class _UnexpectedDeterministicGenerator:
+    async def generate(self, _request: CompileInput) -> tuple[CandidateAst, ...]:
+        raise AssertionError("deterministic parser must not run in model-first mode")
+
+
 @dataclass(frozen=True)
 class _FakeIdentity:
     provider: str = "fixture-provider"
@@ -101,6 +110,24 @@ def _bounded(transport: _FakeTransport) -> VibeBoundedCandidateGenerator:
         transport,
         capability_matrix=CAPABILITY_MATRIX,
     )
+
+
+@pytest.mark.parametrize(("utterance", "expected_name"), [
+    ("我选放量创高突破：收盘价创20日新高且成交量达到前20日均量1.5倍买入，"
+     "跌破20日均线卖出，回测近一年。帮我选三只股票试试。", None),
+    ("我选东方财富MACD金叉买入，MACD死叉卖出", "东方财富"),
+    ("请帮我回测东方财富MACD金叉买入，MACD死叉卖出", "东方财富"),
+])
+def test_leading_instrument_name_excludes_selection_prefix(
+    utterance: str, expected_name: str | None,
+) -> None:
+    mention = _leading_instrument_name(utterance)
+    if expected_name is None:
+        assert mention is None
+    else:
+        assert mention is not None
+        assert mention.text == expected_name
+        assert utterance[mention.start:mention.end] == expected_name
 
 
 @pytest.mark.asyncio
@@ -236,7 +263,7 @@ async def test_unrecognized_phrase_uses_bounded_json_and_compiles_current_dsl() 
     assert outcome.strategy.entry.trigger == "golden_cross"
     assert len(transport.requests) == 1
     request = transport.requests[0]
-    assert request.max_candidates == 3
+    assert request.max_candidates == 1
     assert "不得生成 Python" in request.system_contract
     assert request.capability_projection_version == "candidate-capabilities.v1"
     assert request.capability_projection_hash == CAPABILITY_MATRIX.content_hash
@@ -244,7 +271,33 @@ async def test_unrecognized_phrase_uses_bounded_json_and_compiles_current_dsl() 
 
 
 @pytest.mark.asyncio
-async def test_grounding_invalid_first_attempt_retries_once_and_accepts_valid_payload() -> None:
+async def test_explicit_code_survives_deterministic_to_bounded_fallback() -> None:
+    utterance = (
+        "300059.SZ 指数平滑异同移动平均线快线上穿时买入，指数平滑异同移动平均线快线下穿时卖出"
+    )
+    transport = _FakeTransport(_macd_batch(utterance=utterance))
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_bounded(transport),
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context=None,
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert len(transport.requests) == 1
+    assert transport.requests[0].instrument_context == "300059.SZ"
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert outcome.strategy.instrument.symbol == "300059.SZ"
+
+
+@pytest.mark.asyncio
+async def test_grounding_invalid_payload_fails_closed_without_hidden_retry() -> None:
     transport = _SequenceTransport(
         (
             _macd_batch_with_ungrounded_entry(utterance=FALLBACK_UTTERANCE),
@@ -264,31 +317,9 @@ async def test_grounding_invalid_first_attempt_retries_once_and_accepts_valid_pa
         )
     )
 
-    assert outcome.status is CompileStatus.READY
-    assert outcome.strategy is not None
-    assert len(transport.requests) == 2
-
-
-@pytest.mark.asyncio
-async def test_two_grounding_invalid_attempts_fail_closed_without_third_call() -> None:
-    invalid = _macd_batch_with_ungrounded_entry(utterance=FALLBACK_UTTERANCE)
-    transport = _SequenceTransport((invalid, deepcopy(invalid)))
-    generator = HybridCandidateGenerator(
-        deterministic=RuleBasedCandidateGenerator(),
-        bounded_fallback=_bounded(transport),
-    )
-
-    outcome = await _compiler(generator).compile(
-        CompileInput(
-            utterance=FALLBACK_UTTERANCE,
-            instrument_context="300059.SZ",
-            as_of_date=date(2026, 8, 30),
-        )
-    )
-
     assert outcome.status is CompileStatus.UNSUPPORTED
     assert outcome.diagnostic_code == "candidate_provider_invalid_output"
-    assert len(transport.requests) == 2
+    assert len(transport.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -309,6 +340,51 @@ async def test_known_expression_stays_on_deterministic_fast_path() -> None:
 
     assert outcome.status is CompileStatus.READY
     assert transport.requests == []
+
+
+@pytest.mark.asyncio
+async def test_model_first_mode_sends_a_known_complete_strategy_to_the_provider() -> None:
+    transport = _FakeTransport(_macd_batch())
+    generator = HybridCandidateGenerator(
+        deterministic=_UnexpectedDeterministicGenerator(),
+        bounded_fallback=_bounded(transport),
+        model_first=True,
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance=DIRECT_UTTERANCE,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert len(transport.requests) == 1
+    assert transport.requests[0].utterance == DIRECT_UTTERANCE
+
+
+@pytest.mark.asyncio
+async def test_model_first_provider_failure_never_falls_back_to_deterministic_rules() -> None:
+    generator = HybridCandidateGenerator(
+        deterministic=_UnexpectedDeterministicGenerator(),
+        bounded_fallback=VibeBoundedCandidateGenerator(
+            _FailingTransport(CandidateTransportError("provider unavailable")),
+            capability_matrix=CAPABILITY_MATRIX,
+        ),
+        model_first=True,
+    )
+
+    candidates = await generator.generate(
+        CompileInput(
+            utterance=DIRECT_UTTERANCE,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].unsupported_code == "candidate_provider_unavailable"
 
 
 @pytest.mark.asyncio
@@ -362,10 +438,11 @@ async def test_bounded_event_candidate_compiles_without_generated_code() -> None
 
 
 @pytest.mark.asyncio
-async def test_bounded_position_risk_exits_require_exact_user_grounding() -> None:
-    utterance = "MACD金叉买入，止盈20%或从高点回撤8%卖出"
+@pytest.mark.parametrize("reference", ["高点", "买入后最高收盘价", "建仓以来最高收盘价"])
+async def test_bounded_position_risk_exits_require_exact_user_grounding(reference: str) -> None:
+    utterance = f"MACD金叉买入，止盈20%或从{reference}回撤8%卖出"
     entry_text, _exit_text = utterance.split("，", 1)
-    exit_text = "止盈20%或从高点回撤8%卖出"
+    exit_text = f"止盈20%或从{reference}回撤8%卖出"
     payload = {
         "candidates": [
             {
@@ -539,6 +616,68 @@ async def test_arbitrary_generated_code_fails_closed() -> None:
     )
 
     assert candidates[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_side", ["entry", "exit"])
+async def test_partial_model_rules_keep_verified_stock_and_explicit_side(missing_side: str) -> None:
+    side = "exit" if missing_side == "entry" else "entry"
+    clause = "MACD死叉卖出" if side == "exit" else "MACD金叉买入"
+    utterance = f"我想测东方财富，{clause}"
+    payload = _macd_batch()
+    item = cast(list[dict[str, object]], payload["candidates"])[0]
+    item.update({
+        "instrument_name": "东方财富", "instrument_span": _source_span(utterance, "东方财富"),
+        missing_side: [], f"{missing_side}_spans": [],
+        f"{side}_spans": [_source_span(utterance, clause)],
+        "defaulted_fields": [f"/{side}/0/params/{name}" for name in ("fast", "slow", "signal")],
+    })
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_bounded(_FakeTransport(payload)),
+        model_first=True, instrument_name_resolver=lambda name: {"东方财富": "300059.SZ"}[name],
+    )
+    candidate = (await generator.generate(CompileInput(
+        utterance=utterance, as_of_date=date(2026, 8, 30),
+    )))[0]
+    assert candidate.unsupported_code == f"{missing_side}_rule_not_recognized"
+    assert candidate.instrument_symbol == "300059.SZ"
+    assert len(getattr(candidate, side)) == 1
+    assert getattr(candidate, missing_side) == ()
+    assert any(e.path == "/instrument/symbol" and e.text == "东方财富"
+               for e in candidate.grounding_evidence)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_name", [True, False])
+async def test_model_evidence_does_not_count_stock_buying_intent_as_an_entry_rule(
+    include_name: bool,
+) -> None:
+    utterance = "我想买东方财富，MACD金叉买入，MACD死叉卖出"
+    payload = _macd_batch()
+    item = cast(list[dict[str, object]], payload["candidates"])[0]
+    item.update({
+        "instrument_name": "东方财富" if include_name else None,
+        "instrument_span": _source_span(utterance, "东方财富") if include_name else None,
+        "entry_spans": [_source_span(utterance, "MACD金叉买入")],
+        "exit_spans": [_source_span(utterance, "MACD死叉卖出")],
+    })
+    transport = _FakeTransport(payload)
+    generator = HybridCandidateGenerator(
+        deterministic=_UnexpectedDeterministicGenerator(),
+        bounded_fallback=VibeBoundedCandidateGenerator(
+            transport, capability_matrix=CAPABILITY_MATRIX,
+            provider_identity=CandidateProviderIdentityView("fixture", "fixture", "v1", "v1"),
+        ), model_first=True,
+        instrument_name_resolver=lambda name: {"东方财富": "300059.SZ"}[name],
+    )
+    outcome = await _compiler(generator).compile(CompileInput(
+        utterance=utterance, as_of_date=date(2026, 8, 30),
+    ))
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert outcome.strategy.instrument.symbol == "300059.SZ"
+    assert len(transport.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -1036,6 +1175,562 @@ async def test_json_object_repairs_only_exact_unique_offsets_and_explicit_defaul
 
 
 @pytest.mark.asyncio
+async def test_json_object_expands_narrow_action_quote_to_exact_source_clause() -> None:
+    utterance = "收盘价上穿20日均线买入，下穿20日均线卖出"
+    params = {"period": 20, "price_field": "close"}
+    payload = {
+        "candidates": [
+            {
+                "instrument_symbol": None,
+                "entry": [_indicator_payload("technical.ma", "price_crosses_above", params)],
+                "exit": [_indicator_payload("technical.ma", "price_crosses_below", params)],
+                # The model chose the right leaf but quoted only its action.
+                "entry_spans": [_source_span(utterance, "买入")],
+                "exit_spans": [_source_span(utterance, "下穿20日均线卖出")],
+                "confidence": 0.91,
+                "defaulted_fields": [],
+            }
+        ]
+    }
+
+    generated = await _bounded(_FakeTransport(payload)).generate(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert generated[0].unsupported_code is None
+    entry_evidence = next(
+        item for item in generated[0].grounding_evidence if item.path == "/entry/0"
+    )
+    assert entry_evidence.text == "收盘价上穿20日均线买入"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("subject", "average"), [
+    ("", "20日均线"), ("收盘价", "20日移动平均线"), ("当日收盘价", "MA20"),
+])
+@pytest.mark.parametrize("crossing", [False, True])
+async def test_price_subject_and_comparator_are_grounded_independently(
+    subject: str, average: str, crossing: bool,
+) -> None:
+    entry_text = f"{subject}{'从上方下穿至' if crossing else '低于'}{average}下方买入"
+    exit_text = f"{subject}高于{average}卖出"
+    utterance = f"{entry_text}，{exit_text}"
+    params = {"period": 20, "price_field": "close"}
+    payload = {"candidates": [{
+        "entry": [_indicator_payload("technical.ma", "price_below", params)],
+        "exit": [_indicator_payload("technical.ma", "price_above", params)],
+        "entry_spans": [_source_span(utterance, entry_text)],
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "confidence": 0.91,
+        "defaulted_fields": ["/entry/0/params/price_field", "/exit/0/params/price_field"]
+        if not subject else [],
+    }]}
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=utterance, instrument_context="600519.SH", as_of_date=date(2026, 9, 5),
+    ))
+    expected_code = "candidate_provider_invalid_output" if crossing else None
+    assert generated[0].unsupported_code == expected_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first", "second", "entry_trigger", "exit_trigger", "fast", "expected_code"),
+    (
+        (5, 20, "golden_cross", "death_cross", 5, None),
+        (20, 5, "death_cross", "golden_cross", 5, None),
+        (5, 20, "death_cross", "golden_cross", 5, "candidate_provider_invalid_output"),
+        (5, 20, "golden_cross", "death_cross", 10, "candidate_provider_invalid_output"),
+    ),
+)
+async def test_model_keeps_full_catalog_and_exact_ma_pair_grounding(
+    first: int,
+    second: int,
+    entry_trigger: str,
+    exit_trigger: str,
+    fast: int,
+    expected_code: str | None,
+) -> None:
+    entry_text = f"{first}日均线上穿{second}日均线买入"
+    exit_text = f"{first}日均线下穿{second}日均线卖出"
+    utterance = f"{entry_text}，{exit_text}"
+    params = {"fast_period": fast, "slow_period": 20, "price_field": "close"}
+    transport = _FakeTransport({"candidates": [{
+        "instrument_symbol": None,
+        "entry": [_indicator_payload("technical.ma_cross", entry_trigger, params)],
+        "exit": [_indicator_payload("technical.ma_cross", exit_trigger, params)],
+        "entry_spans": [_source_span(utterance, entry_text)],
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "confidence": 0.95,
+        "defaulted_fields": ["/entry/0/params/price_field", "/exit/0/params/price_field"],
+    }]})
+    generated = await _bounded(transport).generate(CompileInput(
+        utterance=utterance, instrument_context="601318.SH", as_of_date=date(2026, 9, 5),
+    ))
+    assert generated[0].unsupported_code == expected_code
+    assert transport.requests[0].capability_matrix == CAPABILITY_MATRIX.model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", ["20日", "前20日", "近20日"])
+async def test_rolling_high_close_subject_is_not_an_extra_price_condition(window: str) -> None:
+    entry_text = f"东方财富收盘价创{window}新高买入"
+    exit_text = "价格下穿20日均线卖出"
+    utterance = f"{entry_text}，{exit_text}"
+    payload = {"candidates": [{
+        "instrument_symbol": None,
+        "entry": [_indicator_payload("price.rolling_high", "new_high", {
+            "period": 20, "price_field": "close",
+        })],
+        "exit": [_indicator_payload("technical.ma", "price_crosses_below", {
+            "period": 20, "price_field": "close",
+        })],
+        "entry_spans": [_source_span(utterance, entry_text)],
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "confidence": 0.95,
+        "defaulted_fields": ["/exit/0/params/price_field"],
+    }]}
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
+    ))
+    assert generated[0].unsupported_code is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connector", ["且", "并要求"])
+async def test_rolling_high_cannot_hide_a_separate_fixed_price_condition(
+    connector: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger="ashare_lab.adapters.language.vibe_candidates")
+    entry_text = f"收盘价创前20日新高{connector}收盘价低于30元买入"
+    exit_text = "持有5个交易日后卖出"
+    utterance = f"{entry_text}，{exit_text}"
+    payload = {"candidates": [{
+        "instrument_symbol": None,
+        "entry": [_indicator_payload("price.rolling_high", "new_high", {
+            "period": 20, "price_field": "close",
+        })],
+        "exit": [{"kind": "holding_period", "sessions": 5}],
+        "entry_spans": [_source_span(utterance, entry_text)],
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "confidence": 0.95,
+        "defaulted_fields": [],
+    }]}
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
+    ))
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+    assert "source_condition_omitted" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("title", "entry_text", "include_volume", "accepted"), [
+    ("我选放量创高突破：", "收盘价创20日新高且成交量达到前20日均量1.5倍买入", True, True),
+    ("", "收盘价创20日新高且成交量达到前20日均量1.5倍买入", True, True),
+    ("我选放量创高突破：", "收盘价创20日新高买入", False, False),
+    ("我选放量创高突破：", "收盘价创20日新高且成交量达到前20日均量1.5倍买入", False, False),
+    ("我选放量3倍：", "收盘价创20日新高且成交量达到前20日均量1.5倍买入", True, False),
+    ("我选放量３倍：", "收盘价创20日新高且成交量达到前20日均量1.5倍买入", True, False),
+    ("我选放量买入：", "收盘价创20日新高且成交量达到前20日均量1.5倍买入", True, False),
+    ("我选放量创高突破：",
+     "收盘价创20日新高且成交量达到前20日均量1.5倍且收盘价低于30元买入", True, False),
+])
+async def test_selected_strategy_title_only_deduplicates_conditions_repeated_in_explicit_rules(
+    title: str, entry_text: str, include_volume: bool, accepted: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    exit_text = "跌破20日均线卖出"
+    utterance = f"{title}{entry_text}，{exit_text}，回测近一年。帮我选三只股票试试。"
+    entries = [_indicator_payload("price.rolling_high", "new_high", {
+        "period": 20, "price_field": "close",
+    })]
+    if include_volume:
+        entries.append(_indicator_payload("volume.relative", "gte_multiple", {
+            "baseline_period": 20, "consecutive_days": 3,
+        }, value=1.5))
+    payload = {"candidates": [{
+        "entry": entries,
+        "exit": [_indicator_payload("technical.ma", "price_crosses_below", {
+            "period": 20, "price_field": "close",
+        })],
+        "entry_spans": [_source_span(utterance, entry_text)] * len(entries),
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "backtest_lookback_years": 1,
+        "backtest_span": _source_span(utterance, "回测近一年"),
+        "confidence": 0.95,
+        "defaulted_fields": ["/exit/0/params/price_field"] + (
+            ["/entry/1/params/consecutive_days"] if include_volume else []
+        ),
+    }]}
+    request = CompileInput(utterance=utterance, as_of_date=date(2026, 9, 5))
+    transport = _FakeTransport(payload)
+
+    generated = await _bounded(transport).generate(request)
+
+    assert (generated[0].unsupported_code is None) is accepted
+    assert request.utterance == utterance and transport.requests[0].utterance == utterance
+    assert len(transport.requests) == 1
+    if accepted:
+        assert len(generated[0].entry) == len(entries)
+        assert all(item.text == entry_text for item in generated[0].grounding_evidence
+                   if item.path.startswith("/entry/"))
+    else:
+        assert "source_condition_omitted" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entry_text", "expected_code"),
+    (
+        ("创20日新高就买", None),
+        ("最高价创20日新高就买", "candidate_provider_invalid_output"),
+    ),
+)
+async def test_rolling_high_only_defaults_unspoken_price_field(
+    entry_text: str,
+    expected_code: str | None,
+) -> None:
+    utterance = f"{entry_text}，持有5个交易日后卖"
+    payload = {
+        "candidates": [
+            {
+                "instrument_symbol": None,
+                "entry": [
+                    _indicator_payload(
+                        "price.rolling_high",
+                        "new_high",
+                        {"period": 20, "price_field": "close"},
+                    )
+                ],
+                "exit": [{"kind": "holding_period", "sessions": 5}],
+                "entry_spans": [_source_span(utterance, entry_text)],
+                "exit_spans": [_source_span(utterance, "持有5个交易日后卖")],
+                "confidence": 0.91,
+                "defaulted_fields": (
+                    []
+                    if expected_code is None
+                    else ["/entry/0/params/price_field"]
+                ),
+            }
+        ]
+    }
+
+    generated = await _bounded(_FakeTransport(payload)).generate(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert generated[0].unsupported_code == expected_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("multiple", "repair"), [(1.5, False), (2.0, False), (1.5, True), (2.0, True)],
+)
+async def test_homepage_volume_wording_is_grounded_without_changing_model_threshold(
+    multiple: float,
+    repair: bool,
+) -> None:
+    entry_text = "东方财富创20日新高且放量1.5倍买入"
+    exit_text = "跌破20日线卖出"
+    utterance = f"{entry_text}，{exit_text}"
+    payload = {"candidates": [{
+        "instrument_symbol": None,
+        "entry": [
+            _indicator_payload("price.rolling_high", "new_high", {
+                "period": 20, "price_field": "close",
+            }),
+            _indicator_payload("volume.relative", "gte_multiple", {
+                "baseline_period": 20, "consecutive_days": 3,
+            }, value=multiple),
+        ],
+        "exit": [_indicator_payload("technical.ma", "price_crosses_below", {
+            "period": 20, "price_field": "close",
+        })],
+        "entry_spans": [_source_span(utterance, entry_text)] * 2,
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "entry_join": "all",
+        "confidence": 0.95,
+        "defaulted_fields": [
+            "/entry/0/params/price_field", "/entry/1/params/baseline_period",
+            "/entry/1/params/consecutive_days", "/exit/0/params/price_field",
+        ],
+    }]}
+    incomplete = deepcopy(payload)
+    incomplete["candidates"][0]["defaulted_fields"] = []
+    transport = _SequenceTransport((incomplete, payload)) if repair else _FakeTransport(payload)
+    generated = await VibeBoundedCandidateGenerator(
+        transport, capability_matrix=CAPABILITY_MATRIX, repair_invalid_output=repair,
+    ).generate(CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
+    ))
+    assert generated[0].unsupported_code == (
+        None if multiple == 1.5 else "candidate_provider_invalid_output"
+    )
+    assert len(transport.requests) == (2 if repair else 1)
+    if repair:
+        correction = transport.requests[1].user_payload
+        assert correction is not None and correction["utterance"] == utterance
+        assert correction["validationFeedback"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("patch", "safe_code"), [
+    ({"indicator_id": "private.provider_indicator"}, "catalog_indicator_unknown"),
+    ({"trigger": "private_provider_trigger"}, "catalog_trigger_unknown"),
+    ({"params": {"private/provider/key": "private-provider-value"}}, "catalog_parameter_unknown"),
+    ({"params": {"fast": "private-provider-value", "slow": 26, "signal": 9}},
+     "catalog_parameter_type"),
+])
+async def test_catalog_matrix_repair_reports_safe_reason_without_provider_content(
+    patch: dict[str, object], safe_code: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    payload = _macd_batch()
+    candidate = cast(list[dict[str, object]], payload["candidates"])[0]
+    cast(list[dict[str, object]], candidate["entry"])[0].update(patch)
+    transport = _SequenceTransport((payload, payload))
+
+    generated = await VibeBoundedCandidateGenerator(
+        transport, capability_matrix=CAPABILITY_MATRIX, repair_invalid_output=True,
+    ).generate(CompileInput(
+        utterance=DIRECT_UTTERANCE, instrument_context="300059.SZ",
+        as_of_date=date(2026, 9, 5),
+    ))
+
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+    assert len(transport.requests) == 2
+    correction = transport.requests[1].user_payload
+    assert correction is not None
+    assert correction["validationFeedback"] == [f"candidate/1:{safe_code}"]
+    assert f"detail={safe_code}" in caplog.text
+    assert "private" not in caplog.text
+    assert "private" not in str(correction["validationFeedback"])
+    assert _safe_validation_reason(ValueError("private-provider-value")) \
+        == "unclassified_validation_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_supplies_missing_parameter", [True, False])
+async def test_catalog_missing_volume_parameter_supplies_default_path_without_filling_strategy(
+    model_supplies_missing_parameter: bool, caplog: pytest.LogCaptureFixture,
+) -> None:
+    entry = "当日成交量达到前20日均量1.5倍买入"
+    exit_text = "跌破20日均线卖出"
+    utterance = f"生益科技，{entry}，{exit_text}，回测近一年。"
+    valid = {"candidates": [{
+        "entry": [_indicator_payload("volume.relative", "gte_multiple", {
+            "baseline_period": 20, "consecutive_days": 3,
+        }, value=1.5)],
+        "exit": [_indicator_payload("technical.ma", "price_crosses_below", {
+            "period": 20, "price_field": "close",
+        })],
+        "entry_spans": [_source_span(utterance, entry)],
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "backtest_lookback_years": 1,
+        "backtest_span": _source_span(utterance, "回测近一年"),
+        "confidence": 0.95,
+        "defaulted_fields": ["/entry/0/params/consecutive_days", "/exit/0/params/price_field"],
+    }]}
+    incomplete = deepcopy(valid)
+    del incomplete["candidates"][0]["entry"][0]["params"]["consecutive_days"]
+    incomplete["candidates"][0]["defaulted_fields"] = ["/exit/0/params/price_field"]
+    transport = _SequenceTransport((
+        incomplete, valid if model_supplies_missing_parameter else incomplete,
+    ))
+
+    generated = await VibeBoundedCandidateGenerator(
+        transport, capability_matrix=CAPABILITY_MATRIX, repair_invalid_output=True,
+    ).generate(CompileInput(
+        utterance=utterance, instrument_context="600183.SH", as_of_date=date(2026, 9, 5),
+    ))
+
+    assert generated[0].unsupported_code == (
+        None if model_supplies_missing_parameter else "candidate_provider_invalid_output"
+    )
+    assert len(transport.requests) == 2
+    correction = transport.requests[1].user_payload
+    assert correction is not None and correction["utterance"] == utterance
+    feedback = str(correction["validationFeedback"])
+    assert "candidate/1:catalog_parameter_required" in feedback
+    assert "/entry/0/params/consecutive_days" in feedback
+    assert "目录默认值为 3" in feedback and "defaulted_fields" in feedback
+    assert "原文已指定的参数必须忠实保留" in feedback
+    assert "detail=catalog_parameter_required" in caplog.text
+    assert "consecutive_days" not in incomplete["candidates"][0]["entry"][0]["params"]
+    if model_supplies_missing_parameter:
+        assert dict(generated[0].entry[0].params) == {"baseline_period": 20, "consecutive_days": 3}
+        assert generated[0].entry[0].value == 1.5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_corrects_quote", [True, False])
+async def test_shared_exit_action_is_repaired_by_model_with_exact_quote_feedback(
+    model_corrects_quote: bool,
+) -> None:
+    entry = "贵州茅台收盘价低于25日均线买入"
+    exit_text = "高于20日均线或从持仓最高价回撤6%卖出"
+    utterance = f"{entry}，{exit_text}"
+    valid = {"candidates": [{
+        "instrument_symbol": None,
+        "entry": [_indicator_payload("technical.ma", "price_below", {
+            "period": 25, "price_field": "close",
+        })],
+        "exit": [
+            _indicator_payload("technical.ma", "price_above", {
+                "period": 20, "price_field": "close",
+            }),
+            {"kind": "trailing_drawdown", "threshold_pct": 6},
+        ],
+        "entry_spans": [_source_span(utterance, entry)],
+        "exit_spans": [_source_span(utterance, exit_text)] * 2,
+        "exit_join": "any", "confidence": 0.95,
+        "defaulted_fields": ["/exit/0/params/price_field"],
+    }]}
+    invalid = deepcopy(valid)
+    invalid["candidates"][0]["exit_spans"][0] = {
+        **_source_span(utterance, exit_text), "text": "收盘价高于20日均线卖出",
+    }
+    transport = _SequenceTransport((invalid, valid if model_corrects_quote else invalid))
+    generated = await VibeBoundedCandidateGenerator(
+        transport, capability_matrix=CAPABILITY_MATRIX, repair_invalid_output=True,
+    ).generate(CompileInput(
+        utterance=utterance, instrument_context="600519.SH", as_of_date=date(2026, 9, 5),
+    ))
+    assert generated[0].unsupported_code == (
+        None if model_corrects_quote else "candidate_provider_invalid_output"
+    )
+    assert len(transport.requests) == 2
+    correction = transport.requests[1].user_payload
+    assert correction is not None and correction["utterance"] == utterance
+    feedback = str(correction["validationFeedback"])
+    assert "收盘价高于20日均线卖出" in feedback
+    assert "共用买卖动作" in feedback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cash_quote", [None, "10万元", "本金10万元"])
+async def test_model_grounded_initial_cash_flows_into_compiled_strategy(
+    cash_quote: str | None,
+) -> None:
+    rule = "MACD金叉买入，MACD死叉卖出"
+    utterance = f"{rule}，本金10万元"
+    payload = _macd_batch(utterance=rule)
+    candidates = cast(list[object], payload["candidates"])
+    candidate = cast(dict[str, object], candidates[0])
+    candidate["initial_cash_cny"] = 100_000
+    candidate["initial_cash_span"] = (
+        None if cash_quote is None else _source_span(utterance, cash_quote)
+    )
+    transport = _FakeTransport(payload)
+    generator = HybridCandidateGenerator(
+        deterministic=_UnexpectedDeterministicGenerator(),
+        bounded_fallback=_bounded(transport),
+        model_first=True,
+    )
+
+    outcome = await _compiler(generator).compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY
+    assert outcome.strategy is not None
+    assert outcome.strategy.backtest.initial_cash_cny == 100_000
+    assert {
+        item.path: item.source for item in outcome.provenance
+    }["/backtest/initial_cash_cny"] == "utterance/explicit_initial_cash"
+    assert any(
+        item.path == "/backtest/initial_cash_cny" and item.text == "本金10万元"
+        for item in outcome.candidate_grounding
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context", [None, "600519.SH", "300059.SZ"])
+async def test_model_name_anywhere_is_resolved_before_execution(context: str | None) -> None:
+    utterance = f"{DIRECT_UTTERANCE}。这次测试贵州茅台"
+    payload = _macd_batch(utterance=DIRECT_UTTERANCE)
+    candidate = cast(dict[str, object], cast(list[object], payload["candidates"])[0])
+    candidate["instrument_name"] = "贵州茅台"
+    candidate["instrument_span"] = _source_span(utterance, "贵州茅台")
+    calls: list[str] = []
+
+    def resolver(name: str) -> str:
+        calls.append(name)
+        return "600519.SH"
+
+    generator = HybridCandidateGenerator(
+        deterministic=_UnexpectedDeterministicGenerator(),
+        bounded_fallback=_bounded(_FakeTransport(payload)),
+        instrument_name_resolver=resolver,
+        model_first=True,
+    )
+    generated = await generator.generate(CompileInput(
+        utterance=utterance, instrument_context=context, as_of_date=date(2026, 9, 5),
+    ))
+    assert calls == ["贵州茅台"]
+    if context == "300059.SZ":
+        assert generated[0].unsupported_code == "instrument_context_mismatch"
+        assert generated[0].instrument_symbol is None
+    else:
+        assert generated[0].unsupported_code is None
+        assert generated[0].instrument_symbol == "600519.SH"
+        assert generated[0].instrument_name is None
+        assert any(item.path == "/instrument/symbol" and item.text == "贵州茅台"
+                   for item in generated[0].grounding_evidence)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defect", ["name_not_in_source", "invented_code"])
+async def test_model_name_does_not_bypass_source_or_security_identity(defect: str) -> None:
+    utterance = f"{DIRECT_UTTERANCE}。这次测试贵州茅台"
+    payload = _macd_batch(utterance=DIRECT_UTTERANCE)
+    candidate = cast(dict[str, object], cast(list[object], payload["candidates"])[0])
+    candidate["instrument_name"] = "东方财富" if defect == "name_not_in_source" else "贵州茅台"
+    candidate["instrument_span"] = _source_span(utterance, "贵州茅台")
+    if defect == "invented_code":
+        candidate["instrument_symbol"] = "600519.SH"
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=utterance, instrument_context=None, as_of_date=date(2026, 9, 5),
+    ))
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned_cash", (None, 1_000_000))
+async def test_explicit_initial_cash_is_not_omitted_or_changed_by_model(
+    returned_cash: int | None,
+) -> None:
+    rule = "MACD金叉买入，MACD死叉卖出"
+    utterance = f"{rule}，本金10万元"
+    payload = _macd_batch(utterance=rule)
+    candidates = cast(list[object], payload["candidates"])
+    candidate = cast(dict[str, object], candidates[0])
+    if returned_cash is not None:
+        candidate["initial_cash_cny"] = returned_cash
+        candidate["initial_cash_span"] = _source_span(utterance, "本金10万元")
+
+    generated = await _bounded(_FakeTransport(payload)).generate(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case_index", "deviation"),
     (
@@ -1387,3 +2082,196 @@ async def test_catalog_invalid_first_candidate_does_not_hide_valid_second_candid
     assert outcome.strategy is not None
     assert outcome.candidate_rejections[0].candidate_rank == 1
     assert outcome.candidate_rejections[0].diagnostic_code == ("candidate_provider_invalid_output")
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("entry_text", "exit_text", "narrow_quote"), [
+    ("收盘价上穿20日均线买", "收盘价下穿20日均线卖", False),
+    ("收盘价上穿7日均线时买", "收盘价下穿7日均线时卖", False),
+    ("买：收盘价上穿20日均线", "卖：收盘价下穿20日均线", False),
+    ("收盘价上穿20日均线买", "收盘价下穿20日均线卖", True),
+])
+async def test_model_short_trade_actions_keep_exact_condition_evidence(
+    entry_text: str, exit_text: str, narrow_quote: bool,
+) -> None:
+    utterance = f"帮我测东方财富，{entry_text}，{exit_text}，最近一年。"
+    period = 7 if "7日" in entry_text else 20
+    params = {"period": period, "price_field": "close"}
+    payload = {"candidates": [{
+        "entry": [_indicator_payload("technical.ma", "price_crosses_above", params)],
+        "exit": [_indicator_payload("technical.ma", "price_crosses_below", params)],
+        "entry_spans": [_source_span(utterance, "买" if narrow_quote else entry_text)],
+        "exit_spans": [_source_span(utterance, "卖" if narrow_quote else exit_text)],
+        "backtest_lookback_years": 1,
+        "backtest_span": _source_span(utterance, "最近一年"),
+        "confidence": 0.91, "defaulted_fields": [],
+    }]}
+    transport = _FakeTransport(payload)
+    generated = await _bounded(transport).generate(CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
+    ))
+    assert generated[0].unsupported_code is None
+    assert len(transport.requests) == 1
+    evidence = {item.path: item for item in generated[0].grounding_evidence}
+    for path, expected in (("/entry/0", entry_text), ("/exit/0", exit_text)):
+        item = evidence[path]
+        assert item.text == expected
+        assert utterance[item.start:item.end] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("side", "noun"), [
+    ("entry", "超买"), ("exit", "超卖"), ("entry", "买方"),
+    ("exit", "卖盘"), ("entry", "不买"), ("exit", "卖出价格"),
+])
+async def test_short_trade_character_does_not_turn_nouns_or_references_into_orders(
+    side: str, noun: str,
+) -> None:
+    entry_text = f"收盘价上穿20日均线{noun if side == 'entry' else '买'}"
+    exit_text = f"收盘价下穿20日均线{noun if side == 'exit' else '卖'}"
+    utterance = f"{entry_text}，{exit_text}"
+    params = {"period": 20, "price_field": "close"}
+    payload = {"candidates": [{
+        "entry": [_indicator_payload("technical.ma", "price_crosses_above", params)],
+        "exit": [_indicator_payload("technical.ma", "price_crosses_below", params)],
+        "entry_spans": [_source_span(utterance, entry_text)],
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "confidence": 0.91, "defaulted_fields": [],
+    }]}
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
+    ))
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_span", ["mixed_actions", "invented_action"])
+async def test_short_actions_do_not_allow_mixed_or_invented_source_spans(bad_span: str) -> None:
+    utterance = "MACD金叉买，MACD死叉卖"
+    payload = _macd_batch(utterance=utterance)
+    candidate = cast(dict[str, object], cast(list[object], payload["candidates"])[0])
+    candidate["entry_spans"] = [
+        _source_span(utterance, utterance) if bad_span == "mixed_actions" else
+        {"start": 0, "end": 8, "text": "MACD金叉买入"}
+    ]
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
+    ))
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("comparison", "trigger", "valid"), [
+    ("超过", "gt_multiple", True), ("不低于", "gte_multiple", True),
+    ("超过", "gte_multiple", False), ("不低于", "gt_multiple", False),
+])
+async def test_model_relative_volume_preserves_baseline_and_strict_comparator(
+    comparison: str, trigger: str, valid: bool,
+) -> None:
+    entry = f"收盘价创前20日新高且成交量{comparison}前20日均量1.5倍买入"
+    exit_text = "跌破20日均线卖出"
+    utterance = f"{entry}，{exit_text}"
+    payload = {"candidates": [{
+        "entry": [
+            _indicator_payload("price.rolling_high", "new_high", {
+                "period": 20, "price_field": "close",
+            }),
+            _indicator_payload("volume.relative", trigger, {
+                "baseline_period": 20, "consecutive_days": 3,
+            }, value=1.5),
+        ],
+        "entry_join": "all",
+        "exit": [_indicator_payload("technical.ma", "price_crosses_below", {
+            "period": 20, "price_field": "close",
+        })],
+        "entry_spans": [_source_span(utterance, entry)] * 2,
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "confidence": 0.91,
+        "defaulted_fields": ["/entry/1/params/consecutive_days", "/exit/0/params/price_field"],
+    }]}
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
+    ))
+    assert (generated[0].unsupported_code is None) is valid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("exit_text", "exit_period", "valid"), [
+    ("高于70卖", 14, True), ("高于70卖", 7, False), ("MACD高于70卖", 14, False),
+])
+async def test_model_omitted_repeated_indicator_keeps_unique_entry_subject(
+    exit_text: str, exit_period: int, valid: bool,
+) -> None:
+    entry = "用14日RSI，低于30买"
+    utterance = f"{entry}，{exit_text}"
+    payload = {"candidates": [{
+        "entry": [_indicator_payload("technical.rsi", "below", {"period": 14}, value=30)],
+        "exit": [_indicator_payload("technical.rsi", "above", {"period": exit_period}, value=70)],
+        "entry_spans": [_source_span(utterance, entry)],
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "confidence": 0.91, "defaulted_fields": [],
+    }]}
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=utterance, instrument_context="600519.SH", as_of_date=date(2026, 9, 5),
+    ))
+    assert (generated[0].unsupported_code is None) is valid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("amount_text", "amount_value", "price_rule", "include_price", "valid"), [
+    ("超过5亿元", 500_000_000, False, False, True),
+    ("高于50000万元", 500_000_000, False, False, True),
+    ("大于500000000元", 500_000_000, False, False, True),
+    ("超过5亿元", 5, False, False, False),
+    ("不超过5亿元", 500_000_000, False, False, False),
+    ("不高于5亿元", 500_000_000, False, False, False),
+    ("超过5亿元", 500_000_000, True, False, False),
+    ("超过5亿元", 500_000_000, True, True, True),
+])
+async def test_model_amount_threshold_preserves_cny_comparator_and_other_price_rule(
+    amount_text: str, amount_value: int, price_rule: bool, include_price: bool, valid: bool,
+) -> None:
+    entry = f"14日RSI从30下方上穿30且当日成交额{amount_text}"
+    if price_rule:
+        entry += "且收盘价低于30元"
+    entry += "买入"
+    exit_text = "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+    utterance = f"{entry}；{exit_text}"
+    leaves = [
+        _indicator_payload("technical.rsi", "crosses_above", {"period": 14}, value=30),
+        _indicator_payload("market.amount", "above", {}, value=amount_value),
+    ]
+    if include_price:
+        leaves.append(_indicator_payload("price.close", "below", {}, value=30))
+    payload = {"candidates": [{
+        "entry": leaves,
+        "entry_join": "all",
+        "exit": [
+            _indicator_payload("technical.rsi", "above", {"period": 14}, value=55),
+            {"kind": "position_return", "trigger": "stop_loss", "threshold_pct": 5},
+            {"kind": "holding_period", "sessions": 10},
+        ],
+        "exit_join": "any",
+        "entry_spans": [_source_span(utterance, entry)] * len(leaves),
+        "exit_spans": [_source_span(utterance, exit_text)] * 3,
+        "confidence": 0.95,
+        "defaulted_fields": [],
+    }]}
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
+    ))
+    assert (generated[0].unsupported_code is None) is valid
+
+
+@pytest.mark.parametrize(("separator", "valid"), [("、", True), ("、且", False), ("，", False)])
+def test_exit_disjunction_list_does_not_accept_mixed_and_or_or_commas(
+    separator: str, valid: bool,
+) -> None:
+    text = f"14日RSI高于55{separator}持仓亏损5%或持有满10个交易日卖出"
+    span = CandidateSourceSpan(start=0, end=len(text), text=text)
+    if valid:
+        _validate_join_grounding("any", (span,) * 3, side="exit", leaf_count=3, utterance=text)
+    else:
+        with pytest.raises(ValueError):
+            _validate_join_grounding("any", (span,) * 3, side="exit", leaf_count=3, utterance=text)

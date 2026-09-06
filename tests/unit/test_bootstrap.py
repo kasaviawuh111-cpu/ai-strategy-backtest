@@ -21,7 +21,10 @@ from ashare_lab.adapters.event_sources import (
     build_event_acquisition_coverage,
 )
 from ashare_lab.adapters.event_sources.eastmoney import eastmoney_preparable_event_codes
-from ashare_lab.adapters.market_data import SnapshotPreparationFailedError
+from ashare_lab.adapters.market_data import (
+    FileCachedHistoricalIndicatorData,
+    SnapshotPreparationFailedError,
+)
 from ashare_lab.adapters.market_data.choice_snapshot import (
     STRICT_CORPORATE_ACTION_CATEGORIES,
     STRICT_CORPORATE_ACTION_COVERAGE_SCOPE,
@@ -692,6 +695,28 @@ def test_on_demand_profile_is_ready_without_pretending_a_snapshot_is_preloaded(
             settings.snapshot_preparation_root,
         )
     )
+
+
+def test_provider_indicator_dependency_is_cache_only_without_live_mx_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache_root = tmp_path / "provider-indicators"
+    settings = AppSettings(
+        app_env="test",
+        provider_indicator_cache_root=cache_root,
+    )
+    monkeypatch.setattr(
+        bootstrap_module,
+        "_build_mx_saas_live_market_data",
+        lambda _settings: None,
+    )
+
+    provider = bootstrap_module._build_provider_indicator_data(settings)
+
+    assert isinstance(provider, FileCachedHistoricalIndicatorData)
+    assert provider._delegate is None
+    assert provider._root == cache_root
 
 
 def test_on_demand_bootstrap_never_selects_standalone_source_snapshot(

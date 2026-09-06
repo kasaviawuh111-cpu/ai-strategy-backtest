@@ -95,6 +95,10 @@ from .parquet_sessions import (
     SessionReferenceIntegrityError,
     SessionReferenceSchemaError,
 )
+from .provider_indicator_cache import (
+    FileCachedHistoricalIndicatorData,
+    ProviderIndicatorCacheError,
+)
 from .research_sessions import (
     ResearchFallbackSessionProvider,
     ResearchInstrumentProfile,
@@ -162,6 +166,7 @@ __all__ = [
     "EastmoneySecuritySearchUnavailableError",
     "EventSnapshotError",
     "EventSnapshotResult",
+    "FileCachedHistoricalIndicatorData",
     "InternalDemoSnapshotPreparer",
     "LocalParquetMarketDataRepository",
     "MarketDataAdapterError",
@@ -169,6 +174,7 @@ __all__ = [
     "MarketDataSchemaError",
     "OnDemandSnapshotMarketDataRepository",
     "ParquetInstrumentSessionProvider",
+    "ProviderIndicatorCacheError",
     "ResearchFallbackSessionProvider",
     "ResearchInstrumentProfile",
     "SecurityMasterInstrumentNormalizer",

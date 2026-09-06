@@ -1134,6 +1134,14 @@ def test_relative_volume_uses_prior_valid_sessions_and_suspension_is_none() -> N
     assert "rvol_prior(2)" in aligned[3].reason
 
 
+def test_relative_volume_strictly_exceeds_excludes_equal_threshold() -> None:
+    bars = make_bars([10, 10, 10, 10], volumes=[100, 100, 150, 200])
+    aligned = SignalRuntime().evaluate_aligned(_relative_volume_condition("gt_multiple"), bars)
+    assert aligned[2] is not None and not aligned[2].triggered
+    assert aligned[2].left_value == aligned[2].right_value == Decimal("1.5")
+    assert aligned[3] is not None and aligned[3].triggered
+
+
 def test_consecutive_volume_counts_valid_sessions_and_requires_every_day() -> None:
     bars = make_bars(
         [10, 10, 10, 10, 10, 10],

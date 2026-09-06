@@ -12,13 +12,15 @@ import { BENCHMARK_LABEL } from './ExcessEquation'
 import type { ChartMark, SeriesPoint } from '../types'
 
 const W = 354
-const H = 244
+/* 回撤只是「收益曲线的副作用」，不该和净值抢版面：
+   它占整幅高度的 ~13%，比原来的 17% 更接近它在阅读里的分量。 */
+const H = 236
 const PL = 28
 const PR = 6
 const RETURN_TOP = 10
-const RETURN_BOTTOM = 164
-const DRAWDOWN_TOP = 190
-const DRAWDOWN_BOTTOM = 232
+const RETURN_BOTTOM = 168
+const DRAWDOWN_TOP = 192
+const DRAWDOWN_BOTTOM = 224
 
 const C = {
   strategy: 'var(--color-primary)',
@@ -172,7 +174,7 @@ export function EquityChart(
             <>
               {geo.comparisonAvailable ? <>
                 <path d={`${geo.line(geo.excess, geo.returnY)} L ${geo.X(last).toFixed(1)} ${geo.returnY(0).toFixed(1)} L ${PL} ${geo.returnY(0).toFixed(1)} Z`}
-                  fill="rgba(59,132,255,.14)" />
+                  fill="var(--fill-excess)" />
                 <path d={geo.line(geo.excess, geo.returnY)} fill="none" stroke={C.excess} strokeWidth={1.4} strokeOpacity={0.7} />
               </> : null}
               <path d={geo.line(geo.benchmark, geo.returnY)} fill="none" stroke={C.benchmark} strokeWidth={2}
@@ -237,11 +239,11 @@ export function EquityChart(
               stroke="var(--ink-4)" strokeWidth={0.8} strokeDasharray="3 3" />
           ) : null}
 
-          <text x={PL} y={DRAWDOWN_TOP - 8} fontSize={10} fill="var(--ink-3)">账户回撤</text>
+          <text x={PL} y={DRAWDOWN_TOP - 7} fontSize={8.5} fill="var(--ink-3)">账户回撤</text>
           <line x1={PL} x2={W - PR} y1={geo.drawdownY(0)} y2={geo.drawdownY(0)}
             stroke="var(--hairline-2)" strokeWidth={0.5} />
           <path d={`${geo.line(geo.drawdown, geo.drawdownY)} L ${geo.X(last).toFixed(1)} ${geo.drawdownY(0).toFixed(1)} L ${PL} ${geo.drawdownY(0).toFixed(1)} Z`}
-            fill="rgba(246,47,63,.10)" />
+            fill="var(--fill-drawdown)" />
           <path d={geo.line(geo.drawdown, geo.drawdownY)} fill="none" stroke={C.drawdown} strokeWidth={1.4} />
           <text x={PL - 5} y={geo.drawdownY(0) + 3} textAnchor="end" fontSize={9} fill="var(--ink-3)">0%</text>
           <text x={PL - 5} y={DRAWDOWN_BOTTOM} textAnchor="end" fontSize={9} fill="var(--ink-3)">{geo.drawdownLo.toFixed(0)}%</text>

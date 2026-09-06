@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date
 
@@ -13,6 +14,7 @@ from ashare_lab.adapters.language.openai_compatible import (
     OpenAICompatibleCandidateTransport,
 )
 from ashare_lab.adapters.language.vibe_candidates import CandidateTransportRequest
+from ashare_lab.ports.dialogue_progress import model_reasoning_sink, progress_sink
 
 
 class _CountingStream(httpx.AsyncByteStream):
@@ -28,6 +30,18 @@ class _CountingStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class _DelayedStream(_CountingStream):
+    def __init__(self, chunks: tuple[bytes, ...], *, delay_seconds: float) -> None:
+        super().__init__(chunks)
+        self._delay_seconds = delay_seconds
+
+    async def __aiter__(self):  # type: ignore[no-untyped-def]
+        for chunk in self._chunks:
+            await asyncio.sleep(self._delay_seconds)
+            self.yielded += 1
+            yield chunk
 
 
 def _request() -> CandidateTransportRequest:
@@ -65,6 +79,90 @@ def _completion(content: object) -> dict[str, object]:
     }
 
 
+def _sse_event(payload: object) -> bytes:
+    return (
+        b"data: "
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        + b"\n\n"
+    )
+
+
+def _sse_delta(
+    *,
+    content: str | None = None,
+    reasoning_content: str | None = None,
+    finish_reason: str | None = None,
+) -> bytes:
+    delta: dict[str, str] = {}
+    if content is not None:
+        delta["content"] = content
+    if reasoning_content is not None:
+        delta["reasoning_content"] = reasoning_content
+    return _sse_event(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": finish_reason,
+                }
+            ]
+        }
+    )
+
+
+def _sse_completion(
+    content: object,
+    *,
+    reasoning_content: str = "private model reasoning",
+) -> tuple[bytes, ...]:
+    serialized = json.dumps(content, ensure_ascii=False)
+    midpoint = max(1, len(serialized) // 2)
+    return (
+        b": keepalive\n\n",
+        _sse_delta(reasoning_content=reasoning_content),
+        _sse_delta(content=serialized[:midpoint]),
+        _sse_delta(content=serialized[midpoint:]),
+        _sse_delta(finish_reason="stop"),
+        b"data: [DONE]\n\n",
+    )
+
+
+def _sse_response(
+    request: httpx.Request,
+    content: object,
+    *,
+    stream: httpx.AsyncByteStream | None = None,
+) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "text/event-stream"},
+        stream=stream or _CountingStream(_sse_completion(content)),
+        request=request,
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_client_enables_connection_only_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options: list[dict[str, object]] = []
+
+    def transport_factory(**kwargs: object) -> httpx.MockTransport:
+        options.append(kwargs)
+        return httpx.MockTransport(lambda request: httpx.Response(
+            200, json=_completion({"candidates": []}), request=request,
+        ))
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", transport_factory)
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://gateway.example.test/v1/chat/completions", provider="fixture-gateway",
+        model="fixture-model", prompt_version="prompt.v1", schema_version="schema.v1",
+    )
+    await provider.generate_json(_request())
+    assert options == [{"retries": 1, "trust_env": False}]
+
+
 @pytest.mark.asyncio
 async def test_transport_posts_strict_json_schema_without_leaking_secret() -> None:
     requests: list[httpx.Request] = []
@@ -95,6 +193,7 @@ async def test_transport_posts_strict_json_schema_without_leaking_secret() -> No
     assert outbound.headers["Authorization"] == f"Bearer {secret}"
     assert body["model"] == "fixture-model"
     assert body["temperature"] == 0
+    assert "stream" not in body
     assert body["n"] == 1
     assert body["response_format"] == {
         "type": "json_schema",
@@ -315,10 +414,9 @@ async def test_deepseek_structured_requests_disable_default_thinking() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(
-            200,
-            json=_completion({"candidates": [{"confidence": 0.91}]}),
-            request=request,
+        return _sse_response(
+            request,
+            {"candidates": [{"confidence": 0.91}]},
         )
 
     provider = OpenAICompatibleCandidateTransport(
@@ -335,6 +433,230 @@ async def test_deepseek_structured_requests_disable_default_thinking() -> None:
 
     body = json.loads(requests[0].content)
     assert body["thinking"] == {"type": "disabled"}
+    assert body["stream"] is True
+    assert body["temperature"] == 0
+    assert "reasoning_effort" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reasoning_effort", ["low", "high", "max"])
+async def test_deepseek_enabled_thinking_uses_supported_effort_without_sampling_controls(
+    reasoning_effort: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _sse_response(
+            request,
+            {"candidates": [{"confidence": 0.91}]},
+        )
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://api.deepseek.com/chat/completions",
+        provider="deepseek-official",
+        model="deepseek-v4-pro",
+        prompt_version="prompt.v1",
+        schema_version="schema.v1",
+        response_mode="json_object",
+        thinking="enabled",
+        reasoning_effort=reasoning_effort,  # type: ignore[arg-type]
+        transport=httpx.MockTransport(handler),
+    )
+
+    await provider.generate_json(_request())
+
+    body = json.loads(requests[0].content)
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["stream"] is True
+    assert body["reasoning_effort"] == reasoning_effort
+    assert "temperature" not in body
+    assert "top_p" not in body
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stream_uses_real_delta_progress_and_can_outlive_total_timeout() -> None:
+    candidate = {"candidates": [{"confidence": 0.91}]}
+    private_reasoning = "reasoning-must-never-be-exposed"
+    requests: list[httpx.Request] = []
+    progress: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        chunks = _sse_completion(candidate, reasoning_content=private_reasoning)
+        return _sse_response(
+            request,
+            candidate,
+            stream=_DelayedStream(chunks, delay_seconds=0.06),
+        )
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://api.deepseek.com/chat/completions",
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        prompt_version="prompt.v1",
+        schema_version="schema.v1",
+        timeout_seconds=0.25,
+        response_mode="json_object",
+        thinking="enabled",
+        reasoning_effort="high",
+        transport=httpx.MockTransport(handler),
+    )
+    token = progress_sink.set(lambda stage, message: progress.append((stage, message)))
+    try:
+        result = await provider.generate_json(_request())
+    finally:
+        progress_sink.reset(token)
+
+    assert result == candidate
+    assert requests[0].headers["Accept"] == "text/event-stream"
+    assert ("model_reasoning", "已收到模型推理流，仍在生成。") in progress
+    assert ("model_output", "模型开始返回结果。") in progress
+    assert private_reasoning not in repr(progress)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_reasoning_uses_only_opt_in_sink_not_json_or_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidate = {"candidates": [{"confidence": 0.91}]}
+    deltas = ["unit-only-delta-A\n", "unit-only-delta-B：结束。"]
+    received: list[str] = []
+    statuses: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse_response(
+            request,
+            candidate,
+            stream=_CountingStream(
+                (
+                    _sse_delta(reasoning_content=deltas[0]),
+                    _sse_delta(reasoning_content=deltas[1]),
+                    _sse_delta(content=json.dumps(candidate)),
+                    _sse_delta(finish_reason="stop"),
+                    b"data: [DONE]\n\n",
+                )
+            ),
+        )
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://api.deepseek.com/chat/completions",
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        prompt_version="prompt.v1",
+        schema_version="schema.v1",
+        response_mode="json_object",
+        thinking="enabled",
+        reasoning_effort="high",
+        transport=httpx.MockTransport(handler),
+    )
+    reasoning_token = model_reasoning_sink.set(received.append)
+    progress_token = progress_sink.set(lambda stage, message: statuses.append((stage, message)))
+    try:
+        with caplog.at_level("DEBUG"):
+            result = await provider.generate_json(_request())
+    finally:
+        model_reasoning_sink.reset(reasoning_token)
+        progress_sink.reset(progress_token)
+
+    assert received == deltas
+    assert result == candidate
+    assert all(delta.rstrip("\n") not in caplog.text for delta in deltas)
+    assert all(delta.rstrip("\n") not in repr(statuses) for delta in deltas)
+    assert all(delta.rstrip("\n") not in repr(result) for delta in deltas)
+    assert model_reasoning_sink.get() is None
+    assert progress_sink.get() is None
+
+
+@pytest.mark.asyncio
+async def test_deepseek_stream_fails_closed_on_truncation_or_semantic_overflow(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    candidate = {"candidates": []}
+    oversized_reasoning = "private-reasoning-" + "x" * 1_100
+    streams = iter(
+        (
+            _CountingStream(_sse_completion(candidate)[:-1]),
+            _CountingStream(_sse_completion(candidate, reasoning_content=oversized_reasoning)),
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse_response(request, candidate, stream=next(streams))
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://api.deepseek.com/chat/completions",
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        prompt_version="prompt.v1",
+        schema_version="schema.v1",
+        timeout_seconds=1,
+        max_response_bytes=1_024,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(CandidateProviderTransportError, match="ended before DONE"):
+        await provider.generate_json(_request())
+    with pytest.raises(CandidateProviderTransportError, match="too large"):
+        await provider.generate_json(_request())
+
+    assert oversized_reasoning not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_non_deepseek_preserves_total_wall_timeout() -> None:
+    candidate = {"candidates": []}
+    raw = json.dumps(_completion(candidate)).encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=_DelayedStream((raw[:20], raw[20:]), delay_seconds=0.15),
+            request=request,
+        )
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://gateway.example.test/v1/chat/completions",
+        provider="fixture-gateway",
+        model="fixture-model",
+        prompt_version="prompt.v1",
+        schema_version="schema.v1",
+        timeout_seconds=0.25,
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(CandidateProviderTransportError) as caught:
+        await provider.generate_json(_request())
+
+    assert caught.value.timed_out is True
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "thinking", "reasoning_effort", "error"),
+    [
+        ("deepseek-official", "automatic", None, "thinking mode"),
+        ("deepseek-official", "enabled", "medium", "reasoning effort"),
+        ("deepseek-official", "enabled", None, "requires a reasoning effort"),
+        ("deepseek-official", "disabled", "low", "requires enabled thinking"),
+        ("fixture-gateway", "enabled", "high", "only supported for DeepSeek"),
+    ],
+)
+def test_transport_rejects_invalid_thinking_configuration(
+    provider_name: str,
+    thinking: str,
+    reasoning_effort: str | None,
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        OpenAICompatibleCandidateTransport(
+            endpoint="https://gateway.example.test/v1/chat/completions",
+            provider=provider_name,
+            model="fixture-model",
+            prompt_version="prompt.v1",
+            schema_version="schema.v1",
+            thinking=thinking,  # type: ignore[arg-type]
+            reasoning_effort=reasoning_effort,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.asyncio
@@ -352,20 +674,44 @@ async def test_disabled_transport_is_explicit_and_never_attempts_network() -> No
 
 
 def test_transport_rejects_credentials_or_query_in_endpoint() -> None:
-    common = {
-        "provider": "fixture-gateway",
-        "model": "fixture-model",
-        "prompt_version": "prompt.v1",
-        "schema_version": "schema.v1",
-    }
-
     with pytest.raises(ValueError, match="credentials"):
         OpenAICompatibleCandidateTransport(
             endpoint="https://user:password@gateway.example.test/v1/chat/completions",
-            **common,
+            provider="fixture-gateway",
+            model="fixture-model",
+            prompt_version="prompt.v1",
+            schema_version="schema.v1",
         )
     with pytest.raises(ValueError, match="query or fragment"):
         OpenAICompatibleCandidateTransport(
             endpoint="https://gateway.example.test/v1/chat/completions?token=unsafe",
-            **common,
+            provider="fixture-gateway",
+            model="fixture-model",
+            prompt_version="prompt.v1",
+            schema_version="schema.v1",
+        )
+
+
+def test_transport_accepts_bounded_long_thinking_timeout() -> None:
+    OpenAICompatibleCandidateTransport(
+        endpoint="https://api.deepseek.com/chat/completions",
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        prompt_version="prompt.v1",
+        schema_version="schema.v1",
+        thinking="enabled",
+        reasoning_effort="high",
+        timeout_seconds=300.0,
+    )
+
+    with pytest.raises(ValueError, match=r"between 0\.25 and 300 seconds"):
+        OpenAICompatibleCandidateTransport(
+            endpoint="https://api.deepseek.com/chat/completions",
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            prompt_version="prompt.v1",
+            schema_version="schema.v1",
+            thinking="enabled",
+            reasoning_effort="high",
+            timeout_seconds=300.01,
         )

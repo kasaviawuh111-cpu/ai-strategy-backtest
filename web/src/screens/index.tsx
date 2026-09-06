@@ -11,6 +11,8 @@ import {
   MAXIMUM_INITIAL_CASH_CNY,
   MINIMUM_INITIAL_CASH_CNY,
 } from '../shared/config/backtest'
+import { dataAsOfDate } from '../shared/api/contract'
+import { MINIMUM_BACKTEST_DATE, validateBacktestDates } from '../shared/backtest-date-validation'
 import {
   BackIcon,
   Glyph,
@@ -126,6 +128,13 @@ export function ParamsScreen(
     focus: EditableRow['key'] | 'more' },
 ) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const startDateRef = useRef<HTMLInputElement>(null)
+  const endDateRef = useRef<HTMLInputElement>(null)
+  const [dateEdits, setDateEdits] = useState<{ draftId: string; start: string; end: string } | null>(null)
+  if (dateEdits && (!open || dateEdits.draftId !== draft.id)) setDateEdits(null)
+  const dates = dateEdits ?? draft.backtest
+  const latestDate = dataAsOfDate()
+  const dateValidation = validateBacktestDates(dates.start, dates.end, latestDate)
   const rules = strategyRuleTrees(draft)
   const indicatorConditions = [...draft.entry.conditions, ...draft.exit.conditions]
     .filter((condition): condition is StrategyIndicatorCondition =>
@@ -150,6 +159,29 @@ export function ParamsScreen(
     value: StrategyDraft['execution'][K],
   ) => onChange({ ...draft, execution: { ...draft.execution, [key]: value } })
 
+  const currentDateValues = () => ({
+    start: startDateRef.current?.value ?? dates.start,
+    end: endDateRef.current?.value ?? dates.end,
+  })
+  const syncDateInputs = () => setDateEdits({ draftId: draft.id, ...currentDateValues() })
+
+  const finishEditing = () => {
+    // Native date controls may change their displayed value without React's change event.
+    const currentDates = currentDateValues()
+    const currentValidation = validateBacktestDates(currentDates.start, currentDates.end, latestDate)
+    if (!currentValidation.valid) {
+      setDateEdits({ draftId: draft.id, ...currentDates })
+      const input = currentValidation.field === 'start' ? startDateRef : endDateRef
+      input.current?.focus()
+      return
+    }
+    if (currentDates.start !== draft.backtest.start || currentDates.end !== draft.backtest.end) {
+      onChange({ ...draft, backtest: { ...draft.backtest, ...currentDates } })
+    }
+    setDateEdits(null)
+    onBack()
+  }
+
   useEffect(() => {
     if (!open) return
     const target = scrollRef.current?.querySelector<HTMLElement>(`[data-focus="${focus}"]`)
@@ -163,11 +195,14 @@ export function ParamsScreen(
       id="params"
       title="策略设置"
       open={open}
-      onBack={onBack}
+      onBack={finishEditing}
       footer={
         <div className="btns">
-          <button type="button" className="btn ghost" onClick={onReset} disabled={isLocked}>重置为识别结果</button>
-          <button type="button" className="btn solid" onClick={onBack}>完成</button>
+          <button type="button" className="btn ghost" onClick={() => {
+            setDateEdits(null)
+            onReset()
+          }} disabled={isLocked}>重置为识别结果</button>
+          <button type="button" className="btn solid" onClick={finishEditing}>完成</button>
         </div>
       }
     >
@@ -220,16 +255,25 @@ export function ParamsScreen(
           <Section title="回测范围">
             <label className="grow setting-row">
               <span className="k">开始日期</span>
-              <input className="settings-input settings-input--date" type="date" value={draft.backtest.start}
-                max={draft.backtest.end} disabled={isLocked}
-                onChange={(event) => updateBacktest('start', event.target.value)} />
+              <input ref={startDateRef} className="settings-input settings-input--date" type="date"
+                value={dates.start} min={MINIMUM_BACKTEST_DATE} max={latestDate} required disabled={isLocked}
+                aria-invalid={dateValidation.field === 'start'}
+                aria-describedby={dateValidation.field === 'start' ? 'backtest-date-error' : undefined}
+                onInput={syncDateInputs} onChange={syncDateInputs} />
             </label>
             <label className="grow setting-row">
               <span className="k">结束日期</span>
-              <input className="settings-input settings-input--date" type="date" value={draft.backtest.end}
-                min={draft.backtest.start} disabled={isLocked}
-                onChange={(event) => updateBacktest('end', event.target.value)} />
+              <input ref={endDateRef} className="settings-input settings-input--date" type="date"
+                value={dates.end} min={MINIMUM_BACKTEST_DATE} max={latestDate} required disabled={isLocked}
+                aria-invalid={dateValidation.field === 'end'}
+                aria-describedby={dateValidation.field === 'end' ? 'backtest-date-error' : undefined}
+                onInput={syncDateInputs} onChange={syncDateInputs} />
             </label>
+            {!dateValidation.valid ? (
+              <div id="backtest-date-error" role="alert">
+                <Notice>{dateValidation.reason} 更正后再点完成，当前输入尚未保存。</Notice>
+              </div>
+            ) : null}
             <label className="grow setting-row">
               <span data-focus="cash" className="section-anchor" />
               <span className="k">初始资金<small>只影响手数、费用与容量，不代表真实账户</small></span>
@@ -383,7 +427,7 @@ const ORDER_STATUS: Record<OrderStatus, {
   label: string; hint: string; brief: string; settled: boolean
 }> = {
   placed: { label: '已报', hint: '委托已提交，这一天还没有成交记录', brief: '等待成交', settled: false },
-  filled: { label: '已成', hint: '按委托数量全部成交', brief: '成交价未记录', settled: true },
+  filled: { label: '已成', hint: '已记录模拟成交', brief: '成交价未记录', settled: true },
   partial: { label: '部成', hint: '只成交了一部分，剩余数量没有成交', brief: '成交价未记录', settled: true },
   unfilled: { label: '未成', hint: '当天没有成交，可能受涨跌停、容量或次日可卖限制', brief: '未成交', settled: false },
   expired: { label: '废单', hint: '信号有效期内没有等到可成交的机会，委托作废', brief: '已作废', settled: false },
@@ -402,6 +446,7 @@ const shortStamp = (value: string) => {
 const shortDate = (value: string) => shortStamp(value).slice(0, 10)
 
 const providerLabels: Record<string, string> = {
+  eastmoney_mx_finance_data: '东方财富查数 Skill',
   eastmoney: '东方财富公告',
   ifind: '同花顺 iFinD',
   rqdata: 'RQData',
@@ -412,6 +457,7 @@ const providerLabels: Record<string, string> = {
 }
 
 const timeQualityLabels: Record<string, string> = {
+  daily_close_simulation: '日线收盘模拟时点，不是供应商实测发布时刻',
   exact: '来源记录的可得时间',
   vendor_observed: '供应商记录的首次可得时间',
   date_only: '可信日期；按当日收盘后可得，下一交易日委托',
@@ -429,6 +475,7 @@ const timestampPrecisionLabels: Record<string, string> = {
 }
 
 const validationStatusLabels: Record<string, string> = {
+  local_formula_on_provider_ohlcv: '基于 Skill 原始日线按明确周期计算',
   validated: '已通过来源校验',
   unverified: '未验证，不可交易',
   blocked_time_quality: '时间证据不足，不可交易',
@@ -557,13 +604,22 @@ const hasCompleteIdentity = (evidence: RunEvidence) => Boolean(
   && SHA256_IDENTITY.test(evidence.strategyHash ?? ''),
 )
 
-export function ReportScreen(
-  { open, onBack, metrics, series, marks, trades, evidence, onOpenChain,
-    onOpenExecution, mode = 'mock' }:
-  { open: boolean; onBack: () => void; metrics: BacktestMetrics;
+/**
+ * 报告正文。抽出来是为了让它既能就地展开在对话里，也能被二级页包起来——
+ * 同一份内容，两种容器，不做第二套实现。
+ */
+export function ReportBody(
+  { metrics, series, marks, trades, evidence, onOpenChain,
+    onOpenExecution, mode = 'mock', showExecutionEntry = true }:
+  { metrics: BacktestMetrics;
     series: SeriesPoint[]; marks: ChartMark[]; trades: TradeRow[]; evidence: RunEvidence;
     onOpenChain: (trade: TradeRow) => void; onOpenExecution: () => void;
-    mode?: 'mock' | 'live' },
+    mode?: 'mock' | 'live';
+    /**
+     * 「成交规则与数据依据」讲的是这条策略怎么执行，属于工作流而不是结果。
+     * 详情页把它放到工作流分区，所以那里传 false；独立的报告页仍然自带这个入口。
+     */
+    showExecutionEntry?: boolean },
 ) {
   const [pagination, setPagination] = useState({ runId: evidence.runId, count: 20 })
   const [selection, setSelection] = useState<{
@@ -573,8 +629,9 @@ export function ReportScreen(
   }>({ runId: evidence.runId, orderId: null, activityId: null })
   const listRef = useRef<HTMLDivElement>(null)
   const identityComplete = hasCompleteIdentity(evidence)
-  const identityStatus = identityComplete ? 'implemented' : 'partial'
-  const identityLabel = identityComplete ? '身份已记录' : '身份不完整'
+  const identityStatus = identityComplete || evidence.skillData ? 'implemented' : 'partial'
+  const identityLabel = evidence.skillData ? '东方财富 Skill · 复权收益模拟'
+    : identityComplete ? '身份已记录' : '身份不完整'
 
   const orders = useMemo(() => toOrderRows(trades), [trades])
   const secondary = secondaryMetric(metrics)
@@ -603,8 +660,6 @@ export function ReportScreen(
   }
 
   return (
-    <Page id="report" title="回测报告" open={open} onBack={onBack}>
-      <div className="scroll">
         <div className="sect report-flow">
           <section className="report-summary" aria-labelledby="report-conclusion">
             <div className="report-summary-meta">
@@ -718,11 +773,34 @@ export function ReportScreen(
             </div>
           </section>
 
-          <Section title="更多信息">
-            <Row label="成交规则与数据依据" sub="涨跌停、费用、信号来源与运行身份"
-              onClick={onOpenExecution} />
-          </Section>
+          {showExecutionEntry ? (
+            <Section title="更多信息">
+              <Row label="成交规则与数据依据" sub="涨跌停、费用、信号来源与运行身份"
+                onClick={onOpenExecution} />
+            </Section>
+          ) : null}
         </div>
+  )
+}
+
+/** 「成交规则与数据依据」入口。详情页放在工作流分区，报告页放在末尾。 */
+export function ExecutionEntry({ onOpen }: { onOpen: () => void }) {
+  return (
+    <Section title="更多信息">
+      <Row label="成交规则与数据依据" sub="涨跌停、费用、信号来源与运行身份" onClick={onOpen} />
+    </Section>
+  )
+}
+
+/** 报告的二级页容器。App 现在就地展开报告，这个包装留给独立打开报告的场景。 */
+export function ReportScreen(
+  { open, onBack, ...body }:
+  { open: boolean; onBack: () => void } & Parameters<typeof ReportBody>[0],
+) {
+  return (
+    <Page id="report" title="回测报告" open={open} onBack={onBack}>
+      <div className="scroll">
+        <ReportBody {...body} />
       </div>
     </Page>
   )
@@ -740,12 +818,24 @@ export function ExecutionDetailsScreen(
     ).values(),
   )
   const identityComplete = hasCompleteIdentity(evidence)
-  const identityStatus = identityComplete ? 'implemented' : 'partial'
-  const identityLabel = identityComplete ? '身份已记录' : '身份不完整'
+  const identityStatus = identityComplete || evidence.skillData ? 'implemented' : 'partial'
+  const identityLabel = evidence.skillData ? 'Skill 来源已记录'
+    : identityComplete ? '身份已记录' : '身份不完整'
   const validityRows = entryValidityRows(evidence.executionAssumptions)
 
   // 只保留真正有值的身份项；缺失的合并成一句说明，不用一行一个「未记录」占屏。
-  const identityFields = [
+  const identityFields = evidence.skillData ? [
+    { label: '数据来源', value: '东方财富选股 / 查数 Skill' },
+    { label: '股票代码', value: evidence.skillData.instrumentId },
+    { label: '历史数据', value: `${evidence.skillData.historyStart} 至 ${evidence.skillData.historyEnd} · ${evidence.skillData.historyRows} 行` },
+    { label: 'Skill 直接指标', value: `${evidence.skillData.indicatorSeries} 组 · ${evidence.skillData.indicatorPoints} 个数据点` },
+    ...(evidence.skillData.derivedIndicatorEvidence ?? []).map((item) => ({
+      label: `本地计算 · ${({ 'price.rolling_high': '滚动新高', 'volume.relative': '相对成交量', 'technical.ma': '均线' } as Record<string, string>)[item.indicatorId] ?? item.indicatorId}`,
+      value: `${item.formula}；参数 ${item.parameters}`,
+    })),
+    { label: '取数时间', value: evidence.skillData.retrievedAt },
+    { label: '收益口径', value: '供应商复权序列模拟收益；不是逐笔分红到账的实盘账户' },
+  ] : [
     { label: '代码版本', value: evidence.gitSha },
     { label: '数据快照', value: evidence.snapshotId },
     { label: '生产快照', value: evidence.producerSnapshotId },
@@ -812,7 +902,9 @@ export function ExecutionDetailsScreen(
         </Section>
         <Section title="信号来源与时间" aside={`${sourceEvidence.length} 条证据`}>
           {sourceEvidence.length === 0 ? <div className="empty-row">
-            当前结果没有保存信号来源、首次可得时间或原始响应校验值，不能将来源补写为已验证。
+            {evidence.skillData
+              ? '本次指标来自东方财富查数 Skill，按收盘确认、次日开盘模拟执行；取数范围和时间见上方记录。'
+              : '当前结果没有保存信号来源或首次可得时间，不能将来源补写为已验证。'}
           </div> : sourceEvidence.map((item) => {
             const href = safeSourceUrl(item.sourceUrl)
             const provider = providerLabels[item.provider?.toLowerCase() ?? ''] ?? item.provider ?? '来源未记录'

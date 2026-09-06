@@ -575,6 +575,58 @@ def _session_reference_coverage(
     }
 
 
+def _provider_neutral_session_reference_coverage() -> dict[str, object]:
+    rows = _session_reference_rows()
+    audit = {
+        "purpose": "historical_sessions",
+        "query": (
+            "查询300059.SZ 2025-01-02至2025-01-03"
+            "每个交易日的前收盘价、交易状态、是否ST、证券简称"
+        ),
+        "provider": "eastmoney_mx_finance_data",
+        "schemaVersion": "eastmoney-mx.search-data.v1",
+        "responseSha256": "sha256:" + "c" * 64,
+        "retrievedAt": "2025-01-04T00:00:00+00:00",
+        "requestedStart": "2025-01-02",
+        "requestedEnd": "2025-01-03",
+        "returnedStart": "2025-01-02",
+        "returnedEnd": "2025-01-03",
+        "rowCount": 2,
+        "providerFields": ["前收盘价", "交易状态", "是否为ST股票"],
+        "canonicalRowsSha256": _canonical_sha256(rows),
+        "dateAxisSha256": _canonical_sha256([row["date"] for row in rows]),
+    }
+    return {
+        "schemaVersion": "ashare-lab.instrument-session-reference.v3",
+        "status": "complete",
+        "querySucceeded": True,
+        "provider": "eastmoney_mx_finance_data",
+        "instrumentId": "300059.SZ",
+        "start": "2025-01-02",
+        "end": "2025-01-03",
+        "fields": ["date", "preclose", "tradestatus", "isST"],
+        "providerFields": ["前收盘价", "交易状态", "是否为ST股票"],
+        "frequency": "1d",
+        "adjustFlag": "provider_unadjusted_preclose",
+        "priceBasis": "unadjusted",
+        "rowCount": 2,
+        "zeroResult": False,
+        "returnedStart": "2025-01-02",
+        "returnedEnd": "2025-01-03",
+        "canonicalRowsSha256": _canonical_sha256(rows),
+        "dateAxisSha256": _canonical_sha256([row["date"] for row in rows]),
+        "aggregateAuditSha256": _canonical_sha256([audit]),
+        "hashSemantics": (
+            "provider_raw_wire_sha256_plus_canonical_normalized_rows_sha256"
+        ),
+        "paginationPolicy": (
+            "annual_searchData_queries_bounded_to_at_most_366_calendar_days"
+        ),
+        "queryMethod": "Eastmoney MX searchData annual exact-symbol daily facts",
+        "queryAudits": [audit],
+    }
+
+
 def _build(tmp_path: Path, **overrides):
     values = {
         "spec": _spec(),
@@ -705,6 +757,29 @@ def test_builds_content_addressed_dual_price_snapshot(tmp_path: Path) -> None:
     assert signal[0].price_basis is PriceBasis.BACK_ADJUSTED
     assert execution[0].close.amount != signal[0].close.amount
     assert execution[0].volume == signal[0].volume
+
+
+def test_provider_neutral_v3_session_evidence_is_preserved_in_manifest(
+    tmp_path: Path,
+) -> None:
+    result = _build(
+        tmp_path,
+        session_reference_coverage=_provider_neutral_session_reference_coverage(),
+    )
+
+    manifest = json.loads((result.path / "snapshot_manifest.json").read_text(encoding="utf-8"))
+    reference = manifest["sessionReference"]
+    assert reference["kind"] == (
+        "provider-neutral-historical-facts-plus-versioned-rulebook"
+    )
+    assert reference["provider"] == "eastmoney_mx_finance_data"
+    assert reference["adjustFlag"] == "provider_unadjusted_preclose"
+    assert reference["coverage"]["queryAudits"][0]["responseSha256"] == (
+        "sha256:" + "c" * 64
+    )
+    assert reference["priceLimitSource"] == (
+        "derived from ruleVersion using provider-neutral isST/preclose"
+    )
 
 
 def test_snapshot_preserves_provider_reported_turnover_rate_for_both_price_bases(

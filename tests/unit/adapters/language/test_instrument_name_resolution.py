@@ -7,6 +7,9 @@ import pytest
 
 from ashare_lab.adapters.language import RuleBasedCandidateGenerator
 from ashare_lab.adapters.language.vibe_candidates import HybridCandidateGenerator
+from ashare_lab.adapters.market_data.instrument_name_chain import (
+    InstrumentNameProviderUnavailableError,
+)
 from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
@@ -88,6 +91,29 @@ async def test_long_form_indicator_is_not_misread_as_a_company_name_before_model
     )
 
     assert resolver_calls == []
+    assert [item.utterance for item in fallback.requests] == [utterance]
+    assert candidates[0].unsupported_code == "candidate_provider_unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["当日", "每日", "如果", "一旦", "只要"])
+async def test_rule_prefix_reaches_model_without_security_lookup(prefix: str) -> None:
+    fallback = _RecordingFallback()
+
+    def resolver(_name: str) -> str:
+        raise AssertionError("a rule prefix is not an instrument")
+
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=fallback,
+        instrument_name_resolver=resolver,
+        model_first=True,
+    )
+    utterance = f"{prefix}收盘价低于20日移动平均线时买入，高于20日移动平均线时卖出"
+    candidates = await generator.generate(
+        CompileInput(utterance=utterance, instrument_context="600519.SH",
+                     as_of_date=date(2026, 9, 5))
+    )
     assert [item.utterance for item in fallback.requests] == [utterance]
     assert candidates[0].unsupported_code == "candidate_provider_unavailable"
 
@@ -410,6 +436,30 @@ async def test_unconfirmed_company_name_fails_closed_without_default_stock() -> 
     assert len(candidates) == 1
     assert candidates[0].instrument_symbol is None
     assert candidates[0].unsupported_code == "instrument_unconfirmed"
+
+
+@pytest.mark.asyncio
+async def test_provider_outage_is_not_reported_as_an_unconfirmed_company_name() -> None:
+    def unavailable(_name: str) -> str:
+        raise InstrumentNameProviderUnavailableError("all providers unavailable")
+
+    generator = HybridCandidateGenerator(
+        deterministic=RuleBasedCandidateGenerator(),
+        bounded_fallback=_UnexpectedFallback(),
+        instrument_name_resolver=unavailable,
+    )
+
+    candidates = await generator.generate(
+        CompileInput(
+            utterance="同花顺ROE高于0%买入，MACD死叉卖出",
+            instrument_context=None,
+            as_of_date=date(2026, 8, 20),
+        )
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].instrument_symbol is None
+    assert candidates[0].unsupported_code == "instrument_resolution_unavailable"
 
 
 @pytest.mark.asyncio

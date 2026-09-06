@@ -36,6 +36,8 @@ def test_configured_app_serves_only_index_and_assets(tmp_path: Path) -> None:
     with TestClient(app) as client:
         root = client.get("/")
         index = client.get("/index.html")
+        portfolio_review = client.get("/portfolio-review")
+        portfolio_review_slash = client.get("/portfolio-review/")
         asset = client.get("/assets/index-WWLRx0Yi.js")
         mutable_asset = client.get("/assets/runtime.js")
         unknown_page = client.get("/portfolio")
@@ -46,6 +48,12 @@ def test_configured_app_serves_only_index_and_assets(tmp_path: Path) -> None:
     assert root.headers["cache-control"] == "no-store"
     assert index.status_code == 200
     assert index.headers["cache-control"] == "no-store"
+    assert portfolio_review.status_code == 200
+    assert portfolio_review.text == "<main>live web</main>"
+    assert portfolio_review.headers["cache-control"] == "no-store"
+    assert portfolio_review_slash.status_code == 200
+    assert portfolio_review_slash.text == "<main>live web</main>"
+    assert portfolio_review_slash.headers["cache-control"] == "no-store"
     assert asset.status_code == 200
     assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert mutable_asset.status_code == 200

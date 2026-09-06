@@ -3,6 +3,7 @@ import { ApiError } from './types'
 import {
   fromLiveDraftResponse,
   fromLiveClarificationAnswerResponse,
+  fromBacktestOptimizationCandidate,
   mergeLiveRevision,
   toLiveBacktestBody,
   toLiveCompileBody,
@@ -12,6 +13,8 @@ import type { LiveClarificationAnswerResponse, LiveDraftResponse } from './contr
 import type {
   ApiProblem,
   BacktestActivity,
+  BacktestOptimizationCandidate,
+  BacktestReviewResponse,
   BacktestRun,
   BacktestSummary,
   CapabilitiesResponse,
@@ -25,14 +28,45 @@ import type {
   StrategySpecCondition,
 } from './types'
 
-const useMock = import.meta.env.VITE_USE_MOCK !== 'false'
+// Fixtures require explicit local opt-in; published builds always call the API.
+const useMock = import.meta.env.DEV && import.meta.env.VITE_USE_MOCK === 'true'
 const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 const REQUEST_TIMEOUT_MS = 20_000
-const BACKTEST_CREATE_TIMEOUT_MS = 120_000
+// Model-backed operations have no browser wall-clock deadline. The backend
+// detects upstream inactivity; a healthy model stream may take longer.
+const DIALOGUE_TIMEOUT_MS = null
+/** Backtest job creation keeps a separate bounded data-preparation budget. */
+const BACKTEST_CREATE_TIMEOUT_MS = 300_000
+const BACKTEST_REVIEW_TIMEOUT_MS = null
+const DIALOGUE_PROGRESS_POLL_MS = 1_000
+const DIALOGUE_PROGRESS_LIMIT = 12
 
-const requestFailure = (error: unknown, timeoutMs: number): ApiError => {
-  const timedOut = error instanceof DOMException && error.name === 'TimeoutError'
-  const timeoutSeconds = Math.round(timeoutMs / 1_000)
+export type DialogueProgressEvent = {
+  stage: string
+  message: string
+  elapsedMs: number
+  reasoning?: string
+  reasoningTruncated?: boolean
+}
+
+export type DialogueProgressObserver = {
+  signal?: AbortSignal
+  onProgress: (events: readonly DialogueProgressEvent[]) => void
+}
+
+type ProgressAware<T> = T & { dialogueProgress?: DialogueProgressObserver }
+
+type LiveDialogueProgress = {
+  events: Array<{
+    stage: string; message: string; elapsed_ms: number
+    reasoning?: string; reasoning_truncated?: boolean
+  }>
+  finished: boolean
+}
+
+const requestFailure = (error: unknown, timeoutMs: number | null): ApiError => {
+  const timedOut = timeoutMs !== null && error instanceof DOMException && error.name === 'TimeoutError'
+  const timeoutSeconds = Math.round((timeoutMs ?? 0) / 1_000)
   return new ApiError({
     type: 'about:blank',
     title: timedOut ? '接口响应超时' : '无法连接回测服务',
@@ -47,7 +81,7 @@ const requestFailure = (error: unknown, timeoutMs: number): ApiError => {
 const request = async <T>(
   path: string,
   init?: RequestInit,
-  timeoutMs = REQUEST_TIMEOUT_MS,
+  timeoutMs: number | null = REQUEST_TIMEOUT_MS,
 ): Promise<T> => {
   const headers = new Headers(init?.headers)
   headers.set('Accept', 'application/json, application/problem+json')
@@ -58,7 +92,7 @@ const request = async <T>(
     response = await fetch(`${baseUrl}${path}`, {
       ...init,
       headers,
-      signal: init?.signal ?? AbortSignal.timeout(timeoutMs),
+      signal: init?.signal ?? (timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs)),
     })
   } catch (error) {
     if (error instanceof ApiError) throw error
@@ -87,6 +121,96 @@ const request = async <T>(
       detail: '回测服务没有返回有效 JSON，请检查 API 网关或服务版本。',
       code: 'api_invalid_json',
     })
+  }
+}
+
+const delayUntilNextProgressPoll = (signal: AbortSignal): Promise<void> => new Promise((resolve) => {
+  if (signal.aborted) {
+    resolve()
+    return
+  }
+  const timer = window.setTimeout(done, DIALOGUE_PROGRESS_POLL_MS)
+  signal.addEventListener('abort', done, { once: true })
+
+  function done() {
+    window.clearTimeout(timer)
+    signal.removeEventListener('abort', done)
+    resolve()
+  }
+})
+
+const normalizedDialogueProgress = (
+  snapshot: LiveDialogueProgress,
+): readonly DialogueProgressEvent[] => snapshot.events
+  .filter((event) => (
+    typeof event.stage === 'string'
+    && typeof event.message === 'string'
+    && event.message.trim().length > 0
+    && Number.isFinite(event.elapsed_ms)
+    && event.elapsed_ms >= 0
+  ))
+  .slice(-DIALOGUE_PROGRESS_LIMIT)
+  .map((event) => ({
+    stage: event.stage,
+    message: event.message.trim(),
+    elapsedMs: event.elapsed_ms,
+    ...(typeof event.reasoning === 'string' ? {
+      reasoning: event.reasoning.slice(-60_000),
+      reasoningTruncated: event.reasoning_truncated === true,
+    } : {}),
+  }))
+
+const pollDialogueProgress = async (
+  progressId: string,
+  observer: DialogueProgressObserver,
+  signal: AbortSignal,
+): Promise<void> => {
+  while (!signal.aborted) {
+    try {
+      const snapshot = await request<LiveDialogueProgress>(
+        `/api/v1/dialogue-progress/${encodeURIComponent(progressId)}`,
+        { signal },
+      )
+      if (signal.aborted) return
+      const events = normalizedDialogueProgress(snapshot)
+      try {
+        observer.onProgress(events)
+      } catch {
+        // Rendering progress is best-effort and must never fail the real request.
+      }
+      if (snapshot.finished) return
+    } catch {
+      // A 404 before the request registers, an unavailable poll, or an aborted
+      // component never changes the compile/clarification result.
+      if (signal.aborted) return
+    }
+    await delayUntilNextProgressPoll(signal)
+  }
+}
+
+const withDialogueProgress = async <T>(
+  observer: DialogueProgressObserver | undefined,
+  operation: (progressId?: string) => Promise<T>,
+): Promise<T> => {
+  if (observer === undefined || observer.signal?.aborted) return operation()
+
+  let progressId: string
+  try {
+    progressId = crypto.randomUUID()
+  } catch {
+    return operation()
+  }
+
+  const polling = new AbortController()
+  const stopPolling = () => polling.abort()
+  observer.signal?.addEventListener('abort', stopPolling, { once: true })
+  const poll = pollDialogueProgress(progressId, observer, polling.signal)
+  try {
+    return await operation(progressId)
+  } finally {
+    stopPolling()
+    observer.signal?.removeEventListener('abort', stopPolling)
+    await poll
   }
 }
 
@@ -248,25 +372,34 @@ export const requireStrategyCapability = (
 }
 
 export const strategyApi = {
-  compile: async (input: CompileRequest): Promise<CompileResponse> => {
+  compile: async (
+    input: ProgressAware<CompileRequest>,
+    parentDraftId?: string,
+  ): Promise<CompileResponse> => {
     if (useMock) return mockApi.compile(input)
-    const [response, capabilities] = await Promise.all([
-      request<LiveDraftResponse>('/api/v1/strategy-drafts', {
-        method: 'POST',
-        body: JSON.stringify(toLiveCompileBody(input)),
-      }),
-      // Metadata improves labels, but it is not a prerequisite for understanding
-      // or producing the server-owned StrategySpec. The page performs a separate
-      // capability check before it allows a run to start.
-      systemApi.capabilities().catch(() => undefined),
-    ])
-    // “能理解”与“当前可回测”是两个阶段。编译成功后由页面单独展示
-    // catalog / preparation / pinned snapshot，不能在这里把已识别规则吞成错误。
-    return fromLiveDraftResponse(response, input, capabilities)
+    return withDialogueProgress(input.dialogueProgress, async (progressId) => {
+      const headers = new Headers()
+      if (parentDraftId) headers.set('X-Conversation-Parent-Draft-ID', parentDraftId)
+      if (progressId) headers.set('X-Dialogue-Progress-ID', progressId)
+      const [response, capabilities] = await Promise.all([
+        request<LiveDraftResponse>('/api/v1/strategy-drafts', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(toLiveCompileBody(input)),
+        }, DIALOGUE_TIMEOUT_MS),
+        // Metadata improves labels, but it is not a prerequisite for understanding
+        // or producing the server-owned StrategySpec. The page performs a separate
+        // capability check before it allows a run to start.
+        systemApi.capabilities().catch(() => undefined),
+      ])
+      // “能理解”与“当前可回测”是两个阶段。编译成功后由页面单独展示
+      // catalog / preparation / pinned snapshot，不能在这里把已识别规则吞成错误。
+      return fromLiveDraftResponse(response, input, capabilities)
+    })
   },
 
   answerClarification: async (
-    input: ClarificationAnswerInput,
+    input: ProgressAware<ClarificationAnswerInput>,
   ): Promise<ClarificationAnswerOutcome> => {
     if (useMock) return mockApi.answerClarification(input)
     if (!Number.isInteger(input.revision) || (input.revision ?? 0) < 1) {
@@ -278,37 +411,53 @@ export const strategyApi = {
         code: 'strategy_draft_revision_missing',
       })
     }
-    const [response, capabilities] = await Promise.all([
-      request<LiveClarificationAnswerResponse>(
-        `/api/v1/strategy-drafts/${encodeURIComponent(input.draftId)}`
-        + `/revisions/${input.revision}/clarification-answers`,
-        { method: 'POST', body: JSON.stringify({ answer: input.answer }) },
-      ),
-      systemApi.capabilities().catch(() => undefined),
-    ])
-    return fromLiveClarificationAnswerResponse(response, input, capabilities)
+    return withDialogueProgress(input.dialogueProgress, async (progressId) => {
+      const headers = new Headers()
+      if (progressId) headers.set('X-Dialogue-Progress-ID', progressId)
+      const [response, capabilities] = await Promise.all([
+        request<LiveClarificationAnswerResponse>(
+          `/api/v1/strategy-drafts/${encodeURIComponent(input.draftId)}`
+          + `/revisions/${input.revision}/clarification-answers`,
+          { method: 'POST', headers, body: JSON.stringify({
+            answer: input.answer,
+            ...(input.relatedRunIds?.length ? { related_run_ids: input.relatedRunIds.slice(-2) } : {}),
+            ...(input.relatedReview ? { related_review: {
+              run_id: input.relatedReview.runId, response_hash: input.relatedReview.responseHash,
+            } } : {}),
+          }) },
+          DIALOGUE_TIMEOUT_MS,
+        ),
+        systemApi.capabilities().catch(() => undefined),
+      ])
+      return fromLiveClarificationAnswerResponse(response, input, capabilities)
+    })
   },
 
-  revise: async (draft: StrategyDraft): Promise<StrategyDraft> => {
+  revise: async (draft: StrategyDraft, recoverIfMissing = false): Promise<StrategyDraft> => {
     if (useMock) return mockApi.revise(draft)
     const capabilities = await systemApi.capabilities()
     requireStrategyCapability(draft.strategySpec, capabilities)
     const response = await request<LiveDraftResponse>(
       `/api/v1/strategy-drafts/${encodeURIComponent(draft.id)}/revisions`,
-      { method: 'POST', body: JSON.stringify(toLiveRevisionBody(draft)) },
+      { method: 'POST', body: JSON.stringify({
+        ...toLiveRevisionBody(draft),
+        ...(recoverIfMissing ? { recover_if_missing: true } : {}),
+      }) },
     )
     return mergeLiveRevision(response, draft, capabilities)
   },
 }
 
 export const backtestApi = {
-  create: async (draft: StrategyDraft): Promise<BacktestRun> => {
+  create: async (
+    draft: StrategyDraft, options: { refreshData?: boolean } = {},
+  ): Promise<BacktestRun> => {
     if (useMock) return mockApi.createRun(draft)
     const capabilities = await systemApi.capabilities()
     requireStrategyCapability(draft.strategySpec, capabilities)
     return request('/api/v1/backtest-runs', {
       method: 'POST',
-      body: JSON.stringify(toLiveBacktestBody(draft)),
+      body: JSON.stringify(toLiveBacktestBody(draft, options)),
     }, BACKTEST_CREATE_TIMEOUT_MS)
   },
 
@@ -328,6 +477,56 @@ export const backtestApi = {
 
   activities: (runId: string): Promise<BacktestActivity[]> =>
     useMock ? mockApi.getActivities(runId) : request(`/api/v1/backtest-runs/${runId}/trades`),
+
+  review: async (
+    runId: string, observer?: DialogueProgressObserver,
+  ): Promise<BacktestReviewResponse> => {
+    if (useMock) {
+      throw new ApiError({
+        type: 'about:blank',
+        title: 'AI 分析需要真实模型',
+        status: 503,
+        detail: '界面预览没有连接真实模型，不会生成或伪造优化建议。',
+        code: 'backtest_review_model_unavailable',
+      })
+    }
+    return withDialogueProgress(observer, (progressId) => request<BacktestReviewResponse>(
+      `/api/v1/backtest-runs/${encodeURIComponent(runId)}/review`,
+      { method: 'POST', headers: progressId ? { 'X-Dialogue-Progress-ID': progressId } : undefined },
+      BACKTEST_REVIEW_TIMEOUT_MS,
+    ))
+  },
+
+  createOptimization: async (
+    candidate: BacktestOptimizationCandidate,
+    sourceDraft: StrategyDraft,
+  ): Promise<{ draft: StrategyDraft; run: BacktestRun }> => {
+    if (useMock) {
+      throw new ApiError({
+        type: 'about:blank',
+        title: '优化回测需要真实服务',
+        status: 503,
+        detail: '界面预览不会执行模型优化策略。',
+        code: 'backtest_optimization_live_required',
+      })
+    }
+    const capabilities = await systemApi.capabilities()
+    requireStrategyCapability(candidate.strategy, capabilities)
+    // Save the exact model-authored DSL as the current server revision first.
+    // Follow-up language edits must see this strategy, not the old baseline.
+    const draft = await strategyApi.revise(
+      fromBacktestOptimizationCandidate(candidate, sourceDraft, capabilities),
+      true,
+    )
+    const run = await request<BacktestRun>('/api/v1/backtest-runs', {
+      method: 'POST',
+      body: JSON.stringify(toLiveBacktestBody(draft)),
+    }, BACKTEST_CREATE_TIMEOUT_MS)
+    return {
+      draft,
+      run,
+    }
+  },
 }
 
 export const apiMode = useMock ? 'mock' : 'live'

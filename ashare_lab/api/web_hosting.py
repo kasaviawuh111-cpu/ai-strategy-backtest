@@ -56,6 +56,16 @@ def install_web_hosting(app: FastAPI, dist_root: str | Path | None) -> None:
     }
     app.add_api_route("/", name="web-index", **route_options)
     app.add_api_route("/index.html", name="web-index-html", **route_options)
+    app.add_api_route(
+        "/portfolio-review",
+        name="web-portfolio-review",
+        **route_options,
+    )
+    app.add_api_route(
+        "/portfolio-review/",
+        name="web-portfolio-review-slash",
+        **route_options,
+    )
     app.mount(
         "/assets",
         _CacheControlledStaticFiles(directory=assets, check_dir=True),

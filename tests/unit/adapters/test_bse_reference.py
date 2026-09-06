@@ -15,6 +15,7 @@ from ashare_lab.adapters.market_data.bse_reference import (
     BSE_LISTED_COMPANY_URL,
     LISTING_DATE_SEMANTICS,
     PROVIDER_DATE_SEMANTICS,
+    BseCurrentNameSearchResult,
     BseInstrumentNotFoundError,
     BseInstrumentReferenceError,
     BseInstrumentReferenceResult,
@@ -81,6 +82,53 @@ def _clock() -> Callable[[], datetime]:
 
 def _source(handler: httpx.MockTransport) -> BseInstrumentReferenceSource:
     return BseInstrumentReferenceSource(transport=handler, clock=_clock())
+
+
+def _search_source(
+    handler: httpx.MockTransport,
+    *,
+    pages: int,
+) -> BseInstrumentReferenceSource:
+    timestamps = iter(
+        datetime(2026, 8, 30, 10, 0, second, tzinfo=SHANGHAI)
+        for second in range(pages * 2)
+    )
+    return BseInstrumentReferenceSource(
+        transport=handler,
+        clock=lambda: next(timestamps),
+    )
+
+
+def _universe_page(
+    *,
+    number: int,
+    rows: list[dict[str, Any]],
+    total_elements: int,
+    total_pages: int,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "content": rows,
+            "firstPage": number == 0,
+            "lastPage": number == total_pages - 1,
+            "number": number,
+            "numberOfElements": len(rows),
+            "size": 2,
+            "sort": None,
+            "totalElements": total_elements,
+            "totalPages": total_pages,
+        }
+    ]
+
+
+def _candidate(code: str, name: str) -> dict[str, Any]:
+    return {
+        "xxzqdm": code,
+        "xxzqjc": name,
+        "xxzqjb": "T",
+        "xxfcbj": "2",
+        "xxhbzl": "00",
+    }
 
 
 def test_fetches_exact_current_bse_reference_with_auditable_hashes() -> None:
@@ -332,3 +380,107 @@ def test_json_payload_keeps_delisting_limitation_explicit() -> None:
     assert instrument["provider_reference_date_semantics"] == PROVIDER_DATE_SEMANTICS
     coverage = cast(dict[str, object], payload["coverage"])
     assert cast(dict[str, object], coverage["delistingDate"])["status"] == "unsupported"
+
+
+def test_current_name_search_reads_every_page_and_matches_locally() -> None:
+    pages = (
+        _universe_page(
+            number=0,
+            rows=[_candidate("920000", "安徽凤凰"), _candidate("920001", "纬达光电")],
+            total_elements=3,
+            total_pages=2,
+        ),
+        _universe_page(
+            number=1,
+            rows=[_candidate("920002", "万达轴承")],
+            total_elements=3,
+            total_pages=2,
+        ),
+    )
+    requested_pages: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        page = int(
+            next(item.split("=", 1)[1] for item in body.split("&") if item.startswith("page="))
+        )
+        requested_pages.append(page)
+        assert "xxzqjc" not in body
+        return httpx.Response(200, content=_wire(pages[page]), request=request)
+
+    with _search_source(httpx.MockTransport(handler), pages=2) as source:
+        result = source.search_current_name("　纬达光电 ")
+
+    assert isinstance(result, BseCurrentNameSearchResult)
+    assert result.candidates == ("920001.BJ",)
+    assert requested_pages == [0, 1]
+    assert len(result.page_audits) == 2
+    assert result.coverage["totalElements"] == 3
+    assert result.coverage["pagesFetched"] == 2
+    assert str(result.coverage["canonicalUniverseSha256"]).startswith("sha256:")
+
+
+def test_current_name_search_bounds_candidate_count_without_guessing() -> None:
+    payload = _universe_page(
+        number=0,
+        rows=[_candidate("920000", "同名"), _candidate("920001", "同名")],
+        total_elements=2,
+        total_pages=1,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_wire(payload), request=request)
+
+    with _search_source(httpx.MockTransport(handler), pages=1) as source:
+        result = source.search_current_name("同名", max_candidates=1)
+
+    assert result.candidates == ("920000.BJ",)
+    assert result.truncated is True
+
+
+def test_current_name_search_rejects_pagination_drift() -> None:
+    pages = (
+        _universe_page(
+            number=0,
+            rows=[_candidate("920000", "安徽凤凰"), _candidate("920001", "纬达光电")],
+            total_elements=3,
+            total_pages=2,
+        ),
+        _universe_page(
+            number=1,
+            rows=[_candidate("920002", "万达轴承")],
+            total_elements=4,
+            total_pages=2,
+        ),
+    )
+    call = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call
+        response = httpx.Response(200, content=_wire(pages[call]), request=request)
+        call += 1
+        return response
+
+    with (
+        _search_source(httpx.MockTransport(handler), pages=2) as source,
+        pytest.raises(BseInstrumentReferenceError, match="pagination changed"),
+    ):
+        source.search_current_name("纬达光电")
+
+
+def test_current_name_search_rejects_unbounded_universe() -> None:
+    payload = _universe_page(
+        number=0,
+        rows=[_candidate("920000", "安徽凤凰"), _candidate("920001", "纬达光电")],
+        total_elements=2_000,
+        total_pages=1_000,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_wire(payload), request=request)
+
+    with (
+        _search_source(httpx.MockTransport(handler), pages=1) as source,
+        pytest.raises(BseInstrumentReferenceError, match="bounded limit"),
+    ):
+        source.search_current_name("纬达光电")

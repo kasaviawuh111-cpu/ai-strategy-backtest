@@ -7,14 +7,26 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 
+import ashare_lab.bootstrap as bootstrap_module
 from ashare_lab.adapters.language.openai_compatible import (
     OpenAICompatibleCandidateTransport,
 )
 from ashare_lab.adapters.language.rule_based import RuleBasedCandidateGenerator
-from ashare_lab.adapters.language.vibe_candidates import CandidateTransportRequest
+from ashare_lab.adapters.language.vibe_backtest_review import VibeBacktestReviewAdvisor
+from ashare_lab.adapters.language.vibe_candidates import (
+    CandidateCapabilityMatrix,
+    CandidateProviderIdentityView,
+    CandidateTransportRequest,
+)
+from ashare_lab.adapters.language.vibe_strategy_advice import (
+    VibeVerifiedFactStrategyAdvisor,
+)
 from ashare_lab.api.app import create_app
+from ashare_lab.application.compile_strategy import StrategyCompiler
 from ashare_lab.bootstrap import create_configured_app
-from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput, IndicatorIntent
+from ashare_lab.domain.catalog import load_catalog_directory
+from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
+from ashare_lab.ports.idea_routing import IdeaAssetMapping, IdeaProposal, IdeaRoute
 from ashare_lab.settings import AppSettings
 
 ROOT = Path(__file__).parents[2]
@@ -90,6 +102,157 @@ def _macd_batch() -> dict[str, object]:
     }
 
 
+def _idea_payload() -> dict[str, object]:
+    return {
+        "understanding": "用户表达了方向，但还没有参数化买卖条件。",
+        "hypothesis": "可以分别检验趋势、反转和动量规则。",
+        "proposals": [
+            {
+                "title": "趋势确认",
+                "hypothesis": "检验均线突破后的趋势延续。",
+                "entry_summary": "股价上穿 20 日均线",
+                "exit_summary": "股价跌破 20 日均线",
+                "suggested_utterance": "股价上穿20日均线买入，股价跌破20日均线卖出，回测近1年",
+            },
+            {
+                "title": "超跌反转",
+                "hypothesis": "检验 RSI 区间内的均值回归。",
+                "entry_summary": "RSI 低于 30",
+                "exit_summary": "RSI 高于 70",
+                "suggested_utterance": "RSI低于30买入，RSI高于70卖出，回测近1年",
+            },
+            {
+                "title": "动量转强",
+                "hypothesis": "检验 MACD 交叉后的动量变化。",
+                "entry_summary": "MACD 金叉",
+                "exit_summary": "MACD 死叉",
+                "suggested_utterance": "MACD金叉买入，MACD死叉卖出，回测近1年",
+            },
+        ],
+    }
+
+
+def _idea_candidate_batch(utterance: str) -> dict[str, object]:
+    entry_text, exit_text, backtest_text = utterance.split("，", 2)
+    if utterance.startswith("股价上穿"):
+        entry = {
+            "kind": "indicator",
+            "indicator_id": "technical.ma",
+            "definition_version": "1.0.0",
+            "trigger": "price_crosses_above",
+            "params": {"period": 20, "price_field": "close"},
+        }
+        exit_rule = {**entry, "trigger": "price_crosses_below"}
+        defaulted_fields = [
+            "/entry/0/params/price_field",
+            "/exit/0/params/price_field",
+        ]
+    elif utterance.startswith("RSI"):
+        entry = {
+            "kind": "indicator",
+            "indicator_id": "technical.rsi",
+            "definition_version": "1.0.0",
+            "trigger": "below",
+            "params": {"period": 14},
+            "value": 30,
+        }
+        exit_rule = {**entry, "trigger": "above", "value": 70}
+        defaulted_fields = [
+            "/entry/0/params/period",
+            "/exit/0/params/period",
+        ]
+    else:
+        entry = {
+            "kind": "indicator",
+            "indicator_id": "technical.macd",
+            "definition_version": "1.0.0",
+            "trigger": "golden_cross",
+            "params": {"fast": 12, "slow": 26, "signal": 9},
+        }
+        exit_rule = {**entry, "trigger": "death_cross"}
+        defaulted_fields = [
+            f"/{side}/0/params/{name}"
+            for side in ("entry", "exit")
+            for name in ("fast", "signal", "slow")
+        ]
+
+    def span(text: str) -> dict[str, object]:
+        start = utterance.index(text)
+        return {"start": start, "end": start + len(text), "text": text}
+
+    return {
+        "candidates": [
+            {
+                "instrument_symbol": None,
+                "entry": [entry],
+                "exit": [exit_rule],
+                "entry_spans": [span(entry_text)],
+                "exit_spans": [span(exit_text)],
+                "backtest_lookback_years": 1,
+                "backtest_span": span(backtest_text),
+                "confidence": 0.91,
+                "defaulted_fields": defaulted_fields,
+            }
+        ]
+    }
+
+
+class _ResolvedProposalIdeaRouter:
+    async def route(self, _request: CompileInput) -> IdeaRoute:
+        proposals = tuple(
+            IdeaProposal(
+                id=f"idea_{index:012x}",
+                title=cast(str, proposal["title"]),
+                hypothesis=cast(str, proposal["hypothesis"]),
+                entry_summary=cast(str, proposal["entry_summary"]),
+                exit_summary=cast(str, proposal["exit_summary"]),
+                suggested_utterance=cast(str, proposal["suggested_utterance"]),
+                capability_ids=("provider.claim",),
+                assumptions=("仅用于测试服务端标的绑定。",),
+                confidence=0.75,
+                instrument_symbol="300033.SZ",
+            )
+            for index, proposal in enumerate(
+                cast(list[dict[str, object]], _idea_payload()["proposals"]),
+                start=1,
+            )
+        )
+        return IdeaRoute(
+            understanding="联网研究只解析到同花顺。",
+            hypothesis="用三种不同价格行为做历史检验。",
+            asset_mapping=IdeaAssetMapping(
+                instrument_symbol=None,
+                relation="unbound",
+                rationale="候选卡片携带服务端已核验标的。",
+                evidence_status="instrument_required",
+            ),
+            proposals=proposals,
+        )
+
+
+def _profile_diagnostic(
+    *,
+    profile: str,
+    configured: bool,
+    provider: str,
+    model: str,
+    thinking: str = "disabled",
+    reasoning_effort: str | None = None,
+    inherited_from: str | None = None,
+) -> dict[str, object]:
+    return {
+        "configured": configured,
+        "profile": profile,
+        "provider": provider,
+        "model": model,
+        "thinking": {
+            "type": thinking,
+            "reasoning_effort": reasoning_effort,
+        },
+        "inherited_from": inherited_from,
+    }
+
+
 def test_direct_http_factory_keeps_deterministic_default() -> None:
     with TestClient(create_app()) as client:
         known = cast(
@@ -103,6 +266,15 @@ def test_direct_http_factory_keeps_deterministic_default() -> None:
     assert known.status_code == 201
     assert known.json()["status"] == "ready"
     assert known.json()["candidate_provenance"] is None
+
+
+def test_http_factory_can_exclude_the_separate_portfolio_review_product() -> None:
+    app = create_app(include_portfolio_review=False)
+
+    paths = app.openapi()["paths"]
+
+    assert "/api/v1/strategy-drafts" in paths
+    assert not any(path.startswith("/api/v1/portfolio-reviews") for path in paths)
 
 
 def test_unconfigured_provider_keeps_fast_path_and_marks_long_tail_unavailable(
@@ -131,8 +303,9 @@ def test_unconfigured_provider_keeps_fast_path_and_marks_long_tail_unavailable(
     assert known.json()["status"] == "ready"
     assert known.json()["candidate_provenance"] is None
     assert long_tail.status_code == 201
-    assert long_tail.json()["status"] == "unsupported"
-    assert long_tail.json()["diagnostic_code"] == "candidate_provider_unavailable"
+    assert long_tail.json()["status"] == "needs_clarification"
+    assert long_tail.json()["diagnostic_code"] == "idea_guidance_model_unavailable"
+    assert long_tail.json()["idea_route"] is None
     assert app.state.candidate_provider_identity == {
         "provider": "disabled",
         "model": "unconfigured",
@@ -140,11 +313,47 @@ def test_unconfigured_provider_keeps_fast_path_and_marks_long_tail_unavailable(
         "schema_version": "ashare-lab.bounded-candidate.schema.v1",
     }
     assert app.state.candidate_provider_response_mode == "disabled"
+    extract_fast = _profile_diagnostic(
+        profile="extract_fast",
+        configured=False,
+        provider="disabled",
+        model="unconfigured",
+    )
+    assert app.state.language_provider_diagnostics == {
+        "candidate_translation": extract_fast,
+        "clarification_reply": extract_fast,
+        "idea_generation": _profile_diagnostic(
+            profile="plan_deep",
+            configured=False,
+            provider="disabled",
+            model="unconfigured",
+            inherited_from="extract_fast",
+        ),
+        "strategy_advice": _profile_diagnostic(
+            profile="plan_deep",
+            configured=False,
+            provider="disabled",
+            model="unconfigured",
+            inherited_from="extract_fast",
+        ),
+        "backtest_review": _profile_diagnostic(
+            profile="plan_deep",
+            configured=False,
+            provider="disabled",
+            model="unconfigured",
+            inherited_from="extract_fast",
+        ),
+        "viewpoint_web_research": {
+            "configured": False,
+            "provider": "disabled",
+            "model": None,
+        },
+    }
     assert app.state.candidate_capability_projection["version"] == ("candidate-capabilities.v1")
     assert app.state.candidate_capability_projection["hash"].startswith("sha256:")
 
 
-def test_configured_provider_is_used_only_after_allowlisted_rule_miss(
+def test_configured_provider_is_model_first_for_a_complete_known_strategy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -159,41 +368,9 @@ def test_configured_provider_is_used_only_after_allowlisted_rule_miss(
 
     async def deterministic_generate(
         _self: RuleBasedCandidateGenerator,
-        request: CompileInput,
+        _request: CompileInput,
     ) -> tuple[CandidateAst, ...]:
-        if request.utterance == "MACD规则快路测试":
-            params = (("fast", 12), ("signal", 9), ("slow", 26))
-            return (
-                CandidateAst(
-                    instrument_symbol=request.instrument_context,
-                    entry=(
-                        IndicatorIntent(
-                            indicator_id="technical.macd",
-                            definition_version="1.0.0",
-                            trigger="golden_cross",
-                            params=params,
-                        ),
-                    ),
-                    exit=(
-                        IndicatorIntent(
-                            indicator_id="technical.macd",
-                            definition_version="1.0.0",
-                            trigger="death_cross",
-                            params=params,
-                        ),
-                    ),
-                    confidence=1.0,
-                ),
-            )
-        return (
-            CandidateAst(
-                instrument_symbol=request.instrument_context,
-                entry=(),
-                exit=(),
-                confidence=0.0,
-                unsupported_code="no_supported_signal_recognized",
-            ),
-        )
+        raise AssertionError("configured Live compiler must use extract_fast first")
 
     monkeypatch.setattr(OpenAICompatibleCandidateTransport, "generate_json", generate_json)
     monkeypatch.setattr(RuleBasedCandidateGenerator, "generate", deterministic_generate)
@@ -214,22 +391,13 @@ def test_configured_provider_is_used_only_after_allowlisted_rule_miss(
             Response,
             client.post(
                 "/api/v1/strategy-drafts",
-                json=_draft("MACD规则快路测试"),
-            ),
-        )
-        long_tail = cast(
-            Response,
-            client.post(
-                "/api/v1/strategy-drafts",
                 json=_draft(MODEL_UTTERANCE),
             ),
         )
 
     assert known.status_code == 201
     assert known.json()["status"] == "ready"
-    assert long_tail.status_code == 201
-    assert long_tail.json()["status"] == "ready"
-    assert long_tail.json()["candidate_provenance"] == {
+    assert known.json()["candidate_provenance"] == {
         "source": "bounded_provider",
         "provider": "fixture-gateway",
         "model": "fixture-model",
@@ -240,7 +408,7 @@ def test_configured_provider_is_used_only_after_allowlisted_rule_miss(
         "upstream_pattern_commit": "e90b6c6cd9fea23067a85667e7fbf74f9d73ea48",
         "candidate_rank": 1,
     }
-    assert [item["path"] for item in long_tail.json()["candidate_grounding"]["spans"]] == [
+    assert [item["path"] for item in known.json()["candidate_grounding"]["spans"]] == [
         "/entry/0",
         "/exit/0",
     ]
@@ -265,7 +433,254 @@ def test_configured_provider_is_used_only_after_allowlisted_rule_miss(
     }
     assert app.state.candidate_provider_response_mode == "json_schema"
     assert secret not in str(app.state.candidate_provider_identity)
-    assert secret not in long_tail.text
+    assert secret not in known.text
+
+
+def test_configured_app_exposes_nonsecret_language_channel_wiring(tmp_path: Path) -> None:
+    candidate_secret = "candidate-secret-must-not-leak"
+    research_secret = "research-secret-must-not-leak"
+    app = create_configured_app(
+        _settings(
+            tmp_path,
+            candidate_provider_mode="openai_compatible",
+            candidate_provider_endpoint="https://gateway.example.test/v1/chat/completions",
+            candidate_provider_name="deepseek",
+            candidate_provider_model="deepseek-v4-flash",
+            candidate_provider_api_key=candidate_secret,
+            candidate_provider_response_mode="json_object",
+            research_provider_endpoint="https://api.deepseek.com/responses",
+            research_provider_model="deepseek-v4-flash",
+            research_provider_api_key=research_secret,
+        )
+    )
+
+    extract_fast = _profile_diagnostic(
+        profile="extract_fast",
+        configured=True,
+        provider="deepseek",
+        model="deepseek-v4-flash",
+    )
+    assert app.state.language_provider_diagnostics == {
+        "candidate_translation": extract_fast,
+        "clarification_reply": extract_fast,
+        "idea_generation": _profile_diagnostic(
+            profile="plan_deep",
+            configured=True,
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            inherited_from="extract_fast",
+        ),
+        "strategy_advice": _profile_diagnostic(
+            profile="plan_deep",
+            configured=True,
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            inherited_from="extract_fast",
+        ),
+        "backtest_review": _profile_diagnostic(
+            profile="plan_deep",
+            configured=True,
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            inherited_from="extract_fast",
+        ),
+        "viewpoint_web_research": {
+            "configured": True,
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+        },
+    }
+    diagnostic_text = str(app.state.language_provider_diagnostics)
+    assert candidate_secret not in diagnostic_text
+    assert research_secret not in diagnostic_text
+
+
+def test_configured_app_uses_dedicated_plan_deep_transport_for_strategy_advice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[OpenAICompatibleCandidateTransport] = []
+    review_captured: list[OpenAICompatibleCandidateTransport] = []
+    original_advisor = VibeVerifiedFactStrategyAdvisor
+    original_review_advisor = VibeBacktestReviewAdvisor
+
+    def capture_advisor(
+        transport: OpenAICompatibleCandidateTransport,
+        *,
+        capability_matrix: CandidateCapabilityMatrix,
+        provider_identity: CandidateProviderIdentityView,
+    ) -> VibeVerifiedFactStrategyAdvisor:
+        captured.append(transport)
+        return original_advisor(
+            transport,
+            capability_matrix=capability_matrix,
+            provider_identity=provider_identity,
+        )
+
+    monkeypatch.setattr(
+        bootstrap_module,
+        "VibeVerifiedFactStrategyAdvisor",
+        capture_advisor,
+    )
+
+    def capture_review_advisor(
+        transport: OpenAICompatibleCandidateTransport,
+        *,
+        capability_matrix: CandidateCapabilityMatrix,
+        provider_identity: CandidateProviderIdentityView,
+    ) -> VibeBacktestReviewAdvisor:
+        review_captured.append(transport)
+        return original_review_advisor(
+            transport,
+            capability_matrix=capability_matrix,
+            provider_identity=provider_identity,
+        )
+
+    monkeypatch.setattr(
+        bootstrap_module,
+        "VibeBacktestReviewAdvisor",
+        capture_review_advisor,
+    )
+    extract_secret = "extract-secret-must-not-leak"
+    plan_secret = "plan-secret-must-not-leak"
+    app = create_configured_app(
+        _settings(
+            tmp_path,
+            candidate_provider_mode="openai_compatible",
+            candidate_provider_endpoint="https://api.deepseek.com/chat/completions",
+            candidate_provider_name="deepseek",
+            candidate_provider_model="deepseek-v4-flash",
+            candidate_provider_api_key=extract_secret,
+            candidate_provider_response_mode="json_object",
+            plan_deep_provider_mode="openai_compatible",
+            plan_deep_provider_endpoint="https://api.deepseek.com/chat/completions",
+            plan_deep_provider_name="deepseek",
+            plan_deep_provider_model="deepseek-v4-pro",
+            plan_deep_provider_api_key=plan_secret,
+            plan_deep_provider_response_mode="json_object",
+            plan_deep_provider_thinking="enabled",
+            plan_deep_provider_reasoning_effort="high",
+        )
+    )
+
+    assert len(captured) == 1
+    assert len(review_captured) == 1
+    assert captured[0].identity.model == "deepseek-v4-pro"
+    assert review_captured[0] is captured[0]
+    assert app.state.language_provider_diagnostics["candidate_translation"] == (
+        _profile_diagnostic(
+            profile="extract_fast",
+            configured=True,
+            provider="deepseek",
+            model="deepseek-v4-flash",
+        )
+    )
+    assert app.state.language_provider_diagnostics["strategy_advice"] == (
+        _profile_diagnostic(
+            profile="plan_deep",
+            configured=True,
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            thinking="enabled",
+            reasoning_effort="high",
+        )
+    )
+    assert app.state.language_provider_diagnostics["idea_generation"] == (
+        app.state.language_provider_diagnostics["strategy_advice"]
+    )
+    assert app.state.language_provider_diagnostics["backtest_review"] == (
+        app.state.language_provider_diagnostics["strategy_advice"]
+    )
+    rendered = str(app.state.language_provider_diagnostics)
+    assert extract_secret not in rendered
+    assert plan_secret not in rendered
+
+
+def test_vague_strategy_uses_dedicated_plan_deep_transport_and_compiler_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, CandidateTransportRequest]] = []
+
+    async def generate_json(
+        transport: OpenAICompatibleCandidateTransport,
+        request: CandidateTransportRequest,
+    ) -> dict[str, object]:
+        calls.append((transport.identity.model, request))
+        properties = cast(dict[str, object], request.response_schema["properties"])
+        if "proposals" in properties:
+            return _idea_payload()
+        return _idea_candidate_batch(request.utterance)
+
+    monkeypatch.setattr(OpenAICompatibleCandidateTransport, "generate_json", generate_json)
+    app = create_configured_app(
+        _settings(
+            tmp_path,
+            candidate_provider_mode="openai_compatible",
+            candidate_provider_endpoint="https://api.deepseek.com/chat/completions",
+            candidate_provider_name="deepseek",
+            candidate_provider_model="deepseek-v4-flash",
+            candidate_provider_api_key="extract-secret",
+            candidate_provider_response_mode="json_object",
+            plan_deep_provider_mode="openai_compatible",
+            plan_deep_provider_endpoint="https://api.deepseek.com/chat/completions",
+            plan_deep_provider_name="deepseek",
+            plan_deep_provider_model="deepseek-v4-pro",
+            plan_deep_provider_api_key="plan-secret",
+            plan_deep_provider_response_mode="json_object",
+            plan_deep_provider_thinking="enabled",
+            plan_deep_provider_reasoning_effort="high",
+            research_provider_mode="disabled",
+        )
+    )
+
+    with TestClient(app) as client:
+        response = cast(
+            Response,
+            client.post(
+                "/api/v1/strategy-drafts",
+                json=_draft("低买高卖"),
+            ),
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["diagnostic_code"] == "idea_guidance_required"
+    assert payload["idea_route"]["provenance"]["provider"] == "deepseek"
+    assert payload["idea_route"]["provenance"]["model"] == "deepseek-v4-pro"
+    assert payload["idea_route"]["provenance"]["prompt_version"] == "idea-route.prompt.v2"
+    assert payload["idea_route"]["provenance"]["schema_version"] == (
+        "idea-route-provider.v2"
+    )
+    assert [model for model, _request in calls] == [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash",
+    ]
+    properties = cast(dict[str, object], calls[0][1].response_schema["properties"])
+    assert "proposals" in properties
+    assert "template_ids" not in properties
+    assert calls[0][1].user_payload is not None
+    assert "capabilityMatrix" in calls[0][1].user_payload
+
+
+def test_configured_app_can_select_volcengine_web_search(tmp_path: Path) -> None:
+    secret = "volcengine-search-secret-must-not-leak"
+    app = create_configured_app(
+        _settings(
+            tmp_path,
+            research_provider_mode="volcengine_web_search",
+            research_provider_api_key=secret,
+        )
+    )
+
+    assert app.state.language_provider_diagnostics["viewpoint_web_research"] == {
+        "configured": True,
+        "provider": "volcengine",
+        "model": "web-search",
+    }
+    assert secret not in str(app.state.language_provider_diagnostics)
 
 
 def test_configured_app_routes_a_pure_viewpoint_to_idea_guidance(
@@ -282,13 +697,10 @@ def test_configured_app_routes_a_pure_viewpoint_to_idea_guidance(
     ) -> dict[str, object]:
         calls.append(request)
         properties = cast(dict[str, object], request.response_schema.get("properties", {}))
-        assert "template_ids" in properties
-        return {
-            "understanding": "用户表达了一个方向性观点，但没有给出可执行条件。",
-            "hypothesis": "可以用不同价格行为代理检验观点是否与后续走势同向。",
-            "mapping_rationale": "只把当前页面股票当作价格行为代理。",
-            "template_ids": ["ma20_trend", "rsi_reversal", "macd_momentum"],
-        }
+        assert "template_ids" not in properties
+        if "proposals" in properties:
+            return _idea_payload()
+        return _idea_candidate_batch(request.utterance)
 
     monkeypatch.setattr(OpenAICompatibleCandidateTransport, "generate_json", generate_json)
     settings = _settings(
@@ -333,5 +745,59 @@ def test_configured_app_routes_a_pure_viewpoint_to_idea_guidance(
         "technical.rsi",
         "technical.macd",
     }
-    assert len(calls) == 1
-    assert "template_ids" in cast(dict[str, object], calls[0].response_schema["properties"])
+    assert len(calls) == 4
+    assert "proposals" in cast(dict[str, object], calls[0].response_schema["properties"])
+    assert calls[0].user_payload is not None
+    assert "capabilityMatrix" in calls[0].user_payload
+    assert all(
+        "candidates" in cast(dict[str, object], request.response_schema["properties"])
+        for request in calls[1:]
+    )
+
+
+def test_api_proposal_selection_preserves_the_server_verified_proposal_symbol() -> None:
+    catalog = load_catalog_directory(ROOT / "catalogs")
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(),
+        idea_router=_ResolvedProposalIdeaRouter(),
+        catalog=catalog,
+        catalog_id="cn_a.signals",
+        release_version="2026.09.01",
+    )
+    app = create_app(compiler=compiler, catalog=catalog)
+
+    with TestClient(app) as client:
+        created_response = cast(
+            Response,
+            client.post(
+                "/api/v1/strategy-drafts",
+                json={
+                    "utterance": "我讨厌特朗普",
+                    "as_of_date": "2026-08-30",
+                },
+            ),
+        )
+        assert created_response.status_code == 201, created_response.text
+        created = created_response.json()
+        assert created["idea_route"]["asset_mapping"]["instrument_symbol"] is None
+        assert all(
+            item["instrument_symbol"] == "300033.SZ"
+            for item in created["idea_route"]["proposals"]
+        )
+
+        selected_response = cast(
+            Response,
+            client.post(
+                (
+                    f"/api/v1/strategy-drafts/{created['draft_id']}"
+                    f"/revisions/{created['revision']}/clarification-answers"
+                ),
+                json={"answer": "1"},
+            ),
+        )
+
+    assert selected_response.status_code == 200, selected_response.text
+    selected = selected_response.json()
+    assert selected["reply_kind"] == "accepted"
+    assert selected["draft"]["status"] == "ready"
+    assert selected["draft"]["strategy"]["instrument"]["symbol"] == "300033.SZ"

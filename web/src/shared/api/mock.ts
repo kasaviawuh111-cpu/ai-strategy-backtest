@@ -145,11 +145,7 @@ const hasCompleteTradeRule = (request: CompileRequest) =>
   /(买入|建仓)/.test(request.utterance) && /(卖出|平仓)/.test(request.utterance)
 
 const strategyKind = (request: CompileRequest): MockStrategyKind | null => {
-  const clarifiedMacd = hasCompleteTradeRule(request)
-    && request.clarification?.id === 'macd_confirmation_time'
-    && ['close', 'intrabar'].includes(request.clarification.choiceId)
-    && isMacdRequest(request)
-  if (!hasCompleteTradeRule(request) && !clarifiedMacd) return null
+  if (!hasCompleteTradeRule(request)) return null
   if (looksLikeUnsupportedEventRequest(request)) return null
   if (isEventRequest(request)) {
     if (isAnnualReportTermCountRequest(request) && isThreeSessionExitRequest(request)) {
@@ -165,7 +161,7 @@ const strategyKind = (request: CompileRequest): MockStrategyKind | null => {
   if (isTrendComboRequest(request)) return 'trend_combo'
   if (isSupportedMovingAverageRule(request)) return 'moving_average'
   if (isSupportedRsiRule(request)) return 'rsi'
-  if (isSupportedMacdRule(request) || clarifiedMacd) return 'macd'
+  if (isSupportedMacdRule(request)) return 'macd'
   return null
 }
 
@@ -372,7 +368,6 @@ const makeStrategySpec = (request: CompileRequest, kind: MockStrategyKind): Stra
 })
 
 const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDraft => {
-  const intrabar = request.clarification?.choiceId === 'intrabar'
   const volumeBreakoutStrategy = kind === 'volume_breakout'
   const financialStrategy = kind === 'financial_pe_macd'
   const trendComboStrategy = kind === 'trend_combo'
@@ -543,7 +538,7 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
               label: 'MACD 金叉',
               trigger: 'DIF 由下向上穿过 DEA',
               timeframe: '1d',
-              evaluationMode: intrabar ? 'intrabar_streaming' : 'bar_close_confirmed',
+              evaluationMode: 'bar_close_confirmed',
               parameters: [
                 { key: 'fast', label: '快线', value: 12, min: 2, max: 60 },
                 { key: 'slow', label: '慢线', value: 26, min: 3, max: 120 },
@@ -598,7 +593,7 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
           label: 'MACD 死叉',
           trigger: 'DIF 由上向下穿过 DEA',
           timeframe: '1d',
-          evaluationMode: intrabar ? 'intrabar_streaming' : 'bar_close_confirmed',
+          evaluationMode: 'bar_close_confirmed',
           parameters: [
             { key: 'fast', label: '快线', value: 12, min: 2, max: 60 },
             { key: 'slow', label: '慢线', value: 26, min: 3, max: 120 },
@@ -643,8 +638,6 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
         ? '事件按首次可获得时间确认，不倒填公告日期；成交只使用日线开盘价代理，时间非精确'
         : financialStrategy
           ? '市盈率只使用历史当时已可得的接口原始值；日线收盘确认，下一交易日使用开盘价代理'
-        : intrabar
-          ? '盘中触发；需要分钟级数据验证信号时点'
           : '日线收盘确认信号，下一交易日只使用开盘价代理，时间非精确',
       '遵守 A 股次日可卖规则；当天买入的股票下一交易日才可卖出',
       '买入默认使用 100% 可用资金，按 100 股整手向下取整；未投入现金继续保留',
@@ -654,7 +647,6 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
       ...(documentTextStrategy
         ? ['界面预览仅展示规则识别与卡片结构，没有读取年度报告正文，也不代表已计算词频或回测结果。']
         : []),
-      ...(intrabar ? ['当前样例只有日线数据，盘中信号将在正式运行前被能力检查拒绝。'] : []),
     ],
     strategySpec: makeStrategySpec(request, kind),
   }
@@ -893,30 +885,14 @@ const activitiesForCapital = (
 export const mockApi = {
   async compile(request: CompileRequest): Promise<CompileResponse> {
     await wait()
-    if (
-      request.clarification
-      && (
-        request.clarification.id !== 'macd_confirmation_time'
-        || !['close', 'intrabar'].includes(request.clarification.choiceId)
-      )
-    ) {
-      throw new ApiError({
-        type: 'about:blank',
-        title: '无法使用这个补充选项',
-        status: 422,
-        detail: '这个补充选项不在当前预览契约内，请返回重新识别。',
-        code: 'clarification_choice_not_supported',
-      })
-    }
-    if (!request.clarification && request.utterance.trim().toUpperCase() === 'MACD') {
+    if (request.utterance.trim().toUpperCase() === 'MACD') {
       return {
         status: 'needs_clarification',
         draftId: 'draft_incomplete_001',
         clarification: incompleteRuleClarification,
       }
     }
-    const needsClarification = !request.clarification &&
-      isMacdRequest(request)
+    const needsClarification = isMacdRequest(request)
       && request.utterance.includes('盘中')
 
     if (needsClarification) {
@@ -939,7 +915,6 @@ export const mockApi = {
     const outcome = await mockApi.compile({
       ...input.originalRequest,
       utterance: mergeMockClarificationAnswer(input),
-      clarification: undefined,
     })
     return {
       replyKind: 'accepted',

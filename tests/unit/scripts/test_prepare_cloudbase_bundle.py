@@ -339,7 +339,7 @@ def test_cloudbase_dockerfile_uses_portable_source_build_contract() -> None:
     assert "RESTART_RECOVERY_VERIFIED=false" in dockerfile
     assert "/app/var/ephemeral/snapshots/composite" in dockerfile
     assert "MARKET_DATA_PROFILE=on_demand_snapshot" in dockerfile
-    assert "ON_DEMAND_REFRESH_EACH_SUBMISSION=false" in dockerfile
+    assert "ON_DEMAND_REFRESH_EACH_SUBMISSION=true" in dockerfile
     assert "SNAPSHOT_STORAGE_MODE=ephemeral_local" in dockerfile
     assert "SNAPSHOT_STORAGE_MARKER=" not in dockerfile
     assert "DATA_ROOT=/app/var/snapshots/composite/${SNAPSHOT_DIGEST}" in dockerfile
@@ -360,8 +360,22 @@ def test_cloudbase_environment_templates_default_to_same_origin_cors() -> None:
     for name in ("env.example", "ephemeral.env.example"):
         template = (REPOSITORY / "deploy" / "cloudbase" / name).read_text(encoding="utf-8")
         assert "CORS_ALLOWED_ORIGINS=" in template
+        assert "MARKET_DATA_PROFILE=on_demand_snapshot" in template
+        assert "ON_DEMAND_REFRESH_EACH_SUBMISSION=true" in template
         assert "app.workbuddy.link" not in template
         assert "tcloudbaseapp.com" not in template
+        for variable in (
+            "CANDIDATE_PROVIDER_API_KEY",
+            "RESEARCH_PROVIDER_API_KEY",
+            "MX_SAAS_API_KEY",
+        ):
+            assert f"{variable}=<platform-secret>" in template
+        assert not any(line.startswith("VITE_") for line in template.splitlines())
+
+    dockerfile = (REPOSITORY / "deploy" / "cloudbase" / "Dockerfile").read_text(encoding="utf-8")
+    assert "CANDIDATE_PROVIDER_API_KEY=" not in dockerfile
+    assert "RESEARCH_PROVIDER_API_KEY=" not in dockerfile
+    assert "MX_SAAS_API_KEY=" not in dockerfile
 
 
 def test_bundle_rejects_missing_or_unsafe_web_dist(tmp_path: Path) -> None:

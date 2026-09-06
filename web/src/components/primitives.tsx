@@ -3,6 +3,8 @@
 import { useId, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { ActivityKind, StatusWord } from '../types';
+import type { DialogueProgressEvent } from '../shared/api/client';
+import { ModelReasoning } from './ModelReasoning';
 
 /* ---------- 数字格式 ---------- */
 export const fmtPct = (v: number | null) => v == null ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`;
@@ -29,22 +31,6 @@ export const BackIcon = () => (
     <path d="M15 5l-7 7 7 7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );
-
-/** B/S 买卖点：字母负责快速扫读，中文无障碍名称负责说明含义。 */
-export function TradeSidePoint(
-  { side, pending = false }: { side: 'buy' | 'sell'; pending?: boolean },
-) {
-  const label = side === 'buy' ? '买入' : '卖出';
-  return (
-    <span
-      className={`bs-point ${side}${pending ? ' pending' : ''}`}
-      role="img"
-      aria-label={`${pending ? '未成交的' : ''}${label}点`}
-    >
-      {side === 'buy' ? 'B' : 'S'}
-    </span>
-  );
-}
 
 /**
  * 活动形状图元（SPEC 4.9）
@@ -120,56 +106,71 @@ export const Bubble = ({ children }: { children: ReactNode }) => (
 
 /** 系统回答直接排版，不再套一层灰色聊天气泡。 */
 export const Say = ({ children }: { children: ReactNode }) => (
-  <div className="say"><p>{children}</p></div>
+  <div className="say"><p>{typeof children === 'string' ? replyLinks(children) : children}</p></div>
 );
 
+/** Link source text without interpreting HTML or non-web URL schemes. */
+function replyLinks(text: string): ReactNode[] {
+  const links = /\[([^\]\n]+)\]\((https?:\/\/[^\s<>"')]+)\)|(https?:\/\/[^\s<>"'\])（）【】。，；！？、]+)/g;
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(links)) {
+    const raw = match[2] ?? match[3];
+    if (!raw) continue;
+    const url = match[2] ? raw : raw.replace(/[.,;!?]+$/, '');
+    parts.push(text.slice(cursor, match.index));
+    parts.push(<a key={match.index} href={url} target="_blank" rel="noreferrer noopener">
+      {match[1] ?? url}
+    </a>);
+    if (!match[2]) parts.push(raw.slice(url.length));
+    cursor = match.index + match[0].length;
+  }
+  parts.push(text.slice(cursor));
+  return parts;
+}
+
 /** 一个回合：用户靠右，AI 靠左；AI 回合内可叠加折叠头、气泡、chips、卡片 */
-export const Turn = ({ mine, children }: { mine?: boolean; children: ReactNode }) => (
-  <div className={`turn${mine ? ' me' : ''}`}>{children}</div>
+/** `id` 只用于左栏点历史时的锚点跳转（scrollIntoView），不参与样式。 */
+export const Turn = ({ mine, id, children }: { mine?: boolean; id?: string; children: ReactNode }) => (
+  <div className={`turn${mine ? ' me' : ''}`} id={id}>{children}</div>
 );
 
 export const DayDivider = ({ children }: { children: ReactNode }) => (
   <div className="daydiv">{children}</div>
 );
 
-const ThinkingDots = () => (
-  <span className="dots" aria-hidden><i /><i /><i /></span>
-);
-
 /**
- * 对话流内的进行中状态：当前任务是主句，真实进展是次句。
- *
- * 不使用独立卡片、进度条或循环文案；调用方只在实际状态变化时更新 status。
+ * One process disclosure replaces repeated task, status and reasoning headings.
  */
 export function ThinkingStream(
-  { title, status, label = '思考进度', action }:
-  { title: ReactNode; status: ReactNode; label?: string; action?: ReactNode },
+  { status = '处理中', label = '处理进度', action, summary = [] }:
+  {
+    status?: ReactNode;
+    label?: string;
+    action?: ReactNode;
+    summary?: readonly DialogueProgressEvent[];
+  },
 ) {
   return (
-    <div className="thinking-stream">
-      <p className="thinking-task">{title}</p>
-      <div className="thinking-detail">
-        <p className="thinking-status" role="status" aria-live="polite" aria-atomic="true" aria-label={label}>
-          <span>{status}</span><ThinkingDots />
-        </p>
-        {action ? <div className="thinking-action">{action}</div> : null}
-      </div>
+    <div className="thinking-stream" aria-label={label}>
+      <ModelReasoning events={summary} active
+        fallbackStatus={status} progressLabel={label} />
+      {action ? <div className="thinking-action" aria-label={typeof status === 'string' ? status : undefined}>{action}</div> : null}
     </div>
   );
 }
 
 /**
- * 妙想AI 的「已完成思考」折叠头。
+ * 已完成处理记录的折叠头。
  *
- * 标题在宿主里是固定的一句「已完成思考」，不随场景换说法：换说法会让人以为
- * 这是几种不同的东西。场景差异放在右侧 meta（历史记录 / 用到 N 个条件 / 只问这一次），
- * 所以标题不开放成 props，避免以后又长出第二种叫法。
- * SPEC 4.3：不循环播放虚假的长思考过程。
+ * 默认标题是「处理记录」；历史策略等不是运行记录的内容必须显式覆盖标题，
+ * 避免把事后摘要冒充成模型思考或服务执行步骤。
  */
-export const THINK_TITLE = '已完成思考';
+export const THINK_TITLE = '处理记录';
 
 export function ThinkBlock(
-  { meta, lines }: { meta: string; lines: string[] },
+  { meta, lines, title = THINK_TITLE }:
+  { meta: string; lines: string[]; title?: ReactNode },
 ) {
   const [open, setOpen] = useState(false);
   const bodyId = useId();
@@ -182,45 +183,13 @@ export function ThinkBlock(
         aria-controls={bodyId}
         onClick={() => setOpen((v) => !v)}
       >
-        <span className="think-title">{THINK_TITLE}</span>
+        <span className="think-title">{title}</span>
         <span className="meta">{meta}<Caret /></span>
       </button>
       <div id={bodyId} className={`thinkbody${open ? ' open' : ''}`} hidden={!open}>
         {lines.map((l) => <div key={l}>{l}</div>)}
       </div>
     </div>
-  );
-}
-
-/**
- * 回答末尾的「可选下一步」。
- *
- * 对齐妙想AI 宿主：整行、左文案右箭头，第一条是建议先做的那件事（浅紫底）。
- * 之前用的是主色 chip——主色在这一页属于「开始回测」那种要用户下决心的动作，
- * 拿来标可选项会互相抢，而且三个橙色小标签堆在结果卡下面像广告位。
- */
-export const FollowUps = ({ children }: { children: ReactNode }) => (
-  <div className="followups" role="group" aria-label="可选的下一步">{children}</div>
-);
-
-export function FollowUp(
-  { children, onClick, disabled, lead, title }:
-  { children: ReactNode; onClick?: () => void; disabled?: boolean; lead?: boolean; title?: string },
-) {
-  return (
-    <button
-      type="button"
-      className={`followup${lead ? ' followup--lead' : ''}`}
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-    >
-      <span className="fu-text">{children}</span>
-      <svg className="fu-arrow" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-        <path d="M3 8h9M8.5 4.5 12 8l-3.5 3.5" stroke="currentColor" strokeWidth="1.5"
-          strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    </button>
   );
 }
 

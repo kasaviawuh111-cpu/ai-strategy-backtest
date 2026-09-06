@@ -1,0 +1,189 @@
+{
+  "schema_version": "local-natural-language-acceptance.v1",
+  "status": "planned_not_executed",
+  "created_at": "2026-09-05",
+  "purpose": "100 条真实用户输入；验收自然语言、多轮修改、真实取数、回测、解释及优化闭环，不评比固定问句命中率。",
+  "scope": "本地 A 股单股日线；真实 DeepSeek、真实联网工具、东方财富选股/查数 Skill 和现有回测引擎。排除持仓复盘、实盘交易、公司行动分类重建及公开发布。",
+  "structure": {"segments": 20, "turns_per_segment": 5, "total_inputs": 100, "distinct_sessions": 17, "memory_chain": "D11→D12→D13→D14 共 20 轮，不能在段间重置会话"},
+  "execution_rules": [
+    "每个 input 是要真实提交的一句用户话；不得用规则解析器、夹具或缓存的模型回复代替本轮真实模型。输入可以走浏览器或同一正式 API；关键 UI 动作仍需浏览器核对。",
+    "除 D12–D14 外，各段先点新对话。D11–D14 连续传递正式 draft ID/revision 与会话尾节点，不能只在脚本拼历史文本模拟记忆。",
+    "严格按顺序执行：先真实提交并保存每个 input 的原始响应及判定，再执行 after 动作。辅助操作不能改变原输入的失败结论；若明确记录恢复成功可继续后续，恢复也不计为本条自然语言成功。无可用前置结果且未恢复时记录 blocked_by_previous，不伪造草稿、候选或指标。",
+    "ready 表示可审阅的草稿，不等于回测成功。after.kind=run 时，用户点击开始回测，等待真实终态并检查摘要、曲线和交易；这些控制动作不额外计入 100 句。不要在提交含第N个的自然语言前先替用户点击方案。",
+    "rerun 表示此前已有结果且本轮明确要求按修改重跑：只改变指定条件并创建新运行；不能展示旧结果充数，不能重新筛股票。若新条件不完整则停下来追问，不能沿用旧条件执行。",
+    "涉及第 N 个组合或优化方案时，N 指当轮真实展示顺序。核对实际 proposal/candidate ID、股票和条件；绝不在脚本中硬编码 ID 或选择策略。相应真实选项不足 N 个时保留证据并记 prerequisite_unavailable。",
+    "所有普通结果应简短自然；只在失败时点明模型、联网、东方财富选股 Skill、东方财富查数 Skill、历史数据口径或回测执行中的具体环节。普通回答不堆内部名词。",
+    "等待中只显示服务端实际状态与模型已经生成的公开方向说明；组合未完成时方向可先出现。不要固定六步计时动画，不依赖或记录模型私有思考文本。",
+    "优化结论应基于本次真实结果，约两行；候选尚未跑过时不能称已改善。负收益、零交易、少交易都是合法结果，必须如实解释，不能把回测通路成功等同投资有效。",
+    "不要求每句都启动回测。闲聊、解释、选项讨论、无效修改和不支持的数据应保持正确状态；没有新运行本身可以是正确行为。",
+    "动态市场事实只从真实工具取得，记录来源和时间供验收；不为日线策略推荐样本强求今日已触发所有买卖信号，也不把当前筛出的股票池冒充历史选股回测。",
+    "缓存与非缓存验收记录真实命中/未命中及 Skill 请求证据，不凭耗时猜测。不得删除用户已有缓存；优先用未缓存的合法区间，做不到则标注冷缓存前置条件未满足。",
+    "记录每轮输入、可见回复、状态、股票名/代码、买卖条件、区间、模型调用完成状态、实际 Skill 阶段、新 run ID、结果摘要及是否有优化候选。避免全量哈希校验、API Key、完整请求头和私有推理记录。",
+    "记录 pass、fail、blocked_by_previous、prerequisite_unavailable 四类，后两者不算通过。无数据条件的正确解释可通过该轮 UX，但不能抵扣任何要求真实回测成功的轮次。",
+    "本文件只定义待执行用例，未声明任何一条已通过。旧 docs/00-acceptance.md 中 BaoStock、固定候选、旧公司行动和旧快照口径不作为本轮行为要求。"
+  ],
+  "action_contract": {
+    "step_kind": "100个turn全部kind=text，input必须真实发送，不能被任何辅助动作替代。",
+    "after": "所有动作发生在原始input判定已保存之后；没有before动作。",
+    "run": "从本轮真实READY创建并等待回测；已有新run则等待而非重复创建。默认trigger=when_ready、role=acceptance。",
+    "wait_for_review": "对本轮真实run等待分析及优化候选；默认trigger=when_result_available、role=acceptance。",
+    "choose_proposal": "index从1开始，选择真实展示的第N项ID；on_input_failure时仅作为恢复，不把原句未理解改判成功。",
+    "choose_optimization": "index从1开始，使用对应真实结果中的第N个优化候选ID；on_input_failure时仅作为恢复，不重新生成同名假候选。",
+    "after_recovery_ready": "仅前一恢复动作确已获得READY且尚无新run时运行；保留原自然语言失败及单独的recovery记录。"
+  },
+  "outcome_legend": {
+    "ready": "已有完整策略，展示正确的审阅卡；本轮不静默开始首次回测",
+    "rerun": "按已明确的局部修改重新回测，生成新结果；不换股、不丢未修改条件",
+    "clarify": "自然追问必要歧义，保留已知信息，不启动回测",
+    "suggest": "模型给简短方向与最多 3 个可继续选择的方案，不静默执行",
+    "answer": "回答问题且不改变正在使用的策略，不启动回测",
+    "optimize_rerun": "选择真实已返回的优化候选，保留标的及无关设置并新建回测",
+    "unavailable_or_supported": "先按真实能力和取数结果判断；支持则按原义继续，不支持则说明具体缺口并给继续入口"
+  },
+  "ux_decisions": [
+    {"id": "UX01", "question": "第一次选中股票×策略组合，是直接回测还是先审阅？", "recommendation": "首次选中先打开审阅、用户点开始；已有结果后明确说改成 X 再跑则自动重跑。两种情况采用一致、可见的状态，不再让条件修改无声退回选股。", "case_policy": "本清单默认此规则；D08、D10 检查首次选择，D01、D03、D20 检查重跑。"},
+    {"id": "UX02", "question": "真实数据只支持 1–2 个组合时，要等满 3 个还是先展示？", "recommendation": "模型方向先展示，缺字段做一次有界补查；仍不足时展示真实支持的 1–2 个。按用户确认，不展示我自己选股票按钮，但保留自由输入换股。最多 3 个，不为了凑满机械配对或重复股票。", "case_policy": "一般推荐接受 1–3 个真实支持组合；专门选择第二/第三个的用例要求相应前置选项确实存在，否则如实记录，不篡改输入。"}
+  ],
+  "dialogues": [
+    {"id": "D01", "session": "S01", "reset": true, "priority": "P0", "focus": "完整规则、局部修改、无效槽位及纠正", "turns": [
+      {"id":"001","kind":"text","input":"帮我测东方财富，收盘价上穿20日均线买，收盘价下穿20日均线卖，最近一年。","expect":"识别东方财富及日线 MA20 双向穿越，给完整审阅卡。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"002","kind":"text","input":"买入改成上穿5日均线，卖出和其他设置不动，再跑一次。","expect":"仍是东方财富；仅买入均线20→5，卖出MA20、区间和资金保持，产生新结果。","outcome":"rerun"},
+      {"id":"003","kind":"text","input":"买入条件改为：1。其他条件和回测设置保持不变。","expect":"问清1指什么；不能把旧MA5原样当成已修改，也不能启动旧策略或去选股。","outcome":"clarify"},
+      {"id":"004","kind":"text","input":"我刚才没写完整，是收盘价上穿40日均线买入，卖出还按原来的，重新测。","expect":"在当前东方财富策略上补成MA40买入、MA20卖出，生成新回测，不丢原区间。","outcome":"rerun"},
+      {"id":"005","kind":"text","input":"简单说说这次和刚才相比改了什么，值不值得继续试？","expect":"指出实际参数差异并据真实结果简短比较；若缺某次结果明说，不编收益。","outcome":"answer"}
+    ]},
+    {"id": "D02", "session": "S02", "reset": true, "priority": "P0", "focus": "双均线及买卖腿独立改写", "turns": [
+      {"id":"006","kind":"text","input":"生益科技，5日均线上穿20日均线买，5日均线下穿20日均线卖，测近一年。","expect":"名称与600183.SH一致，买卖都是5/20双均线穿越，不误写成价格穿线。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"007","kind":"text","input":"只把卖出里的20改成10，买入那边不动，再测。","expect":"买入仍5上穿20；卖出变5下穿10；继续生益科技。","outcome":"rerun"},
+      {"id":"008","kind":"text","input":"你这次没有把买入也一起改掉吧？","expect":"依据当前实际条件回答，确认买入5/20、卖出5/10；不触发修改或运行。","outcome":"answer"},
+      {"id":"009","kind":"text","input":"现在买入改为5日线上穿30日线，卖出维持刚才的10日线方案，再跑。","expect":"买入5/30，卖出5/10，股票区间不变；新结果与新条件绑定。","outcome":"rerun"},
+      {"id":"010","kind":"text","input":"卖出也用30日线吧，就是5日线下穿30日线，再测一遍。","expect":"只将卖出慢线改30，不将双均线简化成价格下穿；新回测成功或明确实际数据错误。","outcome":"rerun"}
+    ]},
+    {"id": "D03", "session": "S03", "reset": true, "priority": "P0", "focus": "截图原始故障、80日新高及优化重跑", "turns": [
+      {"id":"011","kind":"text","input":"东方财富收盘价创前20日新高且成交量超过前20日均量1.5倍买入，跌破20日均线卖出，回测近一年。","expect":"突破与放量是买入AND条件；卖出MA20，首次完整规则直接进入审阅。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"012","kind":"text","input":"买入条件改为：收盘价创前80日新高。其他条件和回测设置保持不变。再回测。","expect":"整条买入替换为80日新高，删除原放量条件；仍回测东方财富，不返回97行选股表。","outcome":"rerun","ui_check":"通过换个条件再回测槽位输入同句时应保持相同语义"},
+      {"id":"013","kind":"text","input":"卖出改成收盘价下穿10日均线，再跑，买入别动。","expect":"买入80日新高原样保留，卖出20→10，生成独立新结果。","outcome":"rerun"},
+      {"id":"014","kind":"text","input":"帮我看看这次主要问题是什么，有什么可以调整的？","expect":"根据本次结果给约两行分析及可继续验证的候选；准备期间先有中间状态和可用推荐问题。","outcome":"answer","after":[{"kind":"wait_for_review"}]},
+      {"id":"015","kind":"text","input":"用你给的第一个优化方案重新回测。","expect":"自然语言应绑定本次真实第一个优化候选，按候选新建运行；不回到原80日条件，不改股票。若做不到本条失败，不能靠辅助点击改成通过。","outcome":"optimize_rerun","requires":"本次结果已有至少1个真实优化候选","ui_check":"用这个方案重新回测按钮应执行同一候选ID","after":[{"kind":"choose_optimization","index":1,"trigger":"on_input_failure","role":"recovery"},{"kind":"run","trigger":"after_recovery_ready","role":"recovery"}]}
+    ]},
+    {"id": "D04", "session": "S04", "reset": true, "priority": "P1", "focus": "RSI参数归属、区间及少交易解释", "turns": [
+      {"id":"016","kind":"text","input":"贵州茅台用14日RSI，低于30买，高于70卖，测近一年。","expect":"区分RSI周期14与阈值30/70，标的600519.SH，返回完整策略。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"017","kind":"text","input":"买入的30降到25，再跑一下。","expect":"只改买入阈值30→25，RSI周期14、卖出70不变。","outcome":"rerun"},
+      {"id":"018","kind":"text","input":"卖出别等70了，65就卖，重新测。","expect":"卖出阈值70→65，买入25不变，真实生成新结果。","outcome":"rerun"},
+      {"id":"019","kind":"text","input":"区间缩短到最近半年，其他不变，再测。","expect":"只改变回测区间；仍需RSI预热，不能把缺预热伪装为没有买卖机会。","outcome":"rerun"},
+      {"id":"020","kind":"text","input":"如果交易次数很少，能直接说这个策略有效吗？结合这次结果讲两句。","expect":"引用实际交易次数；区分链路完成与证据强弱，不把零交易、少交易或单次赚钱当有效性证明。","outcome":"answer"}
+    ]},
+    {"id": "D05", "session": "S05", "reset": true, "priority": "P0", "focus": "仅买入条件、三个卖出选项与保留信息", "turns": [
+      {"id":"021","kind":"text","input":"我想买东方财富，收盘价创20日新高就买。","expect":"保留标的和买入规则，主动给最多3个不同卖出方向供选择，不静默填卖出。","outcome":"clarify"},
+      {"id":"022","kind":"text","input":"卖出用跌破20日均线，回测近一年。","expect":"补齐卖出及区间；买入仍20日新高，不要求用户重说股票。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"023","kind":"text","input":"卖出换成持有5个交易日就走，其他保持，再测。","expect":"仅替换退出规则；交易日不是自然日，按既有成交后持有期语义回测。","outcome":"rerun"},
+      {"id":"024","kind":"text","input":"这个5天是从什么时候开始算的？","expect":"解释实际引擎持有期起点，不改条件，不查询全市场。","outcome":"answer"},
+      {"id":"025","kind":"text","input":"那改成持有10个交易日，还是这只，再跑。","expect":"同股同买入，持有期5→10，产生新运行与新结果。","outcome":"rerun"}
+    ]},
+    {"id": "D06", "session": "S06", "reset": true, "priority": "P1", "focus": "仅卖出条件及澄清选项改写", "turns": [
+      {"id":"026","kind":"text","input":"比亚迪跌破20日线就卖，但我还没想好怎么买。","expect":"记住002594.SZ和卖出MA20，给最多3个有差异的买入方向，而非再问卖出。","outcome":"clarify"},
+      {"id":"027","kind":"text","input":"先别用你的选项，我要收盘价上穿5日均线再买，近一年。","expect":"尊重自定义条件，合并为MA5买、MA20卖，不强迫点击候选。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"028","kind":"text","input":"不对，我说的卖出一直是20日线，不是5日线。","expect":"核对当前实际卖出；若本来是20则确认即可，若错误则修正，不能反过来改买入。","outcome":"answer"},
+      {"id":"029","kind":"text","input":"买入从5日线换成10日线，再回测，卖出保留。","expect":"MA10买入、MA20卖出，股票和区间不变。","outcome":"rerun"},
+      {"id":"030","kind":"text","input":"先别继续改，给我一句话总结这版规则。","expect":"准确复述比亚迪MA10买、MA20卖；不把这句话当成新策略或启动回测。","outcome":"answer"}
+    ]},
+    {"id": "D07", "session": "S07", "reset": true, "priority": "P0", "focus": "低买高卖、无票、自选入口与自然承接", "turns": [
+      {"id":"031","kind":"text","input":"我就想低买高卖，别太复杂。","expect":"模型将模糊想法细化为最多3个可选择方向；无票时可用真实数据匹配股票，不写长篇内部术语。","outcome":"suggest"},
+      {"id":"032","kind":"text","input":"我自己选股票。","expect":"自然邀请输入股票，保留刚才低买高卖的讨论，不重启陌生对话。","outcome":"clarify","ui_check":"配对chips下的我自己选股票入口产生相同状态"},
+      {"id":"033","kind":"text","input":"用生益科技。","expect":"核实为600183.SH，承接已有方向并允许选择或补条件，不再重复索要股票。","outcome":"suggest"},
+      {"id":"034","kind":"text","input":"就按14日RSI低于30买、高于70卖，最近一年。","expect":"生益科技与RSI规则完整合并，审阅显示真实名称而不是只显示代码。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"035","kind":"text","input":"买入阈值改成20，卖出不改，再跑一次。","expect":"仍是生益科技，周期14不变，只改RSI买入30→20。","outcome":"rerun"}
+    ]},
+    {"id": "D08", "session": "S08", "reset": true, "priority": "P0", "focus": "人物灵感、组合第二项、名称与后续改条件", "turns": [
+      {"id":"036","kind":"text","input":"我是秦始皇。","expect":"用一句自然承接转成可检验的交易方向，随后展示最多3个真实股票×策略组合；不判断真实身份或宣称个人风险偏好。","outcome":"suggest","ui_check":"模型方向先于组合完成可见，补查期间状态持续更新"},
+      {"id":"037","kind":"text","input":"就用第二个组合吧。","expect":"自然语言绑定真实第二项的proposal ID、股票名、代码和买卖条件；进入首次审阅，不猜第一只。未选中即失败，辅助点击不能代替这句理解。","outcome":"ready","requires":"当轮至少2个真实组合","ui_check":"点击第二个组合chip也保留相同名字和代码，查看详情不能触发选择","after":[{"kind":"choose_proposal","index":2,"trigger":"on_input_failure","role":"recovery"},{"kind":"run","trigger":"when_ready","role":"acceptance"}]},
+      {"id":"038","kind":"text","input":"这只先不换，买入整条改成收盘价创前60日新高，卖出和区间保留，再测。","expect":"用所选组合的同一股票；整条替换买入，不遗留原AND条件，不重新选股。","outcome":"rerun"},
+      {"id":"039","kind":"text","input":"为什么会拿这只股票配这个方向？用一句话说。","expect":"根据当时真实选股数据解释研究匹配理由，不编造今日已触发新高或人物题材关系。","outcome":"answer"},
+      {"id":"040","kind":"text","input":"卖出改成持有5个交易日，其他不变，继续回测。","expect":"仍用选中股票与60日新高买入，仅卖出替换持有期，生成新结果。","outcome":"rerun"}
+    ]},
+    {"id": "D09", "session": "S09", "reset": true, "priority": "P1", "focus": "情绪化输入、联网事实与独立技术策略", "turns": [
+      {"id":"041","kind":"text","input":"我讨厌特朗普，想找一个能测试的交易方向。","expect":"自然承接情绪并提出方向；涉及近期事实先真实联网，有来源但不把情绪变成确定涨跌或事件信号。","outcome":"suggest"},
+      {"id":"042","kind":"text","input":"你说的近期事情有出处吗？只给两条最相关的。","expect":"返回最多2条确实检索到且支持所述事实的来源；无搜索成功时如实说明，不伪造搜索中。","outcome":"answer"},
+      {"id":"043","kind":"text","input":"先不管新闻，股票用比亚迪，我想试追趋势。","expect":"核实并锁定比亚迪，给简短趋势方向，不继续用政治新闻替代买卖触发条件。","outcome":"suggest"},
+      {"id":"044","kind":"text","input":"具体就5日均线上穿20日均线买，5日均线下穿20日均线卖，近一年。","expect":"基于已绑定比亚迪生成完整双均线策略，不再追问股票。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"045","kind":"text","input":"这次结果能证明我对那个人的判断是对的吗？","expect":"明确回测只测价格规则，不能证明政治判断或因果关系；简短回应，不修改策略。","outcome":"answer"}
+    ]},
+    {"id": "D10", "session": "S10", "reset": true, "priority": "P0", "focus": "完整规则缺标的、真实三只推荐及换股", "turns": [
+      {"id":"046","kind":"text","input":"收盘价上穿20日均线买，下穿20日均线卖，测近一年，股票还没想好。","expect":"规则已完整，只处理股票选择；给真实数据支持的最多3个股票×该规则组合及自选入口。","outcome":"suggest"},
+      {"id":"047","kind":"text","input":"帮我从查到的里面挑三只比较适合试这个规则的，别把整张表贴出来。","expect":"真实模型比较返回数据后最多选3只并各有短理由，不机械截断，不返回长表，不宣称稳赚。","outcome":"suggest"},
+      {"id":"048","kind":"text","input":"还是先用东方财富，规则按刚才的。","expect":"保留MA20双向穿越与一年区间，仅绑定300059.SZ，不要求重新输入买卖规则。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"049","kind":"text","input":"换成贵州茅台试试，买卖规则和区间全部保留，再回测。","expect":"只换股票600519.SH，取其真实数据并新建回测；名称、图表、标题及结果都跟随新股票。","outcome":"rerun"},
+      {"id":"050","kind":"text","input":"换票之后你有没有顺手把条件改掉？","expect":"对照前后规则确认未改变，不能把旧股票的收益当作茅台结果。","outcome":"answer"}
+    ]},
+    {"id": "D11", "session": "MEMORY20", "reset": true, "priority": "P0", "focus": "20轮记忆链第1–5轮：初始股票、改写和解释", "turns": [
+      {"id":"051","kind":"text","input":"东方财富收盘价创20日新高买，跌破20日均线卖，测近一年。","expect":"锁定300059.SZ及20日新高/MA20，创建这一条长对话的初始策略。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"052","kind":"text","input":"新高看30日吧，其他不改，再测。","expect":"买入窗口20→30，其余信息保留；新结果可追踪。","outcome":"rerun"},
+      {"id":"053","kind":"text","input":"这里的新高是跟前面的收盘价比，还是包括今天一起算？","expect":"解释实际引擎突破口径，不把今天纳入历史窗口制造前视，也不悄悄改策略。","outcome":"answer"},
+      {"id":"054","kind":"text","input":"卖出改为跌破10日线，再跑。","expect":"保留30日新高及最初股票，卖出MA20→MA10。","outcome":"rerun"},
+      {"id":"055","kind":"text","input":"这版跟最早那版差在哪儿？两句话就行。","expect":"准确记住原20/20与现30/10；仅在对应结果存在时比较实际统计。","outcome":"answer"}
+    ]},
+    {"id": "D12", "session": "MEMORY20", "reset": false, "priority": "P0", "focus": "20轮记忆链第6–10轮：解释和闲聊不能污染草稿", "turns": [
+      {"id":"056","kind":"text","input":"先别改，最大回撤这个数字怎么理解？","expect":"解释当前结果最大回撤，不新建选股或回测，不修改草稿。","outcome":"answer"},
+      {"id":"057","kind":"text","input":"现在这些结果包含手续费和滑点了吗？","expect":"读取当前真实执行设置再回答，不能凭默认印象编具体费用数值。","outcome":"answer"},
+      {"id":"058","kind":"text","input":"刚才那个30是买入看的天数，不是持仓30天，对吧？","expect":"正确区分回看期和持有期，确认现买入30日新高、卖出MA10。","outcome":"answer"},
+      {"id":"059","kind":"text","input":"好，我明白了。","expect":"自然简短回应或结束该轮，不重新推荐股票，不增加策略修订或回测。","outcome":"answer"},
+      {"id":"060","kind":"text","input":"先给我几个能继续尝试的调整方向，不要直接帮我跑。","expect":"只给本结果相关的待验证方向，仍保留当前股票和30/10规则，不执行。","outcome":"suggest"}
+    ]},
+    {"id": "D13", "session": "MEMORY20", "reset": false, "priority": "P0", "focus": "20轮记忆链第11–15轮：整条替换与局部阈值", "turns": [
+      {"id":"061","kind":"text","input":"刚才那些优化先不采用，我们继续用原来的那只票。","expect":"沿用本会话已确认的股票；如需要确认只问是否继续这只，不发全市场选股表。","outcome":"answer"},
+      {"id":"062","kind":"text","input":"买卖都换掉：14日RSI低于30买，高于70卖，区间不动，重新测。","expect":"同一300059.SZ，完整替换原30日新高/MA10，不遗留旧规则，执行RSI新回测。","outcome":"rerun"},
+      {"id":"063","kind":"text","input":"买入的30改成25，再跑，别改14这个周期。","expect":"明确保留RSI周期14、卖出70，仅买入阈值25。","outcome":"rerun"},
+      {"id":"064","kind":"text","input":"卖出改成65，其他就这样，再测。","expect":"延续同股和RSI14买25，卖出阈值70→65；新结果不是旧结果。","outcome":"rerun"},
+      {"id":"065","kind":"text","input":"等一下，我今天脑子有点乱。","expect":"自然回应，暂停改动；不把情绪解释成换股或新策略选择，不清空已确认规则。","outcome":"answer"}
+    ]},
+    {"id": "D14", "session": "MEMORY20", "reset": false, "priority": "P0", "focus": "20轮记忆链第16–20轮：跨多次改写仍保持标的", "turns": [
+      {"id":"066","kind":"text","input":"继续之前的，不是要换股票。","expect":"正确保持已确认标的与最近RSI规则；不触发筛选。","outcome":"answer"},
+      {"id":"067","kind":"text","input":"这次整条换成5日均线上穿20日均线买、5日均线下穿20日均线卖，再回测，区间不动。","expect":"清掉RSI规则，使用5/20双均线，继续最初股票及区间。","outcome":"rerun"},
+      {"id":"068","kind":"text","input":"这次和上次的差别主要是什么？","expect":"比较刚才双均线与上一版RSI14买25卖65，而非误取最早突破策略。","outcome":"answer"},
+      {"id":"069","kind":"text","input":"只把买入的快线5改成10，卖出的5和20都别动，再测。","expect":"买入10上穿20、卖出5下穿20；正确维护两条腿独立参数。","outcome":"rerun"},
+      {"id":"070","kind":"text","input":"还是刚才那只股票，买入恢复5日线上穿20日线，卖出不变，再跑一次。","expect":"第20轮仍关联最初300059.SZ；恢复5/20买入并保留5/20卖出，不退回缺票或选股。","outcome":"rerun"}
+    ]},
+    {"id": "D15", "session": "S15", "reset": true, "priority": "P0", "focus": "新会话隔离、只有代码及分步补齐", "turns": [
+      {"id":"071","kind":"text","input":"还是刚才那只股票，收盘上穿20日线买，跌破20日线卖。","expect":"新会话没有已确认股票时不能串入MEMORY20的东方财富；自然让用户选股票或给真实候选。","outcome":"clarify"},
+      {"id":"072","kind":"text","input":"600183。","expect":"核实A股代码为600183.SH及真实名称生益科技，保留刚才MA20买卖规则。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"073","kind":"text","input":"买入改成收盘价创20日新高，其他都不变，再测。","expect":"继续生益科技，只替换买入条件，原卖出MA20和已有区间保留。","outcome":"rerun"},
+      {"id":"074","kind":"text","input":"股票叫什么来着？","expect":"返回已核实的生益科技600183.SH，不用默认东方财富，不产生新策略。","outcome":"answer"},
+      {"id":"075","kind":"text","input":"卖出换成收盘价下穿5日均线，再跑。","expect":"同股，20日新高买、MA5卖；不把问题074当成换股操作。","outcome":"rerun"}
+    ]},
+    {"id": "D16", "session": "S16", "reset": true, "priority": "P0", "focus": "无效输入、编号歧义及名称代码冲突", "turns": [
+      {"id":"076","kind":"text","input":"东方财富14日RSI低于30买，高于70卖，测近一年。","expect":"形成明确RSI策略并完成一份基线结果。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"077","kind":"text","input":"卖出条件改为：1。","expect":"问清1的含义，不能当作第一个旧选项，也不能继续按RSI70执行或猜成1天。","outcome":"clarify"},
+      {"id":"078","kind":"text","input":"这里的1是指盈利1%就卖出，买入保持，再回测。","expect":"明确改为持仓收益率达到1%的退出条件；保留RSI14低于30买入，真实执行或说明该退出能力实际缺口。","outcome":"rerun"},
+      {"id":"079","kind":"text","input":"换成贵州茅台300059试试，规则不变。","expect":"识别名称与代码冲突，问用户选贵州茅台还是东方财富；不得静默任选其一执行。","outcome":"clarify"},
+      {"id":"080","kind":"text","input":"我代码写错了，选贵州茅台600519，沿用刚才规则再跑。","expect":"绑定600519.SH、保留RSI买入及盈利1%退出，不恢复70阈值，生成新回测。","outcome":"rerun"}
+    ]},
+    {"id": "D17", "session": "S17", "reset": true, "priority": "P1", "focus": "查数与选股区分、最多三只及回到策略", "turns": [
+      {"id":"081","kind":"text","input":"查一下东方财富最近一个交易日的收盘价、成交额和换手率。","expect":"已知股票走东方财富查数Skill，按真实返回日期与字段回答，不进行全A股筛选。","outcome":"answer"},
+      {"id":"082","kind":"text","input":"那帮我找三只成交比较活跃、适合拿来测试趋势策略的A股。","expect":"走真实选股数据并由模型比较，最多3只且各有简短理由，不把成交活跃说成未来收益更高。","outcome":"suggest"},
+      {"id":"083","kind":"text","input":"先不换股票，还是东方财富。买入用收盘价上穿20日均线，卖出下穿20日均线，近一年。","expect":"尊重明确回到东方财富，不沿用刚才任意候选，形成完整MA20策略。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"084","kind":"text","input":"我只是把买入改成创前60日新高，再回测，不是让你找创60日新高的股票。","expect":"明确走同股策略修改，买入替换为60日新高，卖出保留MA20；绝不走选股列表。","outcome":"rerun"},
+      {"id":"085","kind":"text","input":"你这次回测的数据究竟来自哪里，是缓存吗？","expect":"依据本次运行真实数据来源与缓存命中状态回答，区分模型文本、选股快照与历史回测数据。","outcome":"answer"}
+    ]},
+    {"id": "D18", "session": "S18", "reset": true, "priority": "P1", "focus": "不支持的分钟口径、明确改为日线及中间态", "turns": [
+      {"id":"086","kind":"text","input":"东方财富用5分钟K线，5均线上穿20均线买，下穿卖，测最近一年。","expect":"先核实分钟数据与执行能力；不支持就准确说明具体数据/执行环节，不静默用日线冒充。","outcome":"unavailable_or_supported"},
+      {"id":"087","kind":"text","input":"那就改成日线，5日均线上穿20日均线买，5日均线下穿20日均线卖，近一年。","expect":"按用户授权改成真实日线策略，清掉分钟上下文，进入审阅。","outcome":"ready","ui_check":"取数耗时长时持续有真实阶段，中间不因原30秒等待就判失败","after":[{"kind":"run"}]},
+      {"id":"088","kind":"text","input":"刚才为什么不能直接拿日线数据当5分钟数据用？","expect":"简短解释周期对应不同信号和成交语义，不重复堆积内部校验术语，不改当前日线策略。","outcome":"answer"},
+      {"id":"089","kind":"text","input":"日线这版买入快线改成10，卖出还是5和20，再跑。","expect":"正确形成买入10/20、卖出5/20，保持日线；新历史取数若缺字段先真实补查而非静默降级。","outcome":"rerun"},
+      {"id":"090","kind":"text","input":"如果还缺数据，你告诉我缺的是哪一步；已经出来的策略先给我看。","expect":"保留已生成的策略或公开方向，说明实际阶段；有缺字段就有界补查，不编已经拿到数据。","outcome":"answer"}
+    ]},
+    {"id": "D19", "session": "S19", "reset": true, "priority": "P0", "focus": "真实冷/热缓存、同股非缓存重跑与口径修复", "precondition": "选用未缓存的本段合法区间或经主代理确认的独立本地验收缓存目录；不得删除既有缓存。若实际命中则记录为热缓存并另标冷缓存未覆盖。", "turns": [
+      {"id":"091","kind":"text","input":"生益科技收盘价上穿20日均线买，下穿20日均线卖，回测2025年1月2日到2025年12月31日。","expect":"区间固定、无相对日期漂移，真实查数Skill取得本股历史数据并完成首次回测；记录真实缓存状态。","outcome":"ready","after":[{"kind":"run"}]},
+      {"id":"092","kind":"text","input":"买入改成上穿5日均线，股票、卖出和区间都不变，再测。","expect":"同历史口径可复用已有数据缓存但必须重新计算新策略；新run不能直接复用旧收益。","outcome":"rerun"},
+      {"id":"093","kind":"text","input":"这次用到缓存了吗？别只根据快慢猜。","expect":"返回运行实际命中证据；若未暴露该信息就说明无法确认，不能声称必然命中。","outcome":"answer"},
+      {"id":"094","kind":"text","input":"请重新通过取数获取同一区间的数据，不用上次缓存，按现在的规则再测一次。","expect":"若正式入口支持强制刷新则发生真实Skill请求后新建回测；没有该入口则明确说明，不假装已刷新或换用BaoStock。","outcome":"unavailable_or_supported","acceptance_note":"只有实际Skill取数和成功新回测才计入非缓存闭环；诚实提示不支持仅算UX正确，仍留功能缺口"},
+      {"id":"095","kind":"text","input":"再取数据后，结果和缓存那次有差别吗？","expect":"只比较实际存在的同策略同区间结果；说明数据是否有变化，不要求人为产生差异，不编造缺失的新结果。","outcome":"answer"}
+    ]},
+    {"id": "D20", "session": "S20", "reset": true, "priority": "P0", "focus": "结果先出、优化中间态、候选重跑与换股继续", "turns": [
+      {"id":"096","kind":"text","input":"东方财富收盘价创前20日新高买，跌破20日均线卖，回测近一年。","expect":"首次真实结果先展示，AI分析另行加载；分析未结束也有可用推荐问题与可编辑槽位。","outcome":"ready","ui_check":"结果可用时不能被AI分析loading遮住或锁死","after":[{"kind":"run"}]},
+      {"id":"097","kind":"text","input":"分析不用很长，两句话告诉我主要问题，再给能继续试的方案。","expect":"基于本run真实统计生成约两行分析及少量候选；等待中状态明确，不显示Provenance长段或伪造过程。","outcome":"answer","after":[{"kind":"wait_for_review"}]},
+      {"id":"098","kind":"text","input":"用第一个优化方案重新回测，股票不要换。","expect":"自然语言实际执行本run返回的第一个优化candidate，产生新run及结果，旧报告仍可查看，不只填入输入框。自然语言失败与按钮成功分开记录。","outcome":"optimize_rerun","requires":"至少1个真实优化候选","ui_check":"同一候选chip/按钮点击能真正提交；重复点击不创建重复执行","after":[{"kind":"choose_optimization","index":1,"trigger":"on_input_failure","role":"recovery"},{"kind":"run","trigger":"after_recovery_ready","role":"recovery"}]},
+      {"id":"099","kind":"text","input":"这次真的更好吗？不好的地方也说一下。","expect":"用两次真实结果比较收益、回撤或交易数的取舍；允许优化后更差，不能只报好指标或保证未来有效。","outcome":"answer"},
+      {"id":"100","kind":"text","input":"把这版优化后的规则放到生益科技上试试，其他设置都保留，重新回测。","expect":"沿用实际优化后规则而非最初20日突破，只换600183.SH；通过真实Skill取数/合法缓存完成新运行，名称和结果一致。","outcome":"rerun","ui_check":"换只股票试试应打开可全选替换的股票槽，买卖槽仍是优化后规则"}
+    ]}
+  ]
+}

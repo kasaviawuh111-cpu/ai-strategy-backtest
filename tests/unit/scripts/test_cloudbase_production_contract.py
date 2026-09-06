@@ -49,6 +49,12 @@ def _runtime_environment(tmp_path: Path) -> dict[str, str]:
         "INITIALIZE_SCHEMA": "false",
         "CODE_REVISION": "a" * 40,
         "MARKET_DATA_PROFILE": "on_demand_snapshot",
+        "ON_DEMAND_REFRESH_EACH_SUBMISSION": "true",
+        "CANDIDATE_PROVIDER_MODE": "openai_compatible",
+        "CANDIDATE_PROVIDER_API_KEY": "candidate-test-secret",
+        "RESEARCH_PROVIDER_MODE": "deepseek_responses",
+        "RESEARCH_PROVIDER_API_KEY": "research-test-secret",
+        "MX_SAAS_API_KEY": "mx-test-secret",
         "SNAPSHOT_STORAGE_MODE": "durable_mount",
         "SNAPSHOT_STORAGE_ID": storage_id,
         "SNAPSHOT_STORAGE_RESTART_PROBE_ID": restart_probe_id,
@@ -92,6 +98,31 @@ def test_runtime_rejects_snapshot_marker_not_proven_across_restart(tmp_path: Pat
         runtime_entrypoint.validate_runtime_environment(environment)
 
 
+def test_runtime_requires_fresh_submission_and_backend_only_provider_secrets(
+    tmp_path: Path,
+) -> None:
+    environment = _runtime_environment(tmp_path)
+
+    with pytest.raises(
+        runtime_entrypoint.ProductionConfigurationError,
+        match="ON_DEMAND_REFRESH_EACH_SUBMISSION=true",
+    ):
+        runtime_entrypoint.validate_runtime_environment(
+            {**environment, "ON_DEMAND_REFRESH_EACH_SUBMISSION": "false"}
+        )
+
+    for variable in (
+        "CANDIDATE_PROVIDER_API_KEY",
+        "RESEARCH_PROVIDER_API_KEY",
+        "MX_SAAS_API_KEY",
+    ):
+        with pytest.raises(
+            runtime_entrypoint.ProductionConfigurationError,
+            match="backend-only provider secrets",
+        ):
+            runtime_entrypoint.validate_runtime_environment({**environment, variable: ""})
+
+
 def test_deployment_profile_is_explicit_and_strict_keeps_production_entrypoint() -> None:
     with pytest.raises(
         deployment_entrypoint.DeploymentProfileError,
@@ -115,6 +146,12 @@ def test_ephemeral_candidate_is_labeled_and_cannot_masquerade_as_production() ->
         "RESTART_RECOVERY_VERIFIED": "false",
         "SNAPSHOT_STORAGE_MODE": "ephemeral_local",
         "MARKET_DATA_PROFILE": "on_demand_snapshot",
+        "ON_DEMAND_REFRESH_EACH_SUBMISSION": "true",
+        "CANDIDATE_PROVIDER_MODE": "openai_compatible",
+        "CANDIDATE_PROVIDER_API_KEY": "candidate-test-secret",
+        "RESEARCH_PROVIDER_MODE": "deepseek_responses",
+        "RESEARCH_PROVIDER_API_KEY": "research-test-secret",
+        "MX_SAAS_API_KEY": "mx-test-secret",
         "CODE_REVISION": "a" * 40,
     }
 
@@ -128,9 +165,22 @@ def test_ephemeral_candidate_is_labeled_and_cannot_masquerade_as_production() ->
         ("PERSISTENCE_MODE", "durable"),
         ("RESTART_RECOVERY_VERIFIED", "true"),
         ("SNAPSHOT_STORAGE_MODE", "durable_mount"),
+        ("ON_DEMAND_REFRESH_EACH_SUBMISSION", "false"),
     ):
         invalid = {**environment, variable: value}
         with pytest.raises(deployment_entrypoint.DeploymentProfileError):
+            deployment_entrypoint.command_for_environment(invalid)
+
+    for variable in (
+        "CANDIDATE_PROVIDER_API_KEY",
+        "RESEARCH_PROVIDER_API_KEY",
+        "MX_SAAS_API_KEY",
+    ):
+        invalid = {**environment, variable: ""}
+        with pytest.raises(
+            deployment_entrypoint.DeploymentProfileError,
+            match="backend-only provider secrets",
+        ):
             deployment_entrypoint.command_for_environment(invalid)
 
 

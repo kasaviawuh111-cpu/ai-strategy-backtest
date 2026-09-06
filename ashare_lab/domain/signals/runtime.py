@@ -1101,6 +1101,7 @@ def _evaluate_relative_volume(
     comparator = _resolve_trigger(
         condition,
         {
+            "gt_multiple": Comparator.GT,
             "gte_multiple": Comparator.GTE,
             "lte_multiple": Comparator.LTE,
         },

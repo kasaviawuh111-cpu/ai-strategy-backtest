@@ -1,4 +1,4 @@
-import { DEFAULT_INSTRUMENT, resolveInstrumentContext } from './instrument-context'
+import { DEFAULT_INSTRUMENT, resolveInstrumentContext, toAshareInstrument } from './instrument-context'
 
 describe('stock-page instrument context', () => {
   it('keeps the standalone default only when the host provides no stock', () => {
@@ -24,6 +24,20 @@ describe('stock-page instrument context', () => {
       instrument: { symbol: '600519.SH', name: '600519.SH' },
     })
   })
+
+  it('normalizes a provider-grounded bare code for an explicit analysis override', () => {
+    expect(toAshareInstrument('300033', '同花顺')).toEqual({
+      symbol: '300033.SZ',
+      name: '同花顺',
+      market: 'CN_A',
+      exchange: 'SZSE',
+    })
+  })
+
+  it.each(['300059.SH', '399001.SZ', '510300.SH', 'AAPL.US'])(
+    'rejects a mismatched or non-stock analysis override: %s',
+    (symbol) => expect(toAshareInstrument(symbol)).toBeNull(),
+  )
 
   it.each([
     '?symbol=AAPL.US&name=Apple',

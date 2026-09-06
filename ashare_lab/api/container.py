@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, cast, runtime_checkable
 
 from fastapi import Request
 
@@ -12,14 +12,25 @@ from ashare_lab.application.backtest_submission import BacktestRunConfig
 from ashare_lab.application.compile_strategy import StrategyCompiler
 from ashare_lab.application.strategy_v2_http import StrategyV2HttpService
 from ashare_lab.domain.catalog import CatalogSnapshot, CoverageCatalogSnapshot
+from ashare_lab.domain.shared import RunId
 from ashare_lab.domain.strategy import StrategySpec
-from ashare_lab.ports.backtest_runs import BacktestRunStore, CreateRunResult
+from ashare_lab.ports.backtest_review import BacktestReviewAdvisor
+from ashare_lab.ports.backtest_runs import BacktestRunRecord, BacktestRunStore, CreateRunResult
+from ashare_lab.ports.live_market_data import LiveFinanceData, LiveMarketData
+from ashare_lab.ports.strategy_advice import VerifiedFactStrategyAdvisor
 
 from .store import InMemoryDraftStore
 
 
 class BacktestSubmitter(Protocol):
     def submit(self, strategy: StrategySpec, config: BacktestRunConfig) -> CreateRunResult: ...
+
+
+@runtime_checkable
+class BacktestPreparationStatus(Protocol):
+    def get_preparation(self, run_id: RunId) -> BacktestRunRecord | None: ...
+
+    def request_cancel_preparation(self, run_id: RunId) -> BacktestRunRecord | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +51,10 @@ class ApiContainer:
     strategy_v2_service: StrategyV2HttpService | None = None
     readiness_probe: Callable[[], Mapping[str, bool]] | None = None
     readiness_reasons_probe: Callable[[], Mapping[str, str]] | None = None
+    live_market_data: LiveMarketData | None = None
+    live_finance_data: LiveFinanceData | None = None
+    strategy_advisor: VerifiedFactStrategyAdvisor | None = None
+    backtest_review_advisor: BacktestReviewAdvisor | None = None
 
     @property
     def backtest_execution_available(self) -> bool:

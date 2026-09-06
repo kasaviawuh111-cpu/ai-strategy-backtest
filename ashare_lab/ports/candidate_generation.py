@@ -22,6 +22,9 @@ class CompileInput:
     utterance: str
     as_of_date: date
     instrument_context: str | None = None
+    # Model-authored, display-only inspiration; never an execution condition.
+    idea_inspiration: str | None = None
+    idea_context: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,8 +137,12 @@ class CandidateAst:
     backtest_start: date | None = None
     backtest_end: date | None = None
     backtest_lookback_years: int | None = None
+    initial_cash_cny: int | None = None
     provenance: CandidateProvenance | None = None
     grounding_evidence: tuple[CandidateGroundingEvidence, ...] = ()
+    # Unresolved model-extracted name. Never grants an executable symbol until
+    # the server-owned security resolver confirms it.
+    instrument_name: str | None = None
 
 
 class CandidateGenerator(Protocol):

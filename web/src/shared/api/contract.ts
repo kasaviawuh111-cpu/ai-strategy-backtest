@@ -1,5 +1,7 @@
 import { ApiError } from './types'
 import type {
+  BacktestOptimizationCandidate,
+  BacktestReviewResponse,
   CapabilitiesResponse,
   CandidateAlternativeItem,
   CandidateGroundingPayload,
@@ -7,8 +9,10 @@ import type {
   CandidateRejectionItem,
   CapabilityParameter,
   CapabilityTriggerDefinition,
+  Clarification,
   ClarificationAnswerInput,
   ClarificationAnswerOutcome,
+  ClarificationData,
   CompileRequest,
   CompileResponse,
   IdeaRoute,
@@ -38,6 +42,9 @@ export type LiveCompileBody = {
   utterance: string
   instrument_context: string | null
   as_of_date: string
+  edit_current_strategy?: boolean
+  related_run_ids?: string[]
+  related_review?: { run_id: string; response_hash: string }
 }
 
 export type LiveRevisionBody = {
@@ -60,13 +67,65 @@ export type LiveBacktestBody = {
     warmupCalendarDays: number
     settlementExtensionDays: number
     runRobustness: boolean
+    refreshData?: boolean
   }
 }
+
+type LiveCurrentDataProvenance = {
+  response_sha256: string
+  retrieved_at: string
+  schema_version: string
+}
+
+type LiveMarketScreen = {
+  provider: string
+  query: string
+  asset_type: string
+  columns: string[]
+  rows: Array<Record<string, unknown>>
+  provenance: LiveCurrentDataProvenance
+}
+
+type LiveFinanceQuery = {
+  provider: string
+  query: string
+  indicators: string | null
+  tables: Array<Record<string, unknown>>
+  provenance: LiveCurrentDataProvenance
+}
+
+type LiveScreenedFinance = {
+  usage_scope: 'current_query_only'
+  historical_backtest_eligible: false
+  screen: LiveMarketScreen
+  entities: Array<{
+    code: string
+    name: string | null
+    asset_type: string
+  }>
+  batches: LiveFinanceQuery[]
+}
+
+export type LiveClarificationData = {
+  usage_scope: 'current_query_only'
+  historical_backtest_eligible: false
+} & (
+  | { kind: 'screen'; screen: LiveMarketScreen; finance?: null; screened_finance?: null }
+  | { kind: 'finance'; screen?: null; finance: LiveFinanceQuery; screened_finance?: null }
+  | {
+      kind: 'screened_finance'
+      screen?: null
+      finance?: null
+      screened_finance: LiveScreenedFinance
+    }
+)
 
 export type LiveDraftResponse = {
   draft_id: string
   revision: number
   status: 'ready' | 'needs_clarification' | 'unsupported' | 'invalid'
+  run_requested?: boolean
+  refresh_data?: boolean
   strategy: StrategySpec | null
   strategy_hash: string | null
   clarification: string | null
@@ -77,6 +136,16 @@ export type LiveDraftResponse = {
   candidate_alternatives: CandidateAlternativeItem[]
   candidate_rejections: CandidateRejectionItem[]
   idea_route?: IdeaRoute | null
+  instrument_suggestion?: Clarification['instrumentSuggestion'] | null
+  instrument_suggestions?: Clarification['instrumentSuggestions'] | null
+  verified_instrument?: Clarification['instrumentSuggestion'] | null
+  backtest_review?: BacktestReviewResponse | null
+  suggested_strategy?: StrategySpec | null
+  suggested_strategy_hash?: string | null
+  suggested_strategy_choice_id?: string | null
+  suggested_strategy_note?: string | null
+  assistant_message?: string | null
+  data?: LiveClarificationData | null
   created_at: string
 }
 
@@ -88,6 +157,7 @@ export type LiveClarificationAnswerResponse = {
     title: string
     preview: string
   }>
+  data?: LiveClarificationData | null
   draft: LiveDraftResponse
 }
 
@@ -117,8 +187,13 @@ const triggerFallback = (trigger: string): string => ({
   crosses_below: '由上向下穿过阈值',
   price_crosses_above: '价格上穿',
   price_crosses_below: '价格下穿',
+  price_above: '价格高于',
+  price_below: '价格低于',
   new_high: '创新高',
   new_low: '创新低',
+  gte_multiple: '不低于',
+  gt_multiple: '超过',
+  lte_multiple: '不高于',
   consecutive_gte_multiple: '连续达到倍数',
   bearish: '顶背离',
   bullish: '底背离',
@@ -143,6 +218,9 @@ const numericBoundary = (value: number | null | undefined, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback
 
 const diagnosticMessages: Record<string, string> = {
+  candidate_provider_timeout: '策略生成模型请求超时，本次未生成策略。请原样重试。',
+  candidate_provider_unavailable: '策略生成模型服务调用未完成，请稍后原样重试。',
+  candidate_provider_invalid_output: '这次策略解析未通过结构或条件校验，尚未生成可回测结果。',
   'template_not_published/big_drop_rebound': '“大跌反弹”会按选股模板处理，当前模板尚未发布，暂时不能执行回测。',
   previous_session_limit_up_capability_unavailable: '已理解为“前一交易日涨停、下一交易日买入”，但这个信号还缺逐证券逐交易日的涨停价/涨停状态，以及 DSL 的前一交易日引用；不能用单日涨 10% 替代。“做个短线”也没有说清卖出方式，请补充持有天数、止盈止损或技术卖出条件。原话会保留，系统不会猜。',
   event_catalog_not_published: '这类事件尚未进入可执行目录，请改用已支持的定期报告事件。',
@@ -184,59 +262,49 @@ const diagnosticMessages: Record<string, string> = {
   instrument_context_mismatch: '你说的股票与当前股票页不一致，系统已停止，不会偷换标的。',
 }
 
-export const dataAsOfDate = () => import.meta.env.VITE_DATA_AS_OF_DATE ?? '2026-08-06'
+const shanghaiCalendarDate = (now: Date): string => {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now)
+  const value = (type: 'year' | 'month' | 'day') =>
+    parts.find((part) => part.type === type)?.value ?? ''
+  return `${value('year')}-${value('month')}-${value('day')}`
+}
+
+export const dataAsOfDate = (now = new Date()) =>
+  import.meta.env.VITE_DATA_AS_OF_DATE?.trim() || shanghaiCalendarDate(now)
 
 export const toLiveCompileBody = (
   input: CompileRequest,
   asOfDate = dataAsOfDate(),
 ): LiveCompileBody => {
-  const instrumentContext = liveInstrumentContext(input)
   return {
     utterance: input.utterance,
-    instrument_context: instrumentContext,
+    instrument_context: input.instrumentContextSource === 'standalone_default'
+      ? null : input.instrument.symbol,
     as_of_date: asOfDate,
+    ...(input.editCurrentStrategy ? { edit_current_strategy: true } : {}),
+    ...(input.relatedRunIds?.length ? { related_run_ids: input.relatedRunIds.slice(-2) } : {}),
+    ...(input.relatedReview ? { related_review: {
+      run_id: input.relatedReview.runId, response_hash: input.relatedReview.responseHash,
+    } } : {}),
   }
-}
-
-function liveInstrumentContext(input: CompileRequest): string | null {
-  const answer = input.clarification
-  if (!answer) {
-    return input.instrumentContextSource === 'standalone_default'
-      ? null
-      : input.instrument.symbol
-  }
-
-  // StrategyDraftRequest v2 has no generic clarification field. Its only
-  // supported clarification is `instrument_required`, answered through the
-  // existing `instrument_context` field.
-  if (
-    answer.id !== 'instrument_required'
-    || answer.choiceId !== 'use-current-instrument'
-  ) {
-    throw new ApiError({
-      type: 'about:blank',
-      title: '无法提交这个补充选项',
-      status: 422,
-      detail: diagnosticMessages.clarification_choice_not_supported
-        ?? '这个补充选项不在当前后端契约内。',
-      code: 'clarification_choice_not_supported',
-    })
-  }
-  return input.instrument.symbol
 }
 
 const clarificationProposalDescription = (
   diagnosticCode: string,
   proposal: IdeaRoute['proposals'][number],
 ): string => {
-  const rationale = proposal.hypothesis.trim().replace(/[。；;,，]+$/, '')
   if (diagnosticCode === 'entry_rule_not_recognized') {
-    return `${rationale}；补充买入：${proposal.entry_summary}`
+    return `买入：${proposal.entry_summary}`
   }
   if (diagnosticCode === 'exit_rule_not_recognized') {
-    return `${rationale}；补充卖出：${proposal.exit_summary}`
+    return `卖出：${proposal.exit_summary}`
   }
-  return `${rationale}；买入：${proposal.entry_summary}；卖出：${proposal.exit_summary}`
+  return `买入：${proposal.entry_summary}；卖出：${proposal.exit_summary}`
 }
 
 const instrumentClarificationCodes = new Set([
@@ -290,13 +358,42 @@ export const fromLiveDraftResponse = (
   input: CompileRequest,
   capabilities?: CapabilitiesResponse,
 ): CompileResponse => {
+  const currentData = response.data ? fromLiveClarificationData(response.data) : undefined
+  const responseIdeaRoute = response.idea_route ?? undefined
+  // An acknowledgement can accompany a ready strategy (including semantic edits).
+  // It must never downgrade executable rules into a data-query clarification.
   if (response.status === 'ready' && response.strategy) {
-    return { status: 'compiled', draft: toDraft(response, input, capabilities) }
+    return { status: 'compiled', draft: toDraft(response, input, capabilities),
+      ...(response.run_requested ? { runRequested: true,
+        refreshData: response.refresh_data === true } : {}) }
+  }
+  // A first-turn current-data question still creates a draft so the next user
+  // message can resume the same conversation.  Its compiler status can be
+  // `unsupported` because the sentence is deliberately not a trading rule;
+  // the provider answer must nevertheless reach the conversation UI.
+  // When the server also returns grounded strategy directions, do not stop at
+  // the plain data answer: the same turn must be able to show both the answer
+  // and the three user-selectable follow-up strategies.
+  if (response.assistant_message && !responseIdeaRoute
+    && (currentData || response.diagnostic_code === 'data_query_only')) {
+    return {
+      status: 'needs_clarification',
+      draftId: response.draft_id,
+      revision: response.revision,
+      assistantMessage: response.assistant_message,
+      data: currentData,
+      clarification: {
+        id: 'live_data_query',
+        question: response.assistant_message,
+        reason: '',
+        choices: [],
+      },
+    }
   }
   const diagnosticCode = response.diagnostic_code ?? 'strategy_clarification'
   const asksForInstrument = instrumentClarificationCodes.has(diagnosticCode)
-  if (response.status === 'needs_clarification' || asksForInstrument) {
-    const ideaRoute = response.idea_route ?? undefined
+  if (response.status === 'needs_clarification' || asksForInstrument || responseIdeaRoute) {
+    const ideaRoute = responseIdeaRoute
     if (ideaRoute && ideaRoute.proposals.length < 2) {
       throw new ApiError({
         type: 'about:blank',
@@ -308,30 +405,23 @@ export const fromLiveDraftResponse = (
     }
     const canUseCurrentInstrument = asksForInstrument
       && input.instrumentContextSource !== 'standalone_default'
-    const asksForCompleteRule = diagnosticCode === 'strategy_rule_incomplete'
     const asksForEntry = diagnosticCode === 'entry_rule_not_recognized'
     const groundedInstrumentName = response.candidate_grounding?.spans
       .find((item) => item.path === '/instrument/symbol')?.text.trim()
-    const ideaAnalysis = ideaRoute
-      ? diagnosticCode === 'idea_guidance_required'
-        ? [
-            ideaRoute.understanding.trim(),
-            `从回测角度，一个待验证的假设是：${ideaRoute.hypothesis.trim()}`,
-            ideaRoute.asset_mapping.rationale.trim(),
-          ].filter(Boolean).join(' ')
-        : ideaRoute.understanding.trim()
-      : undefined
+    const ideaAnalysis = ideaRoute?.understanding.trim()
     return {
       status: 'needs_clarification',
       draftId: response.draft_id,
       revision: response.revision,
+      assistantMessage: response.assistant_message ?? undefined,
+      data: currentData,
       clarification: {
         id: diagnosticCode,
         question: response.clarification
           ?? (asksForInstrument
             ? canUseCurrentInstrument
               ? `请确认使用当前股票“${input.instrument.name}”，或直接输入其他股票名称或 6 位证券代码。`
-              : '请直接输入股票名称或 6 位证券代码，我会继续沿用刚才的买卖规则。'
+              : '请直接告诉我想回测的股票名称或 6 位证券代码；前面已经识别到的买卖条件我会继续保留。'
             : undefined)
             ?? (ideaRoute ? '挑一条，我把它变成完整规则再跑一次。' : '补一句我就能跑。'),
         reason: ideaRoute
@@ -343,20 +433,31 @@ export const fromLiveDraftResponse = (
           : response.clarification
           ? ''
           : asksForInstrument
-          ? '买卖条件已经保留，请继续补充回测标的。'
+          ? '前面的买卖条件我已经记住了，还需要补上回测标的。'
             : '还差一点关键信息。我不猜规则，你补一句就能跑。',
-        choices: ideaRoute ? ideaRoute.proposals.slice(0, 3).map((proposal) => ({
-          id: proposal.id,
-          label: proposal.title,
-          description: clarificationProposalDescription(diagnosticCode, proposal),
-          action: 'replace_and_compile' as const,
-          suggestedUtterance: proposal.suggested_utterance,
-          instrumentSymbol: ideaRoute.asset_mapping.instrument_symbol ?? undefined,
-          instrumentName: groundedInstrumentName
-            || (input.instrumentContextSource !== 'standalone_default'
-              ? input.instrument.name
-              : undefined),
-        })) : asksForInstrument
+        choices: ideaRoute ? ideaRoute.proposals.slice(0, 3).map((proposal) => {
+          const proposalSymbol = proposal.instrument_symbol
+            ?? ideaRoute.asset_mapping.instrument_symbol
+            ?? undefined
+          const inputNameMatchesProposal = input.instrumentContextSource !== 'standalone_default'
+            && input.instrument.symbol === proposalSymbol
+          const groundedNameMatchesProposal = Boolean(
+            groundedInstrumentName
+            && ideaRoute.asset_mapping.instrument_symbol
+            && ideaRoute.asset_mapping.instrument_symbol === proposalSymbol,
+          )
+          return {
+            id: proposal.id,
+            label: proposal.title,
+            description: clarificationProposalDescription(diagnosticCode, proposal),
+            action: 'replace_and_compile' as const,
+            suggestedUtterance: proposal.suggested_utterance,
+            instrumentSymbol: proposalSymbol,
+            instrumentName: proposal.instrument_name ?? (groundedNameMatchesProposal
+              ? groundedInstrumentName
+              : inputNameMatchesProposal ? input.instrument.name : undefined),
+          }
+        }) : asksForInstrument
           ? canUseCurrentInstrument
             ? [{
                 id: 'use-current-instrument',
@@ -366,23 +467,22 @@ export const fromLiveDraftResponse = (
                 action: 'submit_clarification' as const,
               }]
             : []
-          : [{
-          id: 'edit-utterance',
-          label: asksForCompleteRule
-              ? '补充完整规则'
-              : asksForEntry
-                ? '补充买入条件'
-              : '补充卖出条件',
-          description: asksForCompleteRule
-              ? '回到输入框，把什么时候买、什么时候卖一起说清。'
-              : asksForEntry
-                ? '回到输入框，说清什么时候买。'
-              : '回到输入框，说清什么时候卖。',
-          recommended: true,
-          action: 'edit_utterance',
-        }],
+          // 规则澄清统一由对话文本和输入框承接；不再展示空操作标签。
+          : [],
         recognized: recognizedFragments(input),
+        instrumentSuggestion: response.instrument_suggestion ?? undefined,
+        instrumentSuggestions: response.instrument_suggestions ?? undefined,
+        backtestReview: response.backtest_review ?? undefined,
         ideaRoute,
+        provisionalDraft: response.suggested_strategy && response.suggested_strategy_hash
+          ? toDraft({
+              ...response,
+              strategy: response.suggested_strategy,
+              strategy_hash: response.suggested_strategy_hash,
+            }, input, capabilities)
+          : undefined,
+        provisionalChoiceId: response.suggested_strategy_choice_id ?? undefined,
+        provisionalNote: response.suggested_strategy_note ?? undefined,
       },
     }
   }
@@ -392,9 +492,61 @@ export const fromLiveDraftResponse = (
     type: 'about:blank',
     title: '暂时不能生成这条策略',
     status: 422,
-    detail: diagnosticMessages[code] ?? '这句话还不能转换成可执行策略，请补充明确的买入和卖出条件。',
+    detail: response.clarification?.trim() || diagnosticMessages[code]
+      || '这句话还不能转换成可执行策略，请补充明确的买入和卖出条件。',
     code,
   })
+}
+
+const fromLiveProvenance = (provenance: LiveCurrentDataProvenance) => ({
+  responseSha256: provenance.response_sha256,
+  retrievedAt: provenance.retrieved_at,
+  schemaVersion: provenance.schema_version,
+})
+
+const fromLiveScreen = (screen: LiveMarketScreen) => ({
+  provider: screen.provider,
+  query: screen.query,
+  assetType: screen.asset_type,
+  columns: [...screen.columns],
+  rows: screen.rows.map((row) => ({ ...row })),
+  provenance: fromLiveProvenance(screen.provenance),
+})
+
+const fromLiveFinance = (finance: LiveFinanceQuery) => ({
+  provider: finance.provider,
+  query: finance.query,
+  indicators: finance.indicators,
+  tables: finance.tables.map((table) => ({ ...table })),
+  provenance: fromLiveProvenance(finance.provenance),
+})
+
+const fromLiveClarificationData = (data: LiveClarificationData): ClarificationData => {
+  const common = {
+    usageScope: data.usage_scope,
+    historicalBacktestEligible: data.historical_backtest_eligible,
+  } as const
+  if (data.kind === 'screen') {
+    return { ...common, kind: 'screen', screen: fromLiveScreen(data.screen) }
+  }
+  if (data.kind === 'finance') {
+    return { ...common, kind: 'finance', finance: fromLiveFinance(data.finance) }
+  }
+  return {
+    ...common,
+    kind: 'screened_finance',
+    screenedFinance: {
+      usageScope: data.screened_finance.usage_scope,
+      historicalBacktestEligible: data.screened_finance.historical_backtest_eligible,
+      screen: fromLiveScreen(data.screened_finance.screen),
+      entities: data.screened_finance.entities.map((entity) => ({
+        code: entity.code,
+        name: entity.name,
+        assetType: entity.asset_type,
+      })),
+      batches: data.screened_finance.batches.map(fromLiveFinance),
+    },
+  }
 }
 
 export const fromLiveClarificationAnswerResponse = (
@@ -405,6 +557,7 @@ export const fromLiveClarificationAnswerResponse = (
   replyKind: response.reply_kind,
   assistantMessage: response.assistant_message,
   suggestions: response.suggestions.map((item) => ({ ...item })),
+  data: response.data ? fromLiveClarificationData(response.data) : undefined,
   // The server owns how the saved original sentence and this answer are merged.
   // The original request here is used only to label the returned UI draft; it
   // is never resubmitted as an executable strategy candidate.
@@ -457,11 +610,41 @@ export const mergeLiveRevision = (
   }
 }
 
+/**
+ * Project a server-compiled optimization candidate into the editable UI model.
+ * This is presentation-only: the fresh run submits `candidate.strategy`
+ * directly and never recompiles `suggestedUtterance` in the browser flow.
+ */
+export const fromBacktestOptimizationCandidate = (
+  candidate: BacktestOptimizationCandidate,
+  sourceDraft: StrategyDraft,
+  capabilities?: CapabilitiesResponse,
+): StrategyDraft => mergeLiveRevision({
+  draft_id: sourceDraft.id,
+  revision: sourceDraft.revision,
+  status: 'ready',
+  strategy: candidate.strategy,
+  strategy_hash: candidate.strategyHash,
+  clarification: null,
+  diagnostic_code: null,
+  provenance: [],
+  candidate_provenance: null,
+  candidate_grounding: null,
+  candidate_alternatives: [],
+  candidate_rejections: [],
+  created_at: new Date().toISOString(),
+}, {
+  ...sourceDraft,
+  sourceText: candidate.suggestedUtterance,
+}, capabilities)
+
 export const strategySpecFromDraft = (draft: StrategyDraft): StrategySpec => {
   return applyDraftEdits(draft.strategySpec, draft)
 }
 
-export const toLiveBacktestBody = (draft: StrategyDraft): LiveBacktestBody => ({
+export const toLiveBacktestBody = (
+  draft: StrategyDraft, options: { refreshData?: boolean } = {},
+): LiveBacktestBody => ({
   strategy: strategySpecFromDraft(draft),
   config: {
     capacityMode: draft.execution.capacityMode,
@@ -476,6 +659,7 @@ export const toLiveBacktestBody = (draft: StrategyDraft): LiveBacktestBody => ({
     warmupCalendarDays: draft.execution.warmupCalendarDays,
     settlementExtensionDays: draft.execution.settlementExtensionDays,
     runRobustness: draft.execution.runRobustness,
+    ...(options.refreshData ? { refreshData: true } : {}),
   },
 })
 
@@ -487,19 +671,14 @@ function toDraft(
   const strategy = response.strategy as StrategySpec
   const entry = toLeg(strategy.entry, 'entry', capabilities)
   const exit = toExitLeg(strategy.exit.children, capabilities)
-  const hasInterpretationEvidence = [
-    response.candidate_provenance !== null,
-    response.candidate_grounding !== null,
-    response.candidate_alternatives.length > 0,
-    response.candidate_rejections.length > 0,
-  ].some(Boolean)
   return {
     id: response.draft_id,
     revision: response.revision,
     strategyHash: response.strategy_hash,
     sourceText: input.utterance,
     title: strategyTitle([...entry.conditions, ...exit.conditions]),
-    instrument: instrumentFrom(strategy, input.instrument, response.candidate_grounding),
+    instrument: instrumentFrom(strategy, input.instrument, response.candidate_grounding,
+      response.verified_instrument),
     confidence: null,
     entry,
     exit,
@@ -535,19 +714,11 @@ function toDraft(
           ]
         : ['日线收盘确认信号，下一交易日使用开盘价代理；记录时间不代表真实逐笔成交']),
       '遵守 A 股 T+1；当天买入的股票下一交易日才可卖出',
-      '买入默认使用 100% 可用资金，按 100 股整手向下取整；未投入现金继续保留',
+      '按回测设置的资金比例投入，未投入的资金继续保留',
       '涨停买入或跌停卖出时等待开板；仅日线数据无法证明开板则保守记为未成交',
     ],
     warnings: [],
     strategySpec: strategy,
-    ...(hasInterpretationEvidence ? {
-      interpretationEvidence: {
-        candidateProvenance: response.candidate_provenance ?? null,
-        grounding: response.candidate_grounding,
-        alternatives: response.candidate_alternatives,
-        rejections: response.candidate_rejections,
-      },
-    } : {}),
   }
 }
 
@@ -555,14 +726,16 @@ function instrumentFrom(
   strategy: StrategySpec,
   fallback: Instrument,
   grounding?: CandidateGroundingPayload | null,
+  verified?: Clarification['instrumentSuggestion'] | null,
 ): Instrument {
   const suffix = strategy.instrument.symbol.slice(-2)
   const exchange = suffix === 'SH' ? 'SSE' : suffix === 'BJ' ? 'BSE' : 'SZSE'
   const symbolChanged = strategy.instrument.symbol !== fallback.symbol
   const groundedName = grounding?.spans.find((item) => item.path === '/instrument/symbol')?.text.trim()
+  const verifiedName = verified?.symbol === strategy.instrument.symbol ? verified.name : undefined
   return {
     ...fallback,
-    name: symbolChanged ? groundedName || strategy.instrument.symbol : fallback.name,
+    name: verifiedName || (symbolChanged ? groundedName || strategy.instrument.symbol : fallback.name),
     symbol: strategy.instrument.symbol,
     exchange,
   }
@@ -624,6 +797,8 @@ function toUiCondition(
   const name = capability?.display_name ?? readableIdentifier(condition.indicator_id)
   const parameters: StrategyParameter[] = Object.entries(condition.params)
     .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
+    .filter(([key]) => !(condition.indicator_id === 'volume.relative'
+      && key === 'consecutive_days' && condition.trigger !== 'consecutive_gte_multiple'))
     .map(([key, value]) => {
       const definition = parameterDefinition(capability?.parameters, key)
       return {
@@ -657,6 +832,7 @@ function toUiCondition(
     kind: 'indicator',
     indicatorId: condition.indicator_id,
     label: conditionOrder
+      ?? explicitWindowLabel(condition, triggerName)
       ?? movingAverageLabel(condition, triggerName)
       ?? thresholdLabel
       ?? `${name} ${triggerName}`,
@@ -757,10 +933,34 @@ function movingAverageLabel(
   condition: StrategySpecIndicatorCondition,
   triggerName: string,
 ): string | null {
+  if (condition.indicator_id === 'technical.ma_cross') {
+    const { fast_period: fast, slow_period: slow } = condition.params
+    if (typeof fast !== 'number' || typeof slow !== 'number') return null
+    const crossing = condition.trigger === 'golden_cross' ? '上穿'
+      : condition.trigger === 'death_cross' ? '下穿' : null
+    return crossing ? `${fast} 日均线${crossing} ${slow} 日均线` : null
+  }
   if (condition.indicator_id !== 'technical.ma') return null
   const period = typeof condition.params.period === 'number' ? condition.params.period : null
   const prefix = period == null ? '均线' : `${period} 日均线`
   return `${triggerName} ${prefix}`
+}
+
+function explicitWindowLabel(
+  condition: StrategySpecIndicatorCondition,
+  triggerName: string,
+): string | null {
+  if (condition.indicator_id === 'price.rolling_high' && condition.trigger === 'new_high') {
+    const field = ({ close: '收盘价', high: '最高价', low: '最低价', open: '开盘价' } as Record<string, string>)[String(condition.params.price_field)] ?? '价格'
+    return `${field}创前 ${condition.params.period} 日新高`
+  }
+  if (condition.indicator_id === 'volume.relative' && condition.value != null) {
+    const days = condition.trigger === 'consecutive_gte_multiple'
+      ? `连续 ${condition.params.consecutive_days} 日` : ''
+    const comparison = condition.trigger === 'consecutive_gte_multiple' ? '不低于' : triggerName
+    return `${days}成交量${comparison}前 ${condition.params.baseline_period} 日均量的 ${formatConditionValue(condition.value)}倍`
+  }
+  return null
 }
 
 function toUiEventCondition(

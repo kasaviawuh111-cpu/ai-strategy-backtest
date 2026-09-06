@@ -270,13 +270,6 @@ export type StrategyDraft = {
   assumptions: string[]
   warnings: string[]
   strategySpec: StrategySpec
-  /** 只有 Live API 返回时才存在；前端不推断、不补造候选来源。 */
-  interpretationEvidence?: {
-    candidateProvenance: CandidateProvenanceItem | null
-    grounding: CandidateGroundingPayload | null
-    alternatives: CandidateAlternativeItem[]
-    rejections: CandidateRejectionItem[]
-  }
 }
 
 export type CandidateProvenanceItem = {
@@ -320,9 +313,41 @@ export type IdeaRouteProposal = {
   entry_summary: string
   exit_summary: string
   suggested_utterance: string
+  /** Provider-grounded instrument for this proposal; may differ across cards. */
+  instrument_symbol?: string | null
+  instrument_name?: string | null
+  pairing_reason?: string | null
   capability_ids: string[]
   assumptions: string[]
   confidence: number
+}
+
+export type IdeaRouteResearch = {
+  provider: string
+  model: string
+  provider_response_id: string
+  query: string
+  purpose: 'viewpoint' | 'unknown_entity' | 'current_fact'
+  as_of: string
+  summary: string
+  facts: Array<{
+    statement: string
+    fact_kind: string
+    source_ids: string[]
+    time_scope: string | null
+  }>
+  sources: Array<{
+    source_id: string
+    title: string
+    url: string
+    publisher: string
+    published_at: string | null
+  }>
+  unresolved_questions: string[]
+  retrieved_at: string
+  response_sha256: string
+  search_call_count: number
+  schema_version: string
 }
 
 export type IdeaRoute = {
@@ -336,6 +361,8 @@ export type IdeaRoute = {
     evidence_status: 'host_context_only' | 'instrument_required'
   }
   proposals: IdeaRouteProposal[]
+  /** Public-fact evidence only; never an executable strategy or backtest feed. */
+  research?: IdeaRouteResearch | null
   provenance?: {
     source: 'bounded_provider'
     provider: string
@@ -361,32 +388,56 @@ export type ClarificationChoice = {
   instrumentName?: string
 }
 
+export type InstrumentSuggestion = {
+  symbol: string
+  name: string | null
+  source: string
+  retrieved_at: string
+  evidence: string | null
+}
+
 export type Clarification = {
   id: string
   question: string
   reason: string
   choices: ClarificationChoice[]
+  instrumentSuggestion?: InstrumentSuggestion
+  instrumentSuggestions?: InstrumentSuggestion[]
   /** 仅用于把已经识别的片段留在卡片里；不等于可执行 StrategySpec。 */
   recognized?: Array<{ label: string; value: string }>
   /** 观点引导只生成待用户选择的候选；选择前没有 StrategySpec，也不能回测。 */
   ideaRoute?: IdeaRoute
+  /** Server-reviewed candidates retain exact DSL and their completed source run. */
+  backtestReview?: BacktestReviewResponse
+  /**
+   * 服务器把少量口语交易表达还原成的待确认预览。它不能直接进入回测；
+   * 用户必须主动采用对应 choice，服务端会再编译和校验。
+   */
+  provisionalDraft?: StrategyDraft
+  provisionalChoiceId?: string
+  provisionalNote?: string
 }
 
 export type CompileRequest = {
   instrument: Instrument
   instrumentContextSource?: 'stock_page' | 'standalone_default'
   utterance: string
-  clarification?: { id: string; choiceId: string }
+  editCurrentStrategy?: boolean
+  relatedRunIds?: string[]
+  relatedReview?: { runId: string; responseHash: string }
 }
 
 export type CompileResponse =
-  | { status: 'compiled'; draft: StrategyDraft }
+  | { status: 'compiled'; draft: StrategyDraft; runRequested?: boolean; refreshData?: boolean }
   | {
       status: 'needs_clarification'
       draftId: string
       /** Live drafts are revision-bound; Mock responses may omit this legacy field. */
       revision?: number
       clarification: Clarification
+      /** Present when this turn answered a current-data question instead of compiling a strategy. */
+      assistantMessage?: string
+      data?: ClarificationData
     }
 
 export type ClarificationSuggestion = {
@@ -395,10 +446,59 @@ export type ClarificationSuggestion = {
   preview: string
 }
 
+export type CurrentDataProvenanceRef = {
+  responseSha256: string
+  retrievedAt: string
+  schemaVersion: string
+}
+
+export type CurrentMarketScreen = {
+  provider: string
+  query: string
+  assetType: string
+  columns: string[]
+  rows: Array<Record<string, unknown>>
+  provenance: CurrentDataProvenanceRef
+}
+
+export type CurrentFinanceQuery = {
+  provider: string
+  query: string
+  indicators: string | null
+  tables: Array<Record<string, unknown>>
+  provenance: CurrentDataProvenanceRef
+}
+
+export type CurrentScreenedEntity = {
+  code: string
+  name: string | null
+  assetType: string
+}
+
+export type CurrentScreenedFinance = {
+  usageScope: 'current_query_only'
+  historicalBacktestEligible: false
+  screen: CurrentMarketScreen
+  entities: CurrentScreenedEntity[]
+  batches: CurrentFinanceQuery[]
+}
+
+/** Current-data lookup attached to a dialogue turn; never an executable backtest input. */
+export type ClarificationData = {
+  usageScope: 'current_query_only'
+  historicalBacktestEligible: false
+} & (
+  | { kind: 'screen'; screen: CurrentMarketScreen }
+  | { kind: 'finance'; finance: CurrentFinanceQuery }
+  | { kind: 'screened_finance'; screenedFinance: CurrentScreenedFinance }
+)
+
 export type ClarificationAnswerInput = {
   draftId: string
   revision?: number
   answer: string
+  relatedRunIds?: string[]
+  relatedReview?: CompileRequest['relatedReview']
   originalRequest: CompileRequest
   clarification: Clarification
 }
@@ -407,6 +507,7 @@ export type ClarificationAnswerOutcome = {
   replyKind: 'accepted' | 'clarification'
   assistantMessage: string
   suggestions: ClarificationSuggestion[]
+  data?: ClarificationData
   outcome: CompileResponse
 }
 
@@ -535,6 +636,26 @@ export type BacktestSummary = {
   dataRange: { start: string; end: string; sessions: number }
   warnings: string[]
   runEvidence?: BacktestRunEvidence | null
+  dataProvenance?: SkillDataProvenance | null
+}
+
+export type SkillDataProvenance = {
+  provider: 'eastmoney_mx_finance_data'
+  instrumentId: string
+  priceBasis: 'provider_back_adjusted'
+  retrievedAt: string
+  historyStart: string
+  historyEnd: string
+  historyRows: number
+  indicatorSeries: number
+  indicatorPoints: number
+  derivedIndicatorEvidence?: {
+    indicatorId: string
+    formula: string
+    parameters: string
+    source: 'local_formula_on_eastmoney_skill_ohlcv'
+  }[]
+  queries: string[]
 }
 
 export type BacktestRunEvidence = {
@@ -587,6 +708,7 @@ export type BacktestActivity = {
   title: string
   price?: number | null
   quantity?: number | null
+  notionalCny?: number | null
   status:
     | 'confirmed'
     | 'submitted'
@@ -619,6 +741,46 @@ export type BacktestResultBundle = {
   summary: BacktestSummary
   series: EquityPoint[]
   activities: BacktestActivity[]
+}
+
+export type BacktestReviewEvidenceGrade = 'insufficient' | 'limited' | 'moderate'
+export type Sha256Digest = `sha256:${string}`
+
+export type BacktestReviewModelProvenance = {
+  provider: string
+  model: string
+  promptVersion: string
+  schemaVersion: string
+  responseHash: Sha256Digest
+}
+
+export type BacktestOptimizationCandidate = {
+  id: `model-opt-${1 | 2 | 3}`
+  title: string
+  diagnosis: string
+  changeDimension: 'entry' | 'exit' | 'confirmation' | 'risk_control'
+  expectedEffect: string
+  tradeoff: string
+  suggestedUtterance: string
+  /** Server-compiled and Catalog-validated; submit this object directly for an optimization run. */
+  strategy: StrategySpec
+  strategyHash: Sha256Digest
+  modelSuggested: true
+}
+
+export type BacktestReviewResponse = {
+  runId: string
+  sourceResultHash: Sha256Digest
+  generatedAt: string
+  evidenceGrade: BacktestReviewEvidenceGrade
+  evidenceReasons: [string, ...string[]]
+  analysis: string
+  conclusion: string
+  optimizationCandidates:
+    | [BacktestOptimizationCandidate, BacktestOptimizationCandidate]
+    | [BacktestOptimizationCandidate, BacktestOptimizationCandidate, BacktestOptimizationCandidate]
+  modelProvenance: BacktestReviewModelProvenance
+  disclaimer: '历史回测与模型建议仅用于研究，不构成投资建议或真实交易指令'
 }
 
 export type ApiProblem = {

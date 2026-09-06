@@ -206,7 +206,7 @@ def main() -> int:
             "execution": _serialize_result(acquisition.execution),
             "signal": _serialize_result(acquisition.signal),
             "signalPrefix": _serialize_result(acquisition.prefix),
-            "baostockSessionReference": session_reference_source_payload,
+            "sessionReference": session_reference_source_payload,
             "eastmoneyCorporateActionReference": action_source_payload,
         }
         result = build_choice_snapshot(
@@ -282,7 +282,7 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help=(
-            "Validated BaoStock instrument/session reference artifact. "
+            "Validated provider-neutral instrument/session reference artifact. "
             "Historical preclose, tradestatus and isST evidence is mandatory."
         ),
     )
@@ -587,8 +587,11 @@ def _load_session_reference_source(
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise TypeError("top-level JSON must be an object")
-    if payload.get("schemaVersion") != "baostock.internal-demo-reference.v2":
-        raise TypeError("reference artifact must use baostock.internal-demo-reference.v2")
+    if payload.get("schemaVersion") not in {
+        "baostock.internal-demo-reference.v2",
+        "ashare-lab.instrument-session-reference.v3",
+    }:
+        raise TypeError("reference artifact uses an unsupported session-reference schema")
     instrument = payload.get("instrument")
     if not isinstance(instrument, dict) or instrument.get("instrument_id") != symbol:
         raise TypeError("reference artifact belongs to a different instrument")

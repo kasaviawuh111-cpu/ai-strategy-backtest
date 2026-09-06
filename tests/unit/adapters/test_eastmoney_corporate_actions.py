@@ -10,6 +10,7 @@ import pytest
 
 from ashare_lab.adapters.market_data.eastmoney_corporate_actions import (
     COVERAGE_SCOPE,
+    DATACENTER_URL,
     NEGATIVE_PROOF_CATEGORIES,
     SUPPORTED_CATEGORIES,
     EastmoneyCorporateActionError,
@@ -30,6 +31,29 @@ def test_normalizes_current_bse_920_code_for_public_corporate_action_queries() -
     assert str(instrument) == "920001.BJ"
     assert digits == "920001"
     assert prefixed == "BJ920001"
+
+
+def test_public_data_request_retries_one_transient_transport_failure() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("temporary disconnect", request=request)
+        return httpx.Response(200, json={"success": True, "result": {"data": []}})
+
+    with EastmoneyCorporateActionReferenceAdapter(
+        transport=httpx.MockTransport(handler),
+        sleeper=delays.append,
+    ) as adapter:
+        payload, raw = adapter._request_json(DATACENTER_URL, {"reportName": "fixture"})
+
+    assert payload["success"] is True
+    assert raw
+    assert attempts == 2
+    assert delays == [0.25]
 
 
 def test_rejects_unproven_legacy_bse_alias_in_corporate_action_queries() -> None:
@@ -386,7 +410,13 @@ def test_normalizes_complete_rights_terms_from_filtered_dataset() -> None:
 
 @pytest.mark.parametrize(
     "reason",
-    ["首发限售股份上市", "网下配售股份上市", "战略配售上市"],
+    [
+        "首发限售股份上市",
+        "网下配售股份上市",
+        "战略配售上市",
+        "自主行权",
+        "股份性质变更,自主行权",
+    ],
 )
 def test_negative_split_proof_accepts_known_placement_listing_change(reason: str) -> None:
     result = _prepare(
@@ -399,7 +429,7 @@ def test_negative_split_proof_accepts_known_placement_listing_change(reason: str
 
     proof = result.coverage["negativeSplitProof"]
     assert isinstance(proof, dict)
-    assert proof["recognizedChangeReasons"] == [reason]
+    assert proof["recognizedChangeReasons"] == sorted(reason.split(","))
 
 
 @pytest.mark.parametrize(

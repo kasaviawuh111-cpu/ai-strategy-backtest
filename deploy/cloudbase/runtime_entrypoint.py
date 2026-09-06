@@ -15,6 +15,7 @@ from sqlalchemy.exc import ArgumentError
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _FALSE_VALUES = {"0", "false", "no", "off"}
+_TRUE_VALUES = {"1", "true", "yes", "on"}
 _STORAGE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{2,255}$")
 _FORBIDDEN_DATABASE_USERS = {
     "cloudbase_admin",
@@ -28,6 +29,11 @@ _SNAPSHOT_ROOT_VARIABLES = (
     "EVENT_SNAPSHOT_ROOT",
     "COMPOSITE_SNAPSHOT_ROOT",
     "SNAPSHOT_PREPARATION_ROOT",
+)
+_REQUIRED_LIVE_PROVIDER_VARIABLES = (
+    "CANDIDATE_PROVIDER_API_KEY",
+    "RESEARCH_PROVIDER_API_KEY",
+    "MX_SAAS_API_KEY",
 )
 
 
@@ -63,13 +69,34 @@ def validate_runtime_environment(environment: Mapping[str, str]) -> None:
     revision = environment.get("CODE_REVISION", "").strip()
     if _GIT_SHA.fullmatch(revision) is None:
         raise ProductionConfigurationError("CODE_REVISION must be the exact clean 40-character SHA")
+    _validate_live_provider_environment(environment)
     _validate_snapshot_storage(environment)
+
+
+def _validate_live_provider_environment(environment: Mapping[str, str]) -> None:
+    if environment.get("CANDIDATE_PROVIDER_MODE", "").strip() != "openai_compatible":
+        raise ProductionConfigurationError("production requires the backend model provider")
+    if environment.get("RESEARCH_PROVIDER_MODE", "").strip() != "deepseek_responses":
+        raise ProductionConfigurationError("production requires the backend research provider")
+    missing = [
+        variable
+        for variable in _REQUIRED_LIVE_PROVIDER_VARIABLES
+        if not environment.get(variable, "").strip()
+    ]
+    if missing:
+        raise ProductionConfigurationError(
+            "production is missing backend-only provider secrets: " + ", ".join(missing)
+        )
 
 
 def _validate_snapshot_storage(environment: Mapping[str, str]) -> None:
     if environment.get("MARKET_DATA_PROFILE", "").strip() != "on_demand_snapshot":
         raise ProductionConfigurationError(
             "CloudBase production requires the on-demand trusted snapshot registry"
+        )
+    if environment.get("ON_DEMAND_REFRESH_EACH_SUBMISSION", "").strip().lower() not in _TRUE_VALUES:
+        raise ProductionConfigurationError(
+            "production requires ON_DEMAND_REFRESH_EACH_SUBMISSION=true"
         )
     if environment.get("SNAPSHOT_STORAGE_MODE", "").strip() != "durable_mount":
         raise ProductionConfigurationError(

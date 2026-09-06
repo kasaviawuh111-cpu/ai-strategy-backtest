@@ -555,6 +555,9 @@ class LocalParquetMarketDataRepository:
             [manifest_by_dataset.get(dataset) or self._fingerprint(dataset) for dataset in datasets]
             + [item for item in manifest_files if item.dataset not in requested_datasets]
         )
+        if self._profile == "generic_parquet" and _DAILY_DATASET in datasets:
+            daily_file = next(item for item in files if item.dataset == _DAILY_DATASET)
+            self._require_generic_daily_instruments(daily_file.path, instruments)
         manifest = {
             "schema_version": _SCHEMA_VERSION,
             "datasets": list(datasets),
@@ -603,6 +606,33 @@ class LocalParquetMarketDataRepository:
                 files=files,
             )
             return ref
+
+    def _require_generic_daily_instruments(
+        self,
+        daily_file: Path,
+        instruments: tuple[InstrumentId, ...],
+    ) -> None:
+        """Reject logical pins that the generic physical file cannot serve."""
+
+        missing: list[str] = []
+        try:
+            with duckdb.connect(database=":memory:") as connection:
+                for instrument in instruments:
+                    row = connection.execute(
+                        "SELECT 1 FROM read_parquet(?) WHERE stock_code = ? LIMIT 1",
+                        [str(daily_file), _provider_code(instrument)],
+                    ).fetchone()
+                    if row is None:
+                        missing.append(str(instrument))
+        except duckdb.Error as exc:
+            raise MarketDataSchemaError(
+                f"cannot inspect {_DAILY_FILENAME} instrument coverage: {exc}"
+            ) from exc
+        if missing:
+            label = "instrument" if len(missing) == 1 else "instruments"
+            raise MarketDataCapabilityError(
+                f"daily OHLCV snapshot does not contain requested {label}: {', '.join(missing)}"
+            )
 
     def _producer_snapshot_id(
         self,

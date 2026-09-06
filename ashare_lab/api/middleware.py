@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from time import perf_counter
 from typing import cast
 from uuid import uuid4
@@ -27,11 +28,24 @@ _ACCESS_LOG = logging.getLogger("uvicorn.error")
 class RequestContextMiddleware:
     """Attach a request ID and reject bodies above the configured byte limit."""
 
-    def __init__(self, app: ASGIApp, *, max_body_bytes: int) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_body_bytes: int,
+        path_max_body_bytes: Mapping[str, int] | None = None,
+    ) -> None:
         if max_body_bytes <= 0:
             raise ValueError("max_body_bytes must be positive")
+        selected_path_limits = dict(path_max_body_bytes or {})
+        for path, maximum in selected_path_limits.items():
+            if not path.startswith("/"):
+                raise ValueError("path-specific body limits require absolute paths")
+            if maximum <= 0:
+                raise ValueError("path-specific max body bytes must be positive")
         self._app = app
         self._max_body_bytes = max_body_bytes
+        self._path_max_body_bytes = selected_path_limits
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -39,6 +53,10 @@ class RequestContextMiddleware:
             return
 
         correlation_id = _read_request_id(scope) or uuid4().hex
+        maximum = self._path_max_body_bytes.get(
+            str(scope.get("path", "")),
+            self._max_body_bytes,
+        )
         state = scope.setdefault("state", {})
         state["request_id"] = correlation_id
         started_at = perf_counter()
@@ -65,19 +83,26 @@ class RequestContextMiddleware:
                     request_id_value=correlation_id,
                 )
                 return
-            if declared_length is not None and declared_length > self._max_body_bytes:
-                await self._send_too_large(scope, receive, send_with_request_id, correlation_id)
+            if declared_length is not None and declared_length > maximum:
+                await self._send_too_large(
+                    scope,
+                    receive,
+                    send_with_request_id,
+                    correlation_id,
+                    maximum=maximum,
+                )
                 return
 
             bounded_receive = receive
             if scope.get("method") in _BODY_METHODS:
-                messages, too_large = await _buffer_messages(receive, self._max_body_bytes)
+                messages, too_large = await _buffer_messages(receive, maximum)
                 if too_large:
                     await self._send_too_large(
                         scope,
                         receive,
                         send_with_request_id,
                         correlation_id,
+                        maximum=maximum,
                     )
                     return
                 bounded_receive = _replay(messages)
@@ -100,6 +125,8 @@ class RequestContextMiddleware:
         receive: Receive,
         send: Send,
         correlation_id: str,
+        *,
+        maximum: int,
     ) -> None:
         await _send_error(
             scope,
@@ -107,7 +134,7 @@ class RequestContextMiddleware:
             send,
             status_code=413,
             code="request_body_too_large",
-            message=f"Request body exceeds {self._max_body_bytes} bytes",
+            message=f"Request body exceeds {maximum} bytes",
             request_id_value=correlation_id,
         )
 

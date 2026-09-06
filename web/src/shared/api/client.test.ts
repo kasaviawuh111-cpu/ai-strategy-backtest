@@ -1,4 +1,9 @@
-import type { CapabilitiesResponse, CompileRequest, StrategySpec } from './types'
+import type {
+  BacktestReviewResponse,
+  CapabilitiesResponse,
+  CompileRequest,
+  StrategySpec,
+} from './types'
 import type { LiveDraftResponse } from './contract'
 
 const clarifiedRequest: CompileRequest = {
@@ -8,10 +13,6 @@ const clarifiedRequest: CompileRequest = {
     symbol: '300059.SZ',
     market: 'CN_A',
     exchange: 'SZSE',
-  },
-  clarification: {
-    id: 'instrument_required',
-    choiceId: 'use-current-instrument',
   },
 }
 
@@ -117,6 +118,64 @@ describe('live strategy client', () => {
     vi.resetModules()
   })
 
+  it('attaches a progress id and keeps only the latest eight backend steps', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    const progressId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    vi.stubGlobal('crypto', { randomUUID: () => progressId })
+    const updates: Array<Array<{ stage: string; message: string; elapsedMs: number }>> = []
+    let releaseDraft: (() => void) | undefined
+    const draftGate = new Promise<void>((resolve) => { releaseDraft = resolve })
+    let compileProgressHeader: string | null = null
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === `/api/v1/dialogue-progress/${progressId}`) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            events: Array.from({ length: 9 }, (_, index) => ({
+              stage: `stage-${index + 1}`,
+              message: `真实步骤 ${index + 1}`,
+              elapsed_ms: index * 1_000,
+            })),
+            finished: true,
+          }),
+        }
+      }
+      if (path === '/api/v1/capabilities') {
+        return { ok: true, status: 200, json: async () => capabilities() }
+      }
+      if (path === '/api/v1/strategy-drafts') {
+        compileProgressHeader = new Headers(init?.headers).get('X-Dialogue-Progress-ID')
+        await draftGate
+        return { ok: true, status: 201, json: async () => readyResponse() }
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { strategyApi } = await import('./client')
+    const compile = strategyApi.compile({
+      ...clarifiedRequest,
+      dialogueProgress: {
+        onProgress: (events) => updates.push([...events]),
+      },
+    })
+
+    await vi.waitFor(() => expect(updates).toHaveLength(1))
+    releaseDraft?.()
+    await compile
+
+    expect(compileProgressHeader).toBe(progressId)
+    expect(updates[0]).toHaveLength(8)
+    expect(updates[0]?.[0]).toEqual({
+      stage: 'stage-2',
+      message: '真实步骤 2',
+      elapsedMs: 1_000,
+    })
+  })
+
   it('allows the server-owned snapshot preparation step to outlive ordinary API calls', async () => {
     vi.stubEnv('VITE_USE_MOCK', 'false')
     const supported = capabilities({
@@ -135,7 +194,8 @@ describe('live strategy client', () => {
       }],
     })
     const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      void _init
       const path = String(input)
       if (path === '/api/v1/capabilities') {
         return { ok: true, json: async () => supported }
@@ -154,17 +214,194 @@ describe('live strategy client', () => {
     const compiled = await strategyApi.compile({
       ...clarifiedRequest,
       utterance: '东方财富年报发布后买入，MACD 死叉卖出',
-      clarification: undefined,
     })
     if (compiled.status !== 'compiled') throw new Error('expected compiled StrategySpec')
+    expect(timeoutSpy).not.toHaveBeenCalledWith(3_600_000)
+    const draftCall = fetchMock.mock.calls.find(([path]) => path === '/api/v1/strategy-drafts')
+    expect((draftCall?.[1] as RequestInit | undefined)?.signal).toBeUndefined()
 
     await backtestApi.create(compiled.draft)
 
-    expect(timeoutSpy).toHaveBeenLastCalledWith(120_000)
+    expect(timeoutSpy).toHaveBeenLastCalledWith(300_000)
   })
 
-  it('sends the clarification answer through the backend v2 instrument_context field', async () => {
+  it('submits a reviewed server-compiled strategy directly as a fresh run', async () => {
     vi.stubEnv('VITE_USE_MOCK', 'false')
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    const supported = capabilities({
+      event_backtest_available: true,
+      event_availability_scope: 'pinned_snapshot',
+      events: [{
+        event_code: 'event.financial_results.annual_report',
+        definition_version: '1.0.0',
+        catalog_status: 'stable',
+        status: 'available',
+        backtest_available: true,
+        preparation_available: false,
+        availability_scope: 'pinned_snapshot',
+        unavailable_reason: null,
+        triggers: ['published'],
+      }],
+    })
+    const optimizedStrategy: StrategySpec = {
+      ...eventStrategy,
+      exit: {
+        op: 'first_of',
+        children: [{
+          type: 'holding_period_exit',
+          sessions: 10,
+          anchor: 'first_entry_fill',
+          count_mode: 'subsequent_trading_sessions',
+          execution: 'target_session_open_proxy',
+        }],
+      },
+    }
+    const reviewResponse: BacktestReviewResponse = {
+      runId: 'run:base',
+      sourceResultHash: `sha256:${'b'.repeat(64)}`,
+      generatedAt: '2026-09-05T12:00:00Z',
+      evidenceGrade: 'limited',
+      evidenceReasons: ['有效交易样本偏少'],
+      analysis: '策略在震荡区间有多次往返交易。',
+      conclusion: '需要独立检验固定持有期。',
+      optimizationCandidates: [{
+        id: 'model-opt-1',
+        title: '固定持有 10 日',
+        diagnosis: '原卖出信号在震荡期反复触发。',
+        changeDimension: 'exit',
+        expectedEffect: '检验固定持有期是否降低往返交易。',
+        tradeoff: '可能错过更早的风险退出信号。',
+        suggestedUtterance: '东方财富年报发布后买入，实际成交后第 10 个交易日卖出',
+        strategy: optimizedStrategy,
+        strategyHash: `sha256:${'c'.repeat(64)}`,
+        modelSuggested: true,
+      }, {
+        id: 'model-opt-2',
+        title: '放慢退出确认',
+        diagnosis: '原卖出信号可能对短期波动过敏。',
+        changeDimension: 'confirmation',
+        expectedEffect: '检验更慢确认是否减少假信号。',
+        tradeoff: '确认变慢可能放大单笔回撤。',
+        suggestedUtterance: '东方财富年报发布后买入，实际成交后第 10 个交易日卖出',
+        strategy: optimizedStrategy,
+        strategyHash: `sha256:${'d'.repeat(64)}`,
+        modelSuggested: true,
+      }],
+      modelProvenance: {
+        provider: 'deepseek',
+        model: 'deepseek-v4-pro',
+        promptVersion: 'backtest-review.prompt.v1',
+        schemaVersion: 'backtest-review.v1',
+        responseHash: `sha256:${'e'.repeat(64)}`,
+      },
+      disclaimer: '历史回测与模型建议仅用于研究，不构成投资建议或真实交易指令',
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/capabilities') {
+        return { ok: true, status: 200, json: async () => supported }
+      }
+      if (path === '/api/v1/strategy-drafts') {
+        return { ok: true, status: 200, json: async () => readyResponse() }
+      }
+      if (path === '/api/v1/backtest-runs/run%3Abase/review') {
+        expect(init?.method).toBe('POST')
+        expect(init?.body).toBeUndefined()
+        return { ok: true, status: 200, json: async () => reviewResponse }
+      }
+      if (path.endsWith('/revisions')) {
+        expect(JSON.parse(String(init?.body)).strategy).toEqual(optimizedStrategy)
+        expect(JSON.parse(String(init?.body)).recover_if_missing).toBe(true)
+        return { ok: true, status: 201, json: async () => ({
+          ...readyResponse(), draft_id: 'recovered-optimization-draft',
+          revision: 1, strategy: optimizedStrategy,
+          strategy_hash: `sha256:${'c'.repeat(64)}`,
+        }) }
+      }
+      if (path === '/api/v1/backtest-runs') {
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({
+            id: 'run:optimized',
+            state: 'queued',
+            progress: 0,
+            progressLabel: '已排队',
+            createdAt: '2026-09-05T12:01:00Z',
+            updatedAt: '2026-09-05T12:01:00Z',
+            fingerprint: 'fresh-optimization',
+            error: null,
+            resultAvailable: false,
+          }),
+        }
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { backtestApi, strategyApi } = await import('./client')
+    const compiled = await strategyApi.compile({
+      ...clarifiedRequest,
+      utterance: '东方财富年报发布后买入，MACD 死叉卖出',
+    })
+    if (compiled.status !== 'compiled') throw new Error('expected compiled StrategySpec')
+
+    const reviewed = await backtestApi.review('run:base')
+    const optimized = await backtestApi.createOptimization(
+      reviewed.optimizationCandidates[0]!,
+      compiled.draft,
+    )
+
+    expect(optimized.run.id).toBe('run:optimized')
+    expect(optimized.draft.strategySpec).toEqual(optimizedStrategy)
+    expect(optimized.draft.strategyHash).toBe(`sha256:${'c'.repeat(64)}`)
+    expect(optimized.draft.sourceText).toBe(reviewed.optimizationCandidates[0]?.suggestedUtterance)
+    expect(optimized.draft.execution).toEqual(compiled.draft.execution)
+    const createCall = fetchMock.mock.calls.find(([path]) => path === '/api/v1/backtest-runs')
+    expect(createCall).toBeDefined()
+    const body = JSON.parse(String((createCall?.[1] as RequestInit).body))
+    expect(body.strategy).toEqual(optimizedStrategy)
+    expect(body.config).toMatchObject({
+      capacityMode: compiled.draft.execution.capacityMode,
+      allocationRatio: compiled.draft.execution.allocationRatio,
+      slippageBps: compiled.draft.execution.slippageBps,
+    })
+    expect(fetchMock.mock.calls.filter(([path]) => path === '/api/v1/strategy-drafts')).toHaveLength(1)
+    expect(optimized.draft.id).toBe('recovered-optimization-draft')
+    expect(optimized.draft.revision).toBe(1)
+    const saveIndex = fetchMock.mock.calls.findIndex(([path]) => String(path).endsWith('/revisions'))
+    const runIndex = fetchMock.mock.calls.findIndex(([path]) => path === '/api/v1/backtest-runs')
+    expect(saveIndex).toBeGreaterThan(-1)
+    expect(saveIndex).toBeLessThan(runIndex)
+    expect(timeoutSpy).toHaveBeenCalledWith(300_000)
+  })
+
+  it('fails closed instead of fabricating an AI review in Mock mode', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'true')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { backtestApi } = await import('./client')
+
+    await expect(backtestApi.review('run:mock')).rejects.toMatchObject({
+      problem: expect.objectContaining({ code: 'backtest_review_model_unavailable' }),
+    })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [true, undefined],
+    [false, 'true'],
+  ])('uses the real API when DEV=%s and preview flag=%s', async (dev, flag) => {
+    vi.stubEnv('DEV', dev)
+    vi.stubEnv('VITE_USE_MOCK', flag)
+    const { apiMode } = await import('./client')
+    expect(apiMode).toBe('live')
+  })
+
+  it('sends verified stock-page context through the backend instrument_context field', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    vi.stubEnv('VITE_DATA_AS_OF_DATE', '2026-08-06')
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       void _init
       const path = String(input)
@@ -236,7 +473,9 @@ describe('live strategy client', () => {
       }
       if (path === '/api/v1/strategy-drafts/8c91eb84-ab49-4b0c-890a-682e9cc6fe21/revisions/3/clarification-answers') {
         expect(init?.method).toBe('POST')
-        expect(JSON.parse(String(init?.body))).toEqual({ answer: 'RSI 低于 30 买入' })
+        expect(JSON.parse(String(init?.body))).toEqual({
+          answer: 'RSI 低于 30 买入', related_run_ids: ['run:previous', 'run:current'],
+        })
         expect(new Headers(init?.headers).has('Idempotency-Key')).toBe(false)
         return {
           ok: true,
@@ -267,6 +506,7 @@ describe('live strategy client', () => {
       draftId: pending.draftId,
       revision: pending.revision,
       answer: 'RSI 低于 30 买入',
+      relatedRunIds: ['run:old', 'run:previous', 'run:current'],
       originalRequest: { ...clarifiedRequest, utterance: 'MACD 死叉卖出' },
       clarification: pending.clarification,
     })
@@ -311,7 +551,6 @@ describe('live strategy client', () => {
     const compiled = await strategyApi.compile({
       ...clarifiedRequest,
       utterance: '东方财富年报发布后买入，MACD 死叉卖出',
-      clarification: undefined,
     })
 
     expect(compiled.status).toBe('compiled')
@@ -358,7 +597,6 @@ describe('live strategy client', () => {
     const result = await strategyApi.compile({
       ...clarifiedRequest,
       utterance: '东方财富年报发布后买入，MACD 死叉卖出',
-      clarification: undefined,
     })
 
     expect(result.status).toBe('compiled')

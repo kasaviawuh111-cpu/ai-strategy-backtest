@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import tempfile
 from datetime import date, datetime
 from pathlib import Path
@@ -28,11 +29,13 @@ def main() -> int:
         print("BaoStock is not installed; install the project demo extra.")
         return 2
 
-    login = bs.login()
-    if str(login.error_code) != "0":
-        print(f"BaoStock login failed: {login.error_code} {login.error_msg}")
-        return 1
+    previous_socket_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(args.socket_timeout_seconds)
     try:
+        login = bs.login()
+        if str(login.error_code) != "0":
+            print(f"BaoStock login failed: {login.error_code} {login.error_msg}")
+            return 1
         result = BaoStockReferenceAdapter(bs).prepare(
             symbol=args.symbol,
             start=args.start,
@@ -62,7 +65,11 @@ def main() -> int:
         print(f"BaoStock reference preparation failed: {exc}")
         return 1
     finally:
-        bs.logout()
+        try:
+            if "login" in locals() and str(login.error_code) == "0":
+                bs.logout()
+        finally:
+            socket.setdefaulttimeout(previous_socket_timeout)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -71,9 +78,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--start", type=date.fromisoformat, required=True)
     parser.add_argument("--end", type=date.fromisoformat, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--socket-timeout-seconds", type=float, default=30.0)
     args = parser.parse_args()
     if args.start > args.end:
         parser.error("--start must not exceed --end")
+    if not 1 <= args.socket_timeout_seconds <= 120:
+        parser.error("--socket-timeout-seconds must be between 1 and 120")
     return args
 
 

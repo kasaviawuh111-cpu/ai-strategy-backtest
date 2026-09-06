@@ -14762,7 +14762,8 @@
       "triggers": [
         "gte_multiple",
         "lte_multiple",
-        "consecutive_gte_multiple"
+        "consecutive_gte_multiple",
+        "gt_multiple"
       ],
       "warmup_bars": 23
     },

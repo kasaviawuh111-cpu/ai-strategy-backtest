@@ -37,14 +37,20 @@ from ashare_lab.domain.market_data import DataSnapshotRef
 from ashare_lab.domain.provenance import SourceRef
 from ashare_lab.domain.runs import ExecutionAssumptions, RunManifest
 from ashare_lab.domain.shared import InstrumentId, Money, RunId, StrongId
+from ashare_lab.domain.signals import evaluate_provider_condition_tree_aligned
 from ashare_lab.domain.strategy import (
+    AnyCondition,
+    HoldingPeriodExit,
+    PositionReturnExit,
     StrategySpec,
+    TrailingDrawdownExit,
     canonical_hash,
     canonical_json,
     iter_event_conditions,
     strategy_requires_events,
     strategy_requires_financials,
 )
+from ashare_lab.domain.strategy.models import Condition
 from ashare_lab.domain.time import PointInTimeAvailability
 from ashare_lab.ports.backtest_runs import (
     BacktestJobState,
@@ -52,6 +58,11 @@ from ashare_lab.ports.backtest_runs import (
     BacktestRunStore,
 )
 from ashare_lab.ports.market_data import DataRequirements, DateRange, MarketDataRepository
+from ashare_lab.ports.provider_indicator_data import (
+    ProviderIndicatorPoint,
+    ProviderIndicatorSeries,
+    ProviderIndicatorValue,
+)
 from ashare_lab.ports.session_reference import SessionReferenceProvider
 
 
@@ -252,6 +263,38 @@ class BacktestExecutionService:
             if not bars:
                 raise BacktestWorkItemError("data_snapshot_contains_no_daily_bars")
             signal_bars = tuple(self.market_data.load_signal_bars(snapshot, instrument_id, period))
+            provider_session_dates = tuple(
+                bar.session_date for bar in signal_bars
+            )
+            provider_entry_timeline, provider_exit_timeline = _provider_timelines_from_work_item(
+                strategy,
+                manifest,
+                config,
+                session_dates=provider_session_dates,
+            )
+            # Validate provider evidence against the complete pinned axis first,
+            # then drop the post-period settlement tail exactly as the daily
+            # engine does. Warmup sessions before the strategy start remain.
+            if provider_entry_timeline is not None:
+                provider_entry_timeline = tuple(
+                    fact
+                    for session_date, fact in zip(
+                        provider_session_dates,
+                        provider_entry_timeline,
+                        strict=True,
+                    )
+                    if session_date <= strategy.backtest.end
+                )
+            if provider_exit_timeline is not None:
+                provider_exit_timeline = tuple(
+                    fact
+                    for session_date, fact in zip(
+                        provider_session_dates,
+                        provider_exit_timeline,
+                        strict=True,
+                    )
+                    if session_date <= strategy.backtest.end
+                )
             events = (
                 tuple(self.market_data.load_events(snapshot, instrument_id, period))
                 if requires_events
@@ -345,6 +388,8 @@ class BacktestExecutionService:
                 fee_calculator=fees,
                 events=events,
                 financial_facts=financial_facts,
+                provider_entry_timeline=provider_entry_timeline,
+                provider_exit_timeline=provider_exit_timeline,
                 corporate_actions=active_actions,
                 config=engine_config,
                 benchmark_equity=benchmark.funded_equity_path,
@@ -521,6 +566,136 @@ def _financial_facts_from_work_item(
             raise BacktestWorkItemError("financial_fact_instrument_mismatch")
         facts.append(fact)
     return tuple(facts)
+
+
+def _provider_timelines_from_work_item(
+    strategy: StrategySpec,
+    manifest: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    session_dates: tuple[date, ...],
+):
+    raw_payload = config.get("provider_indicator_series")
+    manifest_payload = manifest.get("provider_indicator_series")
+    if raw_payload is None:
+        if manifest_payload is not None:
+            raise BacktestWorkItemError("unexpected_provider_indicator_manifest")
+        return None, None
+    if not isinstance(raw_payload, dict) or not isinstance(manifest_payload, dict):
+        raise BacktestWorkItemError("provider_indicator_payload_invalid")
+    payload = cast(dict[str, Any], raw_payload)
+    persisted_payload = cast(dict[str, Any], manifest_payload)
+    if persisted_payload != payload:
+        raise BacktestWorkItemError("provider_indicator_manifest_mismatch")
+    identity_basis = payload.get("identity_basis")
+    if not isinstance(identity_basis, dict):
+        raise BacktestWorkItemError("provider_indicator_identity_basis_invalid")
+    checksum = _text(payload, "checksum")
+    if canonical_hash(cast(dict[str, object], identity_basis)) != checksum:
+        raise BacktestWorkItemError("provider_indicator_checksum_mismatch")
+    snapshot_id = _text(payload, "snapshot_id")
+    if snapshot_id != "provider-indicators:" + checksum.removeprefix("sha256:"):
+        raise BacktestWorkItemError("provider_indicator_snapshot_id_mismatch")
+    basis = cast(dict[str, Any], identity_basis)
+    entry_timeline = evaluate_provider_condition_tree_aligned(
+        strategy.entry,
+        _provider_series_by_path(basis.get("entry")),
+        session_dates,
+    )
+    exit_condition = _exit_condition(strategy)
+    exit_timeline = (
+        evaluate_provider_condition_tree_aligned(
+            exit_condition,
+            _provider_series_by_path(basis.get("exit")),
+            session_dates,
+        )
+        if exit_condition is not None
+        else None
+    )
+    return entry_timeline, exit_timeline
+
+
+def _provider_series_by_path(raw_items: object) -> dict[str, ProviderIndicatorSeries]:
+    if not isinstance(raw_items, list):
+        raise BacktestWorkItemError("provider_indicator_series_must_be_a_list")
+    result: dict[str, ProviderIndicatorSeries] = {}
+    for raw_item in cast(list[object], raw_items):
+        if not isinstance(raw_item, dict):
+            raise BacktestWorkItemError("provider_indicator_item_must_be_object")
+        item = cast(dict[str, Any], raw_item)
+        path = item.get("path")
+        raw_series = item.get("series")
+        if not isinstance(path, str) or not path:
+            raise BacktestWorkItemError("provider_indicator_path_invalid")
+        if not isinstance(raw_series, dict):
+            raise BacktestWorkItemError("provider_indicator_series_invalid")
+        result[path] = _provider_indicator_series_from_payload(
+            cast(dict[str, Any], raw_series)
+        )
+    return result
+
+
+def _provider_indicator_series_from_payload(
+    payload: dict[str, Any],
+) -> ProviderIndicatorSeries:
+    points: list[ProviderIndicatorPoint] = []
+    raw_points = payload.get("points")
+    if not isinstance(raw_points, list):
+        raise BacktestWorkItemError("provider_indicator_points_missing")
+    for raw_point in cast(list[object], raw_points):
+        if not isinstance(raw_point, dict):
+            raise BacktestWorkItemError("provider_indicator_point_invalid")
+        point = cast(dict[str, Any], raw_point)
+        raw_values = point.get("values")
+        if not isinstance(raw_values, list):
+            raise BacktestWorkItemError("provider_indicator_values_missing")
+        values: list[ProviderIndicatorValue] = []
+        for raw_value in cast(list[object], raw_values):
+            if not isinstance(raw_value, dict):
+                raise BacktestWorkItemError("provider_indicator_value_invalid")
+            value = cast(dict[str, Any], raw_value)
+            values.append(
+                ProviderIndicatorValue(
+                    field_code=_text(value, "field_code"),
+                    field_name=_text(value, "field_name"),
+                    value=Decimal(str(value.get("value"))),
+                    unit=_optional_text(value, "unit"),
+                )
+            )
+        points.append(
+            ProviderIndicatorPoint(
+                session_date=date.fromisoformat(_text(point, "session_date")),
+                observed_at=datetime.fromisoformat(_text(point, "observed_at")),
+                first_available_at=datetime.fromisoformat(_text(point, "first_available_at")),
+                values=tuple(values),
+            )
+        )
+    return ProviderIndicatorSeries(
+        provider=_text(payload, "provider"),
+        instrument_id=_text(payload, "instrument_id"),
+        indicator_id=_text(payload, "indicator_id"),
+        requested_start=date.fromisoformat(_text(payload, "requested_start")),
+        requested_end=date.fromisoformat(_text(payload, "requested_end")),
+        points=tuple(points),
+        response_sha256=_text(payload, "response_sha256"),
+        retrieved_at=datetime.fromisoformat(_text(payload, "retrieved_at")),
+        schema_version=_text(payload, "schema_version"),
+        query=_text(payload, "query"),
+    )
+
+
+def _exit_condition(strategy: StrategySpec) -> Condition | None:
+    children = tuple(
+        child
+        for child in strategy.exit.children
+        if not isinstance(
+            child,
+            (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit),
+        )
+    )
+    if not children:
+        return None
+    return children[0] if len(children) == 1 else AnyCondition(children=children)
 
 
 def _engine_config(config: dict[str, Any]) -> DailyBacktestConfig:

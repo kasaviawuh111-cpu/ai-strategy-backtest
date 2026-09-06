@@ -8,6 +8,7 @@
 | [00-acceptance.md](00-acceptance.md) | 做到什么才算完成 | 验收基线；不混入进度汇报 |
 | [status.md](status.md) | 目前哪些已证实、未完成或缺失 | 每次发布前按证据更新 |
 | [architecture/01-technical-plan.md](architecture/01-technical-plan.md) | 目标架构、当前纵切和后续演进 | 目标与现状必须显式区分 |
+| [portfolio-highlight-review-spec-v0.1.md](portfolio-highlight-review-spec-v0.1.md) | A/H 股账户导入、高光回放、AI 市场剧情与胶水架构 | `proposed`；本地验收前不部署 |
 | [architecture/adr/](architecture/adr/) | 为什么做出关键技术选择；含 PIT 容量、资金基准和公司行动决策 | 决策变化时新增或替代 ADR |
 | [runbooks/](runbooks/) | 如何开发、部署、迁移和恢复 | 命令必须能静态核对并定期演练 |
 | [reference/](reference/) | Catalog 覆盖与数据契约 | 由版本化数据或生成器校验 |

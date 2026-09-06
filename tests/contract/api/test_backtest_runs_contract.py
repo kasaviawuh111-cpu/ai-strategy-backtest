@@ -70,6 +70,19 @@ def configured_api() -> Iterator[tuple[TestClient, FakeRunStore, FakeSubmitter]]
         yield client, store, submitter
 
 
+def test_refresh_is_not_silently_ignored_by_snapshot_backtest(
+    configured_api: tuple[TestClient, FakeRunStore, FakeSubmitter],
+    strategy_payload: dict[str, Any],
+) -> None:
+    client, _store, submitter = configured_api
+    response = client.post("/api/v1/backtest-runs", json={
+        "strategy": strategy_payload, "config": {"refreshData": True},
+    })
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "data_refresh_unavailable"
+    assert submitter.configs == []
+
+
 def test_unconfigured_backtest_routes_exist_but_return_503(
     client: TestClient,
     strategy_payload: dict[str, Any],
@@ -197,6 +210,34 @@ def test_submit_is_async_shaped_and_fingerprint_idempotent(
     assert (
         event_capabilities["event.contracts_orders.major_contract_won"]["status"] == "unavailable"
     )
+
+
+def test_invalid_edited_year_is_rejected_before_queueing(
+    configured_api: tuple[TestClient, FakeRunStore, FakeSubmitter],
+    strategy_payload: dict[str, Any],
+) -> None:
+    client, _store, submitter = configured_api
+    strategy_payload["backtest"].update(start="0686-09-05", end="2026-09-05")
+    response = client.post("/api/v1/backtest-runs", json={"strategy": strategy_payload})
+    _assert_error(response, status_code=422, code="backtest_date_range_invalid")
+    assert "1990" in response.json()["error"]["message"]
+    assert submitter.configs == []
+
+
+def test_valid_long_range_and_zero_slippage_are_not_rewritten(
+    configured_api: tuple[TestClient, FakeRunStore, FakeSubmitter],
+    strategy_payload: dict[str, Any],
+) -> None:
+    client, store, submitter = configured_api
+    strategy_payload["backtest"].update(start="2010-09-05", end="2026-09-05")
+    response = client.post("/api/v1/backtest-runs", json={
+        "strategy": strategy_payload, "config": {"slippageBps": "0"},
+    })
+    assert response.status_code == 202
+    assert submitter.configs[-1].slippage_bps == Decimal("0")
+    record = store.get(RunId(response.json()["id"]))
+    assert record is not None
+    assert json.loads(record.strategy_json)["backtest"] == strategy_payload["backtest"]
 
 
 def test_financial_draft_strategy_must_be_submitted_without_rebuilding_execution(

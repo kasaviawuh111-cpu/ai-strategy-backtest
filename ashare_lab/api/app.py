@@ -19,7 +19,11 @@ from ashare_lab.adapters.language.vibe_candidates import (
 )
 from ashare_lab.adapters.language.vibe_clarification import VibeClarificationDialogueRouter
 from ashare_lab.adapters.language.vibe_ideas import VibeIdeaRouter
-from ashare_lab.application.compile_strategy import StrategyCompiler
+from ashare_lab.adapters.language.vibe_strategy_editing import VibeStrategyEditor
+from ashare_lab.application.compile_strategy import (
+    DEFAULT_INITIAL_CASH_CNY,
+    StrategyCompiler,
+)
 from ashare_lab.application.strategy_v2_http import StrategyV2HttpService
 from ashare_lab.domain.catalog import (
     CatalogSnapshot,
@@ -28,12 +32,19 @@ from ashare_lab.domain.catalog import (
     load_coverage_catalog_directory,
 )
 from ashare_lab.domain.signals.runtime import validate_stable_indicator_evaluator_catalog
+from ashare_lab.domain.strategy import CatalogRef
+from ashare_lab.ports.backtest_review import BacktestReviewAdvisor
 from ashare_lab.ports.backtest_runs import BacktestRunStore
+from ashare_lab.ports.current_fact_research import CurrentFactResearcher
+from ashare_lab.ports.live_market_data import LiveFinanceData, LiveMarketData
+from ashare_lab.ports.strategy_advice import VerifiedFactStrategyAdvisor
 
 from .container import ApiContainer, BacktestSubmitter
 from .errors import install_exception_handlers
 from .middleware import RequestContextMiddleware
 from .routes.backtest_runs import router as backtest_runs_router
+from .routes.market_data import router as market_data_router
+from .routes.portfolio_reviews import router as portfolio_reviews_router
 from .routes.strategy_drafts import router as strategy_drafts_router
 from .routes.strategy_v2 import router as strategy_v2_router
 from .routes.system import router as system_router
@@ -41,6 +52,11 @@ from .store import InMemoryDraftStore
 from .web_hosting import install_web_hosting
 
 DEFAULT_MAX_BODY_BYTES = 16 * 1024
+PORTFOLIO_REVIEW_BODY_LIMITS = {
+    "/api/v1/portfolio-reviews/imports/parse": 2 * 1024 * 1024,
+    "/api/v1/portfolio-reviews/analyze": 2 * 1024 * 1024,
+    "/api/v1/portfolio-reviews/narrate-highlight": 1024 * 1024,
+}
 
 
 def _event_backtest_available_by_default() -> bool:
@@ -67,6 +83,11 @@ def create_app(
     strategy_v2_service: StrategyV2HttpService | None = None,
     readiness_probe: Callable[[], Mapping[str, bool]] | None = None,
     readiness_reasons_probe: Callable[[], Mapping[str, str]] | None = None,
+    live_market_data: LiveMarketData | None = None,
+    live_finance_data: LiveFinanceData | None = None,
+    strategy_advisor: VerifiedFactStrategyAdvisor | None = None,
+    backtest_review_advisor: BacktestReviewAdvisor | None = None,
+    include_portfolio_review: bool = True,
     event_backtest_probe: Callable[[], bool] | None = None,
     event_backtest_codes_probe: Callable[[], frozenset[str]] | None = None,
     event_preparable_codes_probe: Callable[[], frozenset[str]] | None = None,
@@ -116,6 +137,10 @@ def create_app(
         strategy_v2_service=strategy_v2_service,
         readiness_probe=readiness_probe,
         readiness_reasons_probe=readiness_reasons_probe,
+        live_market_data=live_market_data,
+        live_finance_data=live_finance_data,
+        strategy_advisor=strategy_advisor,
+        backtest_review_advisor=backtest_review_advisor,
     )
 
     app = FastAPI(
@@ -127,14 +152,25 @@ def create_app(
     )
     app.state.container = container
     install_exception_handlers(app)
-    app.add_middleware(RequestContextMiddleware, max_body_bytes=max_body_bytes)
+    app.add_middleware(
+        RequestContextMiddleware,
+        max_body_bytes=max_body_bytes,
+        path_max_body_bytes=PORTFOLIO_REVIEW_BODY_LIMITS,
+    )
     if cors_allowed_origins:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(cors_allowed_origins),
             allow_credentials=False,
             allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["Content-Type", "Idempotency-Key", "X-Request-ID"],
+            allow_headers=[
+                "Accept",
+                "Content-Type",
+                "Idempotency-Key",
+                "X-Conversation-Parent-Draft-ID",
+                "X-Dialogue-Progress-ID",
+                "X-Request-ID",
+            ],
             expose_headers=["Idempotency-Replayed", "X-Request-ID"],
             max_age=600,
         )
@@ -142,6 +178,9 @@ def create_app(
     app.include_router(strategy_drafts_router)
     app.include_router(backtest_runs_router)
     app.include_router(strategy_v2_router)
+    app.include_router(market_data_router)
+    if include_portfolio_review:
+        app.include_router(portfolio_reviews_router)
     install_web_hosting(app, web_dist_root)
     return app
 
@@ -154,12 +193,22 @@ def build_hybrid_candidate_compiler(
     catalog: CatalogSnapshot,
     *,
     candidate_transport: IdentifiedCandidateJsonTransport,
+    idea_transport: IdentifiedCandidateJsonTransport | None = None,
     capability_matrix: CandidateCapabilityMatrix,
+    idea_capability_matrix: CandidateCapabilityMatrix | None = None,
     backtest_anchor_date: date | None = None,
     instrument_name_resolver: Callable[[str], str] | None = None,
+    researcher: CurrentFactResearcher | None = None,
+    idea_direct_dsl: bool = False,
+    candidate_repair_invalid_output: bool = False,
 ) -> StrategyCompiler:
-    """Compose rule-first interpretation with one Catalog-bounded fallback."""
+    """Compose provider-first interpretation with deterministic offline compatibility."""
 
+    selected_idea_transport = idea_transport or candidate_transport
+    manifest = next(
+        (item for item in catalog.manifests if item.catalog_id == "cn_a.signals"),
+        catalog.manifests[0],
+    )
     return _compiler_for_generator(
         catalog,
         HybridCandidateGenerator(
@@ -168,20 +217,42 @@ def build_hybrid_candidate_compiler(
                 candidate_transport,
                 capability_matrix=capability_matrix,
                 provider_identity=candidate_transport.identity,
+                repair_invalid_output=candidate_repair_invalid_output,
             ),
             instrument_name_resolver=instrument_name_resolver,
+            model_first=candidate_transport.identity.provider != "disabled",
         ),
         backtest_anchor_date=backtest_anchor_date,
         idea_router=VibeIdeaRouter(
-            candidate_transport,
-            capability_matrix=capability_matrix,
-            provider_identity=candidate_transport.identity,
+            selected_idea_transport,
+            capability_matrix=idea_capability_matrix or capability_matrix,
+            provider_identity=selected_idea_transport.identity,
+            repair_transport=(candidate_transport if candidate_repair_invalid_output else None),
+            repair_provider_identity=(
+                candidate_transport.identity if candidate_repair_invalid_output else None
+            ),
+            researcher=researcher,
+            strategy_catalog=(
+                CatalogRef(
+                    catalog_id=manifest.catalog_id,
+                    release_version=manifest.release_version,
+                )
+                if idea_direct_dsl
+                else None
+            ),
+            default_lookback_years=1,
+            default_initial_cash_cny=DEFAULT_INITIAL_CASH_CNY,
         ),
         clarification_dialogue_router=VibeClarificationDialogueRouter(
             candidate_transport,
             capability_matrix=capability_matrix,
         ),
         instrument_name_resolver=instrument_name_resolver,
+        strategy_editor=VibeStrategyEditor(
+            candidate_transport,
+            capability_matrix=idea_capability_matrix or capability_matrix,
+            provider_identity=candidate_transport.identity,
+        ) if candidate_transport.identity.provider != "disabled" else None,
     )
 
 
@@ -193,6 +264,7 @@ def _compiler_for_generator(
     idea_router: VibeIdeaRouter | None = None,
     clarification_dialogue_router: VibeClarificationDialogueRouter | None = None,
     instrument_name_resolver: Callable[[str], str] | None = None,
+    strategy_editor: VibeStrategyEditor | None = None,
 ) -> StrategyCompiler:
     manifest = next(
         (item for item in catalog.manifests if item.catalog_id == "cn_a.signals"),
@@ -207,6 +279,7 @@ def _compiler_for_generator(
         idea_router=idea_router,
         clarification_dialogue_router=clarification_dialogue_router,
         instrument_name_resolver=instrument_name_resolver,
+        strategy_editor=strategy_editor,
     )
 
 

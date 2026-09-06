@@ -35,6 +35,7 @@ from ashare_lab.domain.market_data import (
 )
 from ashare_lab.domain.orders import OrderSide
 from ashare_lab.domain.shared import InstrumentId, Money, Price, Quantity, StrongId
+from ashare_lab.domain.signals import SignalEvidence, SignalFact
 from ashare_lab.domain.strategy import (
     AllCondition,
     BacktestConfig,
@@ -241,6 +242,8 @@ def run(
     benchmark_initial_equity: Decimal | None = None,
     benchmark_entry_filled: bool | None = None,
     source_calendar_dates: tuple[date, ...] | None = None,
+    provider_entry_timeline: tuple[SignalFact | None, ...] | None = None,
+    provider_exit_timeline: tuple[SignalFact | None, ...] | None = None,
 ):
     actual_bars = source_bars or bars()
     actual_sessions = source_sessions or sessions(actual_bars)
@@ -257,6 +260,8 @@ def run(
             calendar=TradingCalendar(version="test-calendar", sessions=calendar_dates),
             fee_calculator=fees(),
             events=source_events,
+            provider_entry_timeline=provider_entry_timeline,
+            provider_exit_timeline=provider_exit_timeline,
             corporate_actions=source_actions,
             benchmark_close=benchmark_close,
             benchmark_equity=benchmark_equity,
@@ -272,6 +277,89 @@ def run(
     )
 
 
+def _provider_fact(
+    bar: DailyBar,
+    *,
+    condition_ref: str,
+    triggered: bool,
+) -> SignalFact:
+    return SignalFact(
+        instrument_id=bar.instrument_id,
+        session_date=bar.session_date,
+        condition_ref=condition_ref,
+        triggered=triggered,
+        observed_at=bar.available_at,
+        available_at=bar.available_at,
+        reason="exact provider-returned indicator comparison",
+        left_value=Decimal("30"),
+        right_value=Decimal("20"),
+        evidence=(
+            SignalEvidence(
+                evidence_type="provider_indicator",
+                evidence_id=f"eastmoney:{condition_ref}:{bar.session_date}",
+                available_at=bar.available_at,
+                provider="eastmoney_mx_finance_data",
+                timestamp_precision="second",
+                validation_status="provider_value_validated",
+                raw_response_sha256="sha256:" + "b" * 64,
+            ),
+        ),
+    )
+
+
+def test_provider_timelines_bypass_local_indicator_calculation() -> None:
+    source_bars = bars(("10", "10", "10", "10", "10", "10"))
+    entry = tuple(
+        _provider_fact(
+            bar,
+            condition_ref="technical.ma@1.0.0:price_crosses_above",
+            triggered=index == 1,
+        )
+        for index, bar in enumerate(source_bars)
+    )
+    exit_timeline = tuple(
+        _provider_fact(
+            bar,
+            condition_ref="technical.ma@1.0.0:price_crosses_below",
+            triggered=index == 3,
+        )
+        for index, bar in enumerate(source_bars)
+    )
+
+    result = run(
+        source_bars=source_bars,
+        provider_entry_timeline=entry,
+        provider_exit_timeline=exit_timeline,
+    )
+
+    assert tuple(fill.side for fill in result.fills) == (
+        OrderSide.BUY,
+        OrderSide.SELL,
+    )
+    assert all(
+        signal.evidence[0].provider == "eastmoney_mx_finance_data"
+        for signal in result.signals
+    )
+
+
+def test_provider_mode_never_mixes_with_local_exit_calculation() -> None:
+    source_bars = bars(("10", "10", "10", "10"))
+    entry = tuple(
+        _provider_fact(
+            bar,
+            condition_ref="technical.ma@1.0.0:price_crosses_above",
+            triggered=False,
+        )
+        for bar in source_bars
+    )
+
+    with pytest.raises(
+        DailyBacktestInputError,
+        match="requires an exit signal timeline",
+    ):
+        run(source_bars=source_bars, provider_entry_timeline=entry)
+
+
 def test_signal_close_executes_only_at_next_session_open() -> None:
     result = run()
 
@@ -283,6 +371,23 @@ def test_signal_close_executes_only_at_next_session_open() -> None:
     assert result.round_trips[0].net_pnl < 0
     assert result.final_portfolio.position_quantity(INSTRUMENT) == Quantity.zero()
     assert result.orders[0].match.capacity_reason_code == ("capacity_previous_session_volume_proxy")
+
+
+def test_last_session_buy_without_proven_t_plus_one_session_fails_closed() -> None:
+    source_bars = bars()[:4]
+    final_session = source_bars[-1].session_date
+    result = run(
+        source_bars=source_bars,
+        spec=strategy(end_offset=3),
+        source_calendar_dates=tuple(bar.session_date for bar in source_bars),
+    )
+
+    assert result.fills == ()
+    assert result.decisions[-1].status is DecisionStatus.NO_FUTURE_SESSION
+    assert result.decisions[-1].outcome_reason == (
+        "no_proven_t_plus_one_session_after_buy_fill"
+    )
+    assert result.equity_curve[-1].session_date == final_session
 
 
 @pytest.mark.parametrize(

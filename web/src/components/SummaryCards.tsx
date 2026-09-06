@@ -13,7 +13,6 @@ import type {
   FailureState,
   Instrument,
   SeriesPoint,
-  StrategyCapabilitySummary,
   StrategyRuleNode,
   StrategySummary,
 } from '../types';
@@ -71,119 +70,16 @@ export function RuleTree({ node, compact = false }: { node: StrategyRuleNode; co
   return <div className="rule-tree"><RuleNode node={node} compact={compact} /></div>;
 }
 
-const capabilityStateLabel: Record<StrategyCapabilitySummary['stages'][number]['state'], string> = {
-  available: '已具备',
-  conditional: '按请求准备',
-  unavailable: '不可用',
-  unknown: '待确认',
-  demo: '预览',
-};
-
-export function CapabilityCard(
-  { capability, mode, onEdit }:
-  { capability: StrategyCapabilitySummary; mode: 'mock' | 'live'; onEdit?: () => void },
-) {
-  return (
-    <section className="mcard capability-card" aria-label="策略能力状态">
-      <div className="pad">
-        <div className="capability-head">
-          <b>{mode === 'mock' ? '界面预览说明' : '这条策略当前能走到哪一步'}</b>
-          <span>{mode === 'mock' ? '不代表后台可用' : '来自能力接口'}</span>
-        </div>
-        <ol className="capability-stages">
-          {capability.stages.map((stage, index) => (
-            <li key={stage.key} className={`cap-${stage.state}`}>
-              <i>{index + 1}</i>
-              <span><b>{stage.label}</b><small>{stage.detail}</small></span>
-              <em>{capabilityStateLabel[stage.state]}</em>
-            </li>
-          ))}
-        </ol>
-        {capability.events.map((event) => (
-          <div className="event-capability" key={event.eventCode}>
-            <b>{event.label}</b>
-            <span>Catalog {capabilityStateLabel[event.catalog]}</span>
-            <span>可准备 {capabilityStateLabel[event.preparable]}</span>
-            <span>固定快照 {capabilityStateLabel[event.pinnedSnapshot]}</span>
-            <small>{event.detail}</small>
-          </div>
-        ))}
-        {capability.reason ? <p className="capability-reason">{capability.reason}</p> : null}
-      </div>
-      {!capability.canRun && onEdit ? <CardFoot actions={[{ label: '修改规则', onClick: onEdit }]} /> : null}
-    </section>
-  );
-}
-
-export function RecognizedCard(
-  { items }: { items: Array<{ label: string; value: string }> },
-) {
-  if (items.length === 0) return null;
-  return (
-    <section className="mcard recognized-card" aria-label="已经识别的规则片段">
-      <div className="pad">
-        <p className="ttl">已经替你保留</p>
-        {items.map((item) => (
-          <div className="recognized-row" key={`${item.label}:${item.value}`}>
-            <span>{item.label}</span><b>{item.value}</b>
-          </div>
-        ))}
-        <Notice tone="info">这些是你已经说清楚的部分，我先留着；补完直接接上，不用重说一遍。</Notice>
-      </div>
-    </section>
-  );
-}
-
-export function PreparationCard(
-  { stage, needsPreparation, isMock = false }:
-  { stage: 'saving' | 'preparing'; needsPreparation: boolean; isMock?: boolean },
-) {
-  const title = stage === 'saving'
-    ? '正在保存最终策略版本'
-    : needsPreparation ? '正在准备这次事件数据' : '正在校验固定数据并提交任务';
-  return (
-    <section className="mcard preparation-card" aria-live="polite">
-      <div className="pad">
-        <div className="phase-now"><span>{isMock ? `预览：${title}` : title}</span><code>提交中</code></div>
-        <p>{isMock
-          ? '这里模拟提交等待，不代表后台正在采集或计算。'
-          : needsPreparation
-            ? '后端正在按股票、区间和年度报告条件准备并校验数据；只有准备通过才会创建回测任务。'
-            : '前端正在等待服务端确认策略版本和任务身份，不伪造后台进度。'}</p>
-      </div>
-    </section>
-  );
-}
-
-export function NextStepCard(
-  { onEdit, onStress, onTrades }:
-  { onEdit: () => void; onStress: () => void; onTrades: () => void },
-) {
-  return (
-    <section className="mcard next-step-card">
-      <div className="pad">
-        <p className="ttl">接下来可以继续验证</p>
-        <p>这些动作只帮助检查历史规则，不给出买卖建议。</p>
-      </div>
-      <CardFoot actions={[
-        { label: '修改规则', onClick: onEdit, mute: true },
-        { label: '压力测试', onClick: onStress, mute: true },
-        { label: '查看交易', onClick: onTrades },
-      ]} />
-    </section>
-  );
-}
-
 /** 策略确认卡：首层只保留买入、卖出、区间；本金与高级成交设置下沉。 */
 export function StrategyCard(
-  { instrument, strategy, onEditRow, onOpenMore, onRun, isStarting, isLocked, settled, canStart = true, disabledReason, error, executionSummary }:
+  { instrument, strategy, onEditRow, onOpenMore, onRun, isStarting, isLocked, settled, editableAfterRun = false, canStart = true, disabledReason, error, executionSummary }:
   { instrument: Instrument; strategy: StrategySummary;
     onEditRow: (key: EditableRow['key']) => void; onOpenMore: () => void; onRun: () => void;
-    isStarting?: boolean; isLocked?: boolean; settled?: string; canStart?: boolean; disabledReason?: string; error?: string;
+    isStarting?: boolean; isLocked?: boolean; settled?: string; editableAfterRun?: boolean; canStart?: boolean; disabledReason?: string; error?: string;
     /** 当前成交设置的一句话后果，由 view-model 的 summarizeExecution 生成。 */
     executionSummary?: string },
 ) {
-  const isReadOnly = Boolean(isLocked || settled);
+  const isReadOnly = Boolean(isLocked || (settled && !editableAfterRun));
   return (
     <section className={`mcard${settled ? ' is-settled' : ''}`}>
       <div className="pad">
@@ -244,15 +140,21 @@ export function StrategyCard(
 
 /** 运行卡（SPEC 4.7）：只展示真实阶段，不伪造算法进度 */
 export function RunningCard(
-  { phase, onCancel, isCancelling, isMock = false }:
-  { phase: RunPhase; onCancel: () => void; isCancelling?: boolean; isMock?: boolean },
+  { phase, progressLabel, onCancel, isCancelling, isMock = false }:
+  {
+    phase: RunPhase;
+    progressLabel?: string;
+    onCancel: () => void;
+    isCancelling?: boolean;
+    isMock?: boolean;
+  },
 ) {
   const canCancel = !['succeeded', 'failed', 'cancelled'].includes(phase);
   const phaseLabel = RUN_PHASE_LABEL[phase];
-  const status = phase === 'cancel_requested' ? phaseLabel : `正在${phaseLabel}`;
+  const fallbackStatus = phase === 'cancel_requested' ? phaseLabel : `正在${phaseLabel}`;
+  const status = !isMock && progressLabel?.trim() ? progressLabel.trim() : fallbackStatus;
   return (
     <ThinkingStream
-      title="运行这次历史回测"
       status={isMock ? `预览：${status}` : status}
       label="回测进度"
       action={(

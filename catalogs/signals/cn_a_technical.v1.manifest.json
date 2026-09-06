@@ -378,7 +378,8 @@
       "triggers": [
         {"id": "gte_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
         {"id": "lte_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
-        {"id": "consecutive_gte_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true}
+        {"id": "consecutive_gte_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true},
+        {"id": "gt_multiple", "value_requirement": "required", "minimum": 0, "exclusive_minimum": true}
       ]
     },
     {

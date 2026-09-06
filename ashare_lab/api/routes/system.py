@@ -190,6 +190,9 @@ def _indicator_capabilities(container: ApiContainer) -> tuple[IndicatorCapabilit
         raise _indicator_catalog_mismatch("stable indicator identifiers differ")
 
     capabilities: list[IndicatorCapability] = []
+    unavailable_reasons = getattr(
+        container.backtest_submission, "indicator_unavailable_reasons", {}
+    )
     for indicator_id in sorted(executable):
         definition = executable[indicator_id]
         metadata = coverage[indicator_id]
@@ -201,9 +204,13 @@ def _indicator_capabilities(container: ApiContainer) -> tuple[IndicatorCapabilit
             IndicatorCapability(
                 indicator_id=definition.id,
                 definition_version=definition.version,
-                status=definition.status,
+                status="unavailable" if indicator_id in unavailable_reasons else definition.status,
                 display_name=metadata.name_zh,
-                description=metadata.description,
+                description=(
+                    f"东方财富查数 Skill 的{metadata.name_zh}历史数据暂不可用于回测："
+                    f"{unavailable_reasons[indicator_id]}"
+                    if indicator_id in unavailable_reasons else metadata.description
+                ),
                 warmup_bars=definition.warmup_bars,
                 timeframes=definition.timeframes,
                 evaluation_modes=definition.evaluation_modes,

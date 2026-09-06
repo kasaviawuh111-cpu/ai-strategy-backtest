@@ -20,6 +20,30 @@ const expectedExchange = (code: string): { suffix: 'SH' | 'SZ' | 'BJ'; exchange:
   return null
 }
 
+/**
+ * Turn a provider-grounded A-share code into the exact host instrument shape.
+ * This accepts either a bare six-digit code or a code with an exchange suffix,
+ * but never guesses across exchanges or accepts fund/index code ranges.
+ */
+export const toAshareInstrument = (
+  rawSymbol: string,
+  rawName?: string | null,
+): Instrument | null => {
+  const normalized = rawSymbol.trim().toUpperCase()
+  const match = /^(\d{6})(?:\.(SH|SZ|BJ))?$/.exec(normalized)
+  if (!match) return null
+  const code = match[1] ?? ''
+  const expected = expectedExchange(code)
+  if (!expected || (match[2] && match[2] !== expected.suffix)) return null
+  const symbol = `${code}.${expected.suffix}`
+  return {
+    symbol,
+    name: rawName?.trim() || symbol,
+    market: 'CN_A',
+    exchange: expected.exchange,
+  }
+}
+
 export const resolveInstrumentContext = (search: string): InstrumentContextResolution => {
   const params = new URLSearchParams(search)
   const rawSymbol = params.get('instrument_context') ?? params.get('symbol')

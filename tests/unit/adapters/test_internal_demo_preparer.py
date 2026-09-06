@@ -114,14 +114,19 @@ class FakeRunner:
                 "provider failed",
                 "network unavailable",
             )
-        if script.endswith("prepare_baostock_reference.py"):
+        if script.endswith(("prepare_baostock_reference.py", "prepare_mx_reference.py")):
             instrument = command[command.index("--symbol") + 1]
             code = instrument.split(".", maxsplit=1)[0]
             output = Path(command[command.index("--output") + 1])
+            schema_version = (
+                "ashare-lab.instrument-session-reference.v3"
+                if script.endswith("prepare_mx_reference.py")
+                else "baostock.internal-demo-reference.v2"
+            )
             output.write_text(
                 json.dumps(
                     {
-                        "schemaVersion": "baostock.internal-demo-reference.v2",
+                        "schemaVersion": schema_version,
                         "instrument": {
                             "instrument_id": instrument,
                             "listing_date": "2010-03-19",
@@ -177,6 +182,12 @@ class FakeRunner:
                     }
                 ),
                 "",
+            )
+        if script.endswith("prepare_mx_snapshot.py"):
+            return PreparationCommandResult(
+                CHOICE_PROVIDER_UNAVAILABLE_EXIT_CODE,
+                "",
+                "MX unavailable",
             )
         if script.endswith("prepare_baostock_snapshot.py"):
             output_root = Path(command[command.index("--output-root") + 1])
@@ -253,6 +264,7 @@ def _preparer(
     runner: FakeRunner,
     *,
     daily_source: str = "choice_then_eastmoney",
+    reference_source: str = "baostock",
 ) -> InternalDemoSnapshotPreparer:
     return InternalDemoSnapshotPreparer(
         tmp_path,
@@ -263,6 +275,7 @@ def _preparer(
         composite_output_root="composite",
         temporary_root="temporary",
         daily_source=daily_source,
+        reference_source=reference_source,
         command_runner=runner,
     )
 
@@ -328,6 +341,31 @@ def test_technical_request_publishes_no_event_event_v2_and_composite_v2(
     event_command = runner.calls[3]
     assert "--no-event-required" in event_command
     assert "--event-code" not in event_command
+
+
+def test_explicit_mx_reference_never_starts_baostock_before_daily_acquisition(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+
+    result = _preparer(
+        tmp_path,
+        runner,
+        reference_source="eastmoney_mx",
+    ).prepare(
+        _requirements(instrument="688981.SH"),
+        DateRange(date(2025, 3, 8), date(2026, 9, 4)),
+    )
+
+    assert result.producer_snapshot_id == f"composite:{'b' * 64}"
+    scripts = [Path(call[1]).name for call in runner.calls]
+    assert scripts == [
+        "prepare_mx_reference.py",
+        "prepare_eastmoney_corporate_actions.py",
+        "prepare_choice_snapshot.py",
+        "prepare_event_snapshot.py",
+    ]
+    assert "prepare_baostock_reference.py" not in scripts
 
 
 def test_explicit_baostock_daily_source_uses_only_one_stock_daily_acquisition(
@@ -538,17 +576,20 @@ def test_choice_failure_falls_back_to_offline_push2_snapshot_pipeline(tmp_path: 
         "prepare_baostock_reference.py",
         "prepare_eastmoney_corporate_actions.py",
         "prepare_choice_snapshot.py",
+        "prepare_mx_snapshot.py",
         "prepare_eastmoney_snapshot.py",
         "prepare_event_snapshot.py",
     ]
-    fallback = runner.calls[3]
-    assert fallback[fallback.index("--fallback-reason") + 1] == "choice_daily_exit_75"
+    fallback = runner.calls[4]
+    assert (
+        fallback[fallback.index("--fallback-reason") + 1] == "choice_daily_exit_75_mx_unavailable"
+    )
     fallback_root = Path(fallback[fallback.index("--output-root") + 1])
     choice_root = Path(runner.calls[2][runner.calls[2].index("--output-root") + 1])
     assert fallback_root == tmp_path / "technical"
     assert choice_root == tmp_path / "choice"
     assert fallback_root != choice_root
-    event_command = runner.calls[4]
+    event_command = runner.calls[5]
     selected = Path(event_command[event_command.index("--choice-snapshot") + 1])
     assert selected.name == "c" * 64
 

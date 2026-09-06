@@ -22,6 +22,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import ssl
+import time as time_module
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -62,6 +64,8 @@ _DATE_ONLY_AVAILABLE_TIME = time(hour=15)
 _DEFAULT_TIMEOUT_SECONDS = 15.0
 _DEFAULT_PAGE_SIZE = 100
 _MAX_PAGES = 1_000
+_MAX_REQUEST_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = (0.25, 0.75)
 _ZERO_RESULT_CODE = 9201
 _ZERO_RESULT_MESSAGE = "返回数据为空"
 _CODE_RE = re.compile(r"^(?P<digits>[0-9]{6})(?:\.(?P<market>SH|SZ|BJ))?$")
@@ -75,6 +79,8 @@ _KNOWN_NON_SPLIT_CHANGE_MARKERS = (
     "高管股份变动",
     "限制性股票",
     "期权行权",
+    "自主行权",
+    "股份性质变更",
     "股权激励",
     "回购",
     "注销",
@@ -285,6 +291,7 @@ class EastmoneyCorporateActionReferenceAdapter:
         timeout: float | httpx.Timeout = _DEFAULT_TIMEOUT_SECONDS,
         page_size: int = _DEFAULT_PAGE_SIZE,
         clock: Callable[[], datetime] | None = None,
+        sleeper: Callable[[float], None] = time_module.sleep,
     ) -> None:
         if client is not None and transport is not None:
             raise ValueError("inject client or transport, not both")
@@ -293,7 +300,16 @@ class EastmoneyCorporateActionReferenceAdapter:
         self._timeout = timeout if isinstance(timeout, httpx.Timeout) else httpx.Timeout(timeout)
         self._page_size = page_size
         self._clock = clock or _now_shanghai
+        self._sleeper = sleeper
         self._owns_client = client is None
+        if client is None and transport is None:
+            tls = ssl.create_default_context()
+            tls.minimum_version = ssl.TLSVersion.TLSv1_2
+            tls.maximum_version = ssl.TLSVersion.TLSv1_2
+            transport = httpx.HTTPTransport(
+                local_address="0.0.0.0",
+                verify=tls,
+            )
         self._client = client or httpx.Client(
             transport=transport,
             timeout=self._timeout,
@@ -610,16 +626,36 @@ class EastmoneyCorporateActionReferenceAdapter:
         url: str,
         params: Mapping[str, str],
     ) -> tuple[JsonObject, bytes]:
-        try:
-            response = self._client.get(
-                url,
-                params=dict(params),
-                headers=_HEADERS,
-                timeout=self._timeout,
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise EastmoneyCorporateActionError(f"Eastmoney request failed: {exc}") from exc
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(1, _MAX_REQUEST_ATTEMPTS + 1):
+            try:
+                response = self._client.get(
+                    url,
+                    params=dict(params),
+                    headers=_HEADERS,
+                    timeout=self._timeout,
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                last_error = exc
+                retryable_status = (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and (exc.response.status_code == 429 or exc.response.status_code >= 500)
+                )
+                if attempt < _MAX_REQUEST_ATTEMPTS and (
+                    isinstance(exc, httpx.TransportError) or retryable_status
+                ):
+                    self._sleeper(_RETRY_BACKOFF_SECONDS[attempt - 1])
+                    continue
+                raise EastmoneyCorporateActionError(
+                    f"Eastmoney request failed: {exc}"
+                ) from exc
+            break
+        else:  # pragma: no cover - the loop either returns a response or raises
+            assert last_error is not None
+            raise EastmoneyCorporateActionError(
+                f"Eastmoney request failed: {last_error}"
+            ) from last_error
         raw = response.content
         try:
             decoded = json.loads(raw)

@@ -2,17 +2,31 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 
 import { FailureCard, ResultCard, RunningCard, StrategyCard } from './components/SummaryCards'
+import { BacktestReview } from './components/BacktestReview'
+import { StrategySlotComposer } from './components/StrategySlotComposer'
+import { ModelReasoning } from './components/ModelReasoning'
+import { ColumnResizer } from './components/ColumnResizer'
+import { useStoredColumnWidths } from './components/column-widths'
+import { Proposals, type ProposalItem } from './components/Proposals'
 import {
-  Bubble, Chip, Chips, DayDivider, FollowUp, FollowUps, Say, ThinkBlock, ThinkingStream, Turn,
+  Bubble, Chip, Chips, DayDivider, Notice, Say, ThinkBlock,
+  ThinkingStream, Turn,
 } from './components/primitives'
-import { ChainScreen, ExecutionDetailsScreen, ParamsScreen, ReportScreen } from './screens'
+import { ChainScreen, ExecutionDetailsScreen, ExecutionEntry, ParamsScreen, ReportBody } from './screens'
 import { apiMode, backtestApi, strategyApi, systemApi } from './shared/api/client'
+import type { DialogueProgressEvent, DialogueProgressObserver } from './shared/api/client'
+import { fromBacktestOptimizationCandidate, toLiveBacktestBody, toLiveRevisionBody } from './shared/api/contract'
 import { ApiError } from './shared/api/types'
 import type {
   BacktestActivity,
+  BacktestOptimizationCandidate,
+  BacktestReviewResponse,
+  BacktestRun,
   Clarification,
+  ClarificationData,
   ClarificationSuggestion,
   CompileRequest,
+  IdeaRouteProposal,
   Instrument as ApiInstrument,
   StrategyDraft,
 } from './shared/api/types'
@@ -20,7 +34,9 @@ import {
   MAXIMUM_INITIAL_CASH_CNY,
   MINIMUM_INITIAL_CASH_CNY,
 } from './shared/config/backtest'
-import { DEFAULT_INSTRUMENT } from './shared/instrument-context'
+import { validateBacktestDates } from './shared/backtest-date-validation'
+import { DEFAULT_INSTRUMENT, toAshareInstrument } from './shared/instrument-context'
+import { DEFAULT_STRATEGY_EXAMPLES } from './shared/default-strategy-examples'
 import type {
   BacktestMetrics,
   ChartMark,
@@ -48,11 +64,18 @@ import {
 } from './view-model'
 import './styles/app.css'
 
-type Overlay = 'params' | 'report' | 'execution' | 'chain'
+type Overlay = 'params' | 'execution' | 'chain'
+
+const executableRuleText = (draft: StrategyDraft): string => {
+  const rules = toStrategySummary(draft).rows.slice(0, 2)
+    .map((row) => `${row.label}：${row.value}`).join('；')
+  return `${draft.instrument.name}；${rules}；${draft.backtest.start} 至 ${draft.backtest.end}`
+}
 
 type ClarificationMessage = {
   role: 'assistant' | 'user'
   text: string
+  data?: ClarificationData
 }
 
 type ClarificationTarget = {
@@ -74,12 +97,30 @@ type JourneySnapshot = {
   evidence: RunEvidence
   activities: BacktestActivity[]
   clarificationMessages: ClarificationMessage[]
+  review?: BacktestReviewResponse
 }
+
+/**
+ * 策略名。必须由「编译出来的策略」推导，不能用用户第一句原话：
+ * 多轮澄清之后，最终规则可能和第一句毫无关系（线上出现过标题是「你可以干啥」）。
+ * 名字跟着要执行的东西走，才不会和实际跑的规则对不上。
+ */
+const strategyTitle = (instrument: Instrument, strategy: StrategySummary): string =>
+  `${instrument.name} ${summarizeRule(strategy.entryRule)}买入，`
+  + `${summarizeRule(strategy.exitRule)}卖出`
 
 const terminalStates = new Set(['succeeded', 'failed', 'cancelled'])
 /** 点「开始回测」时替用户发出的那句话；和按钮文案保持同一个词。 */
 const RUN_COMMAND = '开始回测'
 const cloneDraft = (draft: StrategyDraft): StrategyDraft => JSON.parse(JSON.stringify(draft)) as StrategyDraft
+const sameExecutableDraft = (candidate: StrategyDraft, baseline: StrategyDraft): boolean =>
+  JSON.stringify({
+    strategy: toLiveRevisionBody(candidate).strategy,
+    config: toLiveBacktestBody(candidate).config,
+  }) === JSON.stringify({
+    strategy: toLiveRevisionBody(baseline).strategy,
+    config: toLiveBacktestBody(baseline).config,
+  })
 const instrumentClarificationIds = new Set([
   'instrument_required',
   'instrument_unconfirmed',
@@ -90,78 +131,288 @@ const isInstrumentClarification = (
 ): boolean =>
   Boolean(clarification && instrumentClarificationIds.has(clarification.id))
 
-const suggestionText = (clarification: Clarification): string[] => {
-  const fromChoices = clarification.choices
-    .map((choice) => {
-      const suggestion = choice.suggestedUtterance?.trim()
-      if (!suggestion) return choice.label.trim()
-      const instrumentName = choice.instrumentName?.trim()
-      return instrumentName && !suggestion.includes(instrumentName)
-        ? `${instrumentName}${suggestion}`
-        : suggestion
-    })
-    .filter(Boolean)
+const visibleClarificationChoices = (clarification: Clarification): typeof clarification.choices =>
+  clarification.choices.filter((choice) => choice.action !== 'edit_utterance')
 
-  let fallback: string[]
-  if (isInstrumentClarification(clarification)) {
-    fallback = []
-  } else if (clarification.id === 'entry_rule_not_recognized') {
-    fallback = ['MACD 金叉买入', '突破 20 日均线买入', '跌幅达到你设定的比例时买入']
-  } else if (clarification.id === 'exit_rule_not_recognized') {
-    fallback = ['MACD 死叉卖出', '跌破 20 日均线卖出', '持有若干个交易日后卖出']
-  } else {
-    fallback = ['补充完整的买入和卖出条件', '改用价格或涨跌幅条件', '改用 MACD、均线或 RSI 条件']
-  }
-  return [...new Set([...fromChoices, ...fallback])].slice(0, 3)
+const ENTRY_ACTION = /(?:买入|买进|建仓|开仓|低吸|抄底)/
+const EXIT_ACTION = /(?:卖出|卖掉|退出|平仓|清仓|止盈|止损)/
+
+/**
+ * 观点候选只能展示服务端给出的完整买卖句。标题或假设本身不是规则，
+ * 前端也不把“趋势确认”之类抽象方向补成可执行语句。
+ */
+const isCompleteIdeaProposal = (proposal: IdeaRouteProposal): boolean => {
+  const utterance = proposal.suggested_utterance.trim()
+  return Boolean(
+    proposal.entry_summary.trim()
+    && proposal.exit_summary.trim()
+    && ENTRY_ACTION.test(utterance)
+    && EXIT_ACTION.test(utterance),
+  )
+}
+
+const orderedIdeaProposals = (
+  clarification: Clarification | undefined,
+  suggestions: ClarificationSuggestion[],
+): IdeaRouteProposal[] => {
+  const proposals = clarification?.ideaRoute?.proposals ?? []
+  if (!proposals.length) return []
+  const byId = new Map(proposals.map((proposal) => [proposal.id, proposal]))
+  const ranked = suggestions
+    .map((suggestion) => byId.get(suggestion.id))
+    .filter((proposal): proposal is IdeaRouteProposal => Boolean(proposal))
+  const rankedIds = new Set(ranked.map((proposal) => proposal.id))
+  return [...ranked, ...proposals.filter((proposal) => !rankedIds.has(proposal.id))]
+    .filter(isCompleteIdeaProposal)
+    .slice(0, 3)
+}
+
+const ideaProposalInstrument = (
+  clarification: Clarification,
+  target: ClarificationTarget | undefined,
+  proposal: IdeaRouteProposal,
+): string | undefined => {
+  const symbol = proposal.instrument_symbol
+    ?? clarification.ideaRoute?.asset_mapping.instrument_symbol
+    ?? undefined
+  if (!symbol) return undefined
+  const groundedChoice = clarification.choices.find((choice) =>
+    choice.id === proposal.id && choice.instrumentSymbol === symbol && choice.instrumentName)
+  const targetInstrument = target?.originalRequest.instrument
+  const targetIsGrounded = target?.originalRequest.instrumentContextSource !== 'standalone_default'
+    && targetInstrument?.symbol === symbol
+  const name = proposal.instrument_name ?? groundedChoice?.instrumentName
+    ?? (targetIsGrounded ? targetInstrument?.name : undefined)
+  return name ? `${name} · ${symbol}` : symbol
+}
+
+const ideaProposalCards = (
+  clarification: Clarification | undefined,
+  target: ClarificationTarget | undefined,
+  suggestions: ClarificationSuggestion[],
+): ProposalItem[] => {
+  if (!clarification?.ideaRoute) return []
+  return orderedIdeaProposals(clarification, suggestions).map((proposal) => ({
+    id: proposal.id,
+    title: proposal.pairing_reason
+      ? `${proposal.instrument_name ?? proposal.instrument_symbol} · ${proposal.title}`
+      : proposal.title,
+    paired: Boolean(proposal.pairing_reason),
+    detail: proposal.pairing_reason ?? undefined,
+    instrument: ideaProposalInstrument(clarification, target, proposal),
+    entry: proposal.entry_summary,
+    exit: proposal.exit_summary,
+  }))
 }
 
 const clarificationAnswerMessage = (
   assistantMessage: string,
-  suggestions: ClarificationSuggestion[],
-): string => {
-  if (suggestions.length === 0) return assistantMessage
-  const numbered = suggestions
-    .map((item, index) => `${index + 1}. ${item.title}：${item.preview}`)
-    .join('\n')
-  return `${assistantMessage}\n你可以直接输入：\n${numbered}\n也可以自己描述。`
+): string => assistantMessage
+
+type DisplayDataTable = {
+  title?: string
+  columns: string[]
+  rows: unknown[][]
 }
 
-const clarificationMessage = (clarification: Clarification): string => {
-  const recognized = clarification.recognized?.length
-    ? `我已保留这些内容：${clarification.recognized
-      .map((item) => `${item.label}是${item.value}`)
-      .join('；')}。`
-    : ''
-  const suggestionItems = clarification.ideaRoute
-    ? clarification.choices.slice(0, 3).map((choice, index) => {
-        const sentence = suggestionText({ ...clarification, choices: [choice] })[0]
-          ?? choice.label
-        return `${index + 1}. ${choice.label}：${sentence}`
-      })
-    : []
-  const suggestions = clarification.ideaRoute
-    ? suggestionItems.join('\n')
-    : suggestionText(clarification).map((item) => `“${item}”`).join('、')
-  return [
-    clarification.reason,
-    recognized,
-    clarification.question,
-    suggestions
-      ? clarification.ideaRoute
-        ? `可以回复 1、2、3，也可以自己描述：\n${suggestions}`
-        : `你可以直接输入${suggestions}，也可以自己描述。`
-      : '',
-  ].filter(Boolean).join('\n')
+const providerTable = (table: Record<string, unknown>): DisplayDataTable | undefined => {
+  const title = typeof table.title === 'string' ? table.title : undefined
+  const rawTable = table.rawTable
+  const source = rawTable && typeof rawTable === 'object' && !Array.isArray(rawTable)
+    ? rawTable as Record<string, unknown>
+    : table
+  const rawColumns = Array.isArray(source.headers)
+    ? source.headers
+    : Array.isArray(source.columns) ? source.columns : []
+  const columns = rawColumns.map((value) => String(value))
+  const rawRows = Array.isArray(source.data)
+    ? source.data
+    : Array.isArray(source.rows) ? source.rows : []
+  if (!columns.length || !rawRows.length) return undefined
+  const rows = rawRows.map((row) => {
+    if (Array.isArray(row)) return row
+    if (row && typeof row === 'object') {
+      const record = row as Record<string, unknown>
+      return columns.map((column) => record[column])
+    }
+    return [row]
+  })
+  return { title, columns, rows }
 }
+
+const currentDataTables = (data: ClarificationData): DisplayDataTable[] => {
+  if (data.kind === 'screen') {
+    return [{
+      title: `${data.screen.assetType}选股结果`,
+      columns: data.screen.columns,
+      rows: data.screen.rows.map((row) => data.screen.columns.map((column) => row[column])),
+    }]
+  }
+  if (data.kind === 'finance') {
+    return data.finance.tables.map(providerTable).filter((table): table is DisplayDataTable => Boolean(table))
+  }
+  const screen = data.screenedFinance.screen
+  return [
+    {
+      title: `先选出 ${data.screenedFinance.entities.length} 只标的`,
+      columns: screen.columns,
+      rows: screen.rows.map((row) => screen.columns.map((column) => row[column])),
+    },
+    ...data.screenedFinance.batches
+      .flatMap((batch) => batch.tables)
+      .map(providerTable)
+      .filter((table): table is DisplayDataTable => Boolean(table)),
+  ]
+}
+
+const firstText = (
+  row: Record<string, unknown>,
+  keys: readonly string[],
+): string | undefined => {
+  for (const key of keys) {
+    const value = row[key]
+    if (typeof value === 'string' || typeof value === 'number') {
+      const text = String(value).trim()
+      if (text) return text
+    }
+  }
+  return undefined
+}
+
+const screenRowInstruments = (
+  rows: Array<Record<string, unknown>>,
+): ApiInstrument[] => rows.flatMap((row) => {
+  const code = firstText(row, ['证券代码', '股票代码', '代码'])
+  if (!code) return []
+  const instrument = toAshareInstrument(
+    code,
+    firstText(row, ['证券简称', '股票简称', '股票名称', '名称', '简称', '股票']),
+  )
+  return instrument ? [instrument] : []
+})
+
+/** Only expose actions for provider-grounded A-share identities. */
+const currentDataInstruments = (data: ClarificationData): ApiInstrument[] => {
+  let instruments: ApiInstrument[] = []
+  if (data.kind === 'screen' && data.screen.assetType === 'A股') {
+    instruments = screenRowInstruments(data.screen.rows)
+  } else if (data.kind === 'screened_finance') {
+    instruments = data.screenedFinance.entities.flatMap((entity) => {
+      if (entity.assetType !== 'A股') return []
+      const instrument = toAshareInstrument(entity.code, entity.name)
+      return instrument ? [instrument] : []
+    })
+  }
+  const unique = new Map(instruments.map((item) => [item.symbol, item]))
+  return [...unique.values()].slice(0, 8)
+}
+
+const researchSourceUrl = (url: string): string | undefined => {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function IdeaResearchEvidence({ clarification }: { clarification: Clarification }) {
+  const research = clarification.ideaRoute?.research
+  if (!research?.sources.length) return null
+  return (
+    <details className="idea-research" aria-label="联网分析依据">
+      <summary>查看参考来源</summary>
+        <div className="idea-research__sources" aria-label="联网信息来源">
+          {research.sources.slice(0, 5).map((source) => {
+            const href = researchSourceUrl(source.url)
+            return href ? (
+              <a key={source.source_id} href={href} target="_blank" rel="noreferrer">
+                {source.title}
+              </a>
+            ) : null
+          })}
+        </div>
+    </details>
+  )
+}
+
+function CurrentDataResult({
+  data,
+  onAnalyze,
+}: {
+  data: ClarificationData
+  onAnalyze?: (instrument: ApiInstrument) => void
+}) {
+  // A direct finance lookup is already summarized in the assistant sentence.
+  // Keep the structured payload in state for auditability, but do not expose
+  // provider field names, hashes or transport metadata in the conversation.
+  if (data.kind === 'finance') return null
+  const tables = currentDataTables(data)
+  const instruments = currentDataInstruments(data)
+  return (
+    <div className="current-data" aria-label="实时查询结果">
+      {tables.map((table, index) => (
+        <section className="current-data__table" key={`${table.title ?? '查询结果'}-${index}`}>
+          {table.title ? <h3>{table.title}</h3> : null}
+          <div className="current-data__scroll">
+            <table>
+              <thead>
+                <tr>{table.columns.slice(0, 8).map((column) => <th key={column}>{column}</th>)}</tr>
+              </thead>
+              <tbody>
+                {table.rows.slice(0, 12).map((row, rowIndex) => (
+                  <tr key={rowIndex}>
+                    {table.columns.slice(0, 8).map((_, columnIndex) => (
+                      <td key={columnIndex}>{String(row[columnIndex] ?? '—')}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {table.rows.length > 12 ? <p className="current-data__more">已展示前 12 条，共 {table.rows.length} 条</p> : null}
+        </section>
+      ))}
+      {onAnalyze && instruments.length ? (
+        <div className="current-data__actions" aria-label="选择标的继续分析">
+          <p>选一只继续：先联网核实公开信息，再给出可由你确认的回测策略。</p>
+          {instruments.map((instrument) => (
+            <button
+              type="button"
+              key={instrument.symbol}
+              onClick={() => onAnalyze(instrument)}
+            >
+              联网分析并给回测策略：{instrument.name} · {instrument.symbol}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * 「下面是几条…」是选项的说明文案，只在选项**当场还在**时才成立。
+ * 提问被归进历史时选项不会跟着留下，这句话就会指向一个不存在的东西，
+ * 所以归档前要摘掉它。现场那条不受影响。
+ */
+const CLARIFICATION_OPTIONS_HINT = '选一个试试，或说说你想怎么改。'
+
+const withoutOptionsHint = (text: string): string =>
+  text.split('\n').filter((line) => line.trim() !== CLARIFICATION_OPTIONS_HINT).join('\n')
+
+// The server returns one complete model reply; choices remain separate UI controls.
+const clarificationMessage = (clarification: Clarification): string => clarification.question
 
 const clarificationPlaceholder = (clarification: Clarification | undefined): string => {
   if (!clarification) return '说出什么时候买、什么时候卖'
+  if (clarification.instrumentSuggestions?.length) return '也可以输入你想用的股票'
   if (isInstrumentClarification(clarification)) return '输入股票名称或 6 位代码'
   if (clarification.id === 'entry_rule_not_recognized') return '补充什么时候买入'
   if (clarification.id === 'exit_rule_not_recognized') return '补充什么时候卖出'
   if (clarification.ideaRoute
     && clarification.ideaRoute.asset_mapping.instrument_symbol == null) {
-    return '输入股票，并说想验证哪个方向'
+    return '选个方向，或说说你想用哪只股票'
   }
   if (clarification.ideaRoute) return '回复序号，或直接说完整规则'
   return '补充完整规则，或直接换一种说法'
@@ -169,6 +420,19 @@ const clarificationPlaceholder = (clarification: Clarification | undefined): str
 
 const compileRecoveryMessage = (error: unknown): string => {
   const code = errorCode(error)?.toLowerCase() ?? ''
+  if (code === 'strategy_draft_not_found' || code === 'strategy_draft_revision_stale') {
+    return '刚才这轮对话状态已经失效，请把这句话再发一次。'
+  }
+  if (code === 'api_timeout') {
+    return '这次识别等待超时了，请原样再发一次。'
+  }
+  if (code === 'api_network_unavailable') {
+    return '这次没有连上本地回测服务，请确认后端仍在运行后原样重试。'
+  }
+  if (code === 'skill_indicator_unavailable' || code.startsWith('live_market_data_')) {
+    return errorMessage(error)
+  }
+  if (code.startsWith('candidate_provider_')) return errorMessage(error)
   if (code === 'previous_session_limit_up_capability_unavailable') {
     return '我已理解你想用“前一交易日涨停”作为买入条件。当前回测还不能可靠执行这个信号，也不会用单日涨 10% 代替。请在下方改用“价格突破”、“涨跌幅”或“MACD / 均线”条件，并说清卖出方式。'
   }
@@ -184,46 +448,9 @@ const compileRecoveryMessage = (error: unknown): string => {
     return '我还没能把这句话还原成完整的买卖规则。请在下方用一句话补充股票、买入和卖出条件；可以从价格阈值、涨跌幅，或 MACD / 均线 / RSI 中选一个方向。'
   }
   if (code.includes('capability') || code.includes('unavailable')) {
-    return `我已理解这条规则，但当前回测还缺少可验证的数据或执行能力。${errorMessage(error)} 请在下方换成价格、涨跌幅或已支持的技术指标条件。`
+    return errorMessage(error)
   }
-  return '这次规则识别没有完成。你可以在下方原样重试，或把股票、买入条件和卖出条件改成一句更明确的话。'
-}
-
-type QuickIconName = 'thinking' | 'skill' | 'task' | 'timer' | 'stock'
-
-function QuickIcon({ name }: { name: QuickIconName }) {
-  if (name === 'thinking') {
-    return <svg viewBox="0 0 18 18" fill="none" aria-hidden="true">
-      <path d="m7.1 11.2-1.6 1.6a2.7 2.7 0 0 1-3.8-3.8l2.5-2.5A2.7 2.7 0 0 1 8 6.4" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
-      <path d="m10.9 6.8 1.6-1.6A2.7 2.7 0 0 1 16.3 9l-2.5 2.5a2.7 2.7 0 0 1-3.8.1" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
-      <path d="m6.4 9 5.2.1" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
-    </svg>
-  }
-  if (name === 'skill') {
-    return <svg viewBox="0 0 18 18" fill="none" aria-hidden="true">
-      <path d="M11.5 2.3a4 4 0 0 0-4.8 5.2l-4 4a1.7 1.7 0 0 0 2.4 2.4l4-4a4 4 0 0 0 5.2-4.8l-2.4 2.4-2.2-.5-.5-2.2 2.3-2.5Z" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
-      <path className="quick-accent" d="M14.5 1.2v2.4M13.3 2.4h2.4" strokeWidth="1.35" strokeLinecap="round" />
-    </svg>
-  }
-  if (name === 'task') {
-    return <svg viewBox="0 0 18 18" fill="none" aria-hidden="true">
-      <rect x="2.1" y="4" width="13.8" height="11" rx="3" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M6 8.2h.01M12 8.2h.01M6.3 11.4c1.5 1.1 3.9 1.1 5.4 0M9 4V2.4" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" />
-      <path className="quick-accent" d="m14.5 1 .35 1.05 1.05.35-1.05.35-.35 1.05-.35-1.05-1.05-.35 1.05-.35L14.5 1Z" strokeWidth=".7" strokeLinejoin="round" />
-    </svg>
-  }
-  if (name === 'timer') {
-    return <svg viewBox="0 0 18 18" fill="none" aria-hidden="true">
-      <rect x="2.1" y="2.4" width="13.8" height="13.2" rx="2.8" stroke="currentColor" strokeWidth="1.4" />
-      <path className="quick-accent" d="m4.6 6.2.8.8 1.4-1.6m-2.2 5 .8.8 1.4-1.6" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M9 6.2h4.2M9 10.4h4.2" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
-    </svg>
-  }
-  return <svg viewBox="0 0 18 18" fill="none" aria-hidden="true">
-    <path d="M3 3.2h8.7M4.8 7h5M6.5 10.8h1.7M3 3.2l3.5 4.1v3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    <circle cx="12.5" cy="11.5" r="3.1" stroke="currentColor" strokeWidth="1.4" />
-    <path className="quick-accent" d="m14.8 13.8 2 2" strokeWidth="1.5" strokeLinecap="round" />
-  </svg>
+  return `策略生成请求未完成：${errorMessage(error)}`
 }
 
 const errorMessage = (error: unknown) => {
@@ -236,6 +463,30 @@ const errorMessage = (error: unknown) => {
 
 const errorCode = (error: unknown) => error instanceof ApiError ? error.problem.code : undefined
 
+const backtestFailureMessage = (run: BacktestRun): string => {
+  // Only the indicator stage identifies the exact Skill. History preparation
+  // can call both screening and finance lookup, so do not guess its origin.
+  const source = run.progressLabel.includes('获取东方财富指标')
+    ? '东方财富查数 Skill'
+    : '东方财富选股/查数流程'
+  switch (run.error) {
+    case 'skill_MxSaasProviderAuthError':
+      return `${source}授权失败，本次回测未完成。`
+    case 'skill_MxSaasProviderUnavailableError':
+      return `${source}连接失败，请稍后重试。`
+    case 'skill_MxSaasProviderNoDataError':
+      return `${source}未返回本次回测所需的数据。`
+    case 'skill_MxSaasProviderDataError':
+      return `${source}返回的数据未通过本次回测的数据检查，回测已停止。`
+    case 'skill_MxDailyHistoryError':
+      return '东方财富历史数据读取或检查失败，本次回测未完成。'
+    case 'skill_history_fields_missing':
+      return run.progressLabel
+    default:
+      return run.error ?? '后台没有返回具体失败原因。'
+  }
+}
+
 const failureFor = (
   error: unknown,
   fallbackKey: string,
@@ -246,6 +497,16 @@ const failureFor = (
   const code = errorCode(error) ?? (error instanceof Error ? error.message : '')
   const normalized = code.toLowerCase()
 
+  if (normalized === 'skill_indicator_unavailable') {
+    return {
+      key: 'capability_unavailable',
+      status: 'unavailable',
+      title: '历史指标数据暂不可用',
+      reason: errorMessage(error),
+      actions: ['修改规则', '使用技术示例'],
+      runId,
+    }
+  }
   if (normalized.includes('instrument_required')) {
     return {
       key: 'missing_stock',
@@ -262,7 +523,7 @@ const failureFor = (
     return {
       key: 'data_incomplete',
       status: 'partial',
-      title: '已理解规则，但缺少报告正文数据',
+      title: '缺少报告正文数据',
       reason: `${errorMessage(error)} 系统不会用公告标题代替正文，也不会猜测词频。请补齐可校验的报告正文快照后再运行。`,
       actions: ['修改规则', '使用技术示例'],
       runId,
@@ -292,8 +553,8 @@ const failureFor = (
     return {
       key: 'capability_unavailable',
       status: 'unavailable',
-      title: '规则已识别，但当前能力不能运行',
-      reason: `${errorMessage(error)} 你可以修改规则，或等固定快照与准备能力可用后再试。`,
+      title: '暂时无法回测',
+      reason: errorMessage(error),
       actions: ['修改规则', '使用技术示例'],
       runId,
     }
@@ -350,7 +611,7 @@ const draftValidation = (draft: StrategyDraft) => {
   const invalidCash = !Number.isInteger(draft.backtest.initialCashCny)
     || draft.backtest.initialCashCny < MINIMUM_INITIAL_CASH_CNY
     || draft.backtest.initialCashCny > MAXIMUM_INITIAL_CASH_CNY
-  const invalidWindow = draft.backtest.start > draft.backtest.end
+  const dateValidation = validateBacktestDates(draft.backtest.start, draft.backtest.end)
   const invalidExecution = !Number.isFinite(draft.execution.participationRate)
     || draft.execution.participationRate <= 0
     || draft.execution.participationRate > 1
@@ -376,7 +637,7 @@ const draftValidation = (draft: StrategyDraft) => {
   if (intrabar) return { valid: false, reason: '分钟行情与分钟撮合尚未接入，盘中策略暂不可运行。' }
   if (invalidParameter) return { valid: false, reason: '有指标参数超出允许范围，请打开参数页检查。' }
   if (invalidCash) return { valid: false, reason: '初始资金需为 1 万元至 10 亿元之间的整数。' }
-  if (invalidWindow) return { valid: false, reason: '回测开始日期不能晚于结束日期。' }
+  if (!dateValidation.valid) return dateValidation
   if (invalidExecution) return { valid: false, reason: '高级执行参数超出后端允许范围，请打开设置检查。' }
   return { valid: true, reason: undefined }
 }
@@ -385,6 +646,10 @@ type AppProps = {
   instrument?: ApiInstrument
   instrumentContextSource?: 'stock_page' | 'standalone_default'
   instrumentContextError?: string
+  /**
+   * 宿主返回入口。顶栏移除后本页不再自绘返回键——嵌入方自己有导航，
+   * 独立打开时浏览器后退就够了。保留在类型里，免得调用方要改签名。
+   */
   onReturnToStockPage?: () => void
   onUseStandaloneExample?: () => void
 }
@@ -393,12 +658,13 @@ export default function App({
   instrument = DEFAULT_INSTRUMENT,
   instrumentContextSource = 'standalone_default',
   instrumentContextError,
-  onReturnToStockPage = () => window.history.back(),
 }: AppProps) {
   const queryClient = useQueryClient()
-  const volumeBreakoutExample = `${instrument.name}创20日新高且放量1.5倍买入，跌破20日线卖出`
-  const financialTrendExample = `${instrument.name}PE低于35且MACD金叉买入，MACD死叉卖出`
+  const maCrossExample = `${instrument.name}5日均线上穿20日均线买入，5日均线下穿20日均线卖出`
   const [utterance, setUtterance] = useState('')
+  const [strategySlots, setStrategySlots] = useState<{ draft: StrategyDraft; mode: 'stock' | 'rules' }>()
+  const rerunAfterEdit = useRef(false)
+  const refreshEditedRun = useRef(false)
   const [submittedText, setSubmittedText] = useState<string>()
   const [draft, setDraft] = useState<StrategyDraft>()
   const [baselineDraft, setBaselineDraft] = useState<StrategyDraft>()
@@ -406,6 +672,9 @@ export default function App({
   const [clarificationTarget, setClarificationTarget] = useState<ClarificationTarget>()
   const [clarificationMessages, setClarificationMessages] = useState<ClarificationMessage[]>([])
   const [clarificationPrompt, setClarificationPrompt] = useState<string>()
+  const [clarificationData, setClarificationData] = useState<ClarificationData>()
+  const [clarificationSuggestions, setClarificationSuggestions] = useState<ClarificationSuggestion[]>([])
+  const [clarificationRequestFailed, setClarificationRequestFailed] = useState(false)
   const [runId, setRunId] = useState<string>()
   /**
    * 点「开始回测」是用户下的指令，所以它应该像用户说的一句话那样进入对话流，
@@ -413,15 +682,53 @@ export default function App({
    */
   const [runCommand, setRunCommand] = useState<string>()
   const [journeyHistory, setJourneyHistory] = useState<JourneySnapshot[]>([])
+  // Browser-tab lifetime only. A new strategy keeps this opaque server draft
+  // lineage; an explicit new conversation clears it. Never persist it globally.
+  const [conversationTailDraftId, setConversationTailDraftId] = useState<string>()
   const [reportSnapshot, setReportSnapshot] = useState<JourneySnapshot>()
+
   const [stack, setStack] = useState<Overlay[]>([])
   const [paramsFocus, setParamsFocus] = useState<EditableRow['key'] | 'more'>('entry')
   const [chainTitle, setChainTitle] = useState('交易因果轨迹')
   const [chainNodes, setChainNodes] = useState<ReturnType<typeof buildChain>>([])
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
-  const [reminderSet, setReminderSet] = useState(false)
+  /**
+   * 策略审阅栏的展开态。桌面端是常驻右栏（这个值只控制手机端那块贴底面板），
+   * 新策略识别出来时自动展开——刚生成就该被看见。
+   */
+  const [reviewOpen, setReviewOpen] = useState(false)
+  /**
+   * 主区呈现哪一种版式：
+   *   'chat'   —— 左栏 + 对话（+ 可选的策略审阅栏），也就是两栏 / 三栏
+   *   'detail' —— 左栏 + 一整块策略详情，中间的对话让位（回测跑完后的落点）
+   * 详情态不是「另一个页面」，只是同一块工作区换了一种排布，所以做成状态而不是路由。
+   */
+  const [view, setView] = useState<'chat' | 'detail'>('chat')
+  const [detailTab, setDetailTab] = useState<'flow' | 'report'>('flow')
+  /** 详情区显示哪一次回测：默认当前这次，左栏点历史时切过去。 */
+  const [detailJourneyId, setDetailJourneyId] = useState<string>()
+  const [dialogueProgress, setDialogueProgress] = useState<readonly DialogueProgressEvent[]>([])
+  const dialogueProgressAbortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const workspaceRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  useStoredColumnWidths(workspaceRef)
+
+  useEffect(() => () => dialogueProgressAbortRef.current?.abort(), [])
+
+  const beginDialogueProgress = (): DialogueProgressObserver => {
+    dialogueProgressAbortRef.current?.abort()
+    const controller = new AbortController()
+    dialogueProgressAbortRef.current = controller
+    setDialogueProgress([])
+    return {
+      signal: controller.signal,
+      onProgress: (events) => {
+        if (!controller.signal.aborted) setDialogueProgress(events.slice(-12))
+      },
+    }
+  }
 
   const open = (overlay: Overlay) => setStack((current) =>
     current.includes(overlay) ? current : [...current, overlay])
@@ -441,32 +748,67 @@ export default function App({
   })
 
   const compileMutation = useMutation({
-    mutationFn: ({ text, instrumentOverride }: {
+    mutationFn: ({ text, instrumentOverride, parentDraftId, editCurrentStrategy,
+      relatedRunIds, relatedReview }: {
       text: string
       instrumentOverride?: ApiInstrument
-    }) => strategyApi.compile(compileRequestFor({ text, instrumentOverride })),
+      parentDraftId?: string
+      editCurrentStrategy?: boolean
+      relatedRunIds?: string[]
+      relatedReview?: CompileRequest['relatedReview']
+    }) => {
+      const request = {
+        ...compileRequestFor({ text, instrumentOverride }),
+        editCurrentStrategy,
+        relatedRunIds,
+        relatedReview,
+        dialogueProgress: beginDialogueProgress(),
+      }
+      return parentDraftId
+        ? strategyApi.compile(request, parentDraftId)
+        : strategyApi.compile(request)
+    },
     onSuccess: (outcome, variables) => {
+      if (outcome.status === 'compiled' && outcome.runRequested) {
+        rerunAfterEdit.current = true
+        refreshEditedRun.current = outcome.refreshData === true
+      }
+      setConversationTailDraftId(
+        outcome.status === 'compiled' ? outcome.draft.id : outcome.draftId,
+      )
+      setClarificationRequestFailed(false)
       setRunId(undefined)
       setStack([])
       setRunCommand(undefined)
+      // 新的识别结果永远属于对话；识别出草稿就顺手把审阅栏打开
+      setView('chat')
+      setDetailJourneyId(undefined)
+      setReviewOpen(outcome.status !== 'needs_clarification')
       if (outcome.status === 'needs_clarification') {
         setDraft(undefined)
         setBaselineDraft(undefined)
         setClarification(outcome.clarification)
+        const review = outcome.clarification.backtestReview
+        if (review) setJourneyHistory(current => current.map(item => item.id === review.runId
+          ? { ...item, review } : item))
         setClarificationTarget({
           draftId: outcome.draftId,
           revision: outcome.revision,
           originalRequest: compileRequestFor(variables),
         })
         setClarificationMessages([])
-        setClarificationPrompt(clarificationMessage(outcome.clarification))
+        setClarificationSuggestions([])
+        setClarificationPrompt(outcome.assistantMessage ?? clarificationMessage(outcome.clarification))
+        setClarificationData(outcome.data)
         setUtterance('')
         window.setTimeout(() => inputRef.current?.focus(), 0)
       } else {
         const nextDraft = cloneDraft(outcome.draft)
         setClarification(undefined)
         setClarificationTarget(undefined)
+        setClarificationSuggestions([])
         setClarificationPrompt(undefined)
+        setClarificationData(undefined)
         setDraft(nextDraft)
         setBaselineDraft(cloneDraft(nextDraft))
       }
@@ -478,40 +820,75 @@ export default function App({
   })
 
   const answerMutation = useMutation({
-    mutationFn: ({ answer, target, pendingClarification }: {
+    mutationFn: ({ answer, target, pendingClarification, relatedRunIds, relatedReview }: {
       answer: string
       target: ClarificationTarget
       pendingClarification: Clarification
+      relatedRunIds?: string[]
+      relatedReview?: CompileRequest['relatedReview']
     }) => strategyApi.answerClarification({
       draftId: target.draftId,
       revision: target.revision,
       answer,
+      relatedRunIds,
+      relatedReview,
       originalRequest: target.originalRequest,
       clarification: pendingClarification,
+      dialogueProgress: beginDialogueProgress(),
     }),
     onSuccess: (turn, variables) => {
-      const assistantText = clarificationAnswerMessage(turn.assistantMessage, turn.suggestions)
+      if (turn.outcome.status === 'compiled' && turn.outcome.runRequested) {
+        rerunAfterEdit.current = true
+        refreshEditedRun.current = turn.outcome.refreshData === true
+      }
+      setConversationTailDraftId(
+        turn.outcome.status === 'compiled'
+          ? turn.outcome.draft.id
+          : turn.outcome.draftId,
+      )
+      setClarificationRequestFailed(false)
+      const assistantText = clarificationAnswerMessage(turn.assistantMessage)
       setRunId(undefined)
       setStack([])
       setRunCommand(undefined)
+      setView('chat')
+      setDetailJourneyId(undefined)
+      setReviewOpen(turn.outcome.status !== 'needs_clarification')
       if (turn.outcome.status === 'needs_clarification') {
         setDraft(undefined)
         setBaselineDraft(undefined)
         setClarification(turn.outcome.clarification)
+        const review = turn.outcome.clarification.backtestReview
+        if (review) setJourneyHistory(current => current.map(item => item.id === review.runId
+          ? { ...item, review } : item))
         setClarificationTarget({
           draftId: turn.outcome.draftId,
           revision: turn.outcome.revision,
           originalRequest: variables.target.originalRequest,
         })
+        setClarificationSuggestions(turn.suggestions)
         setClarificationPrompt(assistantText)
+        setClarificationData(turn.data)
       } else {
         const nextDraft = cloneDraft(turn.outcome.draft)
+        const selectedProposal = variables.pendingClarification.ideaRoute?.proposals.find(
+          (proposal) => proposal.id === variables.answer && proposal.pairing_reason
+            && proposal.instrument_symbol === nextDraft.instrument.symbol,
+        )
+        const verifiedName = selectedProposal?.instrument_name?.trim()
+        if (verifiedName && (!nextDraft.instrument.name.trim()
+          || nextDraft.instrument.name === nextDraft.instrument.symbol)) {
+          // READY may omit the paired proposal's name; preserve only this exact selection.
+          nextDraft.instrument.name = verifiedName
+        }
         setClarification(undefined)
         setClarificationTarget(undefined)
+        setClarificationSuggestions([])
         setClarificationPrompt(undefined)
+        setClarificationData(undefined)
         setClarificationMessages((current) => [
           ...current,
-          { role: 'assistant', text: assistantText },
+          { role: 'assistant', text: assistantText, data: turn.data },
         ])
         setDraft(nextDraft)
         setBaselineDraft(cloneDraft(nextDraft))
@@ -520,7 +897,13 @@ export default function App({
       window.setTimeout(() => inputRef.current?.focus(), 0)
     },
     onError: (error) => {
+      // A failed second-turn request must not leave the previous turn's cards
+      // visible underneath a new error message. They belong to an older turn
+      // and make a transport failure look like a fresh model recommendation.
+      setClarificationRequestFailed(true)
+      setClarificationSuggestions([])
       setClarificationPrompt(compileRecoveryMessage(error))
+      setClarificationData(undefined)
       setUtterance('')
       window.setTimeout(() => inputRef.current?.focus(), 0)
     },
@@ -534,9 +917,15 @@ export default function App({
   })
 
   const startMutation = useMutation({
-    mutationFn: async (candidate: StrategyDraft) => {
-      const savedDraft = await strategyApi.revise(candidate)
-      const run = await backtestApi.create(savedDraft)
+    mutationFn: async ({ candidate, refreshData = false }: {
+      candidate: StrategyDraft; refreshData?: boolean
+    }) => {
+      const dateValidation = validateBacktestDates(candidate.backtest.start, candidate.backtest.end)
+      if (!dateValidation.valid) throw new Error(dateValidation.reason)
+      const savedDraft = baselineDraft && sameExecutableDraft(candidate, baselineDraft)
+        ? candidate
+        : await strategyApi.revise(candidate)
+      const run = await backtestApi.create(savedDraft, { refreshData })
       return { savedDraft, run }
     },
     onSuccess: ({ savedDraft, run }) => {
@@ -556,6 +945,12 @@ export default function App({
       const state = query.state.data?.state
       return state && terminalStates.has(state) ? false : 700
     },
+    /*
+     * 回测是后台任务，用户十有八九会切到别处等它跑完。
+     * react-query 默认在页面不可见时暂停轮询，那样切回来之前任务看着就是卡死的——
+     * 这是状态查询，不是省流量的列表刷新，必须在后台继续问。
+     */
+    refetchIntervalInBackground: true,
   })
 
   const cancelMutation = useMutation({
@@ -583,11 +978,87 @@ export default function App({
     enabled: Boolean(runId) && hasResult,
   })
 
+  const [reviewProgress, setReviewProgress] = useState<{
+    runId: string; events: readonly DialogueProgressEvent[]
+  }>()
+  const reviewProgressAbortRef = useRef<AbortController | null>(null)
+  useEffect(() => () => reviewProgressAbortRef.current?.abort(), [])
+  const reviewMutation = useMutation({
+    mutationFn: (source: JourneySnapshot) => {
+      reviewProgressAbortRef.current?.abort()
+      const controller = new AbortController()
+      reviewProgressAbortRef.current = controller
+      setReviewProgress({ runId: source.id, events: [] })
+      return backtestApi.review(source.id, {
+        signal: controller.signal,
+        onProgress: (events) => {
+          if (!controller.signal.aborted) setReviewProgress({ runId: source.id, events })
+        },
+      })
+    },
+    onSuccess: (review) => {
+      setJourneyHistory((current) => current.map((item) => item.id === review.runId
+        ? { ...item, review } : item))
+    },
+  })
+  const autoReviewedRunIds = useRef(new Set<string>())
+
+  const optimizationMutation = useMutation({
+    mutationFn: async ({ source, candidate }: {
+      source: JourneySnapshot
+      candidate: BacktestOptimizationCandidate
+    }) => ({
+      source,
+      candidate,
+      ...await backtestApi.createOptimization(candidate, source.draft),
+    }),
+    onSuccess: ({ source, candidate, draft: optimizedDraft, run }) => {
+      setConversationTailDraftId(optimizedDraft.id)
+      setJourneyHistory((current) => current.some((item) => item.id === source.id)
+        ? current
+        : [...current, source])
+      setUtterance('')
+      setSubmittedText(`回测优化方案「${candidate.title}」：${executableRuleText(optimizedDraft)}`)
+      setDraft(optimizedDraft)
+      setBaselineDraft(cloneDraft(optimizedDraft))
+      setClarification(undefined)
+      setClarificationTarget(undefined)
+      setClarificationMessages([])
+      setClarificationSuggestions([])
+      setClarificationPrompt(undefined)
+      setClarificationData(undefined)
+      setClarificationRequestFailed(false)
+      queryClient.setQueryData(['backtest-run', run.id], run)
+      setRunId(run.id)
+      setRunCommand('开始优化回测')
+      setReportSnapshot(undefined)
+      setStack([])
+      setDetailJourneyId(undefined)
+      setReviewOpen(false)
+      setView('chat')
+    },
+  })
+
+  const resumeStrategyMutation = useMutation({
+    mutationFn: ({ source }: { source: JourneySnapshot; mode: 'stock' | 'rules' }) =>
+      strategyApi.revise(source.draft, true),
+    onSuccess: (saved, { mode }) => {
+      setConversationTailDraftId(saved.id)
+      startNewCondition()
+      setUtterance('')
+      setStrategySlots({ draft: saved, mode })
+    },
+  })
+
   const resultError = summaryQuery.error ?? seriesQuery.error ?? activitiesQuery.error
   const resultLoading = hasResult
     && (summaryQuery.isLoading || seriesQuery.isLoading || activitiesQuery.isLoading)
   const resultReady = Boolean(summaryQuery.data && seriesQuery.data && activitiesQuery.data)
-  const isJourneyLocked = answerMutation.isPending || startMutation.isPending || Boolean(
+  const isJourneyLocked = answerMutation.isPending
+    || startMutation.isPending
+    || optimizationMutation.isPending
+    || resumeStrategyMutation.isPending
+    || Boolean(
     runQuery.data && !terminalStates.has(runQuery.data.state),
   )
   const validation = draft ? draftValidation(draft) : { valid: false, reason: undefined }
@@ -606,6 +1077,17 @@ export default function App({
   const evidence = useMemo(() => summaryQuery.data ? toRunEvidence(summaryQuery.data) : undefined,
     [summaryQuery.data])
   const canStart = Boolean(validation.valid && capability?.canRun && !capabilitiesQuery.isError)
+  const startEditedRun = startMutation.mutate
+  useEffect(() => {
+    if (!rerunAfterEdit.current || !draft || !canStart || isJourneyLocked
+      || compileMutation.isPending || clarification || runId) return
+    rerunAfterEdit.current = false
+    setRunCommand('按新条件重新回测')
+    setReviewOpen(false)
+    const refreshData = refreshEditedRun.current
+    refreshEditedRun.current = false
+    startEditedRun({ candidate: draft, refreshData })
+  }, [draft, canStart, isJourneyLocked, compileMutation.isPending, clarification, runId, startEditedRun])
   const startDisabledReason = validation.reason
     ?? (capabilitiesQuery.isError
       ? `${errorMessage(capabilitiesQuery.error)} 暂时读不到后端能力说明，不能确认这条策略是否可安全运行。`
@@ -635,6 +1117,7 @@ export default function App({
       evidence,
       activities: activitiesQuery.data,
       clarificationMessages,
+      review: reviewMutation.data?.runId === runId ? reviewMutation.data : undefined,
     }
   }, [
     activitiesQuery.data,
@@ -649,7 +1132,18 @@ export default function App({
     submittedText,
     trades,
     uiStrategy,
+    reviewMutation.data,
   ])
+
+  // Show the finished report immediately; request the real model independently.
+  // Once per new run, never on history navigation or repeated status polling.
+  const requestReview = reviewMutation.mutate
+  useEffect(() => {
+    if (apiMode !== 'live' || !currentSnapshot || reviewMutation.isPending
+      || autoReviewedRunIds.current.has(currentSnapshot.id)) return
+    autoReviewedRunIds.current.add(currentSnapshot.id)
+    requestReview(currentSnapshot)
+  }, [currentSnapshot, requestReview, reviewMutation.isPending])
 
   const rememberCurrentJourney = () => {
     if (!currentSnapshot) return
@@ -659,53 +1153,97 @@ export default function App({
   }
 
   const resetForEdit = () => {
+    rerunAfterEdit.current = false
+    refreshEditedRun.current = false
+    setStrategySlots(undefined)
     setDraft(undefined)
     setBaselineDraft(undefined)
     setClarification(undefined)
     setClarificationTarget(undefined)
     setClarificationMessages([])
+    setClarificationSuggestions([])
     setClarificationPrompt(undefined)
+    setClarificationData(undefined)
     setRunId(undefined)
     setRunCommand(undefined)
     setSubmittedText(undefined)
     setReportSnapshot(undefined)
-    setReminderSet(false)
     setStack([])
     compileMutation.reset()
     answerMutation.reset()
     startMutation.reset()
+    optimizationMutation.reset()
     window.setTimeout(() => inputRef.current?.focus(), 0)
   }
 
   const startNewCondition = () => {
+    setView('chat')
+    setReviewOpen(false)
+    setDetailJourneyId(undefined)
     rememberCurrentJourney()
     resetForEdit()
   }
 
-  const submitText = (text: string) => {
+  const startNewConversation = () => {
+    setConversationTailDraftId(undefined)
+    setJourneyHistory([])
+    setUtterance('')
+    setView('chat')
+    setReviewOpen(false)
+    setDetailJourneyId(undefined)
+    resetForEdit()
+  }
+
+  const submitText = (
+    text: string,
+    options: {
+      instrumentOverride?: ApiInstrument; proposalId?: string
+      editCurrentStrategy?: boolean; rerun?: boolean
+    } = {},
+  ) => {
     const normalized = text.trim()
     if (!normalized || isJourneyLocked) return
-    if (clarification && clarificationTarget) {
+    rerunAfterEdit.current = Boolean(options.rerun)
+    refreshEditedRun.current = false
+    // Send references only; the server loads the verified report facts itself.
+    const relatedRunIds = [...new Set([
+      ...journeyHistory.map(item => item.id),
+      ...(currentSnapshot ? [currentSnapshot.id] : []),
+    ])].slice(-20)
+    const displayedReview = clarification?.backtestReview
+      ?? [...journeyHistory, ...(currentSnapshot ? [currentSnapshot] : [])]
+      .reverse().filter(snapshot => relatedRunIds.includes(snapshot.id))
+      .map(snapshot => snapshot.review ?? (reviewMutation.data?.runId === snapshot.id
+        ? reviewMutation.data : undefined)).find(Boolean)
+    const relatedReview = displayedReview ? {
+      runId: displayedReview.runId, responseHash: displayedReview.modelProvenance.responseHash,
+    } : undefined
+    setStrategySlots(undefined)
+    if (clarification && clarificationTarget && !options.instrumentOverride) {
       const prompt = clarificationPrompt ?? clarificationMessage(clarification)
       setClarificationMessages((current) => [
         ...current,
-        { role: 'assistant', text: prompt },
+        { role: 'assistant', text: withoutOptionsHint(prompt), data: clarificationData },
         { role: 'user', text: normalized },
       ])
       setClarificationPrompt(undefined)
+      setClarificationData(undefined)
+      setClarificationSuggestions([])
+      setClarificationRequestFailed(false)
       setUtterance('')
       setDraft(undefined)
       setBaselineDraft(undefined)
       setRunId(undefined)
       setRunCommand(undefined)
       setReportSnapshot(undefined)
-      setReminderSet(false)
       setStack([])
       startMutation.reset()
       answerMutation.mutate({
-        answer: normalized,
+        answer: options.proposalId ?? normalized,
         target: clarificationTarget,
         pendingClarification: clarification,
+        relatedRunIds,
+        relatedReview,
       })
       return
     }
@@ -717,18 +1255,110 @@ export default function App({
     setClarification(undefined)
     setClarificationTarget(undefined)
     setClarificationMessages([])
+    setClarificationSuggestions([])
     setClarificationPrompt(undefined)
+    setClarificationData(undefined)
     setRunId(undefined)
     setRunCommand(undefined)
     setReportSnapshot(undefined)
-    setReminderSet(false)
     setStack([])
     answerMutation.reset()
     startMutation.reset()
-    compileMutation.mutate({ text: normalized })
+    optimizationMutation.reset()
+    compileMutation.mutate({
+      text: normalized,
+      instrumentOverride: options.instrumentOverride,
+      parentDraftId: conversationTailDraftId,
+      editCurrentStrategy: options.editCurrentStrategy,
+      relatedRunIds,
+      relatedReview,
+    })
+  }
+
+  const analyzeCurrentInstrument = (selected: ApiInstrument) => {
+    const identity = selected.name === selected.symbol
+      ? selected.symbol
+      : `${selected.name}（${selected.symbol}）`
+    submitText(
+      `分析${identity}的相关公开信息，给我几个可回测策略`,
+      { instrumentOverride: selected },
+    )
+  }
+
+  const submitClarificationChoice = (choice: Clarification['choices'][number]) => {
+    const suggested = choice.suggestedUtterance ?? choice.label
+    const routeSymbol = clarification?.ideaRoute?.asset_mapping.instrument_symbol ?? undefined
+    const targetInstrument = clarificationTarget?.originalRequest.instrument
+    const targetIsGrounded = clarificationTarget?.originalRequest.instrumentContextSource !== 'standalone_default'
+    const groundedInstrument = choice.instrumentName
+      ?? choice.instrumentSymbol
+      ?? (routeSymbol && targetInstrument?.symbol === routeSymbol ? targetInstrument.name : routeSymbol)
+      ?? (targetIsGrounded ? targetInstrument?.name : undefined)
+    const answer = groundedInstrument && !suggested.includes(groundedInstrument)
+      ? `${groundedInstrument}${suggested}`
+      : suggested
+    const proposalInstrument = choice.instrumentSymbol
+      ? toAshareInstrument(choice.instrumentSymbol, choice.instrumentName)
+      : null
+    const targetAlreadyGrounded = Boolean(
+      proposalInstrument
+      && targetIsGrounded
+      && targetInstrument?.symbol === proposalInstrument.symbol,
+    )
+    const routeAlreadyGrounded = Boolean(
+      proposalInstrument
+      && routeSymbol === proposalInstrument.symbol,
+    )
+    submitText(
+      answer,
+      proposalInstrument && !targetAlreadyGrounded && !routeAlreadyGrounded
+        ? { instrumentOverride: proposalInstrument }
+        : undefined,
+    )
+  }
+
+  const submitClarificationSuggestion = (suggestion: ClarificationSuggestion) => {
+    const routeSymbol = clarification?.ideaRoute?.asset_mapping.instrument_symbol ?? undefined
+    const targetInstrument = clarificationTarget?.originalRequest.instrument
+    const targetIsGrounded = clarificationTarget?.originalRequest.instrumentContextSource !== 'standalone_default'
+    const groundedInstrument = routeSymbol && targetInstrument?.symbol === routeSymbol
+      ? targetInstrument.name
+      : routeSymbol ?? (targetIsGrounded ? targetInstrument?.name : undefined)
+    const answer = groundedInstrument && !suggestion.preview.includes(groundedInstrument)
+      ? `${groundedInstrument}${suggestion.preview}`
+      : suggestion.preview
+    submitText(answer)
+  }
+
+  const submitIdeaProposal = (proposalId: string) => {
+    const proposal = clarification?.ideaRoute?.proposals.find((item) => item.id === proposalId)
+    if (proposal && isCompleteIdeaProposal(proposal) && clarificationTarget) {
+      const title = proposal.title.trim() || proposal.suggested_utterance
+      const displayText = proposal.pairing_reason
+        ? `${proposal.instrument_name ?? proposal.instrument_symbol} · ${title}`
+        : title
+      submitText(displayText, {
+        proposalId: proposal.id,
+      })
+      return
+    }
+    const choice = clarification?.choices.find((item) => item.id === proposalId)
+    if (choice) {
+      submitClarificationChoice(choice)
+      return
+    }
+    const suggestion = clarificationSuggestions.find((item) => item.id === proposalId)
+    if (suggestion) {
+      submitClarificationSuggestion(suggestion)
+      return
+    }
+    if (proposal && isCompleteIdeaProposal(proposal)) {
+      submitText(proposal.suggested_utterance)
+    }
   }
 
   const handleDraftChange = (nextDraft: StrategyDraft) => {
+    rememberCurrentJourney()
     setDraft(nextDraft)
     setRunId(undefined)
     setRunCommand(undefined)
@@ -746,16 +1376,38 @@ export default function App({
     open('chain')
   }
 
-  const openCurrentReport = () => {
-    if (!currentSnapshot) return
-    setReportSnapshot(currentSnapshot)
-    open('report')
-  }
-
-  const openHistoricalReport = (snapshot: JourneySnapshot) => {
+  /**
+   * 看报告 = 切到详情态的报告分区。
+   * 报告是这次回测的产物，它的位置在详情里；对话只负责记录「跑过这一次」，
+   * 不再在对话里展开第二份同样的报告。
+   */
+  const openReportDetail = (snapshot: JourneySnapshot | undefined) => {
+    if (!snapshot) return
     setReportSnapshot(snapshot)
-    open('report')
+    setDetailJourneyId(journeyHistory.some((item) => item.id === snapshot.id) ? snapshot.id : undefined)
+    setDetailTab('report')
+    setView('detail')
   }
+  const detailSnapshot = detailJourneyId
+    ? journeyHistory.find((item) => item.id === detailJourneyId) ?? currentSnapshot
+    : currentSnapshot
+  const detailReview = detailSnapshot?.review ?? (detailSnapshot && reviewMutation.data?.runId === detailSnapshot.id
+    ? reviewMutation.data
+    : undefined)
+  const detailReviewIsActive = reviewMutation.variables?.id === detailSnapshot?.id
+  const detailOptimizationIsActive = optimizationMutation.variables?.source.id === detailSnapshot?.id
+
+  /** 报告里的下钻（因果轨迹 / 成交规则）仍然用二级页：它们是从报告再往里的一层。 */
+  const reportBodyProps = (snapshot: JourneySnapshot) => ({
+    metrics: snapshot.metrics,
+    series: snapshot.series,
+    marks: snapshot.marks,
+    trades: snapshot.trades,
+    evidence: snapshot.evidence,
+    onOpenChain: openChain,
+    onOpenExecution: () => { setReportSnapshot(snapshot); openExecutionDetails() },
+    mode: apiMode as 'mock' | 'live',
+  })
 
   const openExecutionDetails = () => open('execution')
 
@@ -772,7 +1424,7 @@ export default function App({
     failure = failureFor(cancelMutation.error, 'cancel_failed', '取消请求没有完成', instrument, runId)
   } else if (runQuery.data?.state === 'failed') {
     failure = failureFor(
-      new Error(runQuery.data.error ?? '后台没有返回具体失败原因。'),
+      new Error(backtestFailureMessage(runQuery.data)),
       'run_failed',
       '回测失败',
       instrument,
@@ -796,18 +1448,30 @@ export default function App({
       || failure?.key === 'event_time_insufficient'
       || (failure?.key === 'run_failed' && index === 1)
     ) {
-      submitText(volumeBreakoutExample)
+      submitText(maCrossExample)
     } else resetForEdit()
   }
 
-  const conditionCount = draft
-    ? draft.entry.conditions.length + draft.exit.conditions.length
-    : 0
   const apiLabel = apiMode === 'mock' ? '界面预览' : '回测服务'
   const activeOverlay = stack.at(-1)
   const compileRecovery = compileMutation.isError
     ? compileRecoveryMessage(compileMutation.error)
     : undefined
+  const activeIdeaProposalCards = ideaProposalCards(
+    clarification,
+    clarificationTarget,
+    clarificationSuggestions,
+  )
+  const hasPairedProposals = activeIdeaProposalCards.some((proposal) => proposal.paired)
+  const instrumentSuggestions = (clarification?.instrumentSuggestions?.length
+    ? clarification.instrumentSuggestions
+    : clarification?.instrumentSuggestion ? [clarification.instrumentSuggestion] : [])
+    .filter((item, index, items) => items.findIndex(other => other.symbol === item.symbol) === index)
+    .slice(0, 3)
+  const pendingStrategyDirection = dialogueProgress
+    .filter((event) => event.stage === 'strategy_direction').at(-1)?.message
+  const pendingProcessingEvents = dialogueProgress
+    .filter((event) => event.stage !== 'strategy_direction')
 
   useEffect(() => {
     if (!instrumentContextError) return
@@ -833,25 +1497,96 @@ export default function App({
     submittedText,
   ])
 
+  /*
+   * 回测跑完，落点是策略详情：这时候人要看的是结果，不是再回对话里找那张卡。
+   *
+   * 这一步只能写成 effect：结果就绪是三个查询各自返回后才成立的派生状态，
+   * react-query v5 的查询没有 onSuccess 回调可挂，没有事件可以承接它。
+   * 识别成功那一次切版式已经放进 mutation 的 onSuccess 了，不走 effect。
+   */
+  const settledRunId = resultReady ? runId : undefined
+  useEffect(() => {
+    if (!settledRunId) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- 见上：异步结果就绪没有对应事件
+    setDetailJourneyId(undefined)
+    setDetailTab('report')
+    setView('detail')
+  }, [settledRunId])
+
   return (
     <div className="app" data-api-mode={apiMode} data-has-overlay={stack.length > 0 ? 'true' : 'false'}>
       <div className="screens">
-        <section className="page base" id="pg-chat" aria-hidden={Boolean(activeOverlay)} inert={Boolean(activeOverlay)}>
-          <header className="navbar host-navbar">
-            <button type="button" className="ico" aria-label="返回股票页" onClick={onReturnToStockPage}>
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M15 5l-7 7 7 7" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-            <span className="logo">东方<br />财富</span>
-            <span className="nav-title"><b>妙想AI</b><span>内容由AI生成</span></span>
-            <span className={`mode-pill mode-pill--${apiMode}`}>{apiLabel}</span>
-            <button type="button" className="ico" aria-label="更多">
-              <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
-                <path d="M3 6h16M3 11h16M3 16h16" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-              </svg>
-            </button>
+        <section className="page base" id="pg-chat" aria-hidden={Boolean(activeOverlay)} inert={Boolean(activeOverlay)}
+          data-cold={!submittedText && journeyHistory.length === 0 ? 'true' : 'false'}
+          data-view={view}
+          data-review={view === 'chat' && reviewOpen && draft && uiStrategy ? 'true' : 'false'}>
+          {/*
+            顶栏按 Public 的产品截图重做：左边是产品自己的字标，右边是「当前上下文 +
+            状态」，中间用一条竖发丝线分开——对应它那条 "Buying power … | Brokerage"。
+            原来那条宿主导航（返回键 / 东方财富徽标 / 妙想AI / 汉堡菜单）整条去掉了。
+          */}
+          <header className="topbar">
+            <span className="wordmark"><i aria-hidden="true" />策略回测</span>
+            {/*
+              右侧留空。当前股票和运行模式在下面都各有落点（策略卡带股票、
+              详情头部带模式），顶栏再挂一遍只是重复，且把视线拉到一个
+              不需要操作的角落。
+            */}
           </header>
+
+          <div className="workspace" ref={workspaceRef}>
+            {/* 分隔条绝对定位、不占 grid 区域，见 ColumnResizer 里的说明 */}
+            <ColumnResizer side="rail" target={workspaceRef} />
+            <ColumnResizer side="review" target={workspaceRef} />
+          {/*
+            左栏对应 Public 的 Agents 侧栏：标题 + 新建 + 历史列表。
+            手机端整条收起（历史本来就在对话流里按时间排着，不需要再来一份导航）。
+          */}
+          <aside className="rail" aria-label="策略与历史">
+            <div className="rail-head">
+              <h2>回测策略</h2>
+            </div>
+            <button type="button" className="rail-new" onClick={() => startNewCondition()}
+              disabled={isJourneyLocked}>
+              <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <path d="M10.6 2.9H4.2A1.7 1.7 0 0 0 2.5 4.6v9.2a1.7 1.7 0 0 0 1.7 1.7h9.2a1.7 1.7 0 0 0 1.7-1.7V7.4"
+                  stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                <path d="m12.4 2.2 3.4 3.4-4.6 1.2 1.2-4.6Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+              </svg>
+              新建策略
+            </button>
+            <div className="rail-sect">本次会话</div>
+            <button type="button" className="rail-new" onClick={startNewConversation}
+              disabled={isJourneyLocked} aria-label="新建会话并清空上下文">
+              <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <path d="M14.5 9a5.5 5.5 0 1 1-1.6-3.9M14.5 3.8v3.6h-3.6"
+                  stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"
+                  strokeLinejoin="round" />
+              </svg>
+              新建会话（清空上下文）
+            </button>
+            <nav className="rail-list">
+              {journeyHistory.map((journey) => (
+                <button key={journey.id} type="button"
+                  className={`rail-item${view === 'detail' && detailSnapshot?.id === journey.id ? ' is-active' : ''}`}
+                  onClick={() => { setDetailJourneyId(journey.id); setDetailTab('report'); setView('detail') }}>
+                  <i aria-hidden="true" />
+                  <span>{strategyTitle(journey.instrument, journey.strategy)}</span>
+                </button>
+              ))}
+              {draft && uiStrategy && submittedText ? (
+                <button type="button"
+                  className={`rail-item${view === 'chat' ? ' is-active' : ''}`}
+                  onClick={() => { setDetailJourneyId(undefined); setView('chat'); setReviewOpen(true) }}>
+                  <i aria-hidden="true" />
+                  <span>{strategyTitle(toUiInstrument(draft), uiStrategy)}</span>
+                </button>
+              ) : null}
+              {journeyHistory.length === 0 && !submittedText ? (
+                <p className="rail-empty">还没有回测记录</p>
+              ) : null}
+            </nav>
+          </aside>
 
           <div className="scroll" ref={scrollRef} onScroll={(event) => {
             const node = event.currentTarget
@@ -862,7 +1597,7 @@ export default function App({
 
               {journeyHistory.map((journey) => (
                 <Fragment key={journey.id}>
-                  <Turn mine><Bubble>{journey.utterance}</Bubble></Turn>
+                  <Turn id={`journey-${journey.id}`} mine><Bubble>{journey.utterance}</Bubble></Turn>
                   {journey.clarificationMessages.map((message, index) => (
                     <Turn key={`${journey.id}-clarification-${index}`} mine={message.role === 'user'}>
                       {message.role === 'user'
@@ -872,6 +1607,7 @@ export default function App({
                   ))}
                   <Turn>
                     <ThinkBlock
+                      title="策略与回测摘要"
                       meta="历史记录"
                       lines={[
                         `买入：${summarizeRule(journey.strategy.entryRule)}`,
@@ -895,7 +1631,7 @@ export default function App({
                       metrics={journey.metrics}
                       series={journey.series}
                       marks={journey.marks}
-                      onOpenReport={() => openHistoricalReport(journey)}
+                      onOpenReport={() => openReportDetail(journey)}
                       historical
                     />
                   </Turn>
@@ -908,7 +1644,9 @@ export default function App({
                 <Turn>
                   <Say>
                     {instrumentContextError
-                      ? '没有识别到当前股票。请在下方输入股票名称或 6 位代码，并一起说出买入和卖出条件。例如：“东方财富 MACD 金叉买入，死叉卖出”。'
+                      ? '还没有识别到当前股票。你可以直接输入股票名称或 6 位代码，也可以连同买入和卖出条件一起告诉我。'
+                      : strategySlots
+                        ? '改一下下面的股票或买卖条件，再继续回测。'
                       : journeyHistory.length > 0
                         ? <>说出新的买卖规则，继续回测。</>
                         : <>想怎么交易？用一句话告诉我，我来帮你把它变成可回测的策略。</>}
@@ -918,14 +1656,6 @@ export default function App({
                     跑过一轮之后用户已经知道怎么写，再把同样两条推一遍既占地方，
                     也像是在暗示「你应该选我给的这几个」。
                   */}
-                  {!instrumentContextError && journeyHistory.length === 0 ? (
-                    <div className="home-examples" aria-label="策略示例">
-                      <Chips>
-                        <Chip onClick={() => submitText(volumeBreakoutExample)}>{volumeBreakoutExample}</Chip>
-                        <Chip onClick={() => submitText(financialTrendExample)}>{financialTrendExample}</Chip>
-                      </Chips>
-                    </div>
-                  ) : null}
                 </Turn>
               ) : <Turn mine><Bubble>{submittedText}</Bubble></Turn>}
 
@@ -934,66 +1664,164 @@ export default function App({
                   {message.role === 'user'
                     ? <Bubble>{message.text}</Bubble>
                     : <Say>{message.text}</Say>}
+                  {message.role === 'assistant' && message.data
+                    ? <CurrentDataResult data={message.data} onAnalyze={analyzeCurrentInstrument} />
+                    : null}
                 </Turn>
               ))}
 
               {compileMutation.isPending ? (
                 <Turn>
+                  {pendingStrategyDirection ? <Say>{pendingStrategyDirection}</Say> : null}
                   <ThinkingStream
-                    title="还原这条交易规则"
-                    status="正在识别买入、卖出和回测区间"
+                    status={pendingStrategyDirection ? '正在准备组合' : '正在理解你的想法'}
+                    summary={pendingProcessingEvents}
                   />
                 </Turn>
               ) : null}
 
               {answerMutation.isPending ? (
                 <Turn>
+                  {pendingStrategyDirection ? <Say>{pendingStrategyDirection}</Say> : null}
                   <ThinkingStream
-                    title="接上这句补充"
-                    status="正在核对它是否补齐了刚才的问题"
+                    status={pendingStrategyDirection ? '正在准备组合' : '正在理解你的想法'}
+                    summary={pendingProcessingEvents}
                   />
                 </Turn>
               ) : null}
 
               {clarificationPrompt && !compileMutation.isPending && !answerMutation.isPending ? (
-                <Turn><Say>{clarificationPrompt}</Say></Turn>
+                <Turn>
+                  <ModelReasoning events={dialogueProgress} />
+                  <Say>{clarificationPrompt}</Say>
+                  {!clarificationRequestFailed && clarification?.backtestReview ? (() => {
+                    const review = clarification.backtestReview
+                    const source = [...journeyHistory, ...(currentSnapshot ? [currentSnapshot] : [])]
+                      .find(item => item.id === review.runId)
+                    return <>
+                      <Chips>{review.optimizationCandidates.slice(0, 3).map(candidate => (
+                        <Chip key={candidate.id} disabled={isJourneyLocked || !source}
+                          onClick={() => {
+                            if (source) optimizationMutation.mutate({ source, candidate })
+                          }}>用「{candidate.title}」再回测</Chip>
+                      ))}</Chips>
+                      {optimizationMutation.isError
+                        ? <Say>{errorMessage(optimizationMutation.error)}</Say> : null}
+                    </>
+                  })() : null}
+                  {!clarificationRequestFailed && instrumentSuggestions.length
+                    && (!hasPairedProposals || clarification?.instrumentSuggestions?.length) ? (
+                    <div className="stock-suggestions" aria-label="可选股票">
+                      {instrumentSuggestions.some(item => item.source === 'eastmoney_mx_screener') ? (
+                        <details className="idea-research stock-suggestions__evidence">
+                          <summary>东方财富选股依据</summary>
+                          {instrumentSuggestions.map(item => (
+                            <p key={item.symbol}><strong>{item.name ?? item.symbol}</strong>：{item.evidence}</p>
+                          ))}
+                          <p className="stock-suggestions__time">取数时间：{instrumentSuggestions[0]?.retrieved_at}</p>
+                        </details>
+                      ) : null}
+                      <Chips>
+                        {instrumentSuggestions.map(item => (
+                          <Chip key={item.symbol} disabled={isJourneyLocked}
+                            onClick={() => {
+                              const proposal = clarification?.ideaRoute?.proposals
+                                .find(option => option.instrument_symbol === item.symbol)
+                              if (proposal) submitIdeaProposal(proposal.id)
+                              else submitText(`用${item.name ? `${item.name}（${item.symbol}）` : item.symbol}`)
+                            }}>
+                            {item.name ?? item.symbol}
+                          </Chip>
+                        ))}
+                      </Chips>
+                    </div>
+                  ) : null}
+                  {clarificationData ? (
+                    <CurrentDataResult
+                      data={clarificationData}
+                      onAnalyze={analyzeCurrentInstrument}
+                    />
+                  ) : null}
+                  {!clarificationRequestFailed && clarification?.provisionalDraft ? (() => {
+                    const provisional = clarification.provisionalDraft
+                    const trees = strategyRuleTrees(provisional)
+                    return (
+                      <div className="provisional-strategy" data-testid="provisional-strategy">
+                        <div className="provisional-strategy__meta">按你的口语推测 · 等你确认</div>
+                        <div className="provisional-strategy__rule">
+                          <span>买入</span>{summarizeRule(trees.entry)}
+                        </div>
+                        <div className="provisional-strategy__rule">
+                          <span>卖出</span>{summarizeRule(trees.exit)}
+                        </div>
+                        <div className="provisional-strategy__note">
+                          {clarification.provisionalNote ?? '这只是暂时理解，不会自动开始回测。'}
+                        </div>
+                      </div>
+                    )
+                  })() : null}
+                  {!clarificationRequestFailed && clarification?.ideaRoute ? (
+                    <>
+                      <IdeaResearchEvidence clarification={clarification} />
+                      {activeIdeaProposalCards.length > 0 && !clarification.instrumentSuggestions?.length ? (
+                        <Proposals
+                          items={activeIdeaProposalCards}
+                          onPick={submitIdeaProposal}
+                        />
+                      ) : null}
+                    </>
+                  ) : !clarificationRequestFailed && clarificationSuggestions.length > 0 ? (
+                    <Proposals
+                      items={clarificationSuggestions.map((suggestion) => ({
+                        id: suggestion.id,
+                        title: suggestion.title,
+                        detail: suggestion.preview,
+                      }))}
+                      onPick={(id) => {
+                        const suggestion = clarificationSuggestions.find((item) => item.id === id)
+                        if (suggestion) submitClarificationSuggestion(suggestion)
+                      }}
+                    />
+                  ) : !clarificationRequestFailed
+                    && clarification && visibleClarificationChoices(clarification).length ? (
+                    <Proposals
+                      items={visibleClarificationChoices(clarification).map((choice) => ({
+                        id: choice.id,
+                        title: choice.label,
+                        detail: choice.description,
+                      }))}
+                      onPick={(id) => {
+                        const choice = visibleClarificationChoices(clarification)
+                          .find((item) => item.id === id)
+                        if (choice) submitClarificationChoice(choice)
+                      }}
+                    />
+                  ) : null}
+                </Turn>
               ) : null}
 
               {draft && uiStrategy ? (
                 <Turn>
-                  <ThinkBlock
-                    meta={`用到 ${conditionCount} 个条件`}
-                    lines={[
-                      `买入：${summarizeRule(strategyRuleTrees(draft).entry)}`,
-                      `卖出：${summarizeRule(strategyRuleTrees(draft).exit)}`,
-                      draft.entry.conditions.some((condition) => condition.kind === 'event')
-                        ? '事件按首次可得时间触发；成交仍受交易日与 A 股规则约束'
-                        : '技术信号按日线收盘确认；下一交易日只使用开盘价代理，成交时间非精确',
-                      ...(apiMode === 'mock'
-                        && draft.entry.conditions.some((condition) =>
-                          condition.kind === 'event' && condition.documentText)
-                        ? ['界面预览只展示规则识别和卡片结构；没有读取年报正文，也没有计算词频']
-                        : []),
-                    ]}
-                  />
-                  <StrategyCard
-                    instrument={toUiInstrument(draft)}
-                    strategy={uiStrategy}
-                    onEditRow={openParams}
-                    onOpenMore={() => openParams('more')}
-                    onRun={() => {
-                      if (!canStart) return
-                      setRunCommand(RUN_COMMAND)
-                      startMutation.mutate(draft)
-                    }}
-                    isStarting={startMutation.isPending}
-                    isLocked={isJourneyLocked}
-                    settled={runQuery.data?.state === 'succeeded' ? '已完成回测' : undefined}
-                    canStart={canStart}
-                    disabledReason={startDisabledReason}
-                    error={startMutation.isError ? errorMessage(startMutation.error) : undefined}
-                    executionSummary={summarizeExecution(draft, baselineDraft)}
-                  />
+                  <ModelReasoning events={dialogueProgress} />
+                  <Say>
+                    已经把这句话整理成买卖规则。买入、卖出和回测区间都可以逐条核对，
+                    改完再开始回测。
+                  </Say>
+                  {apiMode === 'mock' && draft.entry.conditions.some((condition) =>
+                    condition.kind === 'event' && condition.documentText) ? (
+                      <Notice tone="info">
+                        界面预览只展示规则识别和卡片结构；没有读取年报正文，也没有计算词频。
+                      </Notice>
+                    ) : null}
+                  <button type="button" className="preview-card" onClick={() => setReviewOpen(true)}>
+                    <span className="preview-eyebrow">预览策略</span>
+                      <span className="preview-name">{strategyTitle(toUiInstrument(draft), uiStrategy)}</span>
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                      <path d="M1.6 9S4.5 3.8 9 3.8 16.4 9 16.4 9 13.5 14.2 9 14.2 1.6 9 1.6 9Z"
+                        stroke="currentColor" strokeWidth="1.3" />
+                      <circle cx="9" cy="9" r="2.1" fill="currentColor" />
+                    </svg>
+                  </button>
                 </Turn>
               ) : null}
 
@@ -1002,15 +1830,15 @@ export default function App({
               {startMutation.isPending ? (
                 <Turn>
                   <ThinkingStream
-                    title="准备这次历史回测"
-                    status="正在固定策略和数据版本"
+                    status="正在准备历史回测"
                   />
                 </Turn>
               ) : null}
 
               {runQuery.data && !terminalStates.has(runQuery.data.state) ? (
                 <Turn>
-                  <RunningCard phase={runQuery.data.state} onCancel={() => cancelMutation.mutate()}
+                  <RunningCard phase={runQuery.data.state} progressLabel={runQuery.data.progressLabel}
+                    onCancel={() => cancelMutation.mutate()}
                     isCancelling={cancelMutation.isPending} isMock={apiMode === 'mock'} />
                 </Turn>
               ) : null}
@@ -1018,8 +1846,7 @@ export default function App({
               {resultLoading ? (
                 <Turn>
                   <ThinkingStream
-                    title="整理这次回测结果"
-                    status="正在读取收益、风险和交易记录"
+                    status="正在整理回测结果"
                   />
                 </Turn>
               ) : null}
@@ -1028,28 +1855,12 @@ export default function App({
                 <>
                   <Turn>
                     <ResultCard metrics={metrics} series={series} marks={marks}
-                      onOpenReport={openCurrentReport} />
-                  </Turn>
-                  <Turn>
-                    <FollowUps>
-                      <FollowUp lead onClick={startNewCondition}>换个条件再跑一次</FollowUp>
-                      <FollowUp onClick={() => setReminderSet(true)} disabled={reminderSet}
-                        title="当前只记录在本页，尚未连接通知服务">
-                        {reminderSet ? '已设置盯盘提醒' : '把这条设成盯盘提醒'}
-                      </FollowUp>
-                      <FollowUp onClick={() => undefined} title="功能入口，暂未接入股票切换">
-                        换只股票试试
-                      </FollowUp>
-                    </FollowUps>
-                    {reminderSet ? (
-                      <p className="hint reminder-status" role="status" aria-live="polite">
-                        <b>盯盘提醒已设置</b><br />
-                        <span>当前只记录在本页，尚未连接通知服务</span>
-                      </p>
-                    ) : null}
+                      onOpenReport={() => openReportDetail(currentSnapshot)} />
                   </Turn>
                 </>
               ) : null}
+
+
 
               {failure ? (
                 <Turn><FailureCard state={failure} onAction={handleFailureAction} /></Turn>
@@ -1070,63 +1881,210 @@ export default function App({
               </svg>
             </button> : null}
 
-          <div className="dock">
-            <div className="quick" aria-label="宿主能力">
-              <button type="button" className="on" aria-pressed="true"><QuickIcon name="thinking" />深度思考</button>
-              <button type="button"><QuickIcon name="skill" />技能</button>
-              <button type="button"><QuickIcon name="task" />超级任务</button>
-              <button type="button"><QuickIcon name="timer" />定时</button>
-              <button type="button"><QuickIcon name="stock" />选股</button>
-            </div>
+          {/*
+            底部只留输入区。买卖、语音、「+」、深度思考那一排能力胶囊、iOS home 指示条
+            都是宿主外壳，不属于这个产品——留着只会让人以为这里能下单。
+          */}
+          {/*
+            策略详情 —— 对应 Public 创建完 Agent 后落到的那一页：
+            返回、大衬线标题、一句话描述、标签、运行信息条，然后是 tab 切换的正文。
+            它和对话共用同一块工作区，只是 grid 把中间那栏收掉了。
+          */}
+          {detailSnapshot ? (
+            <section className="detail" aria-label="策略详情">
+              <div className="detail-inner">
+                <div className="detail-top">
+                  <button type="button" className="detail-back" aria-label="回到对话"
+                    onClick={() => setView('chat')}>
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+                      <path d="M12 4.5 6.5 10l5.5 5.5" stroke="currentColor" strokeWidth="1.6"
+                        strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                  <h1 className="detail-title">
+                    {strategyTitle(detailSnapshot.instrument, detailSnapshot.strategy)}
+                  </h1>
+                  <button type="button" className="detail-edit"
+                    onClick={() => { setView('chat'); setReviewOpen(true) }}>
+                    编辑策略
+                  </button>
+                </div>
+                {/*
+                  只留一行身份信息。买卖规则在「工作流」分区里逐条列着，数据区间既是
+                  工作流的一个步骤、报告里也自带一行——头部再抄一遍就是三处同义重复。
+                */}
+                <p className="detail-meta">
+                  <b>{detailSnapshot.instrument.name}</b>
+                  <span className="num">{detailSnapshot.instrument.code}</span>
+                  <em>{apiLabel}</em>
+                </p>
 
-            <div className="dock-row">
-              <form className="inputbar" onSubmit={(event) => { event.preventDefault(); submitText(utterance) }}>
-                {/* 左侧语音、右侧「+」都是宿主自带的入口，本原型不接管，保持禁用 */}
-                <button type="button" className="ib" aria-label="语音输入（宿主能力，本原型未接入）" disabled>
-                  <svg width="22" height="22" viewBox="0 0 22 22" fill="none" aria-hidden="true">
-                    <circle cx="11" cy="11" r="9.2" stroke="currentColor" strokeWidth="1.5" />
-                    <path d="M7 9.4v3.2M9.4 7.6v6.8M11.8 6.6v8.8M14.2 9v4" stroke="currentColor"
-                      strokeWidth="1.4" strokeLinecap="round" />
+                <div className="detail-tabs" role="tablist" aria-label="策略详情分区">
+                  <button type="button" role="tab" id="detail-tab-flow"
+                    aria-selected={detailTab === 'flow'} aria-controls="detail-panel-flow"
+                    className={detailTab === 'flow' ? 'on' : undefined}
+                    onClick={() => setDetailTab('flow')}>工作流</button>
+                  <button type="button" role="tab" id="detail-tab-report"
+                    aria-selected={detailTab === 'report'} aria-controls="detail-panel-report"
+                    className={detailTab === 'report' ? 'on' : undefined}
+                    onClick={() => setDetailTab('report')}>回测报告</button>
+                </div>
+
+                <div className="detail-panel" id="detail-panel-flow" role="tabpanel"
+                  aria-labelledby="detail-tab-flow" hidden={detailTab !== 'flow'}>
+                  <h2 className="detail-sub">这条策略怎么跑</h2>
+                  <div className="erows erows--readonly">
+                    {detailSnapshot.strategy.rows.map((row) => (
+                      <div key={row.key} className={`erow${row.kind ? ` ${row.kind}` : ''} off`}>
+                        <span className="lb">{row.label}</span>
+                        <span className="val">
+                          {row.value}
+                          {row.sub ? <small>{row.sub}</small> : null}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <ExecutionEntry onOpen={() => {
+                    setReportSnapshot(detailSnapshot)
+                    openExecutionDetails()
+                  }} />
+                </div>
+
+                <div className="detail-panel" id="detail-panel-report" role="tabpanel"
+                  aria-labelledby="detail-tab-report" hidden={detailTab !== 'report'}>
+                  <div id="pg-report">
+                    <h2 className="sr-only">回测报告</h2>
+                    <ReportBody {...reportBodyProps(detailSnapshot)} showExecutionEntry={false} />
+                    <BacktestReview
+                      review={detailReview}
+                      describeCandidate={(candidate) => executableRuleText(
+                        fromBacktestOptimizationCandidate(candidate, detailSnapshot.draft, capabilitiesQuery.data),
+                      )}
+                      progress={reviewProgress?.runId === detailSnapshot.id
+                        ? reviewProgress.events : undefined}
+                      isLoading={detailReviewIsActive && reviewMutation.isPending}
+                      error={detailReviewIsActive && reviewMutation.isError
+                        ? errorMessage(reviewMutation.error)
+                        : undefined}
+                      onRequest={() => reviewMutation.mutate(detailSnapshot)}
+                      onChangeInstrument={() => resumeStrategyMutation.mutate({
+                        source: detailSnapshot, mode: 'stock',
+                      })}
+                      onChangeRules={() => resumeStrategyMutation.mutate({
+                        source: detailSnapshot, mode: 'rules',
+                      })}
+                      onRunCandidate={(candidate) => optimizationMutation.mutate({
+                        source: detailSnapshot,
+                        candidate,
+                      })}
+                      runningCandidateId={detailOptimizationIsActive && optimizationMutation.isPending
+                        ? optimizationMutation.variables?.candidate.id
+                        : undefined}
+                      runError={detailOptimizationIsActive && optimizationMutation.isError
+                        ? errorMessage(optimizationMutation.error)
+                        : resumeStrategyMutation.isError ? errorMessage(resumeStrategyMutation.error)
+                        : undefined}
+                      candidateActionsDisabled={isJourneyLocked}
+                    />
+                  </div>
+                </div>
+
+
+              </div>
+            </section>
+          ) : null}
+
+          {/*
+            策略审阅栏 —— 对应 Public 的「Review your Agent」。
+            桌面端是常驻右栏，手机端塌成输入框上方的可折叠面板；同一份 DOM，
+            靠 .workspace 的 grid-template-areas 换位置，没有为断点分叉的 JSX。
+          */}
+          {draft && uiStrategy ? (
+            <aside className="review" aria-label="策略审阅">
+              <div className="review-head">
+                <span className="review-eyebrow">审阅你的策略</span>
+                <span className="review-title">{strategyTitle(toUiInstrument(draft), uiStrategy)}</span>
+                <button type="button" className="review-close" aria-label="收起策略审阅"
+                  onClick={() => setReviewOpen(false)}>
+                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                    <path d="m4.6 4.6 8.8 8.8M13.4 4.6l-8.8 8.8" stroke="currentColor"
+                      strokeWidth="1.5" strokeLinecap="round" />
                   </svg>
                 </button>
-                <input ref={inputRef} className="strategy-input" aria-label="交易规则" value={utterance}
-                  disabled={isJourneyLocked} onChange={(event) => setUtterance(event.target.value)}
-                  placeholder={needsLimitUpRuleRewrite
-                    ? '改用价格、涨跌幅或技术指标条件'
-                    : clarification
-                      ? clarificationPlaceholder(clarification)
-                      : compileMutation.isError
-                        ? '补充完整规则，或直接换一种说法'
-                        : instrumentContextError
-                          ? '输入股票名称、买入和卖出条件'
-                          : '说出什么时候买、什么时候卖'} />
-                {utterance.trim() ? (
-                  <button type="submit" className="send" aria-label="识别交易规则"
-                    disabled={isJourneyLocked || compileMutation.isPending}>
-                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-                      <path d="M4 9h10M10 5l4 4-4 4" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </button>
-                ) : (
-                  <button type="button" className="plus" aria-label="更多输入方式（宿主能力，本原型未接入）" disabled>
-                    <svg width="28" height="28" viewBox="0 0 26 26" fill="none" aria-hidden="true">
-                      <circle cx="13" cy="13" r="11.2" stroke="currentColor" strokeWidth="1.5" />
-                      <path d="M13 8.2v9.6M8.2 13h9.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                    </svg>
-                  </button>
-                )}
-              </form>
-              <button type="button" className="trade-fab" aria-label="宿主买卖入口，本原型不执行交易" disabled>
-                <svg className="arc" viewBox="0 0 50 50" fill="none" aria-hidden="true">
-                  <path d="M11 32a16 16 0 0 0 8 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-                  <path d="M39 18a16 16 0 0 0-8-7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+              </div>
+              <div className="review-body">
+                <StrategyCard
+                  instrument={toUiInstrument(draft)}
+                  strategy={uiStrategy}
+                  onEditRow={openParams}
+                  onOpenMore={() => openParams('more')}
+                  onRun={() => {
+                    if (!canStart) return
+                    setRunCommand(RUN_COMMAND)
+                    startMutation.mutate({ candidate: draft })
+                  }}
+                  isStarting={startMutation.isPending}
+                  isLocked={isJourneyLocked}
+                  settled={runQuery.data?.state === 'succeeded' ? '已完成回测' : undefined}
+                  editableAfterRun
+                  canStart={canStart}
+                  disabledReason={startDisabledReason}
+                  error={startMutation.isError ? errorMessage(startMutation.error) : undefined}
+                  executionSummary={summarizeExecution(draft, baselineDraft)}
+                />
+              </div>
+            </aside>
+          ) : null}
+
+          <div className="dock">
+            {strategySlots ? (
+              <StrategySlotComposer key={`${strategySlots.draft.id}@${strategySlots.draft.revision}`} {...strategySlots}
+                disabled={isJourneyLocked || compileMutation.isPending}
+                onSubmit={submitText}
+                onClear={() => {
+                  setStrategySlots(undefined)
+                  setUtterance('')
+                  window.setTimeout(() => inputRef.current?.focus(), 0)
+                }} />
+            ) : <form className="inputbar" onSubmit={(event) => { event.preventDefault(); submitText(utterance) }}>
+              <input ref={inputRef} className="strategy-input" aria-label="交易规则" value={utterance}
+                disabled={isJourneyLocked} onChange={(event) => setUtterance(event.target.value)}
+                placeholder={needsLimitUpRuleRewrite
+                  ? '改用价格、涨跌幅或技术指标条件'
+                  : clarification
+                    ? clarificationPlaceholder(clarification)
+                    : compileMutation.isError
+                      ? '补充完整规则，或直接换一种说法'
+                      : instrumentContextError
+                        ? '输入股票名称、买入和卖出条件'
+                        : '说出什么时候买、什么时候卖'} />
+              <button type="submit" className="send" aria-label="识别交易规则"
+                disabled={isJourneyLocked || compileMutation.isPending || !utterance.trim()}>
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <path d="M9 14V4M4.6 8.4 9 4l4.4 4.4" stroke="currentColor" strokeWidth="1.8"
+                    strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-                <span className="b">买</span><span className="s">卖</span>
               </button>
-            </div>
+            </form>}
+
+            {/* 冷启动的示例句排在输入框下方，对应 Public 首屏输入框下那排分类 chip */}
+            {!submittedText && !instrumentContextError && journeyHistory.length === 0 ? (
+              <div className="home-examples" aria-label="策略示例">
+                <Chips>
+                  {DEFAULT_STRATEGY_EXAMPLES.map(example => (
+                    <Chip key={example.instrument.symbol} onClick={() => submitText(example.utterance, {
+                      instrumentOverride: example.instrument,
+                    })}>{example.utterance}</Chip>
+                  ))}
+                </Chips>
+              </div>
+            ) : null}
 
             <p className="disclaimer">仅做历史回测，不构成投资建议</p>
-            <div className="homebar"><i /></div>
+          </div>
+
+          {/* 冷启动时给下方留一段空白，让「标题 + 输入框」落在视觉中线偏上 */}
+          <div className="coldpad" aria-hidden="true" />
           </div>
         </section>
 
@@ -1135,13 +2093,6 @@ export default function App({
             onChange={handleDraftChange}
             onReset={() => baselineDraft && setDraft(cloneDraft(baselineDraft))}
             isLocked={isJourneyLocked} focus={paramsFocus} />
-        ) : null}
-        {reportSnapshot ? (
-          <ReportScreen open={activeOverlay === 'report'} onBack={back}
-            metrics={reportSnapshot.metrics} series={reportSnapshot.series}
-            marks={reportSnapshot.marks} trades={reportSnapshot.trades}
-            evidence={reportSnapshot.evidence} onOpenChain={openChain}
-            onOpenExecution={openExecutionDetails} mode={apiMode} />
         ) : null}
         {reportSnapshot ? (
           <ExecutionDetailsScreen open={activeOverlay === 'execution'} onBack={back}

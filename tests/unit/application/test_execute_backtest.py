@@ -54,6 +54,11 @@ from ashare_lab.domain.time import PointInTimeAvailability
 from ashare_lab.ports.backtest_runs import BacktestJobState
 from ashare_lab.ports.financial_data import PinnedFinancialFacts
 from ashare_lab.ports.market_data import DataRequirements, DateRange
+from ashare_lab.ports.provider_indicator_data import (
+    ProviderIndicatorPoint,
+    ProviderIndicatorSeries,
+    ProviderIndicatorValue,
+)
 
 HASH = "sha256:" + "a" * 64
 REVISION = "a" * 40
@@ -85,6 +90,65 @@ class CapturingQueue:
     def enqueue(self, run_id: RunId) -> str:
         self.run_ids.append(str(run_id))
         return "job:test"
+
+
+class SettlementTailProvider:
+    def __init__(self, session_dates: tuple[date, ...]) -> None:
+        self._session_dates = session_dates
+
+    async def query_indicator_history(
+        self,
+        *,
+        instrument_id: str,
+        indicator_id: str,
+        provider_indicator_name: str,
+        value_names: tuple[str, ...],
+        start: date,
+        end: date,
+    ) -> ProviderIndicatorSeries:
+        points = tuple(
+            ProviderIndicatorPoint(
+                session_date=session_date,
+                observed_at=datetime(
+                    session_date.year,
+                    session_date.month,
+                    session_date.day,
+                    15,
+                    tzinfo=ZoneInfo("Asia/Shanghai"),
+                ),
+                first_available_at=datetime(
+                    session_date.year,
+                    session_date.month,
+                    session_date.day,
+                    15,
+                    tzinfo=ZoneInfo("Asia/Shanghai"),
+                ),
+                values=tuple(
+                    ProviderIndicatorValue(
+                        field_code=f"FIELD_{index}",
+                        field_name=name,
+                        value=Decimal(
+                            10 + session_index % 3 if name == "收盘价" else 10
+                        ),
+                    )
+                    for index, name in enumerate(value_names, start=1)
+                ),
+            )
+            for session_index, session_date in enumerate(self._session_dates)
+            if start <= session_date <= end
+        )
+        return ProviderIndicatorSeries(
+            provider="eastmoney_mx_finance_data",
+            instrument_id=instrument_id,
+            indicator_id=indicator_id,
+            requested_start=start,
+            requested_end=end,
+            points=points,
+            response_sha256=HASH,
+            retrieved_at=datetime(2025, 1, 25, tzinfo=UTC),
+            schema_version="eastmoney-mx.provider-indicator-history.v1",
+            query=provider_indicator_name,
+        )
 
 
 class RejectingGlobalSessionProvider:
@@ -346,6 +410,30 @@ def _write_bars(root: Path) -> None:
     _write_empty_corporate_actions(root)
 
 
+def _write_bars_with_settlement_tail(root: Path) -> tuple[date, ...]:
+    start = date(2024, 12, 30)
+    dates = tuple(start + timedelta(days=index) for index in range(20))
+    closes = tuple(10 + index % 3 for index in range(len(dates)))
+    table: Any = pa.table(  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
+        {
+            "stock_code": ["300059"] * len(dates),
+            "date": dates,
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "close": closes,
+            "volume": [1_000_000] * len(dates),
+            "amount": [value * 1_000_000 for value in closes],
+        }
+    )
+    pq.write_table(  # pyright: ignore[reportUnknownMemberType]
+        table,
+        root / "daily_ohlcv.parquet",
+    )
+    _write_empty_corporate_actions(root)
+    return dates
+
+
 def _write_empty_corporate_actions(root: Path) -> None:
     schema: Any = pa.schema(  # pyright: ignore[reportUnknownMemberType]
         [
@@ -450,6 +538,49 @@ def test_submitted_work_item_runs_to_a_stable_result(tmp_path: Path) -> None:
         "order",
         "fill",
     }
+
+
+def test_provider_timeline_keeps_warmup_but_excludes_settlement_tail(
+    tmp_path: Path,
+) -> None:
+    session_dates = _write_bars_with_settlement_tail(tmp_path)
+    repository = CapturingLocalParquetRepository(tmp_path)
+    store = InMemoryBacktestRunStore()
+    strategy = _strategy()
+    submission = BacktestSubmissionService(
+        market_data=repository,
+        run_store=store,
+        job_queue=CapturingQueue(),
+        versions=_versions(),
+        clock=lambda: datetime(2025, 1, 25, tzinfo=UTC),
+        provider_indicator_data=SettlementTailProvider(session_dates),
+    )
+    created = submission.submit(
+        strategy,
+        BacktestRunConfig(
+            participation_rate=Decimal("1"),
+            slippage_bps=Decimal("0"),
+            allocation_ratio=Decimal("0.9"),
+            run_robustness=False,
+        ),
+    )
+    config = json.loads(created.record.config_json)
+    provider_points = config["provider_indicator_series"]["identity_basis"]["entry"][
+        0
+    ]["series"]["points"]
+
+    assert date.fromisoformat(config["snapshot_start"]) < strategy.backtest.start
+    assert date.fromisoformat(config["snapshot_end"]) > strategy.backtest.end
+    assert date.fromisoformat(provider_points[-1]["session_date"]) > strategy.backtest.end
+
+    completed = BacktestExecutionService(
+        market_data=repository,
+        session_reference=ResearchFallbackSessionProvider(),
+        run_store=store,
+        runtime_identity=_runtime_identity(),
+    ).execute(created.record.run_id)
+
+    assert completed.state is BacktestJobState.SUCCEEDED
 
 
 def test_pinned_financial_fact_runs_through_the_existing_worker(tmp_path: Path) -> None:

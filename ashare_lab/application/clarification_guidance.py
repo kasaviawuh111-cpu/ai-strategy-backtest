@@ -309,6 +309,7 @@ def _grounding(
     utterance: str,
     diagnostic_code: str,
 ) -> tuple[CandidateGroundingEvidence, ...]:
+    match: re.Match[str] | None = None
     if diagnostic_code == "entry_rule_not_recognized":
         clause = _unique_action_clause(utterance, side="exit")
         path = "/exit/0"

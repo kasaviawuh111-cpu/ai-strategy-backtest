@@ -14,14 +14,22 @@ def test_configured_origin_can_preflight_strategy_request() -> None:
             headers={
                 "Origin": "https://example.workbuddy.link",
                 "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "content-type,idempotency-key",
+                "Access-Control-Request-Headers": (
+                    "accept,content-type,idempotency-key,x-request-id"
+                ),
             },
         )
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == ("https://example.workbuddy.link")
-    assert "POST" in response.headers["access-control-allow-methods"]
-    assert "Idempotency-Key" in response.headers["access-control-allow-headers"]
+    allowed_methods = {
+        item.strip().upper() for item in response.headers["access-control-allow-methods"].split(",")
+    }
+    allowed_headers = {
+        item.strip().lower() for item in response.headers["access-control-allow-headers"].split(",")
+    }
+    assert {"GET", "POST", "OPTIONS"} <= allowed_methods
+    assert {"accept", "content-type", "idempotency-key", "x-request-id"} <= allowed_headers
 
 
 def test_unconfigured_origin_is_not_authorized() -> None:

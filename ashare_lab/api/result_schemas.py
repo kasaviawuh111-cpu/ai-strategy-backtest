@@ -48,6 +48,38 @@ class BacktestRunEvidence(CamelApiModel):
     execution_assumptions: dict[str, str] = Field(alias="executionAssumptions")
 
 
+class SkillDataProvenance(CamelApiModel):
+    """Provider facts for the Skill-only path, without a second snapshot ledger."""
+
+    provider: Literal["eastmoney_mx_finance_data"]
+    instrument_id: str = Field(alias="instrumentId")
+    price_basis: Literal["provider_back_adjusted"] = Field(alias="priceBasis")
+    retrieved_at: datetime = Field(alias="retrievedAt")
+    history_start: date = Field(alias="historyStart")
+    history_end: date = Field(alias="historyEnd")
+    history_rows: int = Field(alias="historyRows", gt=0)
+    indicator_series: int = Field(alias="indicatorSeries", ge=0)
+    indicator_points: int = Field(alias="indicatorPoints", ge=0)
+    refresh_requested: bool = Field(
+        default=False, alias="refreshRequested", exclude_if=lambda value: not value
+    )
+    history_cache_status: Literal["unknown", "memory", "disk", "live", "forced"] = Field(
+        default="unknown", alias="historyCacheStatus", exclude_if=lambda value: value == "unknown"
+    )
+    indicator_cache_statuses: tuple[
+        Literal["unknown", "memory", "disk", "live", "forced"], ...
+    ] = Field(
+        default=(), alias="indicatorCacheStatuses", exclude_if=lambda value: not value
+    )
+    indicator_field_evidence: tuple[dict[str, str | None], ...] = Field(
+        default=(), alias="indicatorFieldEvidence"
+    )
+    derived_indicator_evidence: tuple[dict[str, str], ...] = Field(
+        default=(), alias="derivedIndicatorEvidence"
+    )
+    queries: tuple[str, ...]
+
+
 class BacktestSummaryView(CamelApiModel):
     run_id: str = Field(alias="runId", min_length=1, max_length=128)
     total_return: float | None = Field(alias="totalReturn")
@@ -71,6 +103,7 @@ class BacktestSummaryView(CamelApiModel):
     # Results created before run evidence was introduced remain readable, but
     # the client must label them as legacy rather than inventing provenance.
     run_evidence: BacktestRunEvidence | None = Field(default=None, alias="runEvidence")
+    data_provenance: SkillDataProvenance | None = Field(default=None, alias="dataProvenance")
 
 
 class BacktestSeriesPoint(CamelApiModel):
@@ -108,6 +141,7 @@ class BacktestActivity(CamelApiModel):
     title: str = Field(min_length=1, max_length=256)
     price: float | None = Field(default=None, gt=0)
     quantity: int | None = Field(default=None, ge=1)
+    notional_cny: float | None = Field(default=None, alias="notionalCny", gt=0)
     status: Literal["confirmed", "submitted", "filled", "partially_filled", "cancelled", "expired"]
     reason: str = Field(min_length=1, max_length=2_000)
     chain_id: str | None = Field(default=None, alias="chainId", max_length=256)
@@ -162,6 +196,9 @@ class BacktestAudit(CamelApiModel):
         max_length=128,
     )
     open_position_shares: int = Field(alias="openPositionShares", ge=0)
+    open_position_notional_cny: float | None = Field(
+        default=None, alias="openPositionNotionalCny", ge=0
+    )
 
 
 class BacktestStressScenario(CamelApiModel):

@@ -181,7 +181,9 @@ def run_preflight(frontend: str, api: str, timeout: float) -> dict[str, Any]:
             headers={
                 "Origin": frontend,
                 "Access-Control-Request-Method": "POST",
-                "Access-Control-Request-Headers": "content-type,x-request-id",
+                "Access-Control-Request-Headers": (
+                    "accept,content-type,idempotency-key,x-request-id"
+                ),
             },
         )
         with urllib.request.urlopen(
@@ -194,6 +196,29 @@ def run_preflight(frontend: str, api: str, timeout: float) -> dict[str, Any]:
                 raise AssertionError(f"CORS preflight returned HTTP {response.status}")
         if cors_headers.get("access-control-allow-origin") != frontend:
             raise AssertionError("CORS does not allow the exact public frontend origin")
+        allowed_methods = {
+            item.strip().upper()
+            for item in cors_headers.get("access-control-allow-methods", "").split(",")
+            if item.strip()
+        }
+        required_methods = {"GET", "POST", "OPTIONS"}
+        if not required_methods <= allowed_methods:
+            missing = sorted(required_methods - allowed_methods)
+            raise AssertionError(f"CORS is missing required methods: {missing!r}")
+        allowed_headers = {
+            item.strip().lower()
+            for item in cors_headers.get("access-control-allow-headers", "").split(",")
+            if item.strip()
+        }
+        required_headers = {
+            "accept",
+            "content-type",
+            "idempotency-key",
+            "x-request-id",
+        }
+        if not required_headers <= allowed_headers:
+            missing = sorted(required_headers - allowed_headers)
+            raise AssertionError(f"CORS is missing required headers: {missing!r}")
         cors = {
             "required": True,
             "verified": True,

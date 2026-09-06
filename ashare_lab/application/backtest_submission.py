@@ -2,18 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from math import ceil
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from ashare_lab.domain.execution import CapacityMode, LimitHandling
 from ashare_lab.domain.runs import ExecutionAssumptions, RunManifest
 from ashare_lab.domain.shared import DomainValidationError, InstrumentId, RunId
+from ashare_lab.domain.signals import (
+    binding_for_provider_condition,
+    provider_condition_leaves,
+)
 from ashare_lab.domain.strategy import (
+    HoldingPeriodExit,
+    IndicatorCondition,
+    PositionReturnExit,
     StrategySpec,
+    TrailingDrawdownExit,
     canonical_hash,
     canonical_json,
     iter_event_conditions,
@@ -21,6 +31,7 @@ from ashare_lab.domain.strategy import (
     strategy_requires_events,
     strategy_requires_financials,
 )
+from ashare_lab.domain.strategy.models import Condition
 from ashare_lab.ports.backtest_runs import (
     BacktestJobQueue,
     BacktestJobState,
@@ -30,6 +41,10 @@ from ashare_lab.ports.backtest_runs import (
 )
 from ashare_lab.ports.financial_data import FinancialFactLoader, PinnedFinancialFacts
 from ashare_lab.ports.market_data import DataRequirements, DateRange, MarketDataRepository
+from ashare_lab.ports.provider_indicator_data import (
+    HistoricalIndicatorData,
+    ProviderIndicatorSeries,
+)
 
 from .corporate_action_timeline import (
     CORPORATE_ACTION_POLICY,
@@ -44,6 +59,10 @@ from .daily_backtest import (
 from .funded_benchmark import FUNDED_BENCHMARK_POLICY
 
 MAX_WARMUP_CALENDAR_DAYS = 3_650
+# Product input boundary, not a claim that every security has data since this date.
+EARLIEST_A_SHARE_BACKTEST_DATE = date(1990, 1, 1)
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+_DAILY_DATA_STABLE_AT = time(16, 5)
 
 
 class EventDataUnavailableError(RuntimeError):
@@ -52,6 +71,30 @@ class EventDataUnavailableError(RuntimeError):
 
 class FinancialDataUnavailableError(RuntimeError):
     """Raised before queueing when financial facts cannot be pinned safely."""
+
+
+class BacktestDataNotYetAvailableError(RuntimeError):
+    """Raised when a requested backtest end is newer than stable daily data."""
+
+
+class BacktestDateRangeError(ValueError):
+    """Reject malformed historical ranges before queueing any provider work."""
+
+
+def validate_a_share_backtest_range(start: date, end: date) -> None:
+    if start < EARLIEST_A_SHARE_BACKTEST_DATE or start > end:
+        raise BacktestDateRangeError("backtest start must be on or after 1990-01-01 and before end")
+
+
+def latest_stable_a_share_data_date(observed_at: datetime) -> date:
+    """Return the latest date eligible for a completed A-share daily snapshot."""
+
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("observed_at must be timezone-aware")
+    shanghai = observed_at.astimezone(_SHANGHAI)
+    if shanghai.timetz().replace(tzinfo=None) < _DAILY_DATA_STABLE_AT:
+        return shanghai.date() - timedelta(days=1)
+    return shanghai.date()
 
 
 def _event_data_available_by_default() -> bool:
@@ -75,8 +118,11 @@ class BacktestRunConfig:
     settlement_extension_days: int = 14
     run_robustness: bool = True
     capacity_mode: CapacityMode = CapacityMode.POINT_IN_TIME_VOLUME
+    refresh_data: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.refresh_data) is not bool:
+            raise DomainValidationError("refresh_data must be a boolean")
         unit_interval = (self.participation_rate, self.allocation_ratio)
         if any(not Decimal("0") < item <= Decimal("1") for item in unit_interval):
             raise DomainValidationError("participation and allocation must be in (0, 1]")
@@ -172,6 +218,8 @@ class BacktestSubmissionService:
         run_id_factory: Callable[[], RunId] = lambda: RunId(f"run:{uuid4().hex}"),
         event_data_available: Callable[[], bool] = _event_data_available_by_default,
         financial_fact_loader: FinancialFactLoader | None = None,
+        provider_indicator_data: HistoricalIndicatorData | None = None,
+        latest_stable_data_date: Callable[[datetime], date] | None = None,
     ) -> None:
         self._market_data = market_data
         self._run_store = run_store
@@ -181,11 +229,15 @@ class BacktestSubmissionService:
         self._run_id_factory = run_id_factory
         self._event_data_available = event_data_available
         self._financial_fact_loader = financial_fact_loader
+        self._provider_indicator_data = provider_indicator_data
+        self._latest_stable_data_date = latest_stable_data_date
 
     def submit(
         self,
         strategy: StrategySpec,
         config: BacktestRunConfig,
+        *,
+        run_id: RunId | None = None,
     ) -> CreateRunResult:
         requires_events = strategy_requires_events(strategy)
         requires_financials = strategy_requires_financials(strategy)
@@ -198,11 +250,23 @@ class BacktestSubmissionService:
             )
         instrument_id = InstrumentId(strategy.instrument.symbol)
         effective_warmup = _effective_warmup_calendar_days(strategy, config)
+        created_at = self._clock()
+        requested_snapshot_end = strategy.backtest.end + timedelta(
+            days=config.settlement_extension_days
+        )
+        snapshot_end = requested_snapshot_end
+        available_data_end: date | None = None
+        if self._latest_stable_data_date is not None:
+            available_data_end = self._latest_stable_data_date(created_at)
+            if strategy.backtest.end > available_data_end:
+                raise BacktestDataNotYetAvailableError(
+                    "backtest end exceeds the latest stable A-share daily data date"
+                )
+            snapshot_end = min(requested_snapshot_end, available_data_end)
         period = DateRange(
             start=strategy.backtest.start - timedelta(days=effective_warmup),
-            end=strategy.backtest.end + timedelta(days=config.settlement_extension_days),
+            end=snapshot_end,
         )
-        created_at = self._clock()
         financial_bundle: PinnedFinancialFacts | None = None
         if requires_financials:
             if self._financial_fact_loader is None:
@@ -240,6 +304,22 @@ class BacktestSubmissionService:
             snapshot_period=period,
             effective_warmup_calendar_days=effective_warmup,
         )
+        if available_data_end is not None:
+            config_payload["requested_snapshot_end"] = requested_snapshot_end.isoformat()
+            config_payload["available_data_end"] = available_data_end.isoformat()
+        provider_indicator_payload: dict[str, object] | None = None
+        if (
+            self._provider_indicator_data is not None
+            and not requires_events
+            and not requires_financials
+        ):
+            provider_indicator_payload = _load_provider_indicator_payload(
+                strategy=strategy,
+                period=period,
+                provider=self._provider_indicator_data,
+            )
+            if provider_indicator_payload is not None:
+                config_payload["provider_indicator_series"] = provider_indicator_payload
         financial_snapshot_payload: dict[str, object] | None = None
         if financial_bundle is not None:
             financial_snapshot_payload = _financial_snapshot_payload(financial_bundle)
@@ -248,7 +328,7 @@ class BacktestSubmissionService:
                 item.model_dump(mode="json") for item in financial_bundle.facts
             ]
         manifest = RunManifest(
-            run_id=self._run_id_factory(),
+            run_id=run_id or self._run_id_factory(),
             strategy_hash=canonical_hash(strategy),
             catalog_hash=self._versions.catalog_hash,
             config_hash=canonical_hash(config_payload),
@@ -293,6 +373,7 @@ class BacktestSubmissionService:
                 _manifest_payload(
                     manifest,
                     financial_snapshot=financial_snapshot_payload,
+                    provider_indicator_snapshot=provider_indicator_payload,
                 )
             ),
             config_json=canonical_json(config_payload),
@@ -312,6 +393,7 @@ def _manifest_payload(
     manifest: RunManifest,
     *,
     financial_snapshot: Mapping[str, object] | None = None,
+    provider_indicator_snapshot: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     snapshot_payload: dict[str, object] = {
         "checksum": manifest.data_snapshot.checksum,
@@ -341,7 +423,152 @@ def _manifest_payload(
     }
     if financial_snapshot is not None:
         payload["financial_snapshot"] = dict(financial_snapshot)
+    if provider_indicator_snapshot is not None:
+        payload["provider_indicator_series"] = dict(provider_indicator_snapshot)
     return payload
+
+
+def _load_provider_indicator_payload(
+    *,
+    strategy: StrategySpec,
+    period: DateRange,
+    provider: HistoricalIndicatorData,
+) -> dict[str, object] | None:
+    exit_condition = _exit_condition(strategy)
+    entry, exit_series = asyncio.run(
+        _load_provider_indicator_sides(
+            entry_condition=strategy.entry,
+            exit_condition=exit_condition,
+            strategy=strategy,
+            period=period,
+            provider=provider,
+        )
+    )
+    if not entry and not exit_series:
+        return None
+    identity_basis = {
+        "entry": entry,
+        "exit": exit_series,
+    }
+    checksum = canonical_hash(identity_basis)
+    return {
+        "checksum": checksum,
+        "identity_basis": identity_basis,
+        "schema_version": "ashare-lab.provider-indicator-series.v1",
+        "snapshot_id": "provider-indicators:" + checksum.removeprefix("sha256:"),
+    }
+
+
+async def _load_provider_indicator_sides(
+    *,
+    entry_condition: Condition,
+    exit_condition: Condition | None,
+    strategy: StrategySpec,
+    period: DateRange,
+    provider: HistoricalIndicatorData,
+) -> tuple[tuple[dict[str, object], ...], tuple[dict[str, object], ...]]:
+    """Fetch independent provider series concurrently, preserving tree order."""
+
+    entry_task = _provider_series_for_condition(
+        entry_condition,
+        strategy=strategy,
+        period=period,
+        provider=provider,
+    )
+    exit_task = (
+        _provider_series_for_condition(
+            exit_condition,
+            strategy=strategy,
+            period=period,
+            provider=provider,
+        )
+        if exit_condition is not None
+        else _empty_provider_series()
+    )
+    entry, exit_series = await asyncio.gather(entry_task, exit_task)
+    return entry, exit_series
+
+
+async def _empty_provider_series() -> tuple[dict[str, object], ...]:
+    return ()
+
+
+async def _provider_series_for_condition(
+    condition: Condition,
+    *,
+    strategy: StrategySpec,
+    period: DateRange,
+    provider: HistoricalIndicatorData,
+) -> tuple[dict[str, object], ...]:
+    leaves = provider_condition_leaves(condition)
+
+    async def fetch(path: str, leaf: object) -> dict[str, object]:
+        if not isinstance(leaf, IndicatorCondition):
+            raise TypeError("provider condition leaf must be an IndicatorCondition")
+        binding = binding_for_provider_condition(leaf)
+        series = await provider.query_indicator_history(
+            instrument_id=strategy.instrument.symbol,
+            indicator_id=leaf.indicator_id,
+            provider_indicator_name=binding.provider_indicator_name,
+            value_names=binding.value_names,
+            start=period.start,
+            end=period.end,
+        )
+        return {
+            "path": path,
+            "series": _provider_indicator_series_payload(series),
+        }
+
+    return tuple(
+        await asyncio.gather(*(fetch(path, leaf) for path, leaf in leaves))
+    )
+
+
+def _provider_indicator_series_payload(series: ProviderIndicatorSeries) -> dict[str, object]:
+    return {
+        "provider": series.provider,
+        "instrument_id": series.instrument_id,
+        "indicator_id": series.indicator_id,
+        "requested_start": series.requested_start.isoformat(),
+        "requested_end": series.requested_end.isoformat(),
+        "response_sha256": series.response_sha256,
+        "retrieved_at": series.retrieved_at.isoformat(),
+        "schema_version": series.schema_version,
+        "query": series.query,
+        "points": [
+            {
+                "session_date": point.session_date.isoformat(),
+                "observed_at": point.observed_at.isoformat(),
+                "first_available_at": point.first_available_at.isoformat(),
+                "values": [
+                    {
+                        "field_code": value.field_code,
+                        "field_name": value.field_name,
+                        "value": str(value.value),
+                        "unit": value.unit,
+                    }
+                    for value in point.values
+                ],
+            }
+            for point in series.points
+        ],
+    }
+
+
+def _exit_condition(strategy: StrategySpec) -> Condition | None:
+    children = tuple(
+        child
+        for child in strategy.exit.children
+        if not isinstance(
+            child,
+            (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit),
+        )
+    )
+    if not children:
+        return None
+    from ashare_lab.domain.strategy import AnyCondition
+
+    return children[0] if len(children) == 1 else AnyCondition(children=children)
 
 
 def _financial_snapshot_payload(bundle: PinnedFinancialFacts) -> dict[str, object]:

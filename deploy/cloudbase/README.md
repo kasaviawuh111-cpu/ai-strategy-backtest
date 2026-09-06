@@ -94,11 +94,11 @@ This profile is suitable only for current public HTTP smoke testing. Container
 replacement may lose drafts, receipts, runs, and newly acquired snapshots.
 Cross-process and cross-restart recovery are not acceptance claims.
 
-The image-bundled Composite v2 seed is the first lookup target and is reused
-when it already covers the submitted instrument and period. Only requests not
-covered by a trusted seed enter on-demand acquisition; this avoids needless
-provider calls without allowing stale or partial data to satisfy another
-instrument or period.
+Every fresh submission uses `ON_DEMAND_REFRESH_EACH_SUBMISSION=true`: it
+re-acquires the requested instrument and interval from the configured live
+providers before pinning the resulting immutable Composite v2 content ID.
+Published snapshots remain audit/replay artifacts for the worker; they are not
+used as a stale-cache fallback for a new submission.
 
 ## PostgreSQL migration gate (deferred TODO)
 
@@ -217,7 +217,37 @@ Container contract:
 - `APP_ENV=production`, `INITIALIZE_SCHEMA=false`;
 - exact `CODE_REVISION` and strict snapshot identities;
 - exact active WorkBuddy HTTPS origins in `CORS_ALLOWED_ORIGINS`;
+- cross-origin preflight allows `GET`, `POST`, `OPTIONS` and the request headers
+  `Accept`, `Content-Type`, `Idempotency-Key`, `X-Request-ID`;
+- DeepSeek credentials are injected only as backend runtime secrets through
+  `CANDIDATE_PROVIDER_API_KEY` and `RESEARCH_PROVIDER_API_KEY`;
 - one API worker for the current in-process thread queue.
+
+For a separate WorkBuddy deployment, set the backend environment only after
+the restored frontend URL is known:
+
+```text
+CORS_ALLOWED_ORIGINS=https://<exact-restored-frontend-origin>
+ON_DEMAND_REFRESH_EACH_SUBMISSION=true
+CANDIDATE_PROVIDER_MODE=openai_compatible
+CANDIDATE_PROVIDER_NAME=deepseek
+CANDIDATE_PROVIDER_ENDPOINT=https://api.deepseek.com/chat/completions
+CANDIDATE_PROVIDER_MODEL=deepseek-v4-flash
+CANDIDATE_PROVIDER_RESPONSE_MODE=json_object
+CANDIDATE_PROVIDER_API_KEY=<platform-secret>
+RESEARCH_PROVIDER_MODE=deepseek_responses
+RESEARCH_PROVIDER_ENDPOINT=https://api.deepseek.com/responses
+RESEARCH_PROVIDER_MODEL=deepseek-v4-flash
+RESEARCH_PROVIDER_API_KEY=<platform-secret>
+RESEARCH_PROVIDER_TIMEOUT_SECONDS=120
+MX_SAAS_API_KEY=<platform-secret>
+```
+
+Bind the two DeepSeek API-key variables (they may reference the same managed
+secret) and the MX key in the platform secret manager. Do not use `VITE_*`, a
+Docker build argument, frontend source, or `web/dist` for any provider key.
+The repository does not hard-code a WorkBuddy origin because old release URLs
+are not proof of the currently active frontend.
 
 The WorkBuddy frontend may use the candidate only with `VITE_USE_MOCK=false`
 and its candidate HTTPS API URL. Local readiness, fixture tests, or a static

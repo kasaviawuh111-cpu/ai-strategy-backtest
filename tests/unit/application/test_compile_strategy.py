@@ -1,5 +1,7 @@
 from datetime import date
 from pathlib import Path
+from typing import Literal
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -21,7 +23,14 @@ from ashare_lab.domain.strategy import (
     HoldingPeriodExit,
     IndicatorCondition,
 )
-from ashare_lab.ports.candidate_generation import CompileInput
+from ashare_lab.ports.candidate_generation import (
+    CandidateAst,
+    CandidateGroundingEvidence,
+    CandidateProvenance,
+    CompileInput,
+)
+from ashare_lab.ports.clarification_dialogue import ClarificationDialogueAssessment
+from ashare_lab.ports.strategy_editing import StrategyEditResult
 
 ROOT = Path(__file__).parents[3]
 
@@ -54,6 +63,96 @@ async def test_macd_sentence_compiles_without_unnecessary_question(
     assert outcome.strategy.instrument.symbol == "300059.SZ"
     assert outcome.strategy.backtest.start == date(2025, 8, 27)
     assert outcome.strategy.backtest.initial_cash_cny == 1_000_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "MACD金叉买入，不卖出",
+        "MACD金叉买入，暂不卖出",
+        "MACD金叉买入，没有卖出",
+    ],
+)
+async def test_explicitly_missing_exit_offers_compiler_gated_choices(
+    compiler: StrategyCompiler,
+    utterance: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "exit_rule_not_recognized"
+    assert outcome.idea_route is not None
+    assert len(outcome.idea_route.proposals) == 3
+
+
+@pytest.mark.asyncio
+async def test_missing_exit_guidance_does_not_bypass_source_semantic_gate(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="MACD金叉买入，不卖出，盘中成交",
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.diagnostic_code == "non_daily_timeframe_not_supported"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("utterance", ["低买高卖", "高抛低吸", "低吸高抛"])
+async def test_vague_strategy_offers_three_executable_interpretations(
+    compiler: StrategyCompiler,
+    utterance: str,
+) -> None:
+    request = CompileInput(
+        utterance=utterance,
+        instrument_context="300059.SZ",
+        as_of_date=date(2026, 8, 27),
+    )
+
+    outcome = await compiler.compile(request)
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "no_supported_signal_recognized"
+    assert outcome.idea_route is not None
+    assert outcome.idea_route.provenance is None
+    assert len(outcome.idea_route.proposals) == 3
+    for proposal in outcome.idea_route.proposals:
+        compiled = await compiler.compile(
+            CompileInput(
+                utterance=proposal.suggested_utterance,
+                instrument_context=request.instrument_context,
+                as_of_date=request.as_of_date,
+            )
+        )
+        assert compiled.status is CompileStatus.READY
+
+
+@pytest.mark.asyncio
+async def test_vague_strategy_without_instrument_asks_instead_of_rejecting(
+    compiler: StrategyCompiler,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance="低买高卖",
+            instrument_context=None,
+            as_of_date=date(2026, 8, 27),
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "instrument_required"
+    assert outcome.clarification is not None
 
 
 @pytest.mark.asyncio
@@ -1382,6 +1481,39 @@ async def test_unrepresentable_source_semantics_fail_closed_before_strategy_crea
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("utterance,immediate_execution", [
+    ("生益科技，当日成交量达到前20日均量1.5倍买入，跌破20日均线卖出，回测近一年。", False),
+    ("当日成交量达到1.5倍买入，跌破20日均线卖出", False),
+    ("当天成交额达到1.5倍买入，跌破20日均线卖出", False),
+    ("今日的成交量达到1.5倍买入，跌破20日均线卖出", False),
+    ("当日成交量达到1.5倍后立即买入，跌破20日均线卖出", True),
+    ("当日成交量达到1.5倍后当天买入，跌破20日均线卖出", True),
+    ("当日成交额达到1.5倍后当天成交，跌破20日均线卖出", True),
+    ("MACD金叉当天收盘买入，死叉当天收盘卖出", True),
+])
+async def test_daily_volume_observation_is_not_an_immediate_execution_instruction(
+    utterance: str, immediate_execution: bool,
+) -> None:
+    generator = Mock(generate=AsyncMock(return_value=()))
+    compiler = StrategyCompiler(
+        generator=generator,
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+    )
+    request = CompileInput(utterance=utterance, as_of_date=date(2026, 9, 4))
+    outcome = await compiler.compile(request)
+    assert outcome.strategy is None
+    if immediate_execution:
+        assert outcome.diagnostic_code == "same_session_execution_not_supported"
+        generator.generate.assert_not_awaited()
+    else:
+        # The gate does not parse or rewrite the strategy: the original request
+        # must reach the configured generator, whose test response is empty.
+        generator.generate.assert_awaited_once_with(request)
+        assert outcome.diagnostic_code == "no_candidate_generated"
+
+
+@pytest.mark.asyncio
 async def test_fill_anchored_holding_period_exit_is_not_rejected_as_signal_delay(
     compiler: StrategyCompiler,
 ) -> None:
@@ -1415,6 +1547,208 @@ async def test_explicit_supported_daily_confirmation_and_next_open_stays_ready(
     assert outcome.strategy.execution.evaluation_frequency == "1d_close"
     assert outcome.strategy.execution.entry_policy == "next_tradable_session_open"
     assert outcome.strategy.execution.exit_policy == "next_tradable_session_open"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_timeframe_identity_preflight_resolves_only_grounded_name() -> None:
+    request = CompileInput(
+        utterance="东方财富用5分钟K线，5均线上穿20均线买，下穿卖，测最近一年。",
+        as_of_date=date(2026, 9, 4),
+    )
+    generator = Mock(generate=AsyncMock(return_value=(CandidateAst(
+        instrument_symbol=None, instrument_name="东方财富", entry=(), exit=(), confidence=0.9,
+        unsupported_code="non_daily_timeframe_not_supported",
+        grounding_evidence=(CandidateGroundingEvidence(
+            path="/instrument/name", start=0, end=4, text="东方财富",
+        ),),
+    ),)))
+    resolver = Mock(return_value="300059.SZ")
+    compiler = StrategyCompiler(
+        generator=generator, catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+        instrument_name_resolver=resolver,
+    )
+
+    outcome = await compiler.compile(request)
+    generator.generate.assert_not_awaited()
+    identity = await compiler.resolve_unsupported_instrument(request)
+
+    assert identity == ("300059.SZ", CandidateGroundingEvidence(
+        path="/instrument/symbol", start=0, end=4, text="东方财富",
+    ))
+    resolver.assert_called_once_with("东方财富")
+    generator.generate.assert_awaited_once_with(request)
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.strategy is None and outcome.revision_base_strategy is None
+    assert outcome.idea_route is None and not outcome.run_requested
+    assert request.instrument_context is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [
+    "selected", "not_selected", "not_in_source", "empty", "router_error", "resolver_error",
+])
+async def test_unsupported_identity_dialogue_is_independent_of_dsl_and_fail_closed(
+    case: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    request = CompileInput(
+        utterance="东方财富用5分钟K线，5均线上穿20均线买，下穿卖，测最近一年。",
+        as_of_date=date(2026, 9, 4),
+    )
+    assessment = ClarificationDialogueAssessment(
+        reply_kind="preference", acknowledgement_id="respect_preference",
+        natural_reply="分钟线仍不受支持。",
+        instrument_name="同花顺" if case == "not_in_source" else "东方财富",
+        instrument_selected=case != "not_selected",
+        strategy_inspiration="此字段不得用于编译或执行。",
+    )
+    router = Mock(assess=AsyncMock(return_value=None if case == "empty" else assessment))
+    if case == "router_error":
+        router.assess.side_effect = RuntimeError("private-provider-message")
+    generator = Mock(generate=AsyncMock(side_effect=AssertionError("must not parse intraday DSL")))
+    resolver = Mock(return_value="300059.SZ")
+    if case == "resolver_error":
+        resolver.side_effect = RuntimeError("private-provider-message")
+    compiler = StrategyCompiler(
+        generator=generator, catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+        instrument_name_resolver=resolver, clarification_dialogue_router=router,
+    )
+
+    outcome = await compiler.compile(request)
+    identity = await compiler.resolve_unsupported_instrument(request)
+
+    if case == "selected":
+        assert identity == ("300059.SZ", CandidateGroundingEvidence(
+            path="/instrument/symbol", start=0, end=4, text="东方财富",
+        ))
+        resolver.assert_called_once_with("东方财富")
+    else:
+        assert identity is None
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.strategy is None and outcome.idea_route is None and not outcome.run_requested
+    generator.generate.assert_not_awaited()
+    router.assess.assert_awaited_once()
+    sent = router.assess.await_args.args[0]
+    assert sent.answer == request.utterance and not sent.allow_data_query
+    assert not sent.response_only and not sent.options
+    assert "private-provider-message" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("text", "start", "resolved"), [
+    ("东方财富", 1, "300059.SZ"),
+    ("同花顺", 0, "300033.SZ"),
+    ("东方财富", 0, None),
+])
+async def test_unsupported_timeframe_identity_requires_exact_span_and_resolution(
+    text: str, start: int, resolved: str | None,
+) -> None:
+    generator = Mock(generate=AsyncMock(return_value=(CandidateAst(
+        instrument_symbol=None, instrument_name=text, entry=(), exit=(), confidence=0.9,
+        grounding_evidence=(CandidateGroundingEvidence(
+            path="/instrument/name", start=start, end=start + len(text), text=text,
+        ),),
+    ),)))
+    resolver = Mock(return_value=resolved) if resolved else Mock(side_effect=LookupError)
+    compiler = StrategyCompiler(
+        generator=generator, catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+        instrument_name_resolver=resolver,
+    )
+
+    assert await compiler.resolve_unsupported_instrument(CompileInput(
+        utterance="东方财富用5分钟K线，金叉买，死叉卖。", as_of_date=date(2026, 9, 4),
+    )) is None
+    if start != 0 or text != "东方财富":
+        resolver.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unsupported_timeframe_identity_does_not_choose_between_two_verified_stocks() -> None:
+    generator = Mock(generate=AsyncMock(return_value=tuple(CandidateAst(
+        instrument_symbol=None, instrument_name=name, entry=(), exit=(), confidence=0.9,
+        grounding_evidence=(CandidateGroundingEvidence(
+            path="/instrument/name", start=start, end=start + len(name), text=name,
+        ),),
+    ) for name, start in (("东方财富", 0), ("同花顺", 5)))))
+    resolver = Mock(side_effect=["300059.SZ", "300033.SZ"])
+    compiler = StrategyCompiler(
+        generator=generator, catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+        instrument_name_resolver=resolver,
+    )
+
+    assert await compiler.resolve_unsupported_instrument(CompileInput(
+        utterance="东方财富或同花顺用5分钟K线，金叉买，死叉卖。", as_of_date=date(2026, 9, 4),
+    )) is None
+    assert resolver.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("utterance", "context"), [
+    ("东方财富用日线，金叉买，死叉卖。", None),
+    ("东方财富用5分钟K线，金叉买，死叉卖。", "300059.SZ"),
+])
+async def test_unsupported_identity_preflight_is_narrow_and_does_not_requery_known_stock(
+    utterance: str, context: str | None,
+) -> None:
+    generator = Mock(generate=AsyncMock(side_effect=AssertionError("unexpected generation")))
+    compiler = StrategyCompiler(
+        generator=generator, catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+    )
+    assert await compiler.resolve_unsupported_instrument(CompileInput(
+        utterance=utterance, instrument_context=context, as_of_date=date(2026, 9, 4),
+    )) is None
+    generator.generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disposition", ["apply", "change_instrument"])
+@pytest.mark.parametrize(("has_reports", "run_requested", "refresh_data", "expected"), [
+    (True, True, True, True),
+    (True, True, False, False),
+    (True, False, True, False),
+    (False, True, True, False),
+])
+async def test_editor_refresh_flag_requires_a_report_and_explicit_rerun(
+    compiler: StrategyCompiler, disposition: Literal["apply", "change_instrument"],
+    has_reports: bool, run_requested: bool, refresh_data: bool, expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = CompileInput(
+        utterance="MACD金叉买入，死叉卖出", instrument_context="300059.SZ",
+        as_of_date=date(2026, 9, 4),
+    )
+    prior = await compiler.compile(original)
+    assert prior.strategy is not None
+    edited = prior.strategy.model_copy(update={
+        "backtest": prior.strategy.backtest.model_copy(update={"initial_cash_cny": 500_000}),
+    })
+    editor = Mock(edit=AsyncMock(return_value=StrategyEditResult(
+        disposition=disposition, message="已按本轮要求处理。",
+        strategy=edited if disposition == "apply" else None,
+        provenance=CandidateProvenance(
+            source="bounded_provider", provider="fixture", model="fixture",
+            prompt_version="fixture", schema_version="fixture",
+            capability_projection_version="fixture", capability_projection_hash="fixture",
+            upstream_pattern_commit="fixture", candidate_rank=0,
+        ),
+        run_requested=run_requested, refresh_data=refresh_data,
+        instrument_refs=("300033.SZ",) if disposition == "change_instrument" else (),
+    )))
+    monkeypatch.setattr(compiler, "_strategy_editor", editor)
+
+    turn = await compiler.edit_current_strategy(
+        original_input=original, prior_outcome=prior,
+        answer="换成300033.SZ" if disposition == "change_instrument" else "本金改为50万",
+        backtest_results=({"runId": "stored-run"},) if has_reports else (),
+    )
+
+    assert turn is not None and turn.outcome.status is CompileStatus.READY
+    assert turn.outcome.run_requested is bool(has_reports and run_requested)
+    assert turn.outcome.refresh_data is expected
 
 
 @pytest.mark.asyncio

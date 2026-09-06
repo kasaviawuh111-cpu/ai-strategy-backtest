@@ -13,6 +13,11 @@ from sqlalchemy.exc import ArgumentError
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _TRUE_VALUES = {"1", "true", "yes", "on"}
+_REQUIRED_LIVE_PROVIDER_VARIABLES = (
+    "CANDIDATE_PROVIDER_API_KEY",
+    "RESEARCH_PROVIDER_API_KEY",
+    "MX_SAAS_API_KEY",
+)
 
 
 class DeploymentProfileError(RuntimeError):
@@ -71,8 +76,29 @@ def _validate_ephemeral_candidate(environment: Mapping[str, str]) -> None:
         raise DeploymentProfileError(
             "ephemeral candidate requires the on-demand trusted snapshot registry"
         )
+    if environment.get("ON_DEMAND_REFRESH_EACH_SUBMISSION", "").strip().lower() not in _TRUE_VALUES:
+        raise DeploymentProfileError(
+            "ephemeral candidate requires ON_DEMAND_REFRESH_EACH_SUBMISSION=true"
+        )
+    _validate_live_provider_environment(environment)
     if _GIT_SHA.fullmatch(environment.get("CODE_REVISION", "").strip()) is None:
         raise DeploymentProfileError("CODE_REVISION must be the exact clean 40-character SHA")
+
+
+def _validate_live_provider_environment(environment: Mapping[str, str]) -> None:
+    if environment.get("CANDIDATE_PROVIDER_MODE", "").strip() != "openai_compatible":
+        raise DeploymentProfileError("ephemeral candidate requires the backend model provider")
+    if environment.get("RESEARCH_PROVIDER_MODE", "").strip() != "deepseek_responses":
+        raise DeploymentProfileError("ephemeral candidate requires the backend research provider")
+    missing = [
+        variable
+        for variable in _REQUIRED_LIVE_PROVIDER_VARIABLES
+        if not environment.get(variable, "").strip()
+    ]
+    if missing:
+        raise DeploymentProfileError(
+            "ephemeral candidate is missing backend-only provider secrets: " + ", ".join(missing)
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -49,6 +49,14 @@ from .indicators import (
     williams_r,
 )
 from .models import SignalEvidence, SignalFact
+from .provider_runtime import (
+    ProviderIndicatorBinding,
+    ProviderSignalRuntimeError,
+    binding_for_provider_condition,
+    evaluate_provider_condition_tree_aligned,
+    evaluate_provider_indicator_aligned,
+    provider_condition_leaves,
+)
 from .runtime import SignalRuntime, SignalRuntimeError
 
 __all__ = [
@@ -60,6 +68,8 @@ __all__ = [
     "MacdPoint",
     "MovingAverageCrossPoint",
     "PivotDivergencePoint",
+    "ProviderIndicatorBinding",
+    "ProviderSignalRuntimeError",
     "SignalEvidence",
     "SignalFact",
     "SignalRuntime",
@@ -70,6 +80,7 @@ __all__ = [
     "amount_average",
     "amplitude_pct",
     "average_true_range",
+    "binding_for_provider_condition",
     "bollinger_bands",
     "bull_and_bear_index",
     "cci",
@@ -79,6 +90,8 @@ __all__ = [
     "donchian_channel",
     "ema_bias",
     "evaluate_comparator",
+    "evaluate_provider_condition_tree_aligned",
+    "evaluate_provider_indicator_aligned",
     "exponential_moving_average",
     "historical_volatility",
     "kdj",
@@ -91,6 +104,7 @@ __all__ = [
     "on_balance_volume",
     "period_return_pct",
     "previous_volume_average",
+    "provider_condition_leaves",
     "rate_of_change",
     "relative_volume",
     "return_stddev",

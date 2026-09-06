@@ -170,6 +170,8 @@ describe('current report screen', () => {
       onOpenChain={onOpenChain} onOpenExecution={vi.fn()} mode="live" />)
 
     expect(screen.getByRole('button', { name: /买入成交.*回车键/ })).toHaveTextContent('B')
+    expect(screen.getAllByTitle('已记录模拟成交').length).toBeGreaterThan(0)
+    expect(screen.queryByTitle('按委托数量全部成交')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /买入 年度报告首次可得 已成/ }))
     expect(onOpenChain).toHaveBeenCalledWith(expect.objectContaining({
       id: 'fill:1',

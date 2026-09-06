@@ -254,6 +254,19 @@ def test_pin_snapshot_is_deterministic_for_the_same_selection(data_root: Path) -
     assert str(first.snapshot_id) == f"snapshot:{first.checksum.removeprefix('sha256:')}"
 
 
+def test_generic_pin_rejects_instrument_absent_from_daily_file(data_root: Path) -> None:
+    repository = LocalParquetMarketDataRepository(data_root)
+
+    with pytest.raises(
+        MarketDataCapabilityError,
+        match=r"daily OHLCV snapshot does not contain requested instrument: 600519\.SH",
+    ):
+        repository.pin_snapshot(
+            _requirements("600519.SH"),
+            DateRange(date(2025, 1, 2), date(2025, 1, 6)),
+        )
+
+
 def test_load_daily_bars_prunes_instrument_range_and_columns(data_root: Path) -> None:
     repository = LocalParquetMarketDataRepository(data_root)
     snapshot = repository.pin_snapshot(

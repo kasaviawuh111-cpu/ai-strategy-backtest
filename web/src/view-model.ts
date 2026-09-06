@@ -377,8 +377,13 @@ export const assessStrategyCapabilities = (
     ))
   const needsPreparation = ids.events.length > 0 && canPrepare && !snapshotBacked
   const canRun = declared && capabilities.backtest_execution_available && canPrepare
+  const unavailableIndicators = ids.indicators
+    .map((id) => indicators.get(id))
+    .filter((item) => item?.status === 'unavailable')
   const reason = !declared
-    ? documentTextCatalogUnavailable
+    ? unavailableIndicators.length > 0
+      ? unavailableIndicators.map((item) => item!.description).join('\n')
+      : documentTextCatalogUnavailable
       ? '规则已经由服务端生成，但能力接口没有声明该公告正文词频定义可用于回测。'
       : '规则已经由服务端生成，但能力接口尚未声明全部定义可用于提交回测。'
     : !capabilities.backtest_execution_available
@@ -647,6 +652,7 @@ export const toTradeRows = (activities: BacktestActivity[]): TradeRow[] =>
     title: activity.title,
     price: activity.price,
     quantity: activity.quantity,
+    notionalCny: activity.notionalCny,
     reason: activity.reason,
     chainId: activity.chainId,
     decisionId: activity.decisionId,
@@ -808,6 +814,7 @@ export const toRunEvidence = (summary: BacktestSummary): RunEvidence => ({
   strategyHash: summary.runEvidence?.strategyHash ?? null,
   engineVersion: summary.runEvidence?.engineVersion ?? null,
   executionAssumptions: summary.runEvidence?.executionAssumptions ?? {},
+  skillData: summary.dataProvenance ?? null,
 })
 
 const activityKind = (kind: BacktestActivity['kind']): ChainNode['kind'] =>
@@ -1028,6 +1035,7 @@ export const buildChain = (
         activity.reason,
         activity.price != null ? `价格 ¥${activity.price.toFixed(2)}` : null,
         activity.quantity != null ? `数量 ${activity.quantity.toLocaleString('zh-CN')} 股` : null,
+        activity.notionalCny != null ? `模拟金额 ¥${activity.notionalCny.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}` : null,
         activity.capacityReasonCode ? `容量：${capacityImpact(activity, related)}` : null,
       ].filter(Boolean).join(' · '),
       ref: activityRef(activity),

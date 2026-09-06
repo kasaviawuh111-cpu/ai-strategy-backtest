@@ -218,6 +218,10 @@ class DailyBacktestInput:
     signal_bars: tuple[DailyBar, ...] | None = None
     events: tuple[EventEnvelope, ...] = ()
     financial_facts: tuple[FinancialFactRecord, ...] = ()
+    # Exact provider-returned indicator values are evaluated before reaching
+    # the backtest engine. Provider mode must never mix with local formulas.
+    provider_entry_timeline: tuple[SignalFact | None, ...] | None = None
+    provider_exit_timeline: tuple[SignalFact | None, ...] | None = None
     corporate_actions: tuple[CorporateAction, ...] = ()
     config: DailyBacktestConfig = field(default_factory=DailyBacktestConfig)
     benchmark_equity: tuple[tuple[date, Decimal], ...] = ()
@@ -300,24 +304,12 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
 
     bars, signal_bars, sessions, first_trade_index = _validate_and_select_inputs(request)
     instrument_id = InstrumentId(request.strategy.instrument.symbol)
-    entry_timeline = SignalRuntime().evaluate_aligned(
-        request.strategy.entry,
-        signal_bars,
-        request.events,
-        request.financial_facts,
-        execution_bars=bars,
-    )
     market_exit_condition = _exit_condition(request.strategy)
-    exit_timeline: tuple[SignalFact | None, ...] = (
-        SignalRuntime().evaluate_aligned(
-            market_exit_condition,
-            signal_bars,
-            request.events,
-            request.financial_facts,
-            execution_bars=bars,
-        )
-        if market_exit_condition is not None
-        else (None,) * len(signal_bars)
+    entry_timeline, exit_timeline = _select_signal_timelines(
+        request,
+        bars=bars,
+        signal_bars=signal_bars,
+        market_exit_condition=market_exit_condition,
     )
     holding_exit = _holding_period_exit(request.strategy)
     position_risk_exits = _position_risk_exits(request.strategy)
@@ -767,6 +759,22 @@ def _attempt_decision(
         tzinfo=SHANGHAI,
     )
     close_at = datetime.combine(bar.session_date, time(15), tzinfo=SHANGHAI)
+    buy_sellable_on: date | None = None
+    if decision.side is OrderSide.BUY:
+        try:
+            buy_sellable_on = request.calendar.next_session(bar.session_date)
+        except (KeyError, ValueError):
+            return (
+                portfolio,
+                replace(
+                    decision,
+                    status=DecisionStatus.NO_FUTURE_SESSION,
+                    outcome_reason="no_proven_t_plus_one_session_after_buy_fill",
+                ),
+                None,
+                None,
+                False,
+            )
     submitted_at = max(
         decision.created_at + DECISION_PROCESSING_LATENCY,
         auction_accept_at,
@@ -894,13 +902,8 @@ def _attempt_decision(
             fees=fees,
         )
         if decision.side is OrderSide.BUY:
-            try:
-                sellable_on = request.calendar.next_session(fill_record.trading_date)
-            except (KeyError, ValueError) as exc:
-                raise DailyBacktestInputError(
-                    "calendar must include the first session after every possible buy fill"
-                ) from exc
-            portfolio = apply_buy(portfolio, fill_record, sellable_on=sellable_on)
+            assert buy_sellable_on is not None
+            portfolio = apply_buy(portfolio, fill_record, sellable_on=buy_sellable_on)
         else:
             portfolio = apply_sell(portfolio, fill_record)
 
@@ -1474,6 +1477,92 @@ def _validate_and_select_inputs(
         raise DailyBacktestInputError(f"missing sessions for {len(missing)} bars")
     selected_sessions = tuple(session_by_date[bar.session_date] for bar in all_bars)
     return all_bars, signal_bars, selected_sessions, trade_indices[0]
+
+
+def _select_signal_timelines(
+    request: DailyBacktestInput,
+    *,
+    bars: tuple[DailyBar, ...],
+    signal_bars: tuple[DailyBar, ...],
+    market_exit_condition: Condition | None,
+) -> tuple[tuple[SignalFact | None, ...], tuple[SignalFact | None, ...]]:
+    provider_mode = (
+        request.provider_entry_timeline is not None
+        or request.provider_exit_timeline is not None
+    )
+    if not provider_mode:
+        entry = SignalRuntime().evaluate_aligned(
+            request.strategy.entry,
+            signal_bars,
+            request.events,
+            request.financial_facts,
+            execution_bars=bars,
+        )
+        exit_timeline = (
+            SignalRuntime().evaluate_aligned(
+                market_exit_condition,
+                signal_bars,
+                request.events,
+                request.financial_facts,
+                execution_bars=bars,
+            )
+            if market_exit_condition is not None
+            else (None,) * len(signal_bars)
+        )
+        return entry, exit_timeline
+
+    if request.provider_entry_timeline is None:
+        raise DailyBacktestInputError(
+            "provider indicator mode requires an entry signal timeline"
+        )
+    if market_exit_condition is not None and request.provider_exit_timeline is None:
+        raise DailyBacktestInputError(
+            "provider indicator mode requires an exit signal timeline"
+        )
+    entry = _validate_provider_timeline(
+        request.provider_entry_timeline,
+        bars=signal_bars,
+        label="entry",
+    )
+    exit_timeline = _validate_provider_timeline(
+        request.provider_exit_timeline or (None,) * len(signal_bars),
+        bars=signal_bars,
+        label="exit",
+    )
+    return entry, exit_timeline
+
+
+def _validate_provider_timeline(
+    timeline: tuple[SignalFact | None, ...],
+    *,
+    bars: tuple[DailyBar, ...],
+    label: str,
+) -> tuple[SignalFact | None, ...]:
+    if len(timeline) != len(bars):
+        raise DailyBacktestInputError(
+            f"provider {label} timeline must align one-to-one with signal bars"
+        )
+    for fact, bar in zip(timeline, bars, strict=True):
+        if fact is None:
+            continue
+        if fact.instrument_id != bar.instrument_id or fact.session_date != bar.session_date:
+            raise DailyBacktestInputError(
+                f"provider {label} signal identity does not match its signal bar"
+            )
+        if fact.observed_at > bar.available_at:
+            raise DailyBacktestInputError(
+                f"provider {label} signal uses an observation from the future"
+            )
+        if not fact.evidence or any(
+            item.evidence_type != "provider_indicator"
+            or item.provider is None
+            or item.raw_response_sha256 is None
+            for item in fact.evidence
+        ):
+            raise DailyBacktestInputError(
+                f"provider {label} signal is missing exact provider provenance"
+            )
+    return timeline
 
 
 def _safe_run_key(value: str) -> str:

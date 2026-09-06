@@ -9,11 +9,13 @@ import pytest
 
 from ashare_lab.adapters.market_data import LocalParquetMarketDataRepository
 from ashare_lab.application.backtest_submission import (
+    BacktestDataNotYetAvailableError,
     BacktestRunConfig,
     BacktestSubmissionService,
     EventDataUnavailableError,
     SubmissionVersions,
     _effective_warmup_calendar_days,
+    latest_stable_a_share_data_date,
 )
 from ashare_lab.application.execute_backtest import (
     BacktestWorkItemError,
@@ -202,6 +204,108 @@ def test_submission_pins_data_and_reenqueues_a_still_queued_replay(
     assert replay.replayed is True
     assert queue.run_ids == [str(first.record.run_id), str(first.record.run_id)]
     assert '"snapshot_start"' in first.record.config_json
+
+
+def test_live_submission_caps_settlement_tail_at_latest_stable_data_date(
+    tmp_path: Path,
+    macd_strategy: StrategySpec,
+) -> None:
+    write_daily(tmp_path)
+    observed_at = datetime(2026, 9, 4, 5, tzinfo=UTC)
+    created = BacktestSubmissionService(
+        market_data=LocalParquetMarketDataRepository(tmp_path),
+        run_store=MemoryStore(),
+        job_queue=CapturingQueue(),
+        versions=SubmissionVersions(
+            catalog_hash=HASH,
+            engine_version="2.0.0a0",
+            code_revision="git:test",
+        ),
+        clock=lambda: observed_at,
+        latest_stable_data_date=latest_stable_a_share_data_date,
+    ).submit(macd_strategy, BacktestRunConfig())
+
+    config = json.loads(created.record.config_json)
+    assert config["requested_snapshot_end"] == "2026-09-10"
+    assert config["available_data_end"] == "2026-09-03"
+    assert config["snapshot_end"] == "2026-09-03"
+    assert config["settlement_extension_days"] == 14
+
+
+def test_live_historical_submission_keeps_the_full_settlement_tail(
+    tmp_path: Path,
+    macd_strategy: StrategySpec,
+) -> None:
+    write_daily(tmp_path)
+    historical = macd_strategy.model_copy(
+        update={
+            "backtest": macd_strategy.backtest.model_copy(
+                update={"end": date(2026, 8, 1)}
+            )
+        }
+    )
+    created = BacktestSubmissionService(
+        market_data=LocalParquetMarketDataRepository(tmp_path),
+        run_store=MemoryStore(),
+        job_queue=CapturingQueue(),
+        versions=SubmissionVersions(
+            catalog_hash=HASH,
+            engine_version="2.0.0a0",
+            code_revision="git:test",
+        ),
+        clock=lambda: datetime(2026, 9, 4, 5, tzinfo=UTC),
+        latest_stable_data_date=latest_stable_a_share_data_date,
+    ).submit(historical, BacktestRunConfig())
+
+    config = json.loads(created.record.config_json)
+    assert config["requested_snapshot_end"] == "2026-08-15"
+    assert config["snapshot_end"] == "2026-08-15"
+
+
+def test_live_submission_rejects_end_after_stable_data_before_pinning(
+    macd_strategy: StrategySpec,
+) -> None:
+    future = macd_strategy.model_copy(
+        update={
+            "backtest": macd_strategy.backtest.model_copy(
+                update={"end": date(2026, 9, 4)}
+            )
+        }
+    )
+
+    class MustNotPin:
+        def pin_snapshot(self, *_args, **_kwargs):
+            raise AssertionError("market data must not be touched")
+
+    store = MemoryStore()
+    queue = CapturingQueue()
+    service = BacktestSubmissionService(
+        market_data=MustNotPin(),  # type: ignore[arg-type]
+        run_store=store,
+        job_queue=queue,
+        versions=SubmissionVersions(
+            catalog_hash=HASH,
+            engine_version="2.0.0a0",
+            code_revision="git:test",
+        ),
+        clock=lambda: datetime(2026, 9, 4, 5, tzinfo=UTC),
+        latest_stable_data_date=latest_stable_a_share_data_date,
+    )
+
+    with pytest.raises(BacktestDataNotYetAvailableError, match="latest stable"):
+        service.submit(future, BacktestRunConfig())
+
+    assert store.by_fingerprint == {}
+    assert queue.run_ids == []
+
+
+def test_latest_stable_daily_date_uses_the_shanghai_1605_cutoff() -> None:
+    assert latest_stable_a_share_data_date(
+        datetime(2026, 9, 4, 7, 59, tzinfo=UTC)
+    ) == date(2026, 9, 3)
+    assert latest_stable_a_share_data_date(
+        datetime(2026, 9, 4, 8, 5, tzinfo=UTC)
+    ) == date(2026, 9, 4)
 
 
 def test_financial_submission_pins_facts_and_worker_rejects_tampering(

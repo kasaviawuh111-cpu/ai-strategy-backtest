@@ -205,7 +205,7 @@ const expectLiveCompileRequest = (fetchMock: FetchMock) => {
 }
 
 const expectRecognizedButNotRunnable = async (fetchMock: FetchMock) => {
-  expect(await screen.findByText('已完成思考')).toBeInTheDocument()
+  expect(await screen.findByText('预览策略')).toBeInTheDocument()
   expect(screen.getAllByText('MACD 金叉').length).toBeGreaterThan(0)
   expect(screen.getAllByText('MACD 死叉').length).toBeGreaterThan(0)
   expect(screen.getByText('回测服务')).toBeVisible()
@@ -303,7 +303,7 @@ describe('Live App capability boundary', () => {
     await renderLiveApp()
     await submitLiveRule('东方财富季度报告发布后买入，收益33%止盈或高点回撤3%卖出')
 
-    expect(await screen.findByText('已完成思考')).toBeInTheDocument()
+    expect(await screen.findByText('预览策略')).toBeInTheDocument()
     expect(screen.getAllByText('季度报告发布').length).toBeGreaterThan(0)
     expect(screen.getAllByText('持仓收益达到 33% 止盈').length).toBeGreaterThan(0)
     expect(screen.getAllByText('持仓后收盘高点回撤 3% 卖出').length).toBeGreaterThan(0)

@@ -89,6 +89,7 @@ class BacktestExecutionConfig(CamelApiModel):
         le=365,
     )
     run_robustness: bool = Field(default=True, alias="runRobustness")
+    refresh_data: bool = Field(default=False, alias="refreshData", strict=True)
 
     def to_application_config(self) -> BacktestRunConfig:
         return BacktestRunConfig(
@@ -107,6 +108,7 @@ class BacktestExecutionConfig(CamelApiModel):
             warmup_calendar_days=self.warmup_calendar_days,
             settlement_extension_days=self.settlement_extension_days,
             run_robustness=self.run_robustness,
+            refresh_data=self.refresh_data,
         )
 
 

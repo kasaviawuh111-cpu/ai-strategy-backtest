@@ -1,60 +1,114 @@
 /**
- * Design tokens
- * 来源：Figma 0828 (node 39-34171) 的 CSS 导出 + 妙想AI 线上宿主环境。
- * 主色统一为东方财富橙；涨跌语义色保持 A 股口径，且必须同时配合文字与形状表达（SPEC 4.11）。
+ * Design tokens —— Public「AI Agents」视觉体系
+ *
+ * 取自 public.com 主题样式表（wp-content/themes/public/dist/styles/common-*.css）里的原始变量：
+ *   blue-brand #00379a · blue-light #4d74ff / #99afff / #e5ebff
+ *   dark #000 / #2b3746 · grey #516880 / #d4d9df / #f1f4f7 / #f6f8f9
+ *   green-success #4dc16d · red-error #ff0066
+ *   字体：Denton（衬线标题）+ Inter（正文）+ Invest Pro（控件）+ Alpha Mono（数字/代码）
+ * 与之配套的形状语言：卡片 12px、控件 6px、主按钮胶囊 999px、发丝描边代替阴影。
+ *
+ * 涨跌语义色仍按 A 股口径（红涨绿跌），只是换用 Public 的红/绿；
+ * 绿色在其原值 #4dc16d 上压暗到正文可读对比度。颜色永远只是辅助，
+ * 涨跌必须同时由文字与形状表达（SPEC 4.11）。
  */
 :root {
   /* ---- 主色 ---- */
-  --color-primary: #ff7700;
-  --color-primary-press: #e56a00;
-  --color-primary-weak: rgba(255, 119, 0, 0.1);
-  --color-em-logo: #ff6600; /* 顶栏东方财富徽标 */
+  /* 产品界面里的蓝比官网 blue-brand(#00379a) 亮一档：截图中的 Next / Brokerage
+     是这个宝蓝，深navy只用在按下态。 */
+  --color-primary: #2148d8;
+  --color-primary-press: #00379a;
+  --color-primary-weak: rgba(33, 72, 216, 0.06);
+  --color-primary-line: rgba(33, 72, 216, 0.22);
+  --color-accent: #4d74ff;         /* blue-light-001 */
+  --color-accent-weak: #e5ebff;    /* blue-light-003 */
+  /* Public 的首要动作是纯黑胶囊按钮，不是品牌蓝 */
+  --color-action: #000000;
+  --color-action-press: #1b2128;
+  --color-em-logo: #000000;
 
   /* ---- 语义色 ---- */
-  --color-up: #f62f3f;    /* 涨 */
-  --color-down: #00ab61;  /* 跌 */
-  --color-warn: #ff9048;
-  --color-info: #3b84ff;
-  /* 宿主的能力色：深度思考胶囊、回答末尾的追问都用它。
-     取自妙想AI 线上截图（追问行文字与深度思考文字同色），比原来的 #8b5cf6 更偏蓝。 */
-  --color-purple: #4f46d6;
-  --color-purple-weak: rgba(79, 70, 214, 0.09);
+  --color-up: #ff0066;    /* 涨（red-error 原值） */
+  --color-up-weak: rgba(255, 0, 102, 0.07);
+  --color-up-line: rgba(255, 0, 102, 0.3);
+  --color-down: #2f9e5f;  /* 跌（green-success #4dc16d 压暗到正文可读） */
+  --color-down-bright: #4dc16d;
+  --color-down-weak: rgba(47, 158, 95, 0.08);
+  --color-down-line: rgba(47, 158, 95, 0.32);
+  --color-warn: #a35a00;
+  --color-warn-weak: rgba(255, 156, 0, 0.1);
+  --color-warn-line: rgba(255, 156, 0, 0.4);
+  --color-info: #4d74ff;
+  --color-info-weak: rgba(77, 116, 255, 0.08);
+  --color-info-line: rgba(77, 116, 255, 0.3);
+  /* 图表里的面积填充：比提示条的底色重一档，才在曲线下站得住 */
+  --fill-excess: rgba(77, 116, 255, 0.14);
+  --fill-drawdown: rgba(255, 0, 102, 0.1);
+  /* 宿主的能力色（深度思考胶囊、回答末尾的追问）。
+     Public 体系里没有紫，统一收敛到品牌蓝，变量名保留以免调用方分叉。 */
+  --color-purple: #00379a;
+  --color-purple-weak: #e5ebff;
 
   /* ---- 文字层级 ---- */
-  --ink-1: #1a1a1a;
-  --ink-2: #353739;
-  --ink-3: #6d778b;
-  --ink-4: #a6acb8;
-  --ink-5: #ccd0d8;
+  --ink-1: #000000;   /* dark-001 = color-heading */
+  --ink-2: #2b3746;   /* dark-004 = color-text */
+  --ink-3: #516880;   /* grey-001 */
+  --ink-4: #8593a5;
+  --ink-5: #d4d9df;   /* grey-002 */
 
   /* ---- 面与分割 ---- */
   --surface: #ffffff;
-  --surface-card: rgba(170, 170, 185, 0.08);
-  --surface-sunken: rgba(170, 170, 185, 0.16);
-  --hairline: rgba(166, 172, 184, 0.2);
-  --hairline-2: rgba(166, 172, 184, 0.38);
-  --hairline-3: #e4e4e9; /* 宿主底栏与追问行的浅描边 */
+  --surface-card: #f6f8f9;   /* grey-004 */
+  --surface-sunken: #f1f4f7; /* grey-003 */
+  --surface-shell: #eef1f5;  /* 宽屏时屏栈之间露出的底 */
+  --hairline: #e6eaee;
+  --hairline-2: #d4d9df;     /* grey-002 */
+  --hairline-3: #dce2ea;
 
-  /* 对话页顶部渐变底（妙想AI） */
-  --wash: linear-gradient(180deg, #fcedee 0%, #fef6f4 40%, #ffffff 100%);
-  --bubble-me: #fbe7e9; /* 用户气泡 */
+  /* 对话页顶部渐变底：Public 的 keynote 背景是极浅的冷灰蓝，不是暖色 */
+  --wash: linear-gradient(180deg, #ffffff 0%, #ffffff 60%, #fbfbfd 100%);
+  /* 用户气泡是浅灰，不是蓝：截图里发出去的话和 AI 正文靠「有没有底」区分，不靠颜色 */
+  --bubble-me: #f1f3f5;
+  /* 左侧栏 / 次级面板的底 */
+  --surface-rail: #f7f8fa;
+  /* 工作流步骤框：一律灰虚线。Public 用绿色表示「已执行」，
+     我们没有逐步执行状态，所以不引入那个色位。 */
+  --flow-step-line: #d4d9df;
 
   /* ---- 圆角 ---- */
-  --r-card: 16px;
-  --r-inner: 12px;
-  --r-chip: 8px;
-  --r-btn: 22px;
-  --r-bubble: 16px;
+  --r-card: 12px;
+  --r-inner: 8px;
+  --r-chip: 6px;
+  --r-btn: 999px;
+  --r-bubble: 12px;
+
+  /* ---- 阴影：Public 几乎不用投影，只在浮层上给一层很浅的 ---- */
+  --shadow-card: 0 1px 2px rgba(20, 28, 68, 0.04);
+  --shadow-pop: 0 8px 24px rgba(20, 28, 68, 0.1);
 
   /* ---- 版心 ---- */
   --gutter: 16px;
+  --measure: 900px; /* 宽屏下二级页正文的最大行宽 */
 
   /* ---- 字体 ---- */
-  --font: "PingFang SC", -apple-system, BlinkMacSystemFont, "Helvetica Neue",
-    "Microsoft YaHei", sans-serif;
-  /* 数字：Figma 用「涨乐财富体 / ZLShuZiTi」，宿主无该字体时退到等宽数字栈 */
-  --font-num: "DIN Alternate", "SF Pro Text", -apple-system, ui-sans-serif,
+  --font: Inter, "Invest Pro", -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 标题用 Denton；中文宿主上退到宋体族，仍保留 Public 的衬线气质 */
+  --font-display: Denton, "Times New Roman", "Songti SC", "Noto Serif SC",
+    "STSong", serif;
+  /* 数字：Inter 自带 tabular-nums，够齐；技术字段另用等宽 */
+  --font-num: Inter, "SF Pro Text", -apple-system, ui-sans-serif,
     "Helvetica Neue", sans-serif;
+  --font-mono: "Alpha Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ---- 字阶（Public 原值） ---- */
+  --fs-h4: 32px; --lh-h4: 36px;
+  --fs-h5: 24px; --lh-h5: 34px;
+  --fs-h6: 20px; --lh-h6: 23px;
+  --fs-lg: 18px; --lh-lg: 27px;
+  --fs-md: 16px; --lh-md: 24px;
+  --fs-sm: 14px; --lh-sm: 21px;
+  --fs-xs: 12px; --lh-xs: 18px;
 
   /* ---- iOS safe area ---- */
   --safe-top: env(safe-area-inset-top, 0px);

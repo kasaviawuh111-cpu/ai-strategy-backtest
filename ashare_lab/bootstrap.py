@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
+import logging
 import re
 import sys
 import threading
@@ -12,7 +13,6 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime, timedelta
-from functools import lru_cache
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -23,15 +23,23 @@ from sqlalchemy.engine import make_url
 from ashare_lab.adapters.event_sources.eastmoney import eastmoney_preparable_event_codes
 from ashare_lab.adapters.financial_sources import EastmoneyOperatorFinancialFactLoader
 from ashare_lab.adapters.jobs import RQBacktestJobQueue, ThreadBacktestJobQueue
+from ashare_lab.adapters.language.deepseek_web_research import DeepSeekWebResearcher
 from ashare_lab.adapters.language.openai_compatible import (
     DisabledCandidateJsonTransport,
     OpenAICompatibleCandidateTransport,
 )
+from ashare_lab.adapters.language.vibe_backtest_review import VibeBacktestReviewAdvisor
 from ashare_lab.adapters.language.vibe_candidates import (
     CandidateCapabilityMatrix,
     CandidateProviderIdentityView,
     VibeBoundedCandidateGenerator,
     build_candidate_capability_matrix,
+)
+from ashare_lab.adapters.language.vibe_strategy_advice import (
+    VibeVerifiedFactStrategyAdvisor,
+)
+from ashare_lab.adapters.language.volcengine_web_research import (
+    VolcengineWebSearchResearcher,
 )
 from ashare_lab.adapters.market_data import (
     BaoStockReferenceAdapter,
@@ -43,6 +51,7 @@ from ashare_lab.adapters.market_data import (
     ChoiceSecuritySearchClient,
     ChoiceSecuritySearchUnavailableError,
     EastmoneySecurityCandidateSearch,
+    FileCachedHistoricalIndicatorData,
     InternalDemoSnapshotPreparer,
     LocalParquetMarketDataRepository,
     MarketDataAdapterError,
@@ -55,6 +64,14 @@ from ashare_lab.adapters.market_data import (
     SnapshotRegistryMarketDataRepository,
 )
 from ashare_lab.adapters.market_data.baostock_reference import BaoStockClient
+from ashare_lab.adapters.market_data.instrument_name_chain import (
+    ChainedInstrumentNameResolver,
+    SecurityMasterInstrumentNameResolver,
+)
+from ashare_lab.adapters.market_data.mx_saas import (
+    MxSaasMarketDataClient,
+    MxSaasProviderUnavailableError,
+)
 from ashare_lab.adapters.market_data.trusted_snapshots import (
     TrustedSecurityMasterSnapshotLoader,
     TrustedTechnicalSnapshotLoader,
@@ -65,11 +82,16 @@ from ashare_lab.adapters.persistence import (
 )
 from ashare_lab.api import create_app as create_http_app
 from ashare_lab.api.app import build_hybrid_candidate_compiler
+from ashare_lab.api.container import BacktestSubmitter
 from ashare_lab.api.web_hosting import validate_web_dist_root
+from ashare_lab.application.async_backtest_submission import (
+    AsyncBacktestSubmissionCoordinator,
+)
 from ashare_lab.application.backtest_submission import (
     BacktestRunConfig,
     BacktestSubmissionService,
     SubmissionVersions,
+    latest_stable_a_share_data_date,
 )
 from ashare_lab.application.daily_backtest import DailyBacktestConfig, FeeQuoteProvider
 from ashare_lab.application.execute_backtest import (
@@ -117,13 +139,17 @@ from ashare_lab.domain.market_data import DailyBar, DataSnapshotRef, InstrumentS
 from ashare_lab.domain.shared import DomainValidationError, InstrumentId, Money
 from ashare_lab.domain.signals.runtime import validate_stable_indicator_evaluator_catalog
 from ashare_lab.ports.backtest_runs import BacktestJobQueue
+from ashare_lab.ports.current_fact_research import CurrentFactResearcher
 from ashare_lab.ports.market_data import DataRequirements, DateRange, MarketDataRepository
 from ashare_lab.ports.session_reference import SessionReferenceProvider
 from ashare_lab.ports.trusted_snapshots import (
     TrustedSecurityMasterSnapshot,
+    TrustedSnapshotError,
     TrustedTechnicalSnapshot,
 )
 from ashare_lab.settings import AppSettings
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +169,7 @@ class ApiRuntime:
     execution: ExecutionRuntime
     catalog: CatalogSnapshot
     queue: BacktestJobQueue
-    submission: BacktestSubmissionService
+    submission: BacktestSubmitter
     event_backtest_probe: Callable[[], bool]
     event_backtest_codes_probe: Callable[[], frozenset[str]]
     event_preparable_codes_probe: Callable[[], frozenset[str]]
@@ -188,12 +214,19 @@ def build_execution_runtime(settings: AppSettings | None = None) -> ExecutionRun
     # tail.  Relative natural-language periods must end at the last date that can
     # still reserve that tail, otherwise every otherwise-valid run is rejected
     # for asking beyond the immutable snapshot.
-    backtest_anchor_date = (
-        market_data.strict_composite_period().end
-        - timedelta(days=BacktestRunConfig().settlement_extension_days)
-        if strict_snapshot is not None and isinstance(market_data, LocalParquetMarketDataRepository)
-        else None
-    )
+    if strict_snapshot is not None and isinstance(
+        market_data, LocalParquetMarketDataRepository
+    ):
+        backtest_anchor_date = market_data.strict_composite_period().end - timedelta(
+            days=BacktestRunConfig().settlement_extension_days
+        )
+    elif selected.market_data_profile == "on_demand_snapshot":
+        # Every submission still refreshes the live providers when configured
+        # to do so. This anchor only prevents a relative period from asking a
+        # daily-data provider to prove an unfinished/future session.
+        backtest_anchor_date = latest_stable_a_share_data_date(datetime.now(UTC))
+    else:
+        backtest_anchor_date = None
     # Validate market-rule provenance before opening databases or starting workers.
     session_reference = _build_session_reference(selected)
     catalog = load_catalog_directory(selected.catalog_root)
@@ -236,6 +269,8 @@ def build_execution_runtime(settings: AppSettings | None = None) -> ExecutionRun
 def _build_market_data_repository(
     settings: AppSettings,
 ) -> tuple[MarketDataRepository, bool]:
+    if settings.market_data_profile == "eastmoney_skill":
+        raise ValueError("Eastmoney Skill data is composed by create_skill_app, not Parquet")
     if settings.market_data_profile != "on_demand_snapshot":
         return (
             LocalParquetMarketDataRepository(
@@ -268,6 +303,7 @@ def _build_market_data_repository(
         composite_output_root=composite_root,
         temporary_root=preparation_root,
         daily_source=settings.on_demand_daily_source,
+        reference_source=settings.on_demand_reference_source,
     )
     return (
         OnDemandSnapshotMarketDataRepository(
@@ -314,6 +350,7 @@ def _build_strategy_v2_snapshot_repository(
         composite_output_root=composite_root,
         temporary_root=preparation_root,
         daily_source=settings.on_demand_daily_source,
+        reference_source=settings.on_demand_reference_source,
     )
     return OnDemandSnapshotMarketDataRepository(
         registry,
@@ -377,33 +414,6 @@ def _search_strategy_v2_baostock_candidates(identifier: str) -> tuple[str, ...]:
             client.logout()
 
 
-@lru_cache(maxsize=2_048)
-def _resolve_compiler_instrument_name(identifier: str) -> str:
-    """Resolve one exact name through BaoStock discovery plus master data.
-
-    Search results are discovery only.  Every candidate is reopened through
-    the exact BaoStock security-master adapter and the name must match one
-    unique record before its symbol may enter a strategy draft.
-    """
-
-    with _BAOSTOCK_RUNTIME_LOCK:
-        raw = "".join(identifier.split()).casefold()
-        if not raw:
-            raise LookupError("empty instrument name")
-        candidates = _search_strategy_v2_baostock_candidates(identifier)
-        if bool(getattr(candidates, "truncated", False)):
-            raise LookupError("ambiguous instrument name")
-        matches: dict[str, SecurityMasterRecord] = {}
-        for symbol in candidates:
-            record = _resolve_strategy_v2_baostock_record(symbol)
-            normalized_name = "".join(record.name.split()).casefold()
-            if raw == normalized_name or (len(raw) >= 2 and raw in normalized_name):
-                matches[record.symbol] = record
-        if len(matches) != 1:
-            raise LookupError("instrument name is unconfirmed or ambiguous")
-        return next(iter(matches))
-
-
 def build_api_runtime(
     settings: AppSettings | None = None,
     *,
@@ -440,13 +450,24 @@ def build_api_runtime(
             execution.executor.execute,
             max_workers=selected.local_worker_threads,
         )
-    submission = BacktestSubmissionService(
+    synchronous_submission = BacktestSubmissionService(
         market_data=execution.market_data,
         run_store=execution.run_store,
         job_queue=queue,
         versions=execution.versions,
         event_data_available=event_backtest_probe,
         financial_fact_loader=EastmoneyOperatorFinancialFactLoader(),
+        provider_indicator_data=_build_provider_indicator_data(selected),
+        latest_stable_data_date=(
+            latest_stable_a_share_data_date
+            if selected.market_data_profile == "on_demand_snapshot"
+            else None
+        ),
+    )
+    submission = AsyncBacktestSubmissionCoordinator(
+        submission=synchronous_submission,
+        run_store=execution.run_store,
+        max_workers=selected.local_worker_threads,
     )
     return ApiRuntime(
         execution=execution,
@@ -468,6 +489,10 @@ def create_configured_app(
     strategy_v2_service: StrategyV2HttpService | None = None,
 ) -> FastAPI:
     selected_settings = settings or AppSettings()
+    if selected_settings.market_data_profile == "eastmoney_skill":
+        from ashare_lab.api.skill_app import create_skill_app
+
+        return create_skill_app(selected_settings)
     configured_web_root = validate_web_dist_root(
         _repository_path(Path(__file__).resolve().parents[1], selected_settings.web_dist_root)
         if selected_settings.web_dist_root is not None
@@ -481,12 +506,44 @@ def create_configured_app(
     coverage_catalog = load_coverage_catalog_directory(selected.catalog_root / "coverage")
     capability_matrix = build_candidate_capability_matrix(runtime.catalog, coverage_catalog)
     candidate_transport = _build_candidate_transport(selected)
+    plan_deep_transport = _build_plan_deep_transport(
+        selected,
+        extract_fast_transport=candidate_transport,
+    )
+    web_researcher = _build_web_researcher(selected)
+    live_data_provider = _build_mx_saas_live_market_data(selected)
+    instrument_name_resolver = _build_compiler_instrument_name_resolver(
+        selected,
+        mx_resolver=(
+            live_data_provider.resolve_instrument_name if live_data_provider is not None else None
+        ),
+    )
     compiler = build_hybrid_candidate_compiler(
         runtime.catalog,
         candidate_transport=candidate_transport,
+        idea_transport=plan_deep_transport,
         capability_matrix=capability_matrix,
         backtest_anchor_date=runtime.execution.backtest_anchor_date,
-        instrument_name_resolver=_resolve_compiler_instrument_name,
+        instrument_name_resolver=instrument_name_resolver,
+        researcher=web_researcher,
+    )
+    strategy_advisor = (
+        VibeVerifiedFactStrategyAdvisor(
+            plan_deep_transport,
+            capability_matrix=capability_matrix,
+            provider_identity=plan_deep_transport.identity,
+        )
+        if isinstance(plan_deep_transport, OpenAICompatibleCandidateTransport)
+        else None
+    )
+    backtest_review_advisor = (
+        VibeBacktestReviewAdvisor(
+            plan_deep_transport,
+            capability_matrix=capability_matrix,
+            provider_identity=plan_deep_transport.identity,
+        )
+        if isinstance(plan_deep_transport, OpenAICompatibleCandidateTransport)
+        else None
     )
     if strategy_v2_service is None:
         configured_v2, unavailable_reason = _build_strategy_v2_http_service(
@@ -518,6 +575,10 @@ def create_configured_app(
         event_document_text_preparable_codes_probe=(
             runtime.event_document_text_preparable_codes_probe
         ),
+        live_market_data=live_data_provider,
+        live_finance_data=live_data_provider,
+        strategy_advisor=strategy_advisor,
+        backtest_review_advisor=backtest_review_advisor,
         cors_allowed_origins=selected.cors_origins,
         web_dist_root=configured_web_root,
     )
@@ -528,17 +589,165 @@ def create_configured_app(
         if isinstance(candidate_transport, OpenAICompatibleCandidateTransport)
         else "disabled"
     )
+    extract_fast_diagnostic = _language_transport_diagnostic(
+        candidate_transport,
+        profile="extract_fast",
+        thinking=selected.candidate_provider_thinking,
+        reasoning_effort=selected.candidate_provider_reasoning_effort,
+    )
+    plan_deep_diagnostic = _language_transport_diagnostic(
+        plan_deep_transport,
+        profile="plan_deep",
+        thinking=(
+            selected.candidate_provider_thinking
+            if selected.plan_deep_provider_mode == "inherit_extract_fast"
+            else selected.plan_deep_provider_thinking
+        ),
+        reasoning_effort=(
+            selected.candidate_provider_reasoning_effort
+            if selected.plan_deep_provider_mode == "inherit_extract_fast"
+            else selected.plan_deep_provider_reasoning_effort
+        ),
+        inherited_from=(
+            "extract_fast"
+            if selected.plan_deep_provider_mode == "inherit_extract_fast"
+            else None
+        ),
+    )
+    if isinstance(web_researcher, VolcengineWebSearchResearcher):
+        research_provider, research_model = "volcengine", "web-search"
+    elif isinstance(web_researcher, DeepSeekWebResearcher):
+        research_provider, research_model = "deepseek", selected.research_provider_model
+    else:
+        research_provider, research_model = "disabled", None
+    app.state.language_provider_diagnostics = {
+        "candidate_translation": extract_fast_diagnostic,
+        "clarification_reply": extract_fast_diagnostic,
+        "idea_generation": plan_deep_diagnostic,
+        "strategy_advice": plan_deep_diagnostic,
+        "backtest_review": plan_deep_diagnostic,
+        "viewpoint_web_research": {
+            "configured": web_researcher is not None,
+            "provider": research_provider,
+            "model": research_model,
+        },
+    }
     app.state.candidate_capability_projection = {
         "version": capability_matrix.schema_version,
         "hash": capability_matrix.content_hash,
     }
     if isinstance(runtime.queue, ThreadBacktestJobQueue):
         app.router.add_event_handler("shutdown", runtime.queue.shutdown)
+    if isinstance(runtime.submission, AsyncBacktestSubmissionCoordinator):
+        app.router.add_event_handler("shutdown", runtime.submission.shutdown)
     return app
+
+
+def _build_mx_saas_live_market_data(settings: AppSettings) -> MxSaasMarketDataClient | None:
+    """Compose the optional live discovery provider from server-owned config."""
+
+    api_key = settings.resolved_mx_saas_api_key()
+    if api_key is None:
+        return None
+    return MxSaasMarketDataClient(
+        api_key=api_key,
+        timeout_seconds=settings.mx_saas_timeout_seconds,
+    )
+
+
+def _build_provider_indicator_data(
+    settings: AppSettings,
+) -> FileCachedHistoricalIndicatorData:
+    provider = _build_mx_saas_live_market_data(settings)
+    repository_root = Path(__file__).resolve().parents[1]
+    return FileCachedHistoricalIndicatorData(
+        provider,
+        root=_repository_path(repository_root, settings.provider_indicator_cache_root),
+        ttl=timedelta(seconds=settings.provider_indicator_cache_ttl_seconds),
+    )
+
+
+def _build_compiler_instrument_name_resolver(
+    settings: AppSettings,
+    *,
+    mx_resolver: Callable[[str], str] | None,
+) -> Callable[[str], str]:
+    """Use the configured identity cache and MX, never switch to another vendor."""
+
+    resolvers: list[Callable[[str], str]] = []
+    master_id = settings.strategy_v2_security_master_snapshot_id
+    if master_id is not None:
+        try:
+            trusted_master = TrustedSecurityMasterSnapshotLoader(
+                settings.strategy_v2_security_master_root,
+                max_age=timedelta(days=settings.strategy_v2_snapshot_max_age_days),
+            ).load(master_id)
+        except TrustedSnapshotError:
+            # This optional compiler cache never weakens the Strategy v2
+            # bootstrap gate, which separately rejects an invalid configured
+            # master.  V1 name resolution remains available through providers.
+            pass
+        else:
+            resolvers.append(SecurityMasterInstrumentNameResolver(trusted_master.snapshot))
+    if mx_resolver is not None:
+        resolvers.append(mx_resolver)
+    if not resolvers:
+        return _mx_instrument_names_unavailable
+    return ChainedInstrumentNameResolver(
+        resolvers,
+        wrapped_unavailable_causes=(MxSaasProviderUnavailableError,),
+    )
+
+
+def _mx_instrument_names_unavailable(_identifier: str) -> str:
+    raise TimeoutError("东方财富股票名称查询未配置")
+
+
+def _build_web_researcher(settings: AppSettings) -> CurrentFactResearcher | None:
+    """Build the selected search channel, or ``None`` when unconfigured.
+
+    Search is opt-in: with no endpoint/model/key the router keeps its
+    offline behaviour instead of failing a request that used to work.
+    """
+
+    endpoint = settings.research_provider_endpoint
+    model = settings.research_provider_model
+    api_key = settings.research_provider_api_key
+    if settings.research_provider_mode == "disabled":
+        return None
+    try:
+        if settings.research_provider_mode == "volcengine_web_search":
+            if api_key is None:
+                return None
+            if endpoint is None:
+                return VolcengineWebSearchResearcher(
+                    api_key=api_key,
+                    timeout_seconds=settings.research_provider_timeout_seconds,
+                )
+            return VolcengineWebSearchResearcher(
+                api_key=api_key,
+                endpoint=str(endpoint),
+                timeout_seconds=settings.research_provider_timeout_seconds,
+            )
+        if endpoint is None or model is None or api_key is None:
+            return None
+        return DeepSeekWebResearcher(
+            api_key=api_key,
+            endpoint=str(endpoint),
+            model=model,
+            timeout_seconds=settings.research_provider_timeout_seconds,
+        )
+    except ValueError:
+        # A malformed research config must not take down a server whose
+        # compile path never needed search in the first place.
+        _LOGGER.warning("web research provider is misconfigured; search disabled")
+        return None
 
 
 def _build_candidate_transport(
     settings: AppSettings,
+    *,
+    timeout_seconds: float | None = None,
 ) -> DisabledCandidateJsonTransport | OpenAICompatibleCandidateTransport:
     if settings.candidate_provider_mode == "disabled":
         return DisabledCandidateJsonTransport(
@@ -558,11 +767,83 @@ def _build_candidate_transport(
         prompt_version=settings.candidate_prompt_version,
         schema_version=settings.candidate_schema_version,
         api_key=settings.candidate_provider_api_key,
-        timeout_seconds=settings.candidate_provider_timeout_seconds,
+        timeout_seconds=(
+            settings.candidate_provider_timeout_seconds
+            if timeout_seconds is None else timeout_seconds
+        ),
         response_mode=settings.candidate_provider_response_mode,
+        thinking=settings.candidate_provider_thinking,
+        reasoning_effort=settings.candidate_provider_reasoning_effort,
         max_request_bytes=settings.candidate_provider_max_request_bytes,
         max_response_bytes=settings.candidate_provider_max_response_bytes,
     )
+
+
+def _build_plan_deep_transport(
+    settings: AppSettings,
+    *,
+    extract_fast_transport: (
+        DisabledCandidateJsonTransport | OpenAICompatibleCandidateTransport
+    ),
+    timeout_seconds: float | None = None,
+) -> DisabledCandidateJsonTransport | OpenAICompatibleCandidateTransport:
+    """Build the deep-planning model without changing the legacy default."""
+
+    if settings.plan_deep_provider_mode == "inherit_extract_fast":
+        return extract_fast_transport
+    if settings.plan_deep_provider_mode == "disabled":
+        return DisabledCandidateJsonTransport(
+            prompt_version=settings.candidate_prompt_version,
+            schema_version=settings.candidate_schema_version,
+        )
+    endpoint = settings.plan_deep_provider_endpoint
+    provider = settings.plan_deep_provider_name
+    model = settings.plan_deep_provider_model
+    api_key = settings.plan_deep_provider_api_key
+    if endpoint is None or provider is None or model is None or api_key is None:
+        # AppSettings validates this first; retain the boundary if a custom
+        # settings object ever bypasses normal validation.
+        raise RuntimeError("plan_deep provider configuration is incomplete")
+    return OpenAICompatibleCandidateTransport(
+        endpoint=str(endpoint),
+        provider=provider,
+        model=model,
+        prompt_version=settings.candidate_prompt_version,
+        schema_version=settings.candidate_schema_version,
+        api_key=api_key,
+        timeout_seconds=(
+            settings.plan_deep_provider_timeout_seconds
+            if timeout_seconds is None else timeout_seconds
+        ),
+        response_mode=settings.plan_deep_provider_response_mode,
+        thinking=settings.plan_deep_provider_thinking,
+        reasoning_effort=settings.plan_deep_provider_reasoning_effort,
+        max_request_bytes=settings.candidate_provider_max_request_bytes,
+        max_response_bytes=settings.candidate_provider_max_response_bytes,
+    )
+
+
+def _language_transport_diagnostic(
+    transport: DisabledCandidateJsonTransport | OpenAICompatibleCandidateTransport,
+    *,
+    profile: str,
+    thinking: str,
+    reasoning_effort: str | None,
+    inherited_from: str | None = None,
+) -> dict[str, object]:
+    """Expose model routing without serialising credentials or endpoints."""
+
+    return {
+        "configured": isinstance(transport, OpenAICompatibleCandidateTransport),
+        "profile": profile,
+        "provider": transport.identity.provider,
+        "model": transport.identity.model,
+        "thinking": {
+            "type": thinking,
+            "reasoning_effort": reasoning_effort,
+        },
+        "inherited_from": inherited_from,
+    }
 
 
 def _build_strategy_v2_http_service(
@@ -1091,7 +1372,12 @@ def _on_demand_dependencies_available(
         _repository_path(repository_root, settings.snapshot_preparation_root),
     )
     commands = (
-        repository_root / "scripts/prepare_baostock_reference.py",
+        repository_root
+        / (
+            "scripts/prepare_mx_reference.py"
+            if settings.on_demand_reference_source == "eastmoney_mx"
+            else "scripts/prepare_baostock_reference.py"
+        ),
         repository_root / "scripts/prepare_eastmoney_corporate_actions.py",
         repository_root / "scripts/prepare_event_snapshot.py",
         *(
@@ -1117,16 +1403,23 @@ def _on_demand_dependencies_available(
 
 def _on_demand_provider_runtime_available(
     daily_source: str = "choice_then_eastmoney",
+    reference_source: str = "baostock",
 ) -> bool:
     session_runtime = importlib.util.find_spec("baostock") is not None
     choice_runtime = importlib.util.find_spec("EmQuantAPI") is not None
     push2_runtime = importlib.util.find_spec("httpx") is not None
+    if reference_source == "baostock":
+        reference_runtime = session_runtime
+    elif reference_source == "eastmoney_mx":
+        reference_runtime = push2_runtime
+    else:
+        return False
     if daily_source == "baostock_stock_only":
         # Eastmoney is still required for the immutable corporate-action ledger.
-        return session_runtime and push2_runtime
+        return reference_runtime and session_runtime and push2_runtime
     if daily_source != "choice_then_eastmoney":
         return False
-    return session_runtime and (choice_runtime or push2_runtime)
+    return reference_runtime and (choice_runtime or push2_runtime)
 
 
 def _on_demand_provider_runtime_for_settings(settings: AppSettings) -> bool:
@@ -1137,9 +1430,19 @@ def _on_demand_provider_runtime_for_settings(settings: AppSettings) -> bool:
     from the Choice/Push2 path by accident.
     """
 
-    if settings.on_demand_daily_source == "choice_then_eastmoney":
-        return _on_demand_provider_runtime_available()
-    return _on_demand_provider_runtime_available(settings.on_demand_daily_source)
+    if (
+        settings.on_demand_reference_source == "eastmoney_mx"
+        and settings.resolved_mx_saas_api_key() is None
+    ):
+        return False
+    if settings.on_demand_reference_source == "baostock":
+        if settings.on_demand_daily_source == "choice_then_eastmoney":
+            return _on_demand_provider_runtime_available()
+        return _on_demand_provider_runtime_available(settings.on_demand_daily_source)
+    return _on_demand_provider_runtime_available(
+        settings.on_demand_daily_source,
+        settings.on_demand_reference_source,
+    )
 
 
 def _on_demand_document_text_runtime_available() -> bool:

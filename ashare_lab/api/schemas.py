@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -35,19 +35,122 @@ class ErrorEnvelope(ApiModel):
     request_id: str = Field(min_length=1, max_length=64)
 
 
+class BacktestReviewReference(ApiModel):
+    run_id: str = Field(min_length=1, max_length=128)
+    response_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
 class StrategyDraftRequest(ApiModel):
     utterance: str = Field(max_length=2_000)
     instrument_context: str | None = Field(default=None, max_length=32)
     as_of_date: date
+    edit_current_strategy: bool = False
+    related_review: BacktestReviewReference | None = None
+    related_run_ids: tuple[Annotated[str, Field(min_length=1, max_length=128)], ...] = Field(
+        default=(), max_length=20,
+    )
 
 
 class StrategyDraftRevisionRequest(ApiModel):
     strategy: StrategySpec
     utterance: str | None = Field(default=None, max_length=2_000)
+    recover_if_missing: bool = False
 
 
 class ClarificationAnswerRequest(ApiModel):
     answer: str = Field(min_length=1, max_length=2_000)
+    related_review: BacktestReviewReference | None = None
+    related_run_ids: tuple[Annotated[str, Field(min_length=1, max_length=128)], ...] = Field(
+        default=(), max_length=20,
+    )
+
+
+class LiveMarketScreenRequest(ApiModel):
+    """A current-data discovery query, never a historical backtest input."""
+
+    query: str = Field(min_length=1, max_length=2_000)
+    asset_type: Literal["A股", "ETF", "基金"]
+
+
+class LiveMarketProvenancePayload(ApiModel):
+    response_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    retrieved_at: datetime
+    schema_version: str = Field(min_length=1, max_length=128)
+
+
+class LiveMarketScreenResponse(ApiModel):
+    provider: str = Field(min_length=1, max_length=128)
+    query: str = Field(min_length=1, max_length=2_000)
+    asset_type: str = Field(min_length=1, max_length=32)
+    columns: tuple[str, ...]
+    rows: tuple[dict[str, Any], ...]
+    provenance: LiveMarketProvenancePayload
+
+
+class LiveFinanceQueryRequest(ApiModel):
+    """A current-data lookup, never a historical backtest input."""
+
+    query: str = Field(min_length=1, max_length=2_000)
+    indicators: str | None = Field(default=None, max_length=2_000)
+
+
+class LiveFinanceQueryResponse(ApiModel):
+    provider: str = Field(min_length=1, max_length=128)
+    query: str = Field(min_length=1, max_length=2_000)
+    indicators: str | None = Field(default=None, max_length=2_000)
+    tables: tuple[dict[str, Any], ...]
+    provenance: LiveMarketProvenancePayload
+
+
+class LiveScreenedFinanceQueryRequest(ApiModel):
+    """Screen securities, then query current data for the selected entities."""
+
+    screening_query: str = Field(min_length=1, max_length=2_000)
+    asset_type: Literal["A股", "ETF", "基金"]
+    indicators: str = Field(min_length=1, max_length=2_000)
+
+
+class LiveSecurityEntityPayload(ApiModel):
+    code: str = Field(pattern=r"^\d{6}(?:\.(?:SH|SZ|BJ))?$")
+    name: str | None = Field(default=None, max_length=128)
+    asset_type: str = Field(min_length=1, max_length=32)
+
+
+class LiveScreenedFinanceQueryResponse(ApiModel):
+    """Current-only composition; never eligible as a historical PIT snapshot."""
+
+    usage_scope: Literal["current_query_only"] = "current_query_only"
+    historical_backtest_eligible: Literal[False] = False
+    screen: LiveMarketScreenResponse
+    entities: tuple[LiveSecurityEntityPayload, ...]
+    batches: tuple[LiveFinanceQueryResponse, ...]
+
+
+class ClarificationDataPayload(ApiModel):
+    """Typed provider result returned without changing the pending strategy."""
+
+    usage_scope: Literal["current_query_only"] = "current_query_only"
+    historical_backtest_eligible: Literal[False] = False
+    kind: Literal["screen", "finance", "screened_finance"]
+    screen: LiveMarketScreenResponse | None = None
+    finance: LiveFinanceQueryResponse | None = None
+    screened_finance: LiveScreenedFinanceQueryResponse | None = None
+
+    @model_validator(mode="after")
+    def payload_matches_kind(self) -> ClarificationDataPayload:
+        if self.kind == "screen" and (
+            self.screen is None or self.finance is not None or self.screened_finance is not None
+        ):
+            raise ValueError("screen data must contain only the screen result")
+        if self.kind == "finance" and (
+            self.finance is None or self.screen is not None or self.screened_finance is not None
+        ):
+            raise ValueError("finance data must contain only the finance result")
+        if self.kind == "screened_finance" and (
+            self.screened_finance is None or self.screen is not None or self.finance is not None
+        ):
+            raise ValueError("screened finance data must contain only the composed result")
+        return self
 
 
 class ProvenanceItem(ApiModel):
@@ -128,9 +231,57 @@ class IdeaProposalPayload(ApiModel):
     entry_summary: str = Field(min_length=1, max_length=160)
     exit_summary: str = Field(min_length=1, max_length=160)
     suggested_utterance: str = Field(min_length=1, max_length=512)
-    capability_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
+    # Unbound ideas have no executable DSL yet; capabilities are derived only
+    # after the user chooses a stock and the strategy passes compilation.
+    capability_ids: tuple[str, ...] = Field(max_length=8)
     assumptions: tuple[str, ...] = Field(max_length=8)
     confidence: float = Field(ge=0.0, le=1.0)
+    instrument_symbol: str | None = Field(
+        default=None,
+        pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$",
+    )
+    instrument_name: str | None = Field(default=None, max_length=64)
+    pairing_reason: str | None = Field(default=None, max_length=160)
+
+    @model_validator(mode="after")
+    def require_capabilities_for_bound_proposal(self) -> IdeaProposalPayload:
+        if self.instrument_symbol is not None and not self.capability_ids:
+            raise ValueError("bound proposals require validated capabilities")
+        return self
+
+
+class IdeaResearchFactPayload(ApiModel):
+    statement: str = Field(min_length=1, max_length=500)
+    fact_kind: Literal["reported_fact", "inference", "uncertain"]
+    source_ids: tuple[str, ...] = Field(max_length=8)
+    time_scope: str | None = Field(default=None, max_length=120)
+
+
+class IdeaResearchSourcePayload(ApiModel):
+    source_id: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=300)
+    url: str = Field(min_length=8, max_length=2_048)
+    publisher: str = Field(min_length=1, max_length=160)
+    published_at: str | None = Field(default=None, max_length=80)
+
+
+class IdeaResearchPayload(ApiModel):
+    """Display-only web evidence; never strategy or historical price input."""
+
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=128)
+    provider_response_id: str = Field(min_length=1, max_length=256)
+    query: str = Field(min_length=1, max_length=4_000)
+    purpose: Literal["viewpoint", "unknown_entity", "current_fact"]
+    as_of: datetime
+    summary: str = Field(min_length=1, max_length=500)
+    facts: tuple[IdeaResearchFactPayload, ...] = Field(max_length=12)
+    sources: tuple[IdeaResearchSourcePayload, ...] = Field(max_length=20)
+    unresolved_questions: tuple[str, ...] = Field(max_length=8)
+    retrieved_at: datetime
+    response_sha256: str = Field(pattern=r"^(?:sha256:)?[0-9a-f]{64}$")
+    search_call_count: int = Field(ge=1)
+    schema_version: Literal["current-fact-research.v1"]
 
 
 class IdeaRoutePayload(ApiModel):
@@ -140,22 +291,120 @@ class IdeaRoutePayload(ApiModel):
     asset_mapping: IdeaAssetMappingPayload
     proposals: tuple[IdeaProposalPayload, ...] = Field(min_length=2, max_length=3)
     provenance: IdeaRouteProvenancePayload | None = None
+    research: IdeaResearchPayload | None = None
+
+
+class InstrumentSuggestionPayload(ApiModel):
+    symbol: str = Field(pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$")
+    name: str | None = None
+    source: str
+    retrieved_at: datetime
+    evidence: str | None = None
+
+
+class _BacktestReviewApiModel(ApiModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+        populate_by_name=True,
+        serialize_by_alias=True,
+        allow_inf_nan=False,
+    )
+
+
+class BacktestReviewModelProvenance(_BacktestReviewApiModel):
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=128)
+    prompt_version: str = Field(alias="promptVersion", min_length=1, max_length=128)
+    schema_version: str = Field(alias="schemaVersion", min_length=1, max_length=128)
+    response_hash: str = Field(alias="responseHash", pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class BacktestOptimizationCandidateView(_BacktestReviewApiModel):
+    id: str = Field(pattern=r"^model-opt-[1-3]$")
+    title: str = Field(min_length=2, max_length=48)
+    diagnosis: str = Field(min_length=2, max_length=240)
+    change_dimension: Literal[
+        "entry",
+        "exit",
+        "confirmation",
+        "risk_control",
+    ] = Field(alias="changeDimension")
+    expected_effect: str = Field(alias="expectedEffect", min_length=2, max_length=180)
+    tradeoff: str = Field(min_length=2, max_length=180)
+    suggested_utterance: str = Field(alias="suggestedUtterance", min_length=12, max_length=420)
+    strategy: StrategySpec
+    strategy_hash: str = Field(alias="strategyHash", pattern=r"^sha256:[0-9a-f]{64}$")
+    model_suggested: Literal[True] = Field(default=True, alias="modelSuggested")
+
+
+class BacktestReviewResponse(_BacktestReviewApiModel):
+    run_id: str = Field(alias="runId", min_length=1, max_length=128)
+    source_result_hash: str = Field(
+        alias="sourceResultHash",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    generated_at: datetime = Field(alias="generatedAt")
+    evidence_grade: Literal["insufficient", "limited", "moderate"] = Field(
+        alias="evidenceGrade"
+    )
+    evidence_reasons: tuple[str, ...] = Field(alias="evidenceReasons", min_length=1)
+    analysis: str = Field(min_length=8, max_length=600)
+    conclusion: str = Field(min_length=4, max_length=280)
+    optimization_candidates: tuple[BacktestOptimizationCandidateView, ...] = Field(
+        alias="optimizationCandidates",
+        min_length=2,
+        max_length=3,
+    )
+    model_provenance: BacktestReviewModelProvenance = Field(alias="modelProvenance")
+    disclaimer: Literal["历史回测与模型建议仅用于研究，不构成投资建议或真实交易指令"] = (
+        "历史回测与模型建议仅用于研究，不构成投资建议或真实交易指令"
+    )
 
 
 class StrategyDraftResponse(ApiModel):
     draft_id: UUID
     revision: int = Field(ge=1)
     status: CompileStatus
+    run_requested: bool = Field(default=False, exclude_if=lambda value: not value)
+    refresh_data: bool = Field(default=False, exclude_if=lambda value: not value)
     strategy: StrategySpec | None = None
     strategy_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     clarification: str | None = None
     diagnostic_code: str | None = None
+    instrument_suggestion: InstrumentSuggestionPayload | None = None
+    instrument_suggestions: tuple[InstrumentSuggestionPayload, ...] = Field(
+        default=(), max_length=3, exclude_if=lambda value: not value,
+    )
+    verified_instrument: InstrumentSuggestionPayload | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    backtest_review: BacktestReviewResponse | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     provenance: tuple[ProvenanceItem, ...] = ()
     candidate_provenance: CandidateProvenanceItem | None = None
     candidate_grounding: CandidateGroundingPayload | None = None
     candidate_rejections: tuple[CandidateRejectionItem, ...] = ()
     candidate_alternatives: tuple[CandidateAlternativeItem, ...] = ()
     idea_route: IdeaRoutePayload | None = None
+    # A compile-only interpretation for a colloquial idea.  It is not the
+    # executable ``strategy`` field and the client must send the suggested
+    # utterance through the clarification endpoint before it can run.
+    suggested_strategy: StrategySpec | None = None
+    suggested_strategy_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    suggested_strategy_choice_id: str | None = Field(default=None, min_length=1, max_length=128)
+    suggested_strategy_note: str | None = Field(default=None, min_length=1, max_length=240)
+    assistant_message: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1_000,
+        exclude_if=lambda value: value is None,
+    )
+    data: ClarificationDataPayload | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     created_at: datetime
 
     @model_validator(mode="after")
@@ -167,6 +416,23 @@ class StrategyDraftResponse(ApiModel):
                 raise ValueError("ready draft cannot contain idea guidance")
         elif self.strategy is not None or self.strategy_hash is not None:
             raise ValueError("non-ready draft cannot contain a strategy or strategy_hash")
+        suggested_fields = (
+            self.suggested_strategy,
+            self.suggested_strategy_hash,
+            self.suggested_strategy_choice_id,
+            self.suggested_strategy_note,
+        )
+        if any(item is not None for item in suggested_fields):
+            if self.status is not CompileStatus.NEEDS_CLARIFICATION:
+                raise ValueError("suggested strategy must require clarification")
+            if any(item is None for item in suggested_fields):
+                raise ValueError("suggested strategy response is incomplete")
+            if self.idea_route is None:
+                raise ValueError("suggested strategy requires idea guidance")
+            if self.suggested_strategy_choice_id not in {
+                item.id for item in self.idea_route.proposals
+            }:
+                raise ValueError("suggested strategy choice must belong to idea guidance")
         if self.idea_route is not None and self.status is not CompileStatus.NEEDS_CLARIFICATION:
             raise ValueError("idea guidance must require clarification")
         route_codes = {
@@ -179,6 +445,7 @@ class StrategyDraftResponse(ApiModel):
             "ambiguous_volume_direction",
             "ambiguous_boolean_expression",
             "ambiguous_cross_indicator",
+            "data_query_only",
         }
         if self.idea_route is not None and self.diagnostic_code not in route_codes:
             raise ValueError("idea route is not allowed for this diagnostic code")
@@ -198,6 +465,10 @@ class ClarificationAnswerResponse(ApiModel):
     assistant_message: str = Field(min_length=1, max_length=1_000)
     suggestions: tuple[ClarificationSuggestionPayload, ...] = Field(max_length=3)
     draft: StrategyDraftResponse
+    data: ClarificationDataPayload | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class HealthResponse(ApiModel):

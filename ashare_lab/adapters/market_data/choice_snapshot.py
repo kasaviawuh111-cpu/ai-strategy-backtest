@@ -77,6 +77,9 @@ SESSION_REFERENCE_METHOD = "query_history_k_data_plus"
 SESSION_REFERENCE_FREQUENCY = "d"
 SESSION_REFERENCE_ADJUST_FLAG = "3"
 ETF_SESSION_REFERENCE_SCHEMA_VERSION = "ashare-lab.stock-etf-session-reference.v1"
+PROVIDER_NEUTRAL_SESSION_REFERENCE_SCHEMA_VERSION = (
+    "ashare-lab.instrument-session-reference.v3"
+)
 ETF_CORPORATE_ACTION_COVERAGE_SCOPE = "stock_etf_cash_and_unit_change_reconciliation"
 _CHOICE_TRADING_STATUS = "正常交易"
 _CHOICE_SUSPENDED_STATUSES = frozenset({"连续停牌"})
@@ -306,7 +309,12 @@ def build_daily_research_snapshot(
                     "stock-etf-multi-source-daily-facts-plus-versioned-rulebook"
                     if validated_session_coverage.get("schemaVersion")
                     == ETF_SESSION_REFERENCE_SCHEMA_VERSION
-                    else "baostock-historical-facts-plus-versioned-rulebook"
+                    else (
+                        "provider-neutral-historical-facts-plus-versioned-rulebook"
+                        if validated_session_coverage.get("schemaVersion")
+                        == PROVIDER_NEUTRAL_SESSION_REFERENCE_SCHEMA_VERSION
+                        else "baostock-historical-facts-plus-versioned-rulebook"
+                    )
                 ),
                 "provider": validated_session_coverage["provider"],
                 "queryMethod": validated_session_coverage.get(
@@ -328,7 +336,12 @@ def build_daily_research_snapshot(
                 "priceLimitSource": (
                     "stock ETF rule derived from ruleVersion using Tencent prior raw close"
                     if spec.board is Board.STOCK_ETF
-                    else "derived from ruleVersion using BaoStock isST/preclose"
+                    else (
+                        "derived from ruleVersion using provider-neutral isST/preclose"
+                        if validated_session_coverage.get("schemaVersion")
+                        == PROVIDER_NEUTRAL_SESSION_REFERENCE_SCHEMA_VERSION
+                        else "derived from ruleVersion using BaoStock isST/preclose"
+                    )
                 ),
             },
             "adjustmentPrefixStability": dict(prefix_stability),
@@ -527,33 +540,37 @@ def _validate_session_reference(
     for index, raw in enumerate(rows):
         if set(raw) != expected_keys:
             raise ChoiceSnapshotError(
-                f"BaoStock session row {index} fields must exactly match "
+                f"session-reference row {index} fields must exactly match "
                 + ",".join(SESSION_REFERENCE_FIELDS)
             )
         raw_date = raw.get("date")
         if not isinstance(raw_date, str):
-            raise ChoiceSnapshotError(f"BaoStock session row {index} date must be ISO text")
+            raise ChoiceSnapshotError(f"session-reference row {index} date must be ISO text")
         try:
             session_date = date.fromisoformat(raw_date)
         except ValueError as exc:
             raise ChoiceSnapshotError(
-                f"BaoStock session row {index} date must be ISO text"
+                f"session-reference row {index} date must be ISO text"
             ) from exc
         raw_preclose = raw.get("preclose")
         raw_trade_status = raw.get("tradestatus")
         raw_is_st = raw.get("isST")
         if not isinstance(raw_preclose, str):
-            raise ChoiceSnapshotError(f"BaoStock session row {index} preclose must be decimal text")
+            raise ChoiceSnapshotError(
+                f"session-reference row {index} preclose must be decimal text"
+            )
         if raw_trade_status not in {"0", "1"}:
-            raise ChoiceSnapshotError(f"BaoStock session row {index} tradestatus must be 0 or 1")
+            raise ChoiceSnapshotError(
+                f"session-reference row {index} tradestatus must be 0 or 1"
+            )
         if raw_is_st not in {"0", "1"}:
-            raise ChoiceSnapshotError(f"BaoStock session row {index} isST must be 0 or 1")
+            raise ChoiceSnapshotError(f"session-reference row {index} isST must be 0 or 1")
         normalized.append(
             {
                 "date": session_date,
                 "preclose": _positive_decimal(
                     raw_preclose,
-                    f"BaoStock session row {index} preclose",
+                    f"session-reference row {index} preclose",
                 ),
                 "trading_status": (
                     TradingStatus.TRADING if raw_trade_status == "1" else TradingStatus.SUSPENDED
@@ -574,24 +591,25 @@ def _validate_session_reference(
     provider_rows.sort(key=lambda item: item["date"])
     reference_dates = tuple(cast(date, item["date"]) for item in normalized)
     if len(reference_dates) != len(set(reference_dates)):
-        raise ChoiceSnapshotError("BaoStock session reference contains duplicate dates")
+        raise ChoiceSnapshotError("session reference contains duplicate dates")
     execution_dates = tuple(cast(date, item["date"]) for item in execution_rows)
     if reference_dates != execution_dates:
         missing = sorted(set(execution_dates) - set(reference_dates))
         unexpected = sorted(set(reference_dates) - set(execution_dates))
         raise ChoiceSnapshotError(
-            "BaoStock session dates must exactly match Choice and the market calendar; "
+            "session-reference dates must exactly match Choice/daily rows and the market calendar; "
             f"missing={len(missing)}, unexpected={len(unexpected)}"
         )
     for execution, reference in zip(execution_rows, normalized, strict=True):
         session_date = cast(date, execution["date"])
         if cast(Decimal, execution["preclose"]) != cast(Decimal, reference["preclose"]):
             raise ChoiceSnapshotError(
-                f"Choice and BaoStock preclose disagree on {session_date.isoformat()}"
+                f"daily data and session-reference preclose disagree on {session_date.isoformat()}"
             )
         if execution["choice_trading_status"] is not reference["trading_status"]:
             raise ChoiceSnapshotError(
-                f"Choice and BaoStock trading status disagree on {session_date.isoformat()}"
+                "daily data and session-reference trading status disagree on "
+                f"{session_date.isoformat()}"
             )
 
     validated_coverage = _validate_session_reference_coverage(
@@ -608,6 +626,12 @@ def _validate_session_reference_coverage(
     provider_rows: Sequence[Mapping[str, str]],
     spec: ChoiceSnapshotSpec,
 ) -> dict[str, object]:
+    if coverage.get("schemaVersion") == PROVIDER_NEUTRAL_SESSION_REFERENCE_SCHEMA_VERSION:
+        return _validate_provider_neutral_session_reference_coverage(
+            coverage,
+            provider_rows=provider_rows,
+            spec=spec,
+        )
     if coverage.get("schemaVersion") == ETF_SESSION_REFERENCE_SCHEMA_VERSION:
         return _validate_etf_session_reference_coverage(
             coverage,
@@ -779,6 +803,167 @@ def _validate_session_reference_coverage(
         "hashSemantics": coverage["hashSemantics"],
         "paginationPolicy": coverage["paginationPolicy"],
         "intervals": audited_intervals,
+    }
+
+
+def _validate_provider_neutral_session_reference_coverage(
+    coverage: Mapping[str, object],
+    *,
+    provider_rows: Sequence[Mapping[str, str]],
+    spec: ChoiceSnapshotSpec,
+) -> dict[str, object]:
+    """Validate v3 evidence without inheriting BaoStock-specific semantics."""
+
+    if coverage.get("status") != "complete" or coverage.get("querySucceeded") is not True:
+        raise ChoiceSnapshotError("provider-neutral session acquisition must be complete")
+    if coverage.get("instrumentId") != spec.symbol:
+        raise ChoiceSnapshotError("provider-neutral session evidence belongs to another instrument")
+    provider = _coverage_text(coverage.get("provider"), "session-reference provider")
+    if provider != "eastmoney_mx_finance_data":
+        raise ChoiceSnapshotError("v3 session evidence has an unsupported provider")
+    if (
+        coverage.get("start") != spec.start.isoformat()
+        or coverage.get("end") != spec.end.isoformat()
+    ):
+        raise ChoiceSnapshotError("provider-neutral session range must exactly match the snapshot")
+    if coverage.get("fields") != list(SESSION_REFERENCE_FIELDS):
+        raise ChoiceSnapshotError("provider-neutral session fields are not the strict field set")
+    if coverage.get("providerFields") != ["前收盘价", "交易状态", "是否为ST股票"]:
+        raise ChoiceSnapshotError("provider-neutral source fields are not the proven MX field set")
+    if (
+        coverage.get("frequency") != "1d"
+        or coverage.get("adjustFlag") != "provider_unadjusted_preclose"
+        or coverage.get("priceBasis") != "unadjusted"
+    ):
+        raise ChoiceSnapshotError("provider-neutral session evidence must be unadjusted daily data")
+    if coverage.get("rowCount") != len(provider_rows) or coverage.get("zeroResult") is not (
+        not provider_rows
+    ):
+        raise ChoiceSnapshotError("provider-neutral session row metadata is inconsistent")
+    returned_start = provider_rows[0]["date"] if provider_rows else None
+    returned_end = provider_rows[-1]["date"] if provider_rows else None
+    if (
+        coverage.get("returnedStart") != returned_start
+        or coverage.get("returnedEnd") != returned_end
+    ):
+        raise ChoiceSnapshotError("provider-neutral returned range is inconsistent")
+    if coverage.get("canonicalRowsSha256") != _canonical_sha256(list(provider_rows)):
+        raise ChoiceSnapshotError("provider-neutral canonical row hash is invalid")
+    if coverage.get("dateAxisSha256") != _canonical_sha256(
+        [row["date"] for row in provider_rows]
+    ):
+        raise ChoiceSnapshotError("provider-neutral date-axis hash is invalid")
+    if coverage.get("hashSemantics") != (
+        "provider_raw_wire_sha256_plus_canonical_normalized_rows_sha256"
+    ):
+        raise ChoiceSnapshotError("provider-neutral hash semantics are missing")
+    if coverage.get("paginationPolicy") != (
+        "annual_searchData_queries_bounded_to_at_most_366_calendar_days"
+    ):
+        raise ChoiceSnapshotError("provider-neutral pagination policy is unsafe")
+    if coverage.get("queryMethod") != (
+        "Eastmoney MX searchData annual exact-symbol daily facts"
+    ):
+        raise ChoiceSnapshotError("provider-neutral query method is invalid")
+
+    raw_audits = coverage.get("queryAudits")
+    if not isinstance(raw_audits, Sequence) or isinstance(
+        raw_audits,
+        str | bytes | bytearray,
+    ):
+        raise ChoiceSnapshotError("provider-neutral query audits must be a list")
+    audits = list(cast(Sequence[object], raw_audits))
+    expected_intervals = [
+        (max(spec.start, date(year, 1, 1)), min(spec.end, date(year, 12, 31)))
+        for year in range(spec.start.year, spec.end.year + 1)
+    ]
+    if len(audits) != len(expected_intervals):
+        raise ChoiceSnapshotError("provider-neutral annual query coverage is incomplete")
+    validated_audits: list[dict[str, object]] = []
+    for index, (raw_audit, (interval_start, interval_end)) in enumerate(
+        zip(audits, expected_intervals, strict=True)
+    ):
+        if not isinstance(raw_audit, Mapping):
+            raise ChoiceSnapshotError(f"provider-neutral query audit {index} must be an object")
+        audit = dict(cast(Mapping[str, object], raw_audit))
+        expected_query = (
+            f"查询{spec.symbol} {interval_start.isoformat()}至{interval_end.isoformat()}"
+            "每个交易日的前收盘价、交易状态、是否ST、证券简称"
+        )
+        if (
+            audit.get("purpose") != "historical_sessions"
+            or audit.get("query") != expected_query
+            or audit.get("provider") != provider
+            or audit.get("schemaVersion") != "eastmoney-mx.search-data.v1"
+            or audit.get("requestedStart") != interval_start.isoformat()
+            or audit.get("requestedEnd") != interval_end.isoformat()
+            or audit.get("providerFields")
+            != ["前收盘价", "交易状态", "是否为ST股票"]
+            or not _is_sha256(audit.get("responseSha256"))
+        ):
+            raise ChoiceSnapshotError(
+                f"provider-neutral query audit {index} does not match the strict request"
+            )
+        retrieved_at = audit.get("retrievedAt")
+        if not isinstance(retrieved_at, str):
+            raise ChoiceSnapshotError(f"provider-neutral query audit {index} lacks retrieval time")
+        try:
+            parsed_retrieved_at = datetime.fromisoformat(retrieved_at)
+        except ValueError as exc:
+            raise ChoiceSnapshotError(
+                f"provider-neutral query audit {index} retrieval time is invalid"
+            ) from exc
+        if parsed_retrieved_at.tzinfo is None or parsed_retrieved_at.utcoffset() is None:
+            raise ChoiceSnapshotError(
+                f"provider-neutral query audit {index} retrieval time lacks timezone"
+            )
+        interval_rows = [
+            row
+            for row in provider_rows
+            if interval_start <= date.fromisoformat(row["date"]) <= interval_end
+        ]
+        if not interval_rows:
+            raise ChoiceSnapshotError(
+                f"provider-neutral query audit {index} contains no historical rows"
+            )
+        if (
+            audit.get("rowCount") != len(interval_rows)
+            or audit.get("returnedStart") != interval_rows[0]["date"]
+            or audit.get("returnedEnd") != interval_rows[-1]["date"]
+            or audit.get("canonicalRowsSha256") != _canonical_sha256(interval_rows)
+            or audit.get("dateAxisSha256")
+            != _canonical_sha256([row["date"] for row in interval_rows])
+        ):
+            raise ChoiceSnapshotError(
+                f"provider-neutral query audit {index} row evidence is inconsistent"
+            )
+        validated_audits.append(audit)
+    if coverage.get("aggregateAuditSha256") != _canonical_sha256(validated_audits):
+        raise ChoiceSnapshotError("provider-neutral aggregate audit hash is invalid")
+    return {
+        "schemaVersion": PROVIDER_NEUTRAL_SESSION_REFERENCE_SCHEMA_VERSION,
+        "status": "complete",
+        "querySucceeded": True,
+        "provider": provider,
+        "instrumentId": spec.symbol,
+        "start": spec.start.isoformat(),
+        "end": spec.end.isoformat(),
+        "fields": list(SESSION_REFERENCE_FIELDS),
+        "providerFields": ["前收盘价", "交易状态", "是否为ST股票"],
+        "frequency": "1d",
+        "adjustFlag": "provider_unadjusted_preclose",
+        "priceBasis": "unadjusted",
+        "rowCount": len(provider_rows),
+        "zeroResult": not provider_rows,
+        "returnedStart": returned_start,
+        "returnedEnd": returned_end,
+        "canonicalRowsSha256": coverage["canonicalRowsSha256"],
+        "dateAxisSha256": coverage["dateAxisSha256"],
+        "aggregateAuditSha256": coverage["aggregateAuditSha256"],
+        "hashSemantics": coverage["hashSemantics"],
+        "paginationPolicy": coverage["paginationPolicy"],
+        "queryMethod": coverage["queryMethod"],
+        "queryAudits": validated_audits,
     }
 
 

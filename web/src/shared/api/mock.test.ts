@@ -215,15 +215,6 @@ describe('mock API trust boundary', () => {
     expect(answer.outcome.status).toBe('compiled')
   })
 
-  it('fails closed for an unknown mock clarification answer', async () => {
-    await expect(mockApi.compile({
-      ...request('东方财富 MACD 金叉买入，死叉卖出'),
-      clarification: { id: 'unknown', choiceId: 'guess' },
-    })).rejects.toMatchObject({
-      problem: { code: 'clarification_choice_not_supported' },
-    })
-  })
-
   it('never fabricates replayable identity or proved evidence for mock results', async () => {
     const outcome = await mockApi.compile(request('东方财富 MACD 金叉买入，死叉卖出'))
     if (outcome.status !== 'compiled') throw new Error('expected a compiled MACD strategy')
