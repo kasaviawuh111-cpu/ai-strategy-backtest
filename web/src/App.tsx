@@ -108,9 +108,7 @@ type JourneySnapshot = {
  * 多轮澄清之后，最终规则可能和第一句毫无关系（线上出现过标题是「你可以干啥」）。
  * 名字跟着要执行的东西走，才不会和实际跑的规则对不上。
  */
-const strategyTitle = (instrument: Instrument, strategy: StrategySummary): string =>
-  `${instrument.name} ${summarizeRule(strategy.entryRule)}买入，`
-  + `${summarizeRule(strategy.exitRule)}卖出`
+const strategyTitle = (_instrument: Instrument, strategy: StrategySummary): string => strategy.title
 
 const terminalStates = new Set(['succeeded', 'failed', 'cancelled'])
 /** 点「开始回测」时替用户发出的那句话；和按钮文案保持同一个词。 */
@@ -732,6 +730,7 @@ export default function App({
 
   const [stack, setStack] = useState<Overlay[]>([])
   const [paramsFocus, setParamsFocus] = useState<EditableRow['key'] | 'more'>('entry')
+  const [conditionPath, setConditionPath] = useState<string>()
   const [chainTitle, setChainTitle] = useState('交易因果轨迹')
   const [chainNodes, setChainNodes] = useState<ReturnType<typeof buildChain>>([])
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
@@ -775,8 +774,9 @@ export default function App({
 
   const open = (overlay: Overlay) => setStack((current) =>
     current.includes(overlay) ? current : [...current, overlay])
-  const openParams = (focus: EditableRow['key'] | 'more') => {
+  const openParams = (focus: EditableRow['key'] | 'more', path?: string) => {
     setParamsFocus(focus)
+    setConditionPath(path)
     open('params')
   }
   const back = () => setStack((current) => current.slice(0, -1))
@@ -2295,7 +2295,7 @@ export default function App({
             stockEditor={{ onSearch: instrumentApi.search, onSave: saveInlineStock }}
             onChange={handleDraftChange}
             onReset={() => baselineDraft && setDraft(cloneDraft(baselineDraft))}
-            isLocked={isJourneyLocked} focus={paramsFocus} />
+            isLocked={isJourneyLocked} focus={paramsFocus} conditionPath={conditionPath} capabilities={capabilitiesQuery.data} />
         ) : null}
         {reportSnapshot ? (
           <ExecutionDetailsScreen open={activeOverlay === 'execution'} onBack={back}

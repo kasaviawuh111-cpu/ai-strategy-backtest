@@ -434,10 +434,10 @@ class DialogueTurnOrchestrator:
                     message = f"你说的“{name}”，是{labels}中的哪只？"
                 except (OSError, TimeoutError):
                     instrument = None
-                    message = "东方财富选股 Skill 暂时无法核对股票名称，请重试；原规则已保留。"
+                    message = "股票名称查询中断，暂时无法确认输入是否有效；请检查名称或代码后重试。原规则已保留。"
                 except LookupError:
                     instrument = None
-                    message = f"这次还没核实“{name}”，请补充完整股票名称或代码。"
+                    message = f"未找到“{name}”对应的 A 股，请修改股票名称或代码。原规则已保留。"
                 if instrument is not None:
                     turn = await self._apply_instrument(
                         state=state, instrument=instrument, assistant_message=message,

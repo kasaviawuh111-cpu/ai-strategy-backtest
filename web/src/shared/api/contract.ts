@@ -229,7 +229,7 @@ const readableIdentifier = (value: string): string => {
   return leaf.replaceAll('_', ' ')
 }
 
-const triggerFallback = (trigger: string): string => ({
+export const triggerFallback = (trigger: string): string => ({
   golden_cross: '金叉',
   death_cross: '死叉',
   published: '首次发布',
@@ -743,6 +743,14 @@ export const fromBacktestOptimizationCandidate = (
 export const strategySpecFromDraft = (draft: StrategyDraft): StrategySpec => {
   return applyDraftEdits(draft.strategySpec, draft)
 }
+
+/** Rebuild display fields from the edited executable tree, never keep stale labels. */
+export const withEditedStrategySpec = (draft: StrategyDraft, strategySpec: StrategySpec,
+  capabilities?: CapabilitiesResponse): StrategyDraft => ({
+  ...draft, strategySpec,
+  entry: toLeg(strategySpec.entry, 'entry', capabilities),
+  exit: toExitLeg(strategySpec.exit.children, capabilities),
+})
 
 export const toLiveBacktestBody = (
   draft: StrategyDraft, options: { refreshData?: boolean } = {},

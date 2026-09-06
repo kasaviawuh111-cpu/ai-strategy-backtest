@@ -59,14 +59,12 @@ const parameterText = (condition: StrategyCondition): string[] => {
     return [
       `${condition.exitTrigger === 'take_profit' ? '止盈' : '止损'}阈值 ${condition.thresholdPct}%`,
       '首次实际买入成交为基准 · 后复权日线收盘确认',
-      '当前参数只读；修改请返回原话重新识别',
     ]
   }
   if (condition.kind === 'trailing_drawdown') {
     return [
       `高点回撤阈值 ${condition.thresholdPct}%`,
       '买入后后复权日线收盘高点为基准 · 收盘确认',
-      '当前参数只读；修改请返回原话重新识别',
     ]
   }
   if (condition.kind === 'financial') {
@@ -512,7 +510,7 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
   const hasEvent = [...draft.entry.conditions, ...draft.exit.conditions]
     .some((condition) => condition.kind === 'event')
   return {
-    title: draft.title.replace(/\s*·\s*日线$/, ''),
+    title: conciseStrategyTitle(draft),
     rows: [
     { key: 'entry', label: '买入', value: summarizeCardRule(rules.entry), kind: 'buy' },
     { key: 'exit', label: '卖出', value: summarizeCardRule(rules.exit), kind: 'sell' },
@@ -532,6 +530,21 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
     conditionCount: draft.entry.conditions.length + draft.exit.conditions.length,
     eventFacts: eventFacts(draft),
   }
+}
+
+export function conciseStrategyTitle(draft: StrategyDraft): string {
+  const text = draft.entry.conditions.map((item) => item.label).join(' ')
+  const rsi = /RSI|相对强弱/i.test(text)
+  const breakout = /新高/.test(text)
+  const volume = /成交量|放量|相对量/.test(text)
+  const amount = /成交额/.test(text)
+  const name = rsi ? (/上穿|向上|从下|由下/.test(text) ? 'RSI 回升触发' : /低于|小于/.test(text) ? 'RSI 低位信号' : 'RSI 阈值信号')
+    : breakout ? (volume ? '放量突破新高' : '价格突破新高')
+    : /布林|BOLL/i.test(text) ? '布林带价格信号'
+    : /均线|移动平均/.test(text) ? (/金叉|上穿/.test(text) ? '均线交叉跟随' : '均线趋势信号')
+    : draft.entry.conditions.find((item) => item.kind === 'indicator')?.label.split(/[，,（(]/)[0].slice(0, 18)
+      || '事件与条件策略'
+  return `${name}${amount ? ' · 成交额过滤' : ''}`
 }
 
 export const toBacktestMetrics = (summary: BacktestSummary): BacktestMetrics => {

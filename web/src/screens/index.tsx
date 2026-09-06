@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 
 import type {
   CapacityMode,
+  CapabilitiesResponse,
   PriceLimitMode,
   StrategyDraft,
   StrategyIndicatorCondition,
@@ -26,6 +27,7 @@ import {
 import { EquityChart } from '../components/EquityChart'
 import { ExcessEquation } from '../components/ExcessEquation'
 import { RuleTree } from '../components/SummaryCards'
+import { RuleSpecEditor } from '../components/RuleSpecEditor'
 import { InlineStockEditor, type InlineStockEditorActions } from '../components/InlineStockEditor'
 import { numericResultConclusion } from '../result-conclusion'
 import { secondaryMetric, strategyRuleTrees, toOrderRows } from '../view-model'
@@ -129,10 +131,11 @@ const priceLimitHelp: Record<PriceLimitMode, string> = {
 }
 
 export function ParamsScreen(
-  { open, onBack, draft, onChange, onReset, isLocked, focus, stockEditor }:
+  { open, onBack, draft, onChange, onReset, isLocked, focus, stockEditor, conditionPath, capabilities }:
   { open: boolean; onBack: () => void; draft: StrategyDraft;
     onChange: (draft: StrategyDraft) => void; onReset: () => void; isLocked: boolean;
-    focus: EditableRow['key'] | 'more'; stockEditor?: InlineStockEditorActions },
+    focus: EditableRow['key'] | 'more'; stockEditor?: InlineStockEditorActions;
+    conditionPath?: string; capabilities?: CapabilitiesResponse },
 ) {
   const [stockEditing, setStockEditing] = useState(false)
   if (!open && stockEditing) setStockEditing(false)
@@ -226,8 +229,11 @@ export function ParamsScreen(
             </div>
           </Section>
           <fieldset className="settings-fields" disabled={isLocked || stockEditing}>
+          {focus === 'entry' || focus === 'exit' ? <div data-focus={focus}><Section title={focus === 'entry' ? '编辑买入条件' : '编辑卖出条件'}>
+            <RuleSpecEditor draft={draft} side={focus} path={conditionPath} capabilities={capabilities} onChange={onChange} />
+          </Section></div> : null}
           <div data-focus="entry" className="section-anchor" />
-          <Section title="交易规则" aside="来自服务端最终策略规则">
+          {focus !== 'entry' && focus !== 'exit' ? <Section title="交易规则" aside="来自服务端最终策略规则">
             <div className="rule-settings">
               <span className="rule-side buy">买入</span>
               <RuleTree node={rules.entry} />
@@ -239,12 +245,12 @@ export function ParamsScreen(
             </div>
             {hasReadOnlyExitRule ? (
               <Notice tone="info">
-                持有期、止盈止损和移动回撤来自服务端最终规则，当前只读；如需调整，请返回修改原话并重新识别。
+                点击审阅页中的具体卖出条件，可修改持有期、止盈止损和移动回撤参数。
               </Notice>
             ) : null}
-          </Section>
+          </Section> : null}
 
-          {indicatorConditions.length > 0 ? (
+          {focus !== 'entry' && focus !== 'exit' && indicatorConditions.length > 0 ? (
             <Section title="指标参数" aside="不改也可以直接回测">
               {indicatorConditions.flatMap((condition) => condition.parameters.map((parameter) => (
                 <label className="grow setting-row" key={`${condition.id}-${parameter.key}`}>
@@ -271,6 +277,18 @@ export function ParamsScreen(
 
           <div data-focus="range" className="section-anchor" />
           <Section title="回测范围">
+            <label className="setting-row"><span>常用区间</span><select aria-label="常用区间" value="custom"
+              onChange={(event) => {
+                if (event.target.value === 'custom') return
+                const end = latestDate
+                const start = new Date(`${end}T00:00:00Z`)
+                start.setUTCDate(1)
+                start.setUTCMonth(start.getUTCMonth() - Number(event.target.value))
+                const day = Number(end.slice(-2))
+                const last = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0)).getUTCDate()
+                start.setUTCDate(Math.min(day, last))
+                setDateEdits({ draftId: draft.id, start: start.toISOString().slice(0, 10), end })
+              }}><option value="custom">自定义日期</option><option value="6">近半年</option><option value="12">近一年</option><option value="36">近三年</option></select></label>
             <label className="grow setting-row">
               <span className="k">开始日期</span>
               <input ref={startDateRef} className="settings-input settings-input--date" type="date"
@@ -651,8 +669,7 @@ export function ReportBody(
   const listRef = useRef<HTMLDivElement>(null)
   const identityComplete = hasCompleteIdentity(evidence)
   const identityStatus = identityComplete || evidence.skillData ? 'implemented' : 'partial'
-  const identityLabel = evidence.skillData ? '东方财富 Skill · 复权收益模拟'
-    : identityComplete ? '身份已记录' : '身份不完整'
+  const identityLabel = identityComplete ? '身份已记录' : '身份不完整'
 
   const orders = useMemo(() => toOrderRows(trades), [trades])
   const secondary = secondaryMetric(metrics)
@@ -685,7 +702,7 @@ export function ReportBody(
           <section className="report-summary" aria-labelledby="report-conclusion">
             <div className="report-summary-meta">
               <span>{metrics.dataRange.start} 至 {metrics.dataRange.end}</span>
-              {mode === 'live' ? <Tag status={identityStatus}>{identityLabel}</Tag> : null}
+              {mode === 'live' && !evidence.skillData ? <Tag status={identityStatus}>{identityLabel}</Tag> : null}
             </div>
             <h2 id="report-conclusion">{numericResultConclusion(metrics)}</h2>
             <div className="headline">

@@ -565,9 +565,9 @@ class StrategyCompiler:
                     ),
                     compile_input=rebound_input, revision_changed=True,
                 )
-            message = "这次股票名称或代码还没核对上，请确认要用哪一只；原买卖规则已保留。"
+            message = "未找到这个名称或代码对应的 A 股，请修改股票名称或代码；原买卖规则已保留，尚未重新回测。"
             if resolution_unavailable:
-                message = "东方财富选股 Skill 暂时无法核对股票名称，请稍后重试；原策略已保留。"
+                message = "股票名称查询中断，暂时无法确认输入是否有效；请检查名称或代码后重试。原策略已保留，尚未重新回测。"
                 candidates.clear()
             elif candidates:
                 identities = "、".join(item.name for item in candidates.values())

@@ -76,7 +76,7 @@ export function RuleTree({ node, compact = false }: { node: StrategyRuleNode; co
 export function StrategyCard(
   { instrument, strategy, onEditRow, onOpenMore, onRun, isStarting, isLocked, settled, editableAfterRun = false, canStart = true, disabledReason, error, executionSummary, stockEditor }:
   { instrument: Instrument; strategy: StrategySummary;
-    onEditRow: (key: EditableRow['key']) => void; onOpenMore: () => void; onRun: () => void;
+    onEditRow: (key: EditableRow['key'], path?: string) => void; onOpenMore: () => void; onRun: () => void;
     isStarting?: boolean; isLocked?: boolean; settled?: string; editableAfterRun?: boolean; canStart?: boolean; disabledReason?: string; error?: string;
     /** 当前成交设置的一句话后果，由 view-model 的 summarizeExecution 生成。 */
     executionSummary?: string; stockEditor?: InlineStockEditorActions },
@@ -113,12 +113,33 @@ export function StrategyCard(
             <Chevron />
           </button>
         </div>
-        <div className="erows">
-          {strategy.rows.map((row) => (
+        <div className="condition-sections">
+          {strategy.rows.map((row) => {
+            const node = row.key === 'entry' ? strategy.entryRule : row.key === 'exit' ? strategy.exitRule : null;
+            if (node) {
+              const children = node.kind === 'group' && node.operator !== 'not' ? node.children : [node];
+              const operator = node.kind === 'group' ? node.operator : 'all';
+              return <section className={`condition-section ${row.kind}`} key={row.key} aria-label={`${row.label}条件`}>
+                <header className="condition-heading"><span className="lb">{row.label}</span>
+                  <button type="button" className="condition-relation" disabled={fieldsLocked}
+                    onClick={() => onEditRow(row.key, node.id)}>
+                    {children.length > 1 ? operator === 'all' ? `全部满足才${row.label}（且）`
+                      : operator === 'not' ? '不满足以下条件' : `任一触发就${row.label}（或）` : '满足条件时触发'}<Chevron />
+                  </button>
+                </header>
+                <div className="erows">
+                  {children.map((child) => <button key={child.id} type="button" className="erow"
+                    disabled={fieldsLocked} onClick={() => onEditRow(row.key, child.id)}>
+                    <div className="val"><RuleTree node={child} compact /></div><Chevron />
+                  </button>)}
+                </div>
+              </section>;
+            }
+            return (
             <button
               key={row.key}
               type="button"
-              className={`erow${row.kind ? ` ${row.kind}` : ''}${fieldsLocked ? ' off' : ''}`}
+              className="condition-range"
               onClick={() => onEditRow(row.key)}
               disabled={fieldsLocked}
             >
@@ -130,7 +151,7 @@ export function StrategyCard(
               </div>
               <Chevron />
             </button>
-          ))}
+          )})}
         </div>
       </div>
       <CardFoot settled={settled} actions={[

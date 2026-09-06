@@ -234,6 +234,22 @@ button,input,select{font:inherit}
    步骤之间用一根细箭头串起来。第一步（买入＝触发）是浅绿实线，其余是灰虚线——
    和它区分 Trigger 与后续动作的做法一致。序号用 CSS counter，不动 JSX。 */
 .erows{margin-top:10px;padding-left:32px;counter-reset:flowstep}
+.condition-section{margin-top:24px}
+.rule-edit-condition{padding:16px 0;border-top:1px solid var(--hairline)}
+.rule-edit-condition h3{padding:0 16px;font-size:15px;line-height:24px;overflow-wrap:anywhere}
+.condition-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.condition-heading .lb,.condition-range .lb{padding:3px 8px;background:var(--surface-sunken);border-radius:var(--r-chip);font-size:13px}
+.condition-section.buy .lb{color:var(--color-up);background:var(--color-up-weak)}
+.condition-section.sell .lb{color:var(--color-down);background:var(--color-down-weak)}
+.condition-relation,.condition-range{border:0;background:transparent;color:var(--ink-1);font:inherit;display:flex;align-items:center;gap:10px;cursor:pointer;min-height:44px;text-align:left}
+.condition-relation{font-size:14px;font-weight:600;padding:0}
+.condition-range{margin-top:24px;padding:0;width:100%}
+.condition-range .val{flex:1}
+.condition-range small{display:block}
+.condition-sections .erow::after{display:none}
+.condition-sections .erow+.erow{margin-top:12px}
+.condition-relation:focus-visible,.condition-range:focus-visible{outline:2px solid var(--color-primary);outline-offset:3px}
+.condition-sections button:disabled{opacity:.6;cursor:default}
 .erow{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;
   border:1px dashed var(--flow-step-line);border-radius:var(--r-inner);background:var(--surface);
   cursor:pointer;padding:12px 12px;min-height:52px;color:var(--ink-1)}
