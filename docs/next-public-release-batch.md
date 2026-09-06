@@ -8,6 +8,7 @@
 - 线上服务：`ashare-strategy-preview`，当前核对版本003，继续免登录公开访问。本轮不推送 Git、不部署、不改云配置。
 - 003内容摘要：`sha256:244dd789e136c3eb8901c50b7ae525d2567cd17e5d3474ff0bab938e6284a8be`。
 - 已部署包本地基准：`/private/tmp/ashare-public-mvp-release.7GFN7Y/source-manifest.json`。包内303个文件全部匹配清单；当前打包白名单与之比较301个一致，2个生产文件变化，无新增或删除运行文件。`web/dist`当前与003一致；下次实施手机改动后必须重新构建，不能沿用旧产物。
+- 003对照包已另存到项目 `.artifacts/release-baselines/public-003/`（约7MB，逐文件比对与临时目录一致），不再只依赖临时目录；内容清单同时纳入Git：`docs/releases/public-003-source-manifest.json`。归档不包含凭据或用户数据库，不改变线上版本。
 
 ## 本批已实现、尚未上线
 
