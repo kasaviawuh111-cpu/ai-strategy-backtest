@@ -25,6 +25,7 @@ export function StrategySlotComposer({ draft, mode, disabled, onSubmit, onClear 
   })
   const [values, setValues] = useState(original)
   const controls = useRef<Partial<Record<Slot, HTMLTextAreaElement | null>>>({})
+  const selectOnClick = useRef(false)
   const slots: Slot[] = ['stock', 'entry', 'exit']
   const changes = slots.filter((slot) => values[slot].trim() !== original[slot])
   const canSubmit = changes.length > 0 && slots.every((slot) => values[slot].trim())
@@ -73,7 +74,16 @@ export function StrategySlotComposer({ draft, mode, disabled, onSubmit, onClear 
               placeholder={slot === 'stock' ? '填写股票名称或代码' : `填写${labels[slot]}条件`}
               onChange={(event) => setValues((current) => ({ ...current, [slot]: event.target.value }))}
               onFocus={(event) => event.currentTarget.select()}
-              onClick={(event) => event.currentTarget.select()}
+              onPointerDown={(event) => {
+                selectOnClick.current = document.activeElement !== event.currentTarget
+              }}
+              onClick={(event) => {
+                // The first pointer click can collapse the selection made by focus.
+                // Restore it only on entry; further clicks keep native caret/drag editing.
+                if (selectOnClick.current) event.currentTarget.select()
+                selectOnClick.current = false
+              }}
+              onBlur={() => { selectOnClick.current = false }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                   event.preventDefault()
@@ -84,7 +94,7 @@ export function StrategySlotComposer({ draft, mode, disabled, onSubmit, onClear 
         ))}
       </div>
       <div className="strategy-slots__footer">
-        <span>点选整段，直接替换</span>
+        <span>点入全选替换，再点局部修改</span>
         <button type="button" className="strategy-slots__clear" disabled={disabled} onClick={onClear}>清空</button>
         <button type="submit" className="send" aria-label="识别交易规则" disabled={disabled || !canSubmit}>
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
