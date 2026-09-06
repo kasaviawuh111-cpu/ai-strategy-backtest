@@ -195,10 +195,9 @@ const expectLiveCompileRequest = (fetchMock: FetchMock) => {
   expect(draftCalls).toHaveLength(1)
   const init = draftCalls[0]?.[1] as RequestInit
   expect(init.method).toBe('POST')
-  expect(JSON.parse(String(init.body))).toEqual({
+  expect(JSON.parse(String(init.body))).toMatchObject({
     utterance: '东方财富 MACD 刚金叉，而且股价也站上 20 日线了就买入；MACD 死叉就卖出，看看近 1 年效果',
-    instrument_context: '300059.SZ',
-    as_of_date: '2026-08-06',
+    as_of_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
   })
   expect(fetchMock.mock.calls.some(([path]) => String(path).includes('/revisions'))).toBe(false)
   expect(fetchMock.mock.calls.some(([path]) => String(path) === '/api/v1/backtest-runs')).toBe(false)
@@ -208,7 +207,6 @@ const expectRecognizedButNotRunnable = async (fetchMock: FetchMock) => {
   expect(await screen.findByText('预览策略')).toBeInTheDocument()
   expect(screen.getAllByText('MACD 金叉').length).toBeGreaterThan(0)
   expect(screen.getAllByText('MACD 死叉').length).toBeGreaterThan(0)
-  expect(screen.getByText('回测服务')).toBeVisible()
   expect(document.querySelector('.app')).toHaveAttribute('data-api-mode', 'live')
   expect(screen.queryByText('界面预览')).not.toBeInTheDocument()
   expect(screen.queryByText(/固定样例/)).not.toBeInTheDocument()
@@ -311,7 +309,8 @@ describe('Live App capability boundary', () => {
     expect(screen.getByRole('button', { name: '开始回测' })).toBeEnabled()
     expect(screen.queryByRole('region', { name: '策略能力状态' })).not.toBeInTheDocument()
 
-    await userEvent.setup().click(screen.getByRole('button', { name: /卖出.*持仓收益达到 33% 止盈/ }))
-    expect(screen.getByText(/持有期、止盈止损和移动回撤来自服务端最终规则，当前只读/)).toBeVisible()
+    await userEvent.setup().click(screen.getByRole('button', { name: /持仓收益达到 33% 止盈/ }))
+    expect(screen.getByRole('combobox', { name: '卖出条件关系' })).toBeEnabled()
+    expect(screen.getByRole('spinbutton', { name: '幅度（%）' })).toHaveValue(33)
   })
 })

@@ -2,7 +2,7 @@
 
 用户已接受临时存储，优先发布 MVP。本入口只有 `private_skill_ephemeral`，不混用长期存储。
 固定启动：`python -m deploy.private_preview.entrypoint`。一个 ASGI 进程、一个回测 worker、
-最多两个等待回测；本批公开免登录，同源写请求校验，关闭原始推理流。
+最多两个等待回测；本批公开免登录，同源写请求校验。与本地一致，按请求隔离展示上游实际返回的思考文本；没有文本时显示真实状态，不另造内容。
 
 必需声明：`DEPLOYMENT_PROFILE=private_skill_ephemeral`、`APP_ENV=production`、
 `PERSISTENCE_MODE=ephemeral`、`RESTART_RECOVERY_VERIFIED=false`、`INITIALIZE_SCHEMA=true`。

@@ -565,9 +565,15 @@ class StrategyCompiler:
                     ),
                     compile_input=rebound_input, revision_changed=True,
                 )
-            message = "未找到这个名称或代码对应的 A 股，请修改股票名称或代码；原买卖规则已保留，尚未重新回测。"
+            message = (
+                "未找到这个名称或代码对应的 A 股，请修改股票名称或代码；"
+                "原买卖规则已保留，尚未重新回测。"
+            )
             if resolution_unavailable:
-                message = "股票名称查询中断，暂时无法确认输入是否有效；请检查名称或代码后重试。原策略已保留，尚未重新回测。"
+                message = (
+                    "股票名称查询中断，暂时无法确认输入是否有效；请检查名称或代码后重试。"
+                    "原策略已保留，尚未重新回测。"
+                )
                 candidates.clear()
             elif candidates:
                 identities = "、".join(item.name for item in candidates.values())
@@ -2476,7 +2482,10 @@ def _candidate_exit(candidate: CandidateAst) -> FirstOfExit | None:
             item, (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit),
         ))
         if len(conditions) != len(rules):
-            raise _UnsupportedCandidateSemantics(POSITION_AWARE_EXIT_AND_UNSUPPORTED)
+            # The Skill engine supports position-aware ALL exits. Preserve
+            # that join just like a condition-group edit does; the legacy
+            # engine rejects unsupported ALL execution at its own boundary.
+            return FirstOfExit(op="all", children=rules)
         return FirstOfExit(children=(AllCondition(children=conditions),))
     return FirstOfExit(children=rules)
 

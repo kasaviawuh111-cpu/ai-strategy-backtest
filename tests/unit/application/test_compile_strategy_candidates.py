@@ -375,9 +375,10 @@ async def test_exit_join_matrix_never_rewrites_position_aware_and_as_first_of(
         isinstance(item, (IndicatorIntent, EventIntent)) for item in (left, right)
     )
     if join == "all" and not both_are_market_conditions:
-        assert outcome.status is CompileStatus.UNSUPPORTED
-        assert outcome.strategy is None
-        assert outcome.diagnostic_code == "position_aware_exit_and_not_supported"
+        assert outcome.status is CompileStatus.READY, outcome.diagnostic_code
+        assert outcome.strategy is not None
+        assert outcome.strategy.exit.op == "all"
+        assert len(outcome.strategy.exit.children) == 2
         return
 
     assert outcome.status is CompileStatus.READY, outcome.diagnostic_code
