@@ -26,6 +26,18 @@ def _auth(username: str = _USERNAME, password: str = _PASSWORD) -> str:
     return f"Basic {encoded}"
 
 
+@pytest.mark.asyncio
+async def test_anonymous_customer_rate_limit_does_not_consume_another_customers_budget() -> None:
+    app = PrivatePreviewAccess(Recorder(), _config(access_mode="public", writes_per_window=2))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=_ORIGIN) as client:
+        headers = {"Origin": _ORIGIN, "X-Preview-Client-ID": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+        assert (await client.post("/api/action", headers=headers)).status_code == 200
+        assert (await client.post("/api/action", headers=headers)).status_code == 200
+        assert (await client.post("/api/action", headers=headers)).status_code == 429
+        headers["X-Preview-Client-ID"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        assert (await client.post("/api/action", headers=headers)).status_code == 200
+
+
 class Recorder:
     def __init__(self) -> None:
         self.calls: list[Scope] = []
@@ -85,9 +97,13 @@ async def test_authenticated_cross_site_or_missing_origin_write_is_rejected(
     downstream = Recorder()
     app = PrivatePreviewAccess(downstream, _config())
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=_ORIGIN) as client:
-        response = await client.post("/api/v1/strategy-drafts", headers={
-            "Authorization": _auth(), **headers,
-        })
+        response = await client.post(
+            "/api/v1/strategy-drafts",
+            headers={
+                "Authorization": _auth(),
+                **headers,
+            },
+        )
     assert response.status_code == 403
     assert downstream.calls == []
 
@@ -98,9 +114,15 @@ async def test_same_origin_write_is_allowed(method: str) -> None:
     downstream = Recorder()
     app = PrivatePreviewAccess(downstream, _config())
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=_ORIGIN) as client:
-        response = await client.request(method, "/api/action", headers={
-            "Authorization": _auth(), "Origin": _ORIGIN, "Sec-Fetch-Site": "same-origin",
-        })
+        response = await client.request(
+            method,
+            "/api/action",
+            headers={
+                "Authorization": _auth(),
+                "Origin": _ORIGIN,
+                "Sec-Fetch-Site": "same-origin",
+            },
+        )
     assert response.status_code == 200
     assert len(downstream.calls) == 1
 
@@ -110,12 +132,21 @@ async def test_duplicate_auth_or_origin_headers_are_rejected() -> None:
     downstream = Recorder()
     app = PrivatePreviewAccess(downstream, _config())
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=_ORIGIN) as client:
-        duplicate_auth = await client.get("/", headers=[
-            ("Authorization", _auth()), ("Authorization", _auth()),
-        ])
-        duplicate_origin = await client.post("/api/action", headers=[
-            ("Authorization", _auth()), ("Origin", _ORIGIN), ("Origin", _ORIGIN),
-        ])
+        duplicate_auth = await client.get(
+            "/",
+            headers=[
+                ("Authorization", _auth()),
+                ("Authorization", _auth()),
+            ],
+        )
+        duplicate_origin = await client.post(
+            "/api/action",
+            headers=[
+                ("Authorization", _auth()),
+                ("Origin", _ORIGIN),
+                ("Origin", _ORIGIN),
+            ],
+        )
     assert duplicate_auth.status_code == 401
     assert duplicate_origin.status_code == 403
     assert downstream.calls == []
@@ -208,12 +239,16 @@ async def test_websocket_is_not_supported_and_lifespan_passes_through() -> None:
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"username": ""}, {"username": "guest:other"}, {"password": "short"},
-        {"trusted_origin": ""}, {"trusted_origin": "http://preview.example.test"},
+        {"username": ""},
+        {"username": "guest:other"},
+        {"password": "short"},
+        {"trusted_origin": ""},
+        {"trusted_origin": "http://preview.example.test"},
         {"trusted_origin": "https://preview.example.test/path"},
         {"trusted_origin": "https://guest:secret@preview.example.test"},
         {"trusted_origin": "https://preview.example.test:bad"},
-        {"max_concurrent_writes": 5}, {"writes_per_window": 1000},
+        {"max_concurrent_writes": 5},
+        {"writes_per_window": 1000},
     ],
 )
 def test_invalid_configuration_fails_before_serving(overrides: dict[str, object]) -> None:
@@ -224,18 +259,25 @@ def test_invalid_configuration_fails_before_serving(overrides: dict[str, object]
 def test_environment_requires_all_access_settings_without_exposing_secret() -> None:
     with pytest.raises(ValueError):
         PreviewAccessConfig.from_environment({})
-    config = PreviewAccessConfig.from_environment({
-        "PREVIEW_USERNAME": _USERNAME, "PREVIEW_PASSWORD": _PASSWORD, "PREVIEW_ORIGIN": _ORIGIN,
-    })
+    config = PreviewAccessConfig.from_environment(
+        {
+            "PREVIEW_USERNAME": _USERNAME,
+            "PREVIEW_PASSWORD": _PASSWORD,
+            "PREVIEW_ORIGIN": _ORIGIN,
+        }
+    )
     assert config.trusted_origin == _ORIGIN
     assert _PASSWORD not in repr(config) and _USERNAME not in repr(config)
 
 
 @pytest.mark.asyncio
 async def test_explicit_public_mode_works_without_accounts_and_keeps_admission_guards() -> None:
-    config = PreviewAccessConfig.from_environment({
-        "PREVIEW_ACCESS_MODE": "public", "PREVIEW_ORIGIN": _ORIGIN,
-    })
+    config = PreviewAccessConfig.from_environment(
+        {
+            "PREVIEW_ACCESS_MODE": "public",
+            "PREVIEW_ORIGIN": _ORIGIN,
+        }
+    )
     assert config.username == config.password == ""
     downstream = Recorder()
     app = PrivatePreviewAccess(downstream, config)
@@ -247,9 +289,14 @@ async def test_explicit_public_mode_works_without_accounts_and_keeps_admission_g
         result = await client.post("/api/action", headers={"Origin": _ORIGIN})
         assert result.status_code == 200
         assert (await client.post("/api/action")).status_code == 403
-        assert (await client.post("/api/action", headers={
-            "Origin": "https://another.example",
-        })).status_code == 403
+        assert (
+            await client.post(
+                "/api/action",
+                headers={
+                    "Origin": "https://another.example",
+                },
+            )
+        ).status_code == 403
         for _ in range(config.writes_per_window - 1):
             allowed = await client.post("/api/action", headers={"Origin": _ORIGIN})
             assert allowed.status_code == 200

@@ -121,6 +121,7 @@ describe('live strategy client', () => {
       }
       if (String(input) === '/api/v1/strategy-drafts') {
         expect(new Headers(init?.headers).get('Prefer')).toBe('respond-async')
+        expect(new Headers(init?.headers).get('X-Preview-Client-ID')).toMatch(/^[0-9a-f-]{36}$/)
         return new Response('{}', { status: 202,
           headers: { Location: location, 'X-Preview-Pending': '1' } })
       }

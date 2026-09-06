@@ -45,6 +45,19 @@ const DIALOGUE_PROGRESS_POLL_MS = 1_000
 const DIALOGUE_PROGRESS_FINAL_TIMEOUT_MS = 1_000
 const DIALOGUE_PROGRESS_LIMIT = 12
 
+// Anonymous browser scheduling key. This is not login or access authorization.
+let previewClientId: string | undefined
+const previewClient = (): string => {
+  if (previewClientId) return previewClientId
+  try {
+    const saved = localStorage.getItem('backtest-preview-client')
+    if (saved && /^[0-9a-f-]{36}$/.test(saved)) previewClientId = saved
+  } catch { /* Private browsing may disable storage. */ }
+  previewClientId ??= crypto.randomUUID()
+  try { localStorage.setItem('backtest-preview-client', previewClientId) } catch { /* Keep in memory. */ }
+  return previewClientId
+}
+
 export type DialogueProgressEvent = {
   stage: string
   message: string
@@ -92,6 +105,7 @@ const request = async <T>(
   if (init?.body) headers.set('Content-Type', 'application/json')
   if (import.meta.env.VITE_PRIVATE_PREVIEW === 'true' && init?.method === 'POST') {
     headers.set('Prefer', 'respond-async')
+    headers.set('X-Preview-Client-ID', previewClient())
   }
 
   let response: Response

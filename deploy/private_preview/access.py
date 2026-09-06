@@ -19,6 +19,8 @@ from urllib.parse import urlsplit
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from .dialogue_requests import preview_client
+
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
@@ -27,7 +29,7 @@ class PreviewAccessConfig:
     username: str = field(repr=False)
     password: str = field(repr=False)
     trusted_origin: str
-    max_concurrent_writes: int = 2
+    max_concurrent_writes: int = 4
     writes_per_window: int = 12
     window_seconds: int = 60
     access_mode: str = "private"
@@ -95,7 +97,7 @@ class PrivatePreviewAccess:
         self._clock = clock
         self._lock = threading.Lock()
         self._inflight = 0
-        self._starts: deque[float] = deque(maxlen=config.writes_per_window)
+        self._starts: deque[tuple[float, str]] = deque(maxlen=config.writes_per_window * 5)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "websocket":
@@ -116,14 +118,15 @@ class PrivatePreviewAccess:
 
         is_write = scope.get("method", "GET").upper() not in _SAFE_METHODS
         if is_write:
-            if (
-                headers.get(b"origin") != [self.config.trusted_origin.encode("ascii")]
-                or headers.get(b"sec-fetch-site", [b"same-origin"])
-                not in ([b"same-origin"], [b"none"])
+            if headers.get(b"origin") != [
+                self.config.trusted_origin.encode("ascii")
+            ] or headers.get(b"sec-fetch-site", [b"same-origin"]) not in (
+                [b"same-origin"],
+                [b"none"],
             ):
                 await self._reject(scope, receive, send, 403, "Same-origin request required")
                 return
-            if not self._admit_write():
+            if not self._admit_write(preview_client(scope)):
                 await self._reject(scope, receive, send, 429, "Preview request limit reached")
                 return
 
@@ -166,17 +169,18 @@ class PrivatePreviewAccess:
         password_matches = hmac.compare_digest(password, self.config.password.encode("utf-8"))
         return user_matches & password_matches
 
-    def _admit_write(self) -> bool:
+    def _admit_write(self, client: str = "legacy") -> bool:
         with self._lock:
             now = self._clock()
-            while self._starts and self._starts[0] <= now - self.config.window_seconds:
+            while self._starts and self._starts[0][0] <= now - self.config.window_seconds:
                 self._starts.popleft()
             if (
                 self._inflight >= self.config.max_concurrent_writes
-                or len(self._starts) >= self.config.writes_per_window
+                or len(self._starts) >= self.config.writes_per_window * 5
+                or sum(key == client for _, key in self._starts) >= self.config.writes_per_window
             ):
                 return False
-            self._starts.append(now)
+            self._starts.append((now, client))
             self._inflight += 1
             return True
 

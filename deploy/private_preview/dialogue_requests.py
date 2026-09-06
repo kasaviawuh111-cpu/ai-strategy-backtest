@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from time import monotonic
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse, Response
@@ -15,8 +15,20 @@ _PREFIX = "/api/v1/preview-requests/"
 _MAX_BYTES = 8 * 1024 * 1024
 
 
+def preview_client(scope: Scope) -> str:
+    """Anonymous scheduling key, not an account or an authorization boundary."""
+    try:
+        return str(UUID(Headers(scope=scope).get("x-preview-client-id", "")))
+    except ValueError:
+        return "legacy"
+
+
 @dataclass
 class _Pending:
+    lane: str = "strategy"
+    client: str = "legacy"
+    progress_id: str | None = None
+    running: bool = False
     task: asyncio.Task[None] | None = None
     response: Response | None = None
     updated: float = field(default_factory=monotonic)
@@ -28,6 +40,9 @@ class PreviewDialogueRequests:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
         self.records: dict[str, _Pending] = {}
+        # Report interpretation must never consume foreground strategy slots.
+        self.slots = {"strategy": asyncio.Semaphore(2), "review": asyncio.Semaphore(1)}
+        self.capacity = {"strategy": 10, "review": 9}  # running + eight waiting
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -52,11 +67,35 @@ class PreviewDialogueRequests:
             await self.app(scope, receive, send)
             return
         self._prune()
+        if path.startswith("/api/v1/dialogue-progress/") and scope.get("method") == "GET":
+            progress_id = path.rsplit("/", 1)[-1]
+            queued = next(
+                (
+                    r
+                    for r in self.records.values()
+                    if r.progress_id == progress_id and not r.running and r.response is None
+                ),
+                None,
+            )
+            if queued:
+                await JSONResponse(
+                    {
+                        "events": [
+                            {
+                                "stage": "queued",
+                                "message": "请求已受理，正在排队，轮到后会自动继续，无需重复提交。",
+                                "elapsed_ms": round((monotonic() - queued.updated) * 1000),
+                            }
+                        ],
+                        "finished": False,
+                    }
+                )(scope, receive, send)
+                return
         if path.startswith(_PREFIX) and scope.get("method") == "GET":
             key = path.removeprefix(_PREFIX)
             record = self.records.get(key)
             response = (
-                (record.response or self._pending(key))
+                (record.response or self._pending(key, record))
                 if record
                 else JSONResponse(
                     {"detail": "本次临时请求已过期或服务已重建，请重新提交。"},
@@ -80,14 +119,8 @@ class PreviewDialogueRequests:
         ):
             await self.app(scope, receive, send)
             return
-        active = sum(r.response is None for r in self.records.values())
-        if active >= 2:
-            await JSONResponse(
-                {"detail": "当前正在处理其他分析，请稍后再试。"},
-                status_code=429,
-                headers={"Retry-After": "5"},
-            )(scope, receive, send)
-            return
+        lane = "review" if path.endswith("/review") else "strategy"
+        client = preview_client(scope)
         body = bytearray()
         while True:
             event = await receive()
@@ -101,22 +134,26 @@ class PreviewDialogueRequests:
             if not event.get("more_body", False):
                 break
         # Reserve before yielding so two arrivals cannot exceed the capacity.
-        if sum(r.response is None for r in self.records.values()) >= 2:
+        active = [r for r in self.records.values() if r.response is None and r.lane == lane]
+        if len(active) >= self.capacity[lane] or sum(r.client == client for r in active) >= 3:
             await JSONResponse(
-                {"detail": "当前正在处理其他分析，请稍后再试。"}, status_code=429,
+                {"detail": "当前等待队列已满，本次请求尚未受理。请等待已有请求完成后再试。"},
+                status_code=429,
                 headers={"Retry-After": "5"},
             )(scope, receive, send)
             return
         key = str(uuid4())
-        record = self.records[key] = _Pending()
+        record = self.records[key] = _Pending(
+            lane=lane, client=client, progress_id=Headers(scope=scope).get("x-dialogue-progress-id")
+        )
         record.task = asyncio.create_task(self._execute(dict(scope), bytes(body), record))
-        await self._pending(key)(scope, receive, send)
+        await self._pending(key, record)(scope, receive, send)
 
     @staticmethod
-    def _pending(key: str) -> JSONResponse:
+    def _pending(key: str, record: _Pending) -> JSONResponse:
         location = _PREFIX + key
         return JSONResponse(
-            {"status": "pending"},
+            {"status": "running" if record.running else "queued"},
             status_code=202,
             headers={
                 "Location": location,
@@ -159,7 +196,9 @@ class PreviewDialogueRequests:
 
         try:
             async with asyncio.timeout(600):
-                await self.app(scope, receive, send)
+                async with self.slots[record.lane]:
+                    record.running = True
+                    await self.app(scope, receive, send)
             response = Response(bytes(result), status_code=status)
             response.raw_headers = [
                 (key, value)
