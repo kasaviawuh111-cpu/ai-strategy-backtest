@@ -542,7 +542,7 @@ export function conciseStrategyTitle(draft: StrategyDraft): string {
     : breakout ? (volume ? '放量突破新高' : '价格突破新高')
     : /布林|BOLL/i.test(text) ? '布林带价格信号'
     : /均线|移动平均/.test(text) ? (/金叉|上穿/.test(text) ? '均线交叉跟随' : '均线趋势信号')
-    : draft.entry.conditions.find((item) => item.kind === 'indicator')?.label.split(/[，,（(]/)[0].slice(0, 18)
+    : draft.entry.conditions.find((item) => item.kind === 'indicator')?.label.split(/[，,（(]/)[0]?.slice(0, 18)
       || '事件与条件策略'
   return `${name}${amount ? ' · 成交额过滤' : ''}`
 }

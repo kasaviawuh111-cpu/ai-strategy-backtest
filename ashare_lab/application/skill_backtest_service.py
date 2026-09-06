@@ -21,7 +21,9 @@ from zoneinfo import ZoneInfo
 from ashare_lab.adapters.jobs.threaded import ThreadBacktestJobQueue
 from ashare_lab.adapters.market_data.mx_daily_history import (
     MxDailyHistory,
+    MxDailyHistoryBeforeListingError,
     MxDailyHistoryClient,
+    MxDailyHistoryError,
     MxDailyHistoryFieldsMissingError,
 )
 from ashare_lab.adapters.market_data.mx_indicator_contract import (
@@ -215,17 +217,7 @@ class SkillBacktestService:
             strategy = StrategySpec.model_validate_json(record.strategy_json)
             config = _config_from_json(record.config_json)
             warmup = _effective_warmup_calendar_days(strategy, config)
-            history = asyncio.run(
-                self._with_retry_progress(
-                    run_id,
-                    self.history.load(
-                        instrument_id=strategy.instrument.symbol,
-                        start=strategy.backtest.start - timedelta(days=warmup),
-                        end=strategy.backtest.end,
-                        force_refresh=config.refresh_data,
-                    ),
-                )
-            )
+            history = asyncio.run(self._load_history(run_id, strategy, config, warmup))
             self._stage(
                 run_id, BacktestJobState.RUNNING_SIGNAL, 45, "获取东方财富指标并判断策略条件"
             )
@@ -375,6 +367,36 @@ class SkillBacktestService:
                     + "、".join(exc.fields)
                     + "。本次回测未完成，原区间和规则已保留；可修改区间或稍后重新读取。"
                 )
+            elif isinstance(exc, MxDailyHistoryBeforeListingError):
+                error_code = "skill_history_before_listing"
+                progress_label = (
+                    f"这只股票于 {exc.listing_date.isoformat()} 上市，"
+                    f"你选择的区间从 {strategy.backtest.start.isoformat()} 开始，包含上市前日期。"
+                    "请修改回测区间；买卖规则和成交设置已保留，不会自动缩短区间。"
+                )
+            elif isinstance(exc, MxDailyHistoryError):
+                # Only fixed, application-owned messages are classified. Never
+                # expose provider text, row values or a raw exception payload.
+                date_errors = {
+                    "MX session, raw and adjusted daily dates must align one-to-one",
+                    "MX provider limits must cover every trading session and no suspended session",
+                    "MX history response contains duplicate dates",
+                    "MX history response contains dates outside the request",
+                    "MX history response has ambiguous historical date axes",
+                    "MX history chunk boundary coverage is unconfirmed",
+                    "MX history chunks omitted the overlap session",
+                    "MX history chunks disagree on an overlap session",
+                }
+                error_code = (
+                    "skill_history_dates_mismatch" if str(exc) in date_errors
+                    else "skill_history_validation_failed"
+                )
+                progress_label = (
+                    "历史行情、复权价或涨跌停数据的日期未对齐，本次回测已停止。"
+                    if error_code == "skill_history_dates_mismatch"
+                    else "历史数据未通过完整性校验，本次回测已停止。"
+                ) + "原规则和设置已保留；可以重新读取，或修改回测区间。"
+            logger.warning("Skill failure classified: run=%s code=%s", run_id, error_code)
             return self.store.transition(
                 run_id,
                 expected=(current.state,),
@@ -383,6 +405,31 @@ class SkillBacktestService:
                 progress_label=progress_label,
                 error_code=error_code,
             )
+
+    async def _load_history(
+        self, run_id: RunId, strategy: StrategySpec, config: BacktestRunConfig, warmup: int,
+    ) -> MxDailyHistory:
+        try:
+            return await self._with_retry_progress(run_id, self.history.load(
+                instrument_id=strategy.instrument.symbol,
+                start=strategy.backtest.start - timedelta(days=warmup),
+                end=strategy.backtest.end,
+                force_refresh=config.refresh_data,
+            ))
+        except MxDailyHistoryBeforeListingError as exc:
+            # Only the technical warmup may be shortened, never the user's
+            # requested backtest. Unknown/not-yet-ready indicator values remain
+            # unknown and cannot generate an entry signal.
+            if strategy.backtest.start < exc.listing_date:
+                raise
+            self._stage(run_id, BacktestJobState.RUNNING_DATA, 10,
+                        "预热数据早于上市日，正在读取上市后数据；指标就绪后才判断信号，回测区间不变。")
+            return await self._with_retry_progress(run_id, self.history.load(
+                instrument_id=strategy.instrument.symbol,
+                start=exc.listing_date,
+                end=strategy.backtest.end,
+                force_refresh=config.refresh_data,
+            ))
 
     async def _with_retry_progress(self, run_id: RunId, request: Awaitable[_T]) -> _T:
         pending: set[str] = set()
@@ -403,10 +450,13 @@ class SkillBacktestService:
                 label = "数据请求已恢复，正在继续读取。"
             else:
                 pending.add(event.call_id)
-                label = (
-                    f"数据获取遇到临时问题，正在自动重试（{event.retry_number}/{event.max_retries}）。"
-                    "原方案已保留，无需重新提交。"
-                )
+                if event.data_incomplete:
+                    label = "历史数据缺少必要字段，正在补查一次；原方案已保留，无需重新提交。"
+                else:
+                    label = (
+                        f"数据获取遇到临时问题，正在自动重试（{event.retry_number}/{event.max_retries}）。"
+                        "原方案已保留，无需重新提交。"
+                    )
             try:
                 self.store.transition(
                     run_id,

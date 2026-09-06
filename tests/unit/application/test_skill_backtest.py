@@ -14,6 +14,7 @@ from ashare_lab.adapters.market_data.mx_daily_history import (
     MX_BACK_ADJUSTMENT,
     MX_DAILY_HISTORY_PROVIDER,
     MxDailyHistory,
+    MxDailyHistoryBeforeListingError,
     MxDailyHistoryClient,
     MxDailyHistoryFieldsMissingError,
     MxDailyRow,
@@ -45,6 +46,61 @@ from ashare_lab.ports.provider_indicator_data import HistoricalIndicatorData
 TZ = ZoneInfo("Asia/Shanghai")
 SYMBOL = "300059.SZ"
 START = date(2025, 1, 2)
+
+
+def test_prelisting_range_is_actionable_and_does_not_retry_or_modify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    load = AsyncMock(side_effect=MxDailyHistoryBeforeListingError(
+        start=date(2020, 3, 10), listing_date=date(2021, 4, 9),
+    ))
+    service = SkillBacktestService(
+        history=cast(MxDailyHistoryClient, SimpleNamespace(load=load)),
+        indicators=cast(HistoricalIndicatorData, object()), store=InMemoryBacktestRunStore(),
+    )
+    monkeypatch.setattr(service.queue, "enqueue", lambda _run_id: "manual-test")
+    try:
+        strategy = _strategy((date(2020, 9, 6), date(2026, 9, 6)))
+        created = service.submit(strategy, BacktestRunConfig(slippage_bps=Decimal("7")))
+        result = service.execute(created.record.run_id)
+        assert result.error_code == "skill_history_before_listing"
+        assert "2021-04-09" in result.progress_label
+        assert "2020-09-06" in result.progress_label
+        assert "不会自动缩短区间" in result.progress_label
+        assert result.strategy_json == created.record.strategy_json
+        assert result.config_json == created.record.config_json
+        assert load.await_count == 1
+        assert result.result_json is None
+    finally:
+        service.shutdown()
+
+
+def test_warmup_only_prelisting_keeps_requested_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    marker = object()
+    listing = START - timedelta(days=30)
+    load = AsyncMock(side_effect=[
+        MxDailyHistoryBeforeListingError(start=START - timedelta(days=180), listing_date=listing),
+        marker,
+    ])
+    service = SkillBacktestService(
+        history=cast(MxDailyHistoryClient, SimpleNamespace(load=load)),
+        indicators=cast(HistoricalIndicatorData, object()), store=InMemoryBacktestRunStore(),
+    )
+    monkeypatch.setattr(service.queue, "enqueue", lambda _run_id: "manual-test")
+    try:
+        import asyncio
+
+        strategy = _strategy((START, START + timedelta(days=10)))
+        config = BacktestRunConfig()
+        created = service.submit(strategy, config)
+        result = asyncio.run(service._load_history(created.record.run_id, strategy, config, 180))
+        assert result is marker
+        assert load.await_args_list[1].kwargs["start"] == listing
+        assert load.await_args_list[1].kwargs["end"] == strategy.backtest.end
+        assert strategy.backtest.start == START
+        assert load.await_count == 2
+    finally:
+        service.shutdown()
 
 
 @pytest.mark.parametrize(

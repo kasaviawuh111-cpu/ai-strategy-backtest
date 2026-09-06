@@ -509,6 +509,9 @@ const backtestFailureMessage = (run: BacktestRun): string => {
     case 'skill_MxDailyHistoryError':
       return '东方财富历史数据读取或检查失败，本次回测未完成。'
     case 'skill_history_fields_missing':
+    case 'skill_history_before_listing':
+    case 'skill_history_dates_mismatch':
+    case 'skill_history_validation_failed':
       return run.progressLabel
     default:
       return run.error ?? '后台没有返回具体失败原因。'
@@ -1581,7 +1584,10 @@ export default function App({
   } else if (cancelMutation.isError) {
     failure = failureFor(cancelMutation.error, 'cancel_failed', '取消请求没有完成', instrument, runId)
   } else if (runQuery.data?.state === 'failed') {
-    failure = failureFor(
+    failure = runQuery.data.error === 'skill_history_before_listing' ? {
+      key: 'history_range_invalid', status: 'unavailable', title: '请调整回测区间',
+      reason: backtestFailureMessage(runQuery.data), actions: ['修改回测区间'], runId,
+    } : failureFor(
       new Error(backtestFailureMessage(runQuery.data)),
       'run_failed',
       '回测失败',
@@ -1598,7 +1604,14 @@ export default function App({
   }
 
   const handleFailureAction = (index: number) => {
-    if (index === 0 && failure?.key === 'result_failed') refreshResults()
+    if (failure?.key === 'history_range_invalid') {
+      if (!draft) return
+      setRunId(undefined)
+      setRunCommand(undefined)
+      startMutation.reset()
+      setReviewOpen(true)
+      openParams('range')
+    } else if (index === 0 && failure?.key === 'result_failed') refreshResults()
     else if (index === 0 && ['run_read_failed', 'cancel_failed'].includes(failure?.key ?? '')) {
       void runQuery.refetch()
     } else if (failure?.key === 'run_failed') {

@@ -92,10 +92,10 @@ export function RuleSpecEditor({ draft, side, path, capabilities, onChange }: {
   return <div>
     {side === 'entry' ? renderNode(spec.entry, 'entry', (node) => commit({ ...spec, entry: node as StrategySpecCondition })) : <>
       <label className="setting-row"><span>卖出条件关系</span><select aria-label="卖出条件关系"
-        value={spec.exit.op === 'all' || (spec.exit.children.length === 1 && spec.exit.children[0].type === 'all') ? 'all' : 'any'}
-        disabled={spec.exit.children.length === 1 && !['all', 'any'].includes(spec.exit.children[0].type)}
+        value={spec.exit.op === 'all' || (spec.exit.children.length === 1 && spec.exit.children[0]?.type === 'all') ? 'all' : 'any'}
+        disabled={spec.exit.children.length <= 1 && !['all', 'any'].includes(spec.exit.children[0]?.type ?? '')}
         onChange={(event) => {
-          const children = spec.exit.children.length === 1 && ['all', 'any'].includes(spec.exit.children[0].type)
+          const children = spec.exit.children.length === 1 && ['all', 'any'].includes(spec.exit.children[0]?.type ?? '')
             ? (spec.exit.children[0] as { children: StrategySpecCondition[] }).children
             : spec.exit.children as StrategySpecCondition[]
           commit({ ...spec, exit: { op: event.target.value === 'all' ? 'all' : 'first_of', children } })

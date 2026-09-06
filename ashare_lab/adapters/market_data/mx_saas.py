@@ -125,6 +125,7 @@ class MxRetryProgress:
     retry_number: int
     max_retries: int
     recovered: bool = False
+    data_incomplete: bool = False
 
 
 _RETRY_OBSERVER: ContextVar[Callable[[MxRetryProgress], None] | None] = ContextVar(
@@ -146,6 +147,14 @@ def _notify_retry_progress(event: MxRetryProgress) -> None:
     observer = _RETRY_OBSERVER.get()
     if observer is not None:
         observer(event)
+
+
+def notify_mx_data_retry(call_id: str, *, recovered: bool = False) -> None:
+    """Reuse the run-scoped progress channel for one missing-field requery."""
+    _notify_retry_progress(MxRetryProgress(
+        tool="searchData", call_id=call_id, retry_number=1, max_retries=1,
+        recovered=recovered, data_incomplete=True,
+    ))
 
 
 class MxSaasProviderError(RuntimeError):

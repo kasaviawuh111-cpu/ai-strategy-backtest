@@ -14,6 +14,7 @@ from ashare_lab.adapters.market_data.mx_daily_history import (
     MX_BACK_ADJUSTMENT,
     MX_DAILY_HISTORY_PROVIDER,
     MxDailyHistory,
+    MxDailyHistoryBeforeListingError,
     MxDailyHistoryCacheMissError,
     MxDailyHistoryClient,
     MxDailyHistoryError,
@@ -22,6 +23,7 @@ from ashare_lab.adapters.market_data.mx_daily_history import (
 from ashare_lab.adapters.market_data.mx_saas import (
     MxSaasProviderAuthError,
     MxSaasProviderNoDataError,
+    observe_mx_retries,
 )
 from ashare_lab.domain.market_data import Board, TradingStatus
 from ashare_lab.ports.live_market_data import (
@@ -33,6 +35,43 @@ from ashare_lab.ports.live_market_data import (
 _NOW = datetime(2026, 9, 5, 12, tzinfo=UTC)
 _START = date(2026, 9, 3)
 _END = date(2026, 9, 4)
+
+
+@pytest.mark.asyncio
+async def test_before_listing_stops_before_any_daily_queries(tmp_path: Path) -> None:
+    live = _FakeMxClient("688981.SH")
+    client = MxDailyHistoryClient(client=live, cache_root=tmp_path)
+    with pytest.raises(MxDailyHistoryBeforeListingError) as error:
+        await client.load("688981.SH", date(2019, 1, 1), _END)
+    assert error.value.listing_date == date(2020, 7, 16)
+    assert live.calls == ["identity", "listing"]
+
+
+@pytest.mark.asyncio
+async def test_missing_field_group_recovers_once_with_visible_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = _FakeMxClient("688981.SH")
+    original = live.query_finance
+    attempts = 0
+    events = []
+
+    async def query_finance(*, query: str, indicators: str | None) -> LiveFinanceDataResult:
+        nonlocal attempts
+        if indicators == "涨停价、跌停价":
+            attempts += 1
+            if attempts == 1:
+                raise MxSaasProviderNoDataError("private")
+        return await original(query=query, indicators=indicators)
+
+    monkeypatch.setattr(live, "query_finance", query_finance)
+    with observe_mx_retries(events.append):
+        history = await MxDailyHistoryClient(live, tmp_path).load(live.symbol, _START, _END)
+    assert history.rows
+    assert attempts == 2
+    assert [event.recovered for event in events] == [False, True]
+    assert all(event.data_incomplete and event.max_retries == 1 for event in events)
+    assert live.calls.count("raw") == 1
 
 
 def _provenance(marker: str) -> LiveMarketDataProvenance:
@@ -610,7 +649,7 @@ async def test_later_missing_fields_report_only_failed_chunk_and_keep_completed_
     monkeypatch.setattr(live, "query_finance", query_finance)
     with pytest.raises(MxDailyHistoryFieldsMissingError) as captured:
         await MxDailyHistoryClient(live, tmp_path).load(live.symbol, _LONG_START, _LONG_END)
-    assert [captured.value.start, captured.value.end] == failed_bounds
+    assert [captured.value.start, captured.value.end] * 2 == failed_bounds
     assert failed_bounds[0] > _LONG_START and failed_bounds[1] == _LONG_END
     assert len(tuple(tmp_path.rglob("*.json"))) == 1
     assert "private provider diagnostic" not in str(captured.value)

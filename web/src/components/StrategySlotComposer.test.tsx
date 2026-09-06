@@ -34,8 +34,8 @@ it('selects on entry but preserves a partial selection on subsequent clicks and 
   fireEvent.change(entry, { target: { value: entry.value.replace('20', '30') } })
   fireEvent.click(screen.getByRole('button', { name: '识别交易规则' }))
   expect(submit).toHaveBeenCalledOnce()
-  expect(submit.mock.calls[0][0]).toContain('贵州茅台')
-  expect(submit.mock.calls[0][0]).not.toContain('卖出条件改为')
+  expect(submit.mock.calls[0]?.[0]).toContain('贵州茅台')
+  expect(submit.mock.calls[0]?.[0]).not.toContain('卖出条件改为')
 })
 
 it('supports replacing all slots and blocks submission while a slot is empty', () => {
@@ -43,9 +43,9 @@ it('supports replacing all slots and blocks submission while a slot is empty', (
   render(<StrategySlotComposer draft={draft} mode="stock" disabled={false} onSubmit={submit} onClear={vi.fn()} />)
   fireEvent.change(screen.getByLabelText('股票'), { target: { value: '' } })
   expect(screen.getByRole('button', { name: '识别交易规则' })).toBeDisabled()
-  for (const [label, value] of [['股票', '美的集团'], ['买入', 'RSI上穿30'], ['卖出', 'RSI高于55']]) {
+  for (const [label, value] of [['股票', '美的集团'], ['买入', 'RSI上穿30'], ['卖出', 'RSI高于55']] as const) {
     fireEvent.change(screen.getByLabelText(label), { target: { value } })
   }
   fireEvent.click(screen.getByRole('button', { name: '识别交易规则' }))
-  expect(submit.mock.calls[0][0]).toContain('买入条件改为：RSI上穿30。卖出条件改为：RSI高于55')
+  expect(submit.mock.calls[0]?.[0]).toContain('买入条件改为：RSI上穿30。卖出条件改为：RSI高于55')
 })

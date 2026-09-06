@@ -1653,6 +1653,7 @@ describe('formal main.tsx App journey', () => {
 
   it.each([
     ['skill_mx_read_timeout', '等待东方财富查数 Skill响应超时，本次取数未完成，可以重试。'],
+    ['skill_history_before_listing', '这只股票于 2021-04-09 上市，你选择的区间从 2020-09-06 开始，包含上市前日期。请修改回测区间；买卖规则和成交设置已保留，不会自动缩短区间。'],
     ['skill_history_fields_missing', '查询 2010-03-09 至 2012-03-08 的历史数据时，东方财富未返回涨停价、跌停价。本次回测未完成，原区间和规则已保留；可修改区间或稍后重新读取。'],
   ])('retries and edits a failed run without resetting or replacing its strategy: %s', async (error, progressLabel) => {
     const instrument: Instrument = {
@@ -1728,6 +1729,17 @@ describe('formal main.tsx App journey', () => {
     expect(create).toHaveBeenNthCalledWith(1, compiled.draft, { refreshData: false })
     expect(await screen.findByText(progressLabel))
       .toBeVisible()
+    if (error === 'skill_history_before_listing') {
+      expect(screen.getByText('请调整回测区间')).toBeVisible()
+      expect(screen.queryByRole('button', { name: '重新读取' })).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: '修改回测区间' }))
+      expect(screen.getByRole('spinbutton', { name: '初始资金' })).toBeVisible()
+      expect(create).toHaveBeenCalledTimes(1)
+      expect(revise).not.toHaveBeenCalled()
+      expect(strategyApi.compile).toHaveBeenCalledTimes(1)
+      unchangedView.unmount()
+      return
+    }
     await user.click(screen.getByRole('button', { name: '重新读取' }))
     await waitFor(() => expect(create).toHaveBeenCalledTimes(2))
     expect(create).toHaveBeenNthCalledWith(2, compiled.draft, { refreshData: true })

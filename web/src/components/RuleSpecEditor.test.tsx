@@ -37,8 +37,8 @@ it('edits holding sessions without changing entry, fees or independent exit sema
   render(<RuleSpecEditor draft={draft} side="exit" path="exit-0" onChange={change} />)
   expect(screen.getByRole('combobox', { name: '卖出条件关系' })).toBeDisabled()
   fireEvent.change(screen.getByRole('spinbutton', { name: '持有交易日' }), { target: { value: '20' } })
-  const next = change.mock.calls[0][0]
-  expect(toLiveRevisionBody(next).strategy.exit.children[0].sessions).toBe(20)
+  const next = change.mock.calls[0]?.[0]
+  expect(toLiveRevisionBody(next).strategy.exit.children[0]).toMatchObject({ sessions: 20 })
   expect(next.execution).toEqual(draft.execution)
   expect(next.strategySpec.entry).toEqual(draft.strategySpec.entry)
 })
@@ -55,13 +55,13 @@ it('shows separate condition buttons, relation and unboxed range with correct ed
 
 it('persists ALL across indicator and holding exits and labels the real relation', () => {
   const initial = withEditedStrategySpec(base, { ...base.strategySpec, exit: { op: 'first_of', children: [
-    base.strategySpec.exit.children[0], { type: 'holding_period_exit', sessions: 10, anchor: 'first_entry_fill',
+    base.strategySpec.exit.children[0]!, { type: 'holding_period_exit', sessions: 10, anchor: 'first_entry_fill',
       count_mode: 'subsequent_trading_sessions', execution: 'target_session_open_proxy' },
   ] } })
   const change = vi.fn()
   render(<RuleSpecEditor draft={initial} side="exit" onChange={change} />)
   fireEvent.change(screen.getByRole('combobox', { name: '卖出条件关系' }), { target: { value: 'all' } })
-  const next = change.mock.calls[0][0]
+  const next = change.mock.calls[0]?.[0]
   expect(toLiveRevisionBody(next).strategy.exit.op).toBe('all')
   expect(next.exit.conditions[1].label).toBe('持有满 10 个交易日')
   expect(toStrategySummary(next).exitRule).toMatchObject({ operator: 'all' })
@@ -75,7 +75,7 @@ it('edits verified financial and event values in the executable payload', () => 
   const change = vi.fn()
   const { unmount } = render(<RuleSpecEditor draft={initial} side="entry" onChange={change} />)
   fireEvent.change(screen.getByRole('spinbutton', { name: '财务阈值（PERCENT）' }), { target: { value: '15' } })
-  expect(toLiveRevisionBody(change.mock.calls[0][0]).strategy.entry).toMatchObject({ value: 15, revision_policy: 'as_known_at_signal' })
+  expect(toLiveRevisionBody(change.mock.calls[0]?.[0]).strategy.entry).toMatchObject({ value: 15, revision_policy: 'as_known_at_signal' })
   unmount()
   const event = withEditedStrategySpec(base, { ...base.strategySpec, entry: {
     type: 'event_condition', event_code: 'event.test', definition_version: '1.0.0', trigger: 'published', attributes: { count: 2 },

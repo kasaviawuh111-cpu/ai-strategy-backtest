@@ -30,7 +30,7 @@ from ashare_lab.domain.market_data import (
 from ashare_lab.domain.shared import DomainValidationError
 from ashare_lab.ports.live_market_data import LiveFinanceDataResult, LiveMarketDataResult
 
-from .mx_saas import MxSaasMarketDataClient, MxSaasProviderNoDataError
+from .mx_saas import MxSaasMarketDataClient, MxSaasProviderNoDataError, notify_mx_data_retry
 
 MX_DAILY_HISTORY_PROVIDER = "eastmoney_mx_finance_data"
 MX_BACK_ADJUSTMENT = "provider_declared_back_adjusted"
@@ -69,6 +69,15 @@ class MxDailyHistoryError(RuntimeError):
 
 class MxDailyHistoryCacheMissError(MxDailyHistoryError):
     """No persisted history exists and no live MX client is configured."""
+
+
+class MxDailyHistoryBeforeListingError(MxDailyHistoryError):
+    """Requested history predates the provider-verified listing date."""
+
+    def __init__(self, *, start: date, listing_date: date) -> None:
+        self.start = start
+        self.listing_date = listing_date
+        super().__init__("MX daily history cannot start before listing date")
 
 
 class MxDailyHistoryFieldsMissingError(MxDailyHistoryError):
@@ -343,7 +352,7 @@ class MxDailyHistoryClient:
         if listing_name != identity_name:
             raise MxDailyHistoryError("MX identity responses disagree on the security name")
         if start < listing_date:
-            raise MxDailyHistoryError("MX daily history cannot start before listing date")
+            raise MxDailyHistoryBeforeListingError(start=start, listing_date=listing_date)
 
         identity_evidence = (
             _screen_evidence("security_master", identity_response),
@@ -421,10 +430,27 @@ class MxDailyHistoryClient:
             *, query: str, indicators: str, required: tuple[str, ...],
         ) -> LiveFinanceDataResult:
             assert self._client is not None
-            try:
-                return await self._client.query_finance(query=query, indicators=indicators)
-            except MxSaasProviderNoDataError as exc:
-                raise MxDailyHistoryFieldsMissingError(required, start=start, end=end) from exc
+            call_id = f"history-fields:{uuid4().hex}"
+            for attempt in range(2):
+                try:
+                    response = await self._client.query_finance(query=query, indicators=indicators)
+                    _history_fields(
+                        response, symbol=symbol, required=required, start=start, end=end,
+                    )
+                    if attempt:
+                        notify_mx_data_retry(call_id, recovered=True)
+                    return response
+                except (MxSaasProviderNoDataError, MxDailyHistoryFieldsMissingError) as exc:
+                    if attempt:
+                        if isinstance(exc, MxDailyHistoryFieldsMissingError):
+                            raise
+                        raise MxDailyHistoryFieldsMissingError(
+                            required, start=start, end=end,
+                        ) from exc
+                    # Requery only this field group once; retain the same symbol,
+                    # dates and adjustment contract. Never merge conflicting data.
+                    notify_mx_data_retry(call_id)
+            raise AssertionError("unreachable")
 
         range_text = f"{start.isoformat()}至{end.isoformat()}"
         session_indicators = "前收盘价、交易状态、是否ST"
