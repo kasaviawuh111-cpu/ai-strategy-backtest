@@ -1,4 +1,4 @@
-# 公网统一更新（发布进行中）
+# 公网统一更新：004已上线并完成关键链路核验
 
 用户本轮明确授权：保留已上线能力，把本地已支持的全部能力统一发布；包括待处理／收尾项中已经实现的部分，不限于原9项已验收清单。未实现、真实数据缺口及暂停项目不虚报完成。
 
@@ -15,7 +15,15 @@
 
 ## 线上结果
 
-等待发布完成与独立公网浏览器验证；此处尚不能称004已上线。
+- CloudBase任务2089737已finished，版本ashare-strategy-preview-004承接100%流量；003基线保留用于回退。
+- 原公网地址保持不变，access=public、credentialsConfigured=false，不增加测试账号。
+- 独立匿名390×844移动尺寸浏览器已核实preview-meta内容标识以及JS/CSS逐文件SHA256匹配004清单；跨来源POST返回403。
+- 已在公网由真实自然语言生成ALL策略，股票栏输入“中国”返回全A股目录候选；RSI阈值30改35的二级编辑完成。草稿796e24ba-e5cd-4afe-b516-adbfc7096694、revision=2、ready，保留美的集团、成交额5亿、退出ALL／持有10日／RSI55及原费用日期。
+- 实际公网run:a3f9c24cbec24ccdaf70bf7fb11bab7e已succeeded；独立GET核对242个净值点、12条委托／成交活动（页面4笔成交、2个回合），来源eastmoney_mx_finance_data、live取数。策略收益7.40%、持有20.55%，如实显示落后，不承诺盈利。
+- 报告分析DeepSeek-v4-pro完成；分析sourceResultHash与该运行resultHash一致。公网轮询实际收到reasoning，最大单事件25635字符；页面展开确实有文本，实测高度160px、scrollHeight=17979、overflow-y=auto，鼠标滚轮上翻后scrollTop变化并能阅读较早文本。已查看展开及上翻截图，不只检查include_model_reasoning开关。
+- 本轮浏览器采集脚本最初只查同步POST结果，遗漏公网异步preview-requests的最终响应，导致采集器等待；页面本身已完成报告。保留原响应后改用同一run独立读取和断言，不重复发起回测、不把采集器停止误记为产品失败。受理瞬间返回对话的时序未成功采样，不能借本次补验声称微信真机B30通过。
+- 匿名移动尺寸Chromium与真实手机微信仍有差异。当前验证覆盖本次关键链路，不代表全部历史字段、故障注入、多轮对话全部在线重验。
+- 精简证据见[004验收摘要](releases/public-004-acceptance.json)；原响应和截图保存在项目.artifacts/public-004-acceptance/，无密钥／用户数据库入包。源包基线保存在.artifacts/release-baselines/public-004/；003保留供回退。
 
 ## 保留项
 
