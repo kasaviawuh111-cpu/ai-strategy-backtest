@@ -133,7 +133,7 @@ button,input,select{font:inherit}
 .model-reasoning summary span:last-child{color:var(--ink-3);font-size:12px;font-weight:400}
 .model-reasoning summary span:last-child::after{content:'展开';margin-inline-start:10px}
 .model-reasoning[open] summary span:last-child::after{content:'收起'}
-.model-reasoning__body{height:160px;overflow:auto;overscroll-behavior:contain;padding:12px 16px;background:var(--surface-card);border-radius:12px;scrollbar-color:var(--ink-5) transparent}
+.model-reasoning__body{height:auto;max-height:160px;overflow:auto;overscroll-behavior:contain;padding:12px 16px;background:var(--surface-card);border-radius:12px;scrollbar-color:var(--ink-5) transparent}
 .model-reasoning__entry+.model-reasoning__entry{margin-top:10px}
 .model-reasoning__body p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .model-reasoning__body .model-reasoning__hint{color:var(--ink-3);margin-bottom:8px;font-size:12px}
