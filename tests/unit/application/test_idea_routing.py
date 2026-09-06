@@ -7,6 +7,12 @@ from uuid import uuid4
 import pytest
 
 from ashare_lab.adapters.language import HybridCandidateGenerator, RuleBasedCandidateGenerator
+from ashare_lab.adapters.language.vibe_candidates import (
+    CandidateTransportRequest,
+    CandidateTransportResponse,
+    build_candidate_capability_matrix,
+)
+from ashare_lab.adapters.language.vibe_clarification import VibeClarificationDialogueRouter
 from ashare_lab.application.compile_strategy import (
     CompileOutcome,
     CompileStatus,
@@ -19,7 +25,7 @@ from ashare_lab.application.dialogue_state import (
 )
 from ashare_lab.application.dialogue_turn import DialogueTurnOrchestrator
 from ashare_lab.application.turn_intent import TurnIntent, classify_clarification_turn
-from ashare_lab.domain.catalog import load_catalog_directory
+from ashare_lab.domain.catalog import load_catalog_directory, load_coverage_catalog_directory
 from ashare_lab.domain.financials.models import FinancialMetricId, FinancialUnit
 from ashare_lab.domain.strategy import (
     BacktestConfig,
@@ -487,6 +493,46 @@ async def test_contextual_dialogue_model_failure_has_no_template_or_revision_cha
     assert turn.assistant_message == "对话模型这次未能返回有效回复，请稍后重试。"
     assert turn.outcome is pending and turn.compile_input is original
     assert not turn.revision_changed and turn.suggestions == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("utterance", ["我是秦始皇", "随便想个方向"])
+async def test_repaired_initial_assessment_continues_once_to_editable_ideas(utterance: str) -> None:
+    class Transport:
+        calls = 0
+
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.calls += 1
+            return {
+                "reply_kind": "preference",
+                "acknowledgement_id": "light_redirect" if self.calls == 1
+                else "respect_preference",
+                "natural_reply": "先沿着你的表达整理可修改的交易方向。",
+                "strategy_inspiration": "探索有明确退出约束的交易风格。",
+            }
+
+    transport = Transport()
+    catalog = load_catalog_directory(ROOT / "catalogs")
+    ideas = _RecordingIdeaRouter(_idea_route(instrument_symbol=None))
+    compiler = StrategyCompiler(
+        generator=_NeverCalledGenerator(), catalog=catalog,
+        catalog_id="cn_a.signals", release_version="2026.09.01", idea_router=ideas,
+        clarification_dialogue_router=VibeClarificationDialogueRouter(
+            transport, capability_matrix=build_candidate_capability_matrix(
+                catalog, load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
+            ),
+        ),
+    )
+    outcome = await compiler.compile(CompileInput(
+        utterance=utterance, as_of_date=date(2026, 9, 4),
+    ))
+    assert transport.calls == 2 and len(ideas.requests) == 1
+    assert ideas.requests[0].utterance == utterance
+    assert outcome.diagnostic_code == "idea_guidance_required"
+    assert outcome.idea_route is not None and len(outcome.idea_route.proposals) == 3
+    assert outcome.strategy is None and not outcome.run_requested
 
 
 @pytest.mark.asyncio
