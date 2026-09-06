@@ -545,6 +545,106 @@ async def test_verified_candidate_reply_can_offer_switching_to_the_users_own_sto
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("repaired", [True, False])
+async def test_response_only_numeric_repair_uses_original_facts_and_stops_after_two_calls(
+    capability_matrix: CandidateCapabilityMatrix, repaired: bool,
+) -> None:
+    original_context = "东方财富成交额为13708345678元，数据日期为2026-09-04。"
+    invalid_reply = "东方财富成交额为137.08亿元。"
+    corrected_reply = "东方财富在2026-09-04的成交额为13708345678元。"
+    request = replace(
+        _request(), answer="查询东方财富最近一个交易日的成交额。",
+        prior_utterance="", question="", options=(), response_only=True,
+        context_summary=original_context,
+    )
+
+    class NumericReplySequence(_RecordingTransport):
+        async def generate_json(
+            self, submitted: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.requests.append(submitted)
+            assert len(self.requests) <= 2, "grounding repair must not request a third response"
+            reply = corrected_reply if repaired and len(self.requests) == 2 else invalid_reply
+            return {
+                "reply_kind": "unclear", "acknowledgement_id": "ask_rephrase",
+                "natural_reply": reply,
+            }
+
+    transport = NumericReplySequence(None)
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(request)
+
+    assert len(transport.requests) == 2
+    if repaired:
+        assert result is not None and result.natural_reply == corrected_reply
+    else:
+        # Repeating the rejected reply must not promote it into a trusted fact.
+        assert result is None
+    first_payload = transport.requests[0].user_payload
+    second_payload = transport.requests[1].user_payload
+    assert first_payload is not None and second_payload is not None
+    for key in (
+        "answer", "priorUtterance", "question", "contextSummary", "allowedOptions",
+        "recentTurns", "research",
+    ):
+        assert first_payload[key] == second_payload[key]
+        assert "137.08" not in str(second_payload[key])
+    assert second_payload["contextSummary"] == original_context
+    assert second_payload["responseOnly"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repaired", [True, False])
+async def test_response_only_security_name_must_match_supplied_code_after_one_repair(
+    capability_matrix: CandidateCapabilityMatrix, repaired: bool,
+) -> None:
+    wrong_reply = "中芯集成（688825）成交额为500元。"
+    correct_reply = "长鑫科技（688825）成交额为500元。"
+    request = replace(
+        _request(), answer="列出股票名称、代码和成交额。", prior_utterance="",
+        question="", options=(), response_only=True,
+        context_summary="真实查询返回：688825，长鑫科技，成交额500元。",
+        verified_instruments=(("688825", "长鑫科技"),),
+    )
+
+    class SecurityReplySequence(_RecordingTransport):
+        async def generate_json(
+            self, submitted: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.requests.append(submitted)
+            assert len(self.requests) <= 2
+            return {
+                "reply_kind": "unclear", "acknowledgement_id": "ask_rephrase",
+                "natural_reply": correct_reply
+                if repaired and len(self.requests) == 2 else wrong_reply,
+            }
+
+    transport = SecurityReplySequence(None)
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(request)
+
+    assert len(transport.requests) == 2
+    if repaired:
+        assert result is not None and result.natural_reply == correct_reply
+    else:
+        assert result is None
+    first_payload = transport.requests[0].user_payload
+    assert first_payload is not None
+    assert "question为空时不要提出任何新问题" in transport.requests[0].system_contract
+    assert "不要求用户重述已经明确的字段或日期口径" in transport.requests[0].system_contract
+    for submitted in transport.requests:
+        assert submitted.user_payload is not None
+        assert submitted.user_payload["verifiedInstruments"] == [
+            {"code": "688825", "name": "长鑫科技"},
+        ]
+        assert submitted.user_payload["contextSummary"] == request.context_summary
+        assert "中芯集成" not in str(submitted.user_payload)
+    assert transport.requests[1].user_payload == first_payload
+
+
+@pytest.mark.asyncio
 async def test_selected_strategy_stock_reply_uses_current_facts_and_keeps_full_model_text(
     capability_matrix: CandidateCapabilityMatrix,
 ) -> None:
@@ -606,6 +706,35 @@ async def test_explicit_stock_selection_is_model_authored_and_requires_current_n
     assert (result is not None) is accepted
     if result is not None:
         assert result.instrument_selected and result.instrument_name == name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("run_requested", "evidence", "response_only", "accepted"), [
+    (False, "先别跑", False, True),
+    (True, "立即回测", False, False),
+    (True, None, False, False),
+    (False, "先别跑", True, False),
+])
+async def test_stock_confirmation_run_intent_requires_exact_current_evidence(
+    capability_matrix: CandidateCapabilityMatrix,
+    run_requested: bool, evidence: str | None, response_only: bool, accepted: bool,
+) -> None:
+    transport = _RecordingTransport({
+        "reply_kind": "preference", "acknowledgement_id": "respect_preference",
+        "natural_reply": "收到，先准备东方财富的规则。", "instrument_name": "东方财富",
+        "instrument_selected": True, "run_requested": run_requested,
+        "run_request_evidence": evidence,
+    })
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(replace(
+        _request(), answer="东方财富，先别跑", options=(), response_only=response_only,
+    ))
+    assert (result is not None) is accepted
+    if result is not None:
+        assert result.instrument_name == "东方财富" and result.instrument_selected
+        assert result.run_requested is False
+        assert result.run_request_evidence == "先别跑"
 
 
 @pytest.mark.asyncio

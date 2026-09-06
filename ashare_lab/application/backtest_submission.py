@@ -39,6 +39,7 @@ from ashare_lab.ports.backtest_runs import (
     BacktestRunStore,
     CreateRunResult,
 )
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.financial_data import FinancialFactLoader, PinnedFinancialFacts
 from ashare_lab.ports.market_data import DataRequirements, DateRange, MarketDataRepository
 from ashare_lab.ports.provider_indicator_data import (
@@ -189,6 +190,14 @@ class BacktestRunConfig:
             "effective_warmup_calendar_days": effective_warmup_calendar_days,
             "warmup_calendar_days": self.warmup_calendar_days,
         }
+
+
+def resolve_execution_settings(patch: ExecutionSettingsPatch) -> ExecutionSettingsPatch:
+    """Use the engine's existing defaults for a complete draft configuration."""
+    defaults = BacktestRunConfig()
+    return ExecutionSettingsPatch.model_validate({
+        key: getattr(defaults, key) for key in ExecutionSettingsPatch.model_fields
+    }).merged(patch)
 
 
 @dataclass(frozen=True, slots=True)

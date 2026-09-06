@@ -1752,6 +1752,71 @@ async def test_editor_refresh_flag_requires_a_report_and_explicit_rerun(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("run_after_confirmation", [True, False])
+async def test_instrument_clarification_keeps_choices_and_pending_intent(
+    compiler: StrategyCompiler, monkeypatch: pytest.MonkeyPatch,
+    run_after_confirmation: bool,
+) -> None:
+    from datetime import UTC, datetime
+
+    from ashare_lab.ports.instrument_resolution import (
+        InstrumentNameAmbiguous,
+        InstrumentNameCandidate,
+    )
+
+    original = CompileInput(
+        utterance="MACD金叉买入，死叉卖出", instrument_context="300059.SZ",
+        as_of_date=date(2026, 9, 4),
+    )
+    prior = await compiler.compile(original)
+    assert prior.strategy is not None
+    candidates = tuple(InstrumentNameCandidate(symbol, name, "provider", datetime.now(UTC))
+                       for symbol, name in (("601995.SH", "中金公司"), ("600489.SH", "中金黄金")))
+    resolver = Mock(side_effect=InstrumentNameAmbiguous(candidates))
+    monkeypatch.setattr(compiler, "_instrument_name_resolver", resolver)
+    provenance = CandidateProvenance(
+        source="bounded_provider", provider="fixture", model="fixture",
+        prompt_version="fixture", schema_version="fixture",
+        capability_projection_version="fixture", capability_projection_hash="fixture",
+        upstream_pattern_commit="fixture", candidate_rank=0,
+    )
+    editor = Mock(edit=AsyncMock(side_effect=[
+        StrategyEditResult("change_instrument", "换股再测", None, provenance,
+                           run_requested=True, instrument_refs=("中金",)),
+        StrategyEditResult("change_instrument", "已经核对股票", None, provenance,
+                           run_requested=run_after_confirmation, instrument_refs=("中金公司",)),
+    ]))
+    monkeypatch.setattr(compiler, "_strategy_editor", editor)
+    pending = await compiler.edit_current_strategy(
+        original_input=original, prior_outcome=prior, answer="换成中金再回测",
+        backtest_results=({"runId": "stored-run"},),
+    )
+    assert pending is not None
+    assert pending.outcome.strategy is None and not pending.outcome.run_requested
+    assert pending.outcome.instrument_candidates == candidates
+    assert pending.outcome.pending_edit_run_requested
+    assert "中金公司" in pending.assistant_message and "中金黄金" in pending.assistant_message
+    confirmed = await compiler.edit_current_strategy(
+        original_input=pending.compile_input, prior_outcome=pending.outcome,
+        answer="中金公司" if run_after_confirmation else "中金公司，先别跑",
+        backtest_results=({"runId": "stored-run"},),
+    )
+    assert confirmed is not None and confirmed.outcome.strategy is not None
+    assert confirmed.outcome.strategy.instrument.symbol == "601995.SH"
+    assert confirmed.outcome.strategy.entry == prior.strategy.entry
+    assert confirmed.outcome.strategy.exit == prior.strategy.exit
+    assert confirmed.outcome.strategy.backtest == prior.strategy.backtest
+    assert confirmed.outcome.strategy.execution == prior.strategy.execution
+    assert confirmed.outcome.run_requested is run_after_confirmation
+    assert confirmed.outcome.is_strategy_edit
+    assert not confirmed.outcome.instrument_candidates
+    assert not confirmed.outcome.pending_edit_run_requested
+    resolver.assert_called_once_with("中金")
+    assert editor.edit.call_args.args[0].pending_run_requested
+    assert editor.edit.call_args.args[0].instrument_candidates == candidates
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("phrase", "event_code"),
     [

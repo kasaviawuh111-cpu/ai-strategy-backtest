@@ -7,13 +7,14 @@ import logging
 import re
 import unicodedata
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from enum import StrEnum
 from itertools import pairwise
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from ashare_lab.application.backtest_submission import resolve_execution_settings
 from ashare_lab.application.clarification_guidance import (
     build_clarification_guidance,
     merge_clarification_supplement,
@@ -76,6 +77,7 @@ from ashare_lab.ports.clarification_dialogue import (
     ClarificationOption,
 )
 from ashare_lab.ports.dialogue_progress import emit_progress
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.idea_routing import (
     IdeaGenerationError,
     IdeaProposal,
@@ -84,6 +86,7 @@ from ashare_lab.ports.idea_routing import (
     IdeaRouter,
     UnboundIdeaStrategy,
 )
+from ashare_lab.ports.instrument_resolution import InstrumentNameAmbiguous, InstrumentNameCandidate
 from ashare_lab.ports.strategy_advice import StockRecommendation
 from ashare_lab.ports.strategy_editing import StrategyEditor, StrategyEditRequest
 
@@ -427,6 +430,15 @@ class CompileOutcome:
     stock_recommendations: tuple[StockRecommendation, ...] = ()
     run_requested: bool = False
     refresh_data: bool = False
+    is_strategy_edit: bool = False
+    instrument_candidates: tuple[InstrumentNameCandidate, ...] = ()
+    # Internal pending intent is not execution authorization on a clarification.
+    pending_edit_run_requested: bool = False
+    pending_edit_refresh_data: bool = False
+    execution_settings: ExecutionSettingsPatch = field(default_factory=ExecutionSettingsPatch)
+    pending_execution_settings: ExecutionSettingsPatch = field(
+        default_factory=ExecutionSettingsPatch,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,9 +497,16 @@ class StrategyCompiler:
         if base is None or self._strategy_editor is None:
             return None
         as_of = self._backtest_anchor_date or self._trusted_date_provider()
+        current_settings = resolve_execution_settings(prior_outcome.execution_settings)
         result = await self._strategy_editor.edit(StrategyEditRequest(
             answer=answer, prior_utterance=original_input.utterance, strategy=base,
             as_of_date=as_of, recent_turns=recent_turns[-20:], backtest_results=backtest_results,
+            pending_clarification=prior_outcome.clarification,
+            pending_run_requested=prior_outcome.pending_edit_run_requested,
+            pending_refresh_data=prior_outcome.pending_edit_refresh_data,
+            instrument_candidates=prior_outcome.instrument_candidates,
+            execution_settings=current_settings,
+            pending_execution_settings=prior_outcome.pending_execution_settings,
         ))
         if result is not None and result.disposition == "not_edit":
             return None
@@ -496,10 +515,30 @@ class StrategyCompiler:
             # the security identity and retain the exact server-side rules.
             refs = tuple(_original_instrument_reference(ref, answer) or ""
                          for ref in result.instrument_refs)
-            symbols = (
-                [await self.resolve_instrument_context(ref) for ref in refs]
-                if 1 <= len(refs) <= 2 and all(ref and ref in answer for ref in refs) else []
-            )
+            symbols: list[str | None] = []
+            candidates: dict[str, InstrumentNameCandidate] = {}
+            resolution_unavailable = False
+            if 1 <= len(refs) <= 2 and all(ref and ref in answer for ref in refs):
+                for ref in refs:
+                    confirmed = [
+                        item for item in prior_outcome.instrument_candidates
+                        if ref.casefold() in {item.name.casefold(), item.symbol.casefold()}
+                    ]
+                    if len(confirmed) == 1:
+                        symbols.append(confirmed[0].symbol)
+                        continue
+                    try:
+                        symbols.append(await self.resolve_instrument_context(
+                            ref, require_details=True,
+                        ))
+                    except InstrumentNameAmbiguous as exc:
+                        symbols.append(None)
+                        candidates.update((item.symbol, item) for item in exc.candidates)
+                    except (OSError, TimeoutError):
+                        symbols.append(None)
+                        resolution_unavailable = True
+                    except LookupError:
+                        symbols.append(None)
             symbol = (symbols[0]
                       if symbols and None not in symbols and len(set(symbols)) == 1 else None)
             rebound_input = CompileInput(
@@ -511,6 +550,10 @@ class StrategyCompiler:
                     reply_kind="accepted", assistant_message=result.message,
                     outcome=replace(
                         rebound, candidate_provenance=result.provenance,
+                        is_strategy_edit=True,
+                        execution_settings=current_settings.merged(
+                            prior_outcome.pending_execution_settings,
+                        ).merged(result.execution_settings),
                         run_requested=bool(backtest_results and result.run_requested),
                         refresh_data=bool(
                             backtest_results and result.run_requested and result.refresh_data
@@ -523,6 +566,12 @@ class StrategyCompiler:
                     compile_input=rebound_input, revision_changed=True,
                 )
             message = "这次股票名称或代码还没核对上，请确认要用哪一只；原买卖规则已保留。"
+            if resolution_unavailable:
+                message = "东方财富选股 Skill 暂时无法核对股票名称，请稍后重试；原策略已保留。"
+                candidates.clear()
+            elif candidates:
+                identities = "、".join(item.name for item in candidates.values())
+                message = f"你说的“{refs[0]}”，具体是{identities}中的哪一只？"
             _LOGGER.warning(
                 "instrument_change_unresolved ref_count=%s exact_spans=%s resolved=%s",
                 len(refs), tuple(bool(ref) and ref in answer for ref in refs), tuple(symbols),
@@ -546,6 +595,14 @@ class StrategyCompiler:
                     status=CompileStatus.NEEDS_CLARIFICATION, clarification=message,
                     diagnostic_code="strategy_edit_clarification", revision_base_strategy=base,
                     candidate_provenance=result.provenance,
+                    is_strategy_edit=True,
+                    instrument_candidates=tuple(candidates.values())[:3],
+                    execution_settings=current_settings,
+                    pending_execution_settings=prior_outcome.pending_execution_settings.merged(
+                        result.execution_settings,
+                    ),
+                    pending_edit_run_requested=result.run_requested,
+                    pending_edit_refresh_data=result.refresh_data,
                 ),
                 compile_input=original_input, revision_changed=True,
             )
@@ -559,12 +616,18 @@ class StrategyCompiler:
                                      else "strategy_discussion"),
                     revision_base_strategy=base,
                     candidate_provenance=result.provenance,
+                    execution_settings=current_settings,
+                    is_strategy_edit=True,
                 ),
                 compile_input=original_input,
                 revision_changed=result.disposition == "request_optimization",
             )
         strategy = None if result is None else result.strategy
+        next_settings = (current_settings.merged(result.execution_settings)
+                         if result is not None and result.disposition == "apply"
+                         else current_settings)
         unchanged_edit = (strategy is not None and strategy == base
+                          and next_settings == current_settings
                           and not (backtest_results and result is not None
                                    and result.run_requested))
         if unchanged_edit:
@@ -586,6 +649,8 @@ class StrategyCompiler:
             outcome = CompileOutcome(
                 status=CompileStatus.READY, strategy=strategy,
                 strategy_hash=canonical_hash(strategy), candidate_provenance=provenance,
+                is_strategy_edit=True,
+                execution_settings=next_settings,
                 provenance=(FieldProvenance(path="/", source="bounded_provider/strategy_edit"),),
                 run_requested=bool(
                     backtest_results and result is not None and result.run_requested
@@ -611,6 +676,10 @@ class StrategyCompiler:
                 diagnostic_code=("strategy_edit_clarification" if needs_clarification
                                  else "strategy_edit_unavailable"),
                 revision_base_strategy=base, candidate_provenance=provenance,
+                is_strategy_edit=True,
+                execution_settings=current_settings,
+                pending_edit_run_requested=prior_outcome.pending_edit_run_requested,
+                pending_edit_refresh_data=prior_outcome.pending_edit_refresh_data,
             )
         return ClarificationTurnOutcome(
             reply_kind="accepted" if strategy is not None else "clarification",
@@ -622,7 +691,9 @@ class StrategyCompiler:
             revision_changed=True,
         )
 
-    async def resolve_instrument_context(self, value: str) -> str | None:
+    async def resolve_instrument_context(
+        self, value: str, *, require_details: bool = False,
+    ) -> str | None:
         """Resolve an instrument-only turn without interpreting strategy text.
 
         A canonical code is normalised locally.  A name must be proven by the
@@ -650,7 +721,40 @@ class StrategyCompiler:
             resolved = await asyncio.to_thread(self._instrument_name_resolver, normalized)
             return normalize_a_share_instrument(resolved).value
         except (AshareInstrumentCodeError, LookupError, OSError, TimeoutError):
+            if require_details:
+                raise
             return None
+
+    @property
+    def has_clarification_dialogue(self) -> bool:
+        return self._clarification_dialogue_router is not None
+
+    async def assess_instrument_clarification(
+        self, *, original_input: CompileInput, prior_outcome: CompileOutcome,
+        answer: str, pending_label: str | None = None,
+        recent_turns: tuple[ClarificationDialogueTurn, ...] = (),
+        options: tuple[ClarificationOption, ...] = (),
+    ) -> ClarificationDialogueAssessment | None:
+        """Interpret a whole stock-confirmation reply, not a name-shaped substring."""
+        if self._clarification_dialogue_router is None:
+            return None
+        return await self._clarification_dialogue_router.assess(ClarificationDialogueRequest(
+            answer=answer.strip(), prior_utterance=original_input.utterance,
+            diagnostic_code="instrument_confirmation",
+            question=prior_outcome.clarification or "想用哪只股票？",
+            context_summary=(
+                f"已保留交易输入：{original_input.utterance}。当前仅等待用户确认股票。"
+                f"此前待确认候选：{pending_label or '未提供'}，候选不代表用户已经选择。"
+                "结合最新整句话判断股票选择和是否回测，不能只改写上一轮问题。"
+                "用户已经说出想用的股票时不再重复询问旧候选。服务端会核对身份和规则。"
+                "只说先别跑表示暂不执行；股票名加先别跑表示确认股票但暂不执行；"
+                "取消本次换股才表示不应用新股票。未明确运行意图则保留原有意图。"
+                "allowedOptions若非空，列的是已经查实的股票候选，不是策略方向。"
+                "用户用编号或代词明确选择时只填对应selected_option_id，"
+                "不要把历史股票名伪造成本轮原文instrument_name。"
+            ),
+            options=options, recent_turns=recent_turns[-20:],
+        ))
 
     async def resolve_unsupported_instrument(
         self, request: CompileInput,
@@ -764,6 +868,7 @@ class StrategyCompiler:
             ),
             candidate_provenance=candidate_provenance,
             candidate_grounding=prior_outcome.candidate_grounding,
+            execution_settings=prior_outcome.execution_settings,
         )
 
     def rebind_current_strategy(
@@ -780,6 +885,9 @@ class StrategyCompiler:
             prior_outcome, status=CompileStatus.READY, strategy=strategy,
             strategy_hash=canonical_hash(strategy), clarification=None, diagnostic_code=None,
             revision_base_strategy=None,
+            instrument_candidates=(), pending_edit_run_requested=False,
+            pending_edit_refresh_data=False, is_strategy_edit=True,
+            pending_execution_settings=ExecutionSettingsPatch(),
             provenance=(FieldProvenance(path="/instrument/symbol",
                                         source="dialogue/verified_instrument_change"),),
         )
@@ -888,6 +996,8 @@ class StrategyCompiler:
         prior_outcome: CompileOutcome,
         answer: str,
         recent_turns: tuple[ClarificationDialogueTurn, ...] = (),
+        dialogue_assessment: ClarificationDialogueAssessment | None = None,
+        ready_message: str | None = None,
     ) -> ClarificationTurnOutcome:
         """Continue dialogue; model-authored strategies still pass the DSL gate."""
 
@@ -930,14 +1040,17 @@ class StrategyCompiler:
         # An unknown/casual follow-up needs a contextual model decision before
         # standalone compilation. Otherwise a newly generated idea can be
         # discarded as "still needs clarification" and generated a second time.
-        assessed_early = selected_proposal is None and turn_intent in {
-            TurnIntent.UNKNOWN, TurnIntent.CASUAL, TurnIntent.SELECT_OPTION,
-        }
-        assessment = None
+        assessed_early = dialogue_assessment is not None or (
+            selected_proposal is None and turn_intent in {
+                TurnIntent.UNKNOWN, TurnIntent.CASUAL, TurnIntent.SELECT_OPTION,
+            }
+        )
+        assessment = dialogue_assessment
         if assessed_early:
-            assessment = await self._assess_clarification_dialogue(
-                original_input, prior_outcome, answer, turn_intent, recent_turns,
-            )
+            if assessment is None:
+                assessment = await self._assess_clarification_dialogue(
+                    original_input, prior_outcome, answer, turn_intent, recent_turns,
+                )
             if assessment is not None:
                 selection = await self._apply_dialogue_selection(
                     original_input, prior_outcome, answer, assessment,
@@ -1007,6 +1120,7 @@ class StrategyCompiler:
                         selected_proposal,
                     ),
                     candidate_grounding=prior_outcome.candidate_grounding,
+                    execution_settings=prior_outcome.execution_settings,
                 )
             else:
                 # Legacy/local proposal routes still use their existing
@@ -1106,12 +1220,9 @@ class StrategyCompiler:
         )
         if progressed:
             if recompiled.status is CompileStatus.READY:
-                if accepted_as_continuation:
-                    message = "明白，我已经把这条补充和刚才的观点放在一起了。"
-                elif accepted_as_replacement:
-                    message = "好，我会按你刚刚说的完整新规则重新开始，旧规则不会混进来。"
-                else:
-                    message = "好，我已经把这句补充接到刚才的规则里，买入和卖出条件都完整了。"
+                message = ready_message or await self.compose_ready_response(
+                    answer=answer, outcome=recompiled, recent_turns=recent_turns,
+                )
             else:
                 next_question = recompiled.clarification or "还需要再补充一项信息。"
                 message = (next_question if recompiled.idea_route is not None else
@@ -1188,6 +1299,7 @@ class StrategyCompiler:
     async def compose_dialogue_response(
         self, *, answer: str, question: str, context: str,
         recent_turns: tuple[ClarificationDialogueTurn, ...] = (),
+        verified_instruments: tuple[tuple[str, str], ...] = (),
     ) -> str:
         """Render a whole response from verified state, without changing that state."""
         if self._clarification_dialogue_router is None:
@@ -1197,10 +1309,30 @@ class StrategyCompiler:
                 answer=answer, prior_utterance="", diagnostic_code="response_only",
                 question=question, context_summary=context, options=(),
                 recent_turns=recent_turns[-20:], response_only=True,
+                verified_instruments=verified_instruments,
             )
         )
         return (assessment.natural_reply if assessment is not None else
                 "对话模型这次未能返回有效回复，请稍后重试。")
+
+    async def compose_ready_response(
+        self, *, answer: str, outcome: CompileOutcome,
+        recent_turns: tuple[ClarificationDialogueTurn, ...] = (),
+    ) -> str:
+        """Confirm verified rules without templating prose or authorizing a run."""
+        assert outcome.status is CompileStatus.READY and outcome.strategy is not None
+        return await self.compose_dialogue_response(
+            answer=answer,
+            question="买卖规则已准备好，可以核对。",
+            context=(
+                "本次规则已通过校验，下面是当前实际策略及成交设置。只用一句简短中文承接"
+                "本轮输入，确认规则已准备好；不全文复述规则，不追加缺项问题。"
+                "本步骤只准备规则，没有产生回测结果；不能承诺收益或声称已经执行回测。"
+                f"策略：{outcome.strategy.model_dump_json()}；"
+                f"成交设置：{outcome.execution_settings.model_dump_json()}"
+            ),
+            recent_turns=recent_turns,
+        )
 
     async def compile(self, request: CompileInput) -> CompileOutcome:
         if not request.utterance.strip():
@@ -1412,7 +1544,8 @@ class StrategyCompiler:
                     candidate_provenance=candidate.provenance,
                 )
                 if clarification_outcome is not None:
-                    return clarification_outcome
+                    return replace(clarification_outcome,
+                                   execution_settings=candidate.execution_settings)
             if candidate.unsupported_code == "return_period_requires_clarification":
                 return CompileOutcome(
                     status=CompileStatus.NEEDS_CLARIFICATION,
@@ -1423,6 +1556,7 @@ class StrategyCompiler:
                     diagnostic_code=candidate.unsupported_code,
                     candidate_provenance=candidate.provenance,
                     candidate_grounding=candidate.grounding_evidence,
+                    execution_settings=candidate.execution_settings,
                 )
             if candidate.unsupported_code == "natural_day_holding_period_requires_clarification":
                 return CompileOutcome(
@@ -1434,6 +1568,7 @@ class StrategyCompiler:
                     diagnostic_code=candidate.unsupported_code,
                     candidate_provenance=candidate.provenance,
                     candidate_grounding=candidate.grounding_evidence,
+                    execution_settings=candidate.execution_settings,
                 )
             if candidate.unsupported_code == "candidate_provider_low_confidence":
                 return CompileOutcome(
@@ -1446,6 +1581,7 @@ class StrategyCompiler:
                     diagnostic_code=candidate.unsupported_code,
                     candidate_provenance=candidate.provenance,
                     candidate_grounding=candidate.grounding_evidence,
+                    execution_settings=candidate.execution_settings,
                 )
             if candidate.unsupported_code in {
                 "entry_rule_not_recognized",
@@ -1474,6 +1610,7 @@ class StrategyCompiler:
                     diagnostic_code=candidate.unsupported_code,
                     candidate_provenance=candidate.provenance,
                     candidate_grounding=candidate.grounding_evidence,
+                    execution_settings=candidate.execution_settings,
                 )
             return CompileOutcome(
                 status=CompileStatus.UNSUPPORTED,
@@ -1553,6 +1690,8 @@ class StrategyCompiler:
                     selected_idea_proposal=self._unbound_candidate_proposal(
                         effective_request, candidates[0],
                     ),
+                    execution_settings=candidates[0].execution_settings,
+                    instrument_suggestion_declined=candidates[0].instrument_suggestion_declined,
                 )
             if all(item.diagnostic_code == "invalid_a_share_instrument" for item in rejections):
                 return CompileOutcome(
@@ -1640,6 +1779,7 @@ class StrategyCompiler:
             candidate_grounding=candidate.grounding_evidence,
             candidate_rejections=tuple(rejections),
             candidate_alternatives=alternatives,
+            execution_settings=candidate.execution_settings,
         )
 
     async def _compile_initial_conversation(
@@ -1773,9 +1913,8 @@ class StrategyCompiler:
                 return None
             turn = await self.answer_clarification(
                 original_input=request, prior_outcome=outcome, answer=selected.id,
+                ready_message=assessment.natural_reply,
             )
-            if turn.outcome.status is CompileStatus.READY:
-                return replace(turn, assistant_message=assessment.natural_reply)
             return turn
         if outcome is prior:
             return None
@@ -1897,6 +2036,15 @@ class StrategyCompiler:
                 failure=IdeaGenerationError("execution"), candidate_grounding=viewpoint_grounding,
             )
 
+        # Keep user-owned costs outside the proposed buy/sell rules. A known
+        # candidate was grounded against the same input and remains authoritative.
+        execution_settings = idea_route.execution_settings.merged(
+            known_candidate.execution_settings if known_candidate else ExecutionSettingsPatch(),
+        )
+        instrument_suggestion_declined = idea_route.instrument_suggestion_declined or bool(
+            known_candidate and known_candidate.instrument_suggestion_declined
+        )
+
         if routed_request.instrument_context is None and all(
             proposal.instrument_symbol is None and proposal.strategy is None
             for proposal in idea_route.proposals
@@ -1909,6 +2057,8 @@ class StrategyCompiler:
                 diagnostic_code="idea_guidance_required",
                 idea_route=idea_route,
                 candidate_grounding=viewpoint_grounding,
+                execution_settings=execution_settings,
+                instrument_suggestion_declined=instrument_suggestion_declined,
             )
 
         if any(proposal.strategy is not None for proposal in idea_route.proposals):
@@ -1994,6 +2144,8 @@ class StrategyCompiler:
                 if suggestion is None
                 else "我把你说的口语表达暂时理解成这条规则；请确认后再回测。"
             ),
+            execution_settings=execution_settings,
+            instrument_suggestion_declined=instrument_suggestion_declined,
         )
 
     @staticmethod

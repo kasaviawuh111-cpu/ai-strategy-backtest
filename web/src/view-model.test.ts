@@ -7,11 +7,13 @@ import type {
   StrategyDraft,
 } from './shared/api/types'
 import type { BacktestMetrics, RunEvidence } from './types'
+import { DEFAULT_EXECUTION_SETTINGS } from './shared/config/backtest'
 import {
   assessStrategyCapabilities,
   buildChain,
   secondaryMetric,
   strategyRuleTrees,
+  summarizeExecution,
   summarizeRule,
   toChartMarks,
   toOrderRows,
@@ -136,6 +138,30 @@ const runEvidence: RunEvidence = {
 }
 
 describe('result view model', () => {
+  it('labels system-default execution settings without counting strategy-owned policies', () => {
+    expect(summarizeExecution({ ...draft, execution: {
+      ...draft.execution, ...DEFAULT_EXECUTION_SETTINGS,
+    } })).toBe('默认')
+  })
+
+  it('keeps adjusted fees labelled after the draft is saved or the stock changes', () => {
+    const execution = { ...draft.execution, ...DEFAULT_EXECUTION_SETTINGS,
+      slippageBps: 2, commissionRate: 0, minimumCommissionCny: 0 }
+    expect(summarizeExecution({ ...draft, execution })).toBe('已调整 3 项')
+    expect(summarizeExecution({ ...draft, id: 'rebound-draft', revision: 8,
+      instrument: { ...draft.instrument, symbol: '601995.SH', name: '中金公司', exchange: 'SSE' },
+      execution: { ...execution },
+    })).toBe('已调整 3 项')
+  })
+
+  it('returns to the default label only after the settings return to system defaults', () => {
+    const execution = { ...draft.execution, ...DEFAULT_EXECUTION_SETTINGS, slippageBps: 2 }
+    expect(summarizeExecution({ ...draft, execution })).toBe('已调整 1 项')
+    expect(summarizeExecution({ ...draft, execution: {
+      ...execution, slippageBps: DEFAULT_EXECUTION_SETTINGS.slippageBps,
+    } })).toBe('默认')
+  })
+
   it('keeps retry orders in one signal chain as separate broker-style rows', () => {
     const retryActivities: BacktestActivity[] = [
       activities[0]!,
@@ -196,6 +222,36 @@ describe('result view model', () => {
 
   it('does not turn a signal without an order into a broker order row', () => {
     expect(toOrderRows(toTradeRows([activities[0]!]))).toEqual([])
+  })
+
+  it.each([
+    ['exit_retry_budget_exhausted', '已达到卖出尝试上限'],
+    ['exit_retry_disabled', '成交设置关闭了卖出重试'],
+  ])('explains %s without inventing another order or losing a partial fill', (reason, explanation) => {
+    const signal = { ...activities[0]!, side: 'sell' as const }
+    const order = { ...activities[1]!, side: 'sell' as const }
+    const partial: BacktestActivity = {
+      ...activities[2]!, side: 'sell', id: 'partial:sell', kind: 'partial_fill',
+      status: 'partially_filled', title: '卖出部分成交', quantity: 1900,
+    }
+    const stop: BacktestActivity = {
+      ...partial, id: 'stop:sell', kind: 'unfilled', status: 'expired',
+      title: '卖出尝试已结束', reason, outcomeReason: reason,
+      occurredAt: '2024-03-15T15:00:00+08:00',
+      price: null, quantity: null, notionalCny: null, fillId: undefined,
+    }
+    const events = [signal, order, partial, stop]
+    const rows = toOrderRows(toTradeRows(events))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ status: 'partial', quantity: 1900 })
+    expect(rows[0]?.activityIds).toContain(stop.id)
+    const chain = buildChain(draft, events, toTradeRows(events).find((row) => row.id === stop.id)!)
+    const terminal = chain.find((node) => node.title === stop.title)
+    expect(terminal?.detail).toContain(explanation)
+    expect(terminal?.detail).not.toContain(reason)
+    expect(terminal?.detail).toContain('可调整')
+    expect(terminal?.facts?.some((fact) => fact.label === '本次结果')).toBe(false)
+    expect(terminal?.technicalFacts).toContainEqual({ label: '本次结果代码', value: reason })
   })
 
   it('chooses the most useful available secondary result metric', () => {

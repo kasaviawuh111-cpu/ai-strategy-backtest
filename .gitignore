@@ -23,6 +23,8 @@ build/
 # Data (do not commit market data)
 *.parquet
 *.csv
+# Reviewed public identities only; prices and runtime exports remain excluded.
+!/docs/data/a-share-identities-20260906.csv
 *.csv.gz
 astock_data/
 var/data/

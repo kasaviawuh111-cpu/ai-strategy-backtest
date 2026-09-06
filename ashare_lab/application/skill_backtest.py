@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Literal, cast
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from ashare_lab.adapters.market_data.mx_daily_history import MxDailyHistory, MxDailyRow
@@ -263,7 +263,7 @@ def run_skill_backtest(
             position.holding_exit_index = None
 
         if position is not None and pending_exit is not None:
-            exit_decision = cast(_PendingDecision, pending_exit)
+            exit_decision = pending_exit
             if exit_decision.available_at <= open_at:
                 exit_decision.sessions_seen += 1
                 exit_decision.attempts += 1
@@ -325,11 +325,6 @@ def run_skill_backtest(
                         )
                         position = None
                         pending_exit = None
-                    elif (
-                        not config.retry_unfilled_exits
-                        or exit_decision.attempts >= exit_decision.max_sessions
-                    ):
-                        pending_exit = None
                 else:
                     append_activity(
                         kind="unfilled",
@@ -346,11 +341,31 @@ def run_skill_backtest(
                         parent_id=order_activity_id,
                         origin_signal_id=exit_decision.origin_signal_id,
                     )
-                    if (
-                        not config.retry_unfilled_exits
-                        or exit_decision.sessions_seen >= exit_decision.max_sessions
-                    ):
-                        pending_exit = None
+                if position is not None and (
+                    not config.retry_unfilled_exits
+                    or exit_decision.attempts >= exit_decision.max_sessions
+                ):
+                    # This closes the existing decision, not a new order or fill.
+                    # Link the final real order as for end-of-period expiry.
+                    append_activity(
+                        kind="unfilled",
+                        occurred_at=open_at,
+                        side="sell",
+                        status="expired",
+                        reason=(
+                            "exit_retry_budget_exhausted"
+                            if config.retry_unfilled_exits
+                            else "exit_retry_disabled"
+                        ),
+                        signal=exit_decision.signal,
+                        attempt_no=exit_decision.attempts,
+                        chain_id=exit_decision.decision_id,
+                        decision_id=exit_decision.decision_id,
+                        order_id=order_activity_id,
+                        parent_id=order_activity_id,
+                        origin_signal_id=exit_decision.origin_signal_id,
+                    )
+                    pending_exit = None
 
         if position is None and pending_entry is not None and not sold_today:
             entry_decision = pending_entry
@@ -540,7 +555,7 @@ def run_skill_backtest(
     final_row = rows[eligible_indices[-1]]
     no_future_at = datetime.combine(final_row.session_date, time(15), tzinfo=SHANGHAI)
     final_pending: tuple[_PendingDecision | None, ...] = (
-        cast(_PendingDecision | None, pending_exit),
+        pending_exit,
         pending_entry,
     )
     for pending in final_pending:

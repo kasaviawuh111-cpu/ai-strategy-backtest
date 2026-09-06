@@ -32,8 +32,14 @@ _APPEND_ONLY_TABLES = (
     "strategy_validation_receipts_v2",
     "backtest_run_manifests_v2",
     "backtest_run_results_v2",
+    "dialogue_draft_revisions",
+    "dialogue_idempotency",
+    "dialogue_backtest_reviews",
 )
-_APPLICATION_TABLES = (*_APPEND_ONLY_TABLES, "backtest_runs", "alembic_version")
+_DIALOGUE_HEAD_TABLE = "dialogue_drafts"
+_APPLICATION_TABLES = (
+    *_APPEND_ONLY_TABLES, "backtest_runs", _DIALOGUE_HEAD_TABLE, "alembic_version",
+)
 _TASK_SUCCESS = {"SUCCESS", "SUCCEED", "SUCCEEDED", "FINISHED", "DONE"}
 _TASK_FAILURE = {"FAILED", "FAIL", "ERROR", "CANCELED", "CANCELLED"}
 _MIGRATION_REHEARSAL_DEFERRED = (
@@ -555,10 +561,19 @@ def verify_database_via_tc3(env_id: str, runtime_role: str, alembic_head: str) -
         raise CloudReleaseGateError("append-only PostgreSQL triggers are missing or disabled")
     _verify_remote_runtime_role(env_id, role)
     for table in _APPEND_ONLY_TABLES:
+        payload = "payload_json" if table.startswith("dialogue_") else "artifact_json"
         _expect_sql_rejected(
-            env_id, f"UPDATE public.{table} SET artifact_json=artifact_json WHERE false", role
+            env_id, f"UPDATE public.{table} SET {payload}={payload} WHERE false", role
         )
         _expect_sql_rejected(env_id, f"DELETE FROM public.{table} WHERE false", role)
+    # Zero-row statements check permissions only; the single-connection
+    # production_db probe proves actual head mutation and rolls all rows back.
+    _execute_sql(
+        env_id,
+        "UPDATE public.dialogue_drafts SET storage_version=storage_version WHERE false",
+        role,
+    )
+    _expect_sql_rejected(env_id, "DELETE FROM public.dialogue_drafts WHERE false", role)
 
 
 def call_cloud_api(
@@ -637,7 +652,7 @@ def _require_remote_runtime_role(env_id: str, role: str) -> None:
 
 
 def _verify_remote_runtime_role(env_id: str, role: str) -> None:
-    for table in _APPEND_ONLY_TABLES:
+    for table in (*_APPEND_ONLY_TABLES, _DIALOGUE_HEAD_TABLE):
         response = _execute_sql(
             env_id,
             "SELECT has_table_privilege('" + role + "','public." + table + "','SELECT') AS s, "
@@ -651,7 +666,8 @@ def _verify_remote_runtime_role(env_id: str, role: str) -> None:
             if len(row) == 1
             else ()
         )
-        if actual != (True, True, False, False):
+        expected = (True, True, table == _DIALOGUE_HEAD_TABLE, False)
+        if actual != expected:
             raise CloudReleaseGateError(f"runtime PostgreSQL ACL is unsafe: {table}")
 
 
@@ -675,7 +691,7 @@ def _runtime_acl_statements(role: str) -> tuple[str, ...]:
         f"REVOKE ALL ON SCHEMA public FROM {role}",
         f"GRANT USAGE ON SCHEMA public TO {role}",
     ]
-    for table in (*_APPEND_ONLY_TABLES, "backtest_runs", "alembic_version"):
+    for table in _APPLICATION_TABLES:
         statements.extend(
             (
                 f"REVOKE ALL ON TABLE public.{table} FROM PUBLIC",
@@ -688,6 +704,7 @@ def _runtime_acl_statements(role: str) -> tuple[str, ...]:
     statements.extend(
         (
             f"GRANT SELECT, INSERT, UPDATE ON TABLE public.backtest_runs TO {role}",
+            f"GRANT SELECT, INSERT, UPDATE ON TABLE public.dialogue_drafts TO {role}",
             f"GRANT SELECT ON TABLE public.alembic_version TO {role}",
             "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM PUBLIC",
         )

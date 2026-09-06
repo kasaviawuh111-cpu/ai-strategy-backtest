@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "slug": "mobile-recovery",
+  "title": "手机返回、回测反馈与首页查询恢复",
+  "source": { "type": "adhoc", "ref": "B30/B31/B32" },
+  "status": "in-review",
+  "fidelity": "partial",
+  "createdAt": "2026-09-06",
+  "updatedAt": "2026-09-06",
+  "tags": ["mobile", "wechat", "navigation", "recovery", "preview-only"],
+  "direction": {
+    "source": "product-tokens",
+    "note": "保留 app.css、tokens.css、SummaryCards 的白底、黑色主按钮、蓝色次操作、编号与虚线。仅对比反馈落点；不重做 B19 条件分组。微信外部确认页不属于本预览。"
+  },
+  "asIs": {
+    "verified": "both",
+    "selfChecked": false,
+    "component": "web/src/App.tsx; web/src/components/SummaryCards.tsx; web/src/styles/app.css",
+    "note": "已读渲染源、检查003线上窄视口和用户微信录屏。HTML语法检查通过；本地文件URL被浏览器工具策略阻止，未绕过，因此本预览渲染及点击QA尚未完成。预览不模拟真机WebKit、触屏或微信壳，字体按本机回退，不声称像素完全一致。"
+  },
+  "versions": [{
+    "v": 1,
+    "file": "v1.html",
+    "date": "2026-09-06",
+    "summary": "独立点击预览：A回到对话看进度、B留在策略页看进度；顶部返回对话与标题分开；包含首页、处理中、查询暂断、最终失败与恢复状态。",
+    "decisions": ["用户明确要求先看预览；未批准实施。", "顶部返回导航与A反馈落点只针对手机版，桌面布局和原关闭入口保持；保存到下一批，不立即发布。"]
+  }],
+  "decisions": [{
+    "q": "是否直接修改正式页面？",
+    "choice": "否，先预览",
+    "why": "用户最新要求；本轮已开始的局部产品代码与新增测试均精确撤回，既有改动保留。"
+  }],
+  "dataModel": [
+    { "field": "mobile return", "means": "提案：产品页顶部使用返回对话，替代审阅标题旁的关闭符号；不修改微信自带的底部浏览器箭头。", "source": "用户微信录屏; web/src/App.tsx review-close" },
+    { "field": "reviewOpen", "means": "只控制审阅栏；手机断点开启时隐藏对话，不等于新建会话。", "source": "web/src/App.tsx × handler; web/src/styles/app.css max-width:719px" },
+    { "field": "run.state", "means": "create受理后返回的运行状态，非单纯按钮动画；成功／失败／取消为终态。", "source": "web/src/App.tsx startMutation/runQuery; web/src/components/SummaryCards.tsx RunningCard" },
+    { "field": "progressLabel", "means": "后端真实进度文案；断线重试只在真实重试事件发生时展示。预览状态由演示控件驱动。", "source": "web/src/components/SummaryCards.tsx RunningCard; ashare_lab/application/skill_backtest_service.py" },
+    { "field": "preview-request Location", "means": "202受理后的结果查询地址。恢复应重查原结果，不能默默再次POST。", "source": "web/src/shared/api/client.ts request; deploy/private_preview/dialogue_requests.py" },
+    { "field": "default example", "means": "首页chip提交完整例句及对应股票上下文。重开网页的浏览器兼容问题未被窄视口测试排除。", "source": "web/src/App.tsx home-examples; web/src/shared/default-strategy-examples.ts" }
+  ],
+  "build": {
+    "entryPoints": ["web/src/App.tsx", "web/src/shared/api/client.ts"],
+    "verify": ["用户确认后才实施；定向状态与兼容测试、实际本地手机尺寸链路、线上另行验收"],
+    "authorized": false
+  }
+}

@@ -32,9 +32,22 @@ from ashare_lab.settings import AppSettings
 
 from .app import build_hybrid_candidate_compiler, create_app
 from .dialogue_progress import install_dialogue_progress
+from .persistent_store import SQLAlchemyDraftStore
 
 
 def create_skill_app(settings: AppSettings) -> FastAPI:
+    if settings.is_production or settings.queue_backend != "thread":
+        raise ValueError("eastmoney_skill is a local acceptance profile; not a public deployment")
+    return _compose_skill_app(settings, include_model_reasoning=True)
+
+
+def _compose_skill_app(
+    settings: AppSettings,
+    *,
+    include_model_reasoning: bool,
+    max_pending: int | None = None,
+) -> FastAPI:
+    """Internal composition shared by the guarded local and private preview entrypoints."""
     # Reuse model transport composition; do not build the legacy data runtime.
     from ashare_lab.bootstrap import (
         _build_candidate_transport,  # pyright: ignore[reportPrivateUsage]
@@ -43,8 +56,6 @@ def create_skill_app(settings: AppSettings) -> FastAPI:
         _prepare_sqlite_parent,  # pyright: ignore[reportPrivateUsage]
     )
 
-    if settings.is_production or settings.queue_backend != "thread":
-        raise ValueError("eastmoney_skill is a local acceptance profile; not a public deployment")
     api_key = settings.resolved_mx_saas_api_key()
     if api_key is None:
         raise ValueError("Eastmoney Skill credential is required")
@@ -88,7 +99,6 @@ def create_skill_app(settings: AppSettings) -> FastAPI:
     mx = MxSaasMarketDataClient(
         api_key=api_key,
         timeout_seconds=settings.mx_saas_timeout_seconds,
-        max_attempts=2,
         strict_indicator_contracts=True,
     )
     compiler = build_hybrid_candidate_compiler(
@@ -107,6 +117,9 @@ def create_skill_app(settings: AppSettings) -> FastAPI:
     store = SQLAlchemyBacktestRunStore(
         settings.database_url, initialize_schema=settings.initialize_schema
     )
+    draft_store = SQLAlchemyDraftStore(
+        store.engine, initialize_schema=settings.initialize_schema
+    )
     service = SkillBacktestService(
         history=MxDailyHistoryClient(
             client=mx, cache_root=root / settings.skill_history_cache_root
@@ -120,6 +133,7 @@ def create_skill_app(settings: AppSettings) -> FastAPI:
         ),
         store=store,
         max_workers=settings.local_worker_threads,
+        max_pending=max_pending,
     )
     advisor = VibeVerifiedFactStrategyAdvisor(
         planner,
@@ -137,6 +151,7 @@ def create_skill_app(settings: AppSettings) -> FastAPI:
         coverage_catalog=coverage,
         backtest_submission=service,
         run_store=store,
+        draft_store=draft_store,
         live_market_data=mx,
         live_finance_data=mx,
         strategy_advisor=advisor,
@@ -153,7 +168,7 @@ def create_skill_app(settings: AppSettings) -> FastAPI:
         include_portfolio_review=False,
     )
     app.state.runtime = service
-    install_dialogue_progress(app, include_model_reasoning=True)
+    install_dialogue_progress(app, include_model_reasoning=include_model_reasoning)
 
     app.state.candidate_provider_identity = asdict(candidate.identity)
     app.state.candidate_provider_response_mode = settings.candidate_provider_response_mode

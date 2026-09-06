@@ -13,6 +13,7 @@ import type {
 } from './types'
 import { ApiError } from './types'
 import {
+  DEFAULT_EXECUTION_SETTINGS,
   MAXIMUM_INITIAL_CASH_CNY,
   MINIMUM_INITIAL_CASH_CNY,
   STANDARD_INITIAL_CASH_CNY,
@@ -602,9 +603,9 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
             }],
     },
     execution: {
+      ...DEFAULT_EXECUTION_SETTINGS,
       entryPolicy: 'next_tradable_session_open',
       exitPolicy: 'next_tradable_session_open',
-      priceLimitMode: 'wait_for_unlock',
       tPlusOne: true,
       dataCapability: eventStrategy
         ? 'daily_ohlcv_events'
@@ -616,17 +617,6 @@ const makeDraft = (request: CompileRequest, kind: MockStrategyKind): StrategyDra
         : financialStrategy
           ? 'financial_available_plus_1d_close'
           : '1d_close',
-      capacityMode: 'point_in_time_volume',
-      participationRate: 0.05,
-      allocationRatio: 1,
-      commissionRate: 0.0003,
-      minimumCommissionCny: 5,
-      slippageBps: 5,
-      retryUnfilledExits: true,
-      maxExitAttempts: 20,
-      warmupCalendarDays: 180,
-      settlementExtensionDays: 14,
-      runRobustness: true,
     },
     backtest: {
       start: MOCK_BACKTEST_START,

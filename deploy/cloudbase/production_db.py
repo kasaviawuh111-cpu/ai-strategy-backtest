@@ -26,8 +26,12 @@ _APPEND_ONLY_TABLES = (
     "strategy_validation_receipts_v2",
     "backtest_run_manifests_v2",
     "backtest_run_results_v2",
+    "dialogue_draft_revisions",
+    "dialogue_idempotency",
+    "dialogue_backtest_reviews",
 )
 _RUN_TABLE = "backtest_runs"
+_DIALOGUE_HEAD_TABLE = "dialogue_drafts"
 _ALEMBIC_TABLE = "alembic_version"
 
 
@@ -146,7 +150,7 @@ def apply_runtime_acl(
             connection.execute(sql.SQL("REVOKE CREATE ON SCHEMA {} FROM PUBLIC").format(public))
             connection.execute(sql.SQL("REVOKE ALL ON SCHEMA {} FROM {}").format(public, role))
             connection.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(public, role))
-            for table in (*_APPEND_ONLY_TABLES, _RUN_TABLE, _ALEMBIC_TABLE):
+            for table in (*_APPEND_ONLY_TABLES, _RUN_TABLE, _DIALOGUE_HEAD_TABLE, _ALEMBIC_TABLE):
                 identifier = sql.Identifier(table)
                 connection.execute(
                     sql.SQL("REVOKE ALL PRIVILEGES ON TABLE {} FROM PUBLIC").format(identifier)
@@ -160,11 +164,12 @@ def apply_runtime_acl(
                         sql.Identifier(table), role
                     )
                 )
-            connection.execute(
-                sql.SQL("GRANT SELECT, INSERT, UPDATE ON TABLE {} TO {}").format(
-                    sql.Identifier(_RUN_TABLE), role
+            for table in (_RUN_TABLE, _DIALOGUE_HEAD_TABLE):
+                connection.execute(
+                    sql.SQL("GRANT SELECT, INSERT, UPDATE ON TABLE {} TO {}").format(
+                        sql.Identifier(table), role
+                    )
                 )
-            )
             connection.execute(
                 sql.SQL("GRANT SELECT ON TABLE {} TO {}").format(
                     sql.Identifier(_ALEMBIC_TABLE), role
@@ -245,7 +250,7 @@ def _require_not_object_owner(connection: psycopg.Connection[Any], role: str) ->
         "JOIN pg_namespace AS n ON n.oid = c.relnamespace "
         "JOIN pg_roles AS r ON r.oid = c.relowner "
         "WHERE n.nspname = 'public' AND r.rolname = %s AND c.relname = ANY(%s)",
-        (role, list((*_APPEND_ONLY_TABLES, _RUN_TABLE, _ALEMBIC_TABLE))),
+        (role, list((*_APPEND_ONLY_TABLES, _RUN_TABLE, _DIALOGUE_HEAD_TABLE, _ALEMBIC_TABLE))),
     ).fetchall()
     if rows:
         raise ProductionDatabaseError("runtime role must not own application tables")
@@ -283,12 +288,13 @@ def _require_acl(connection: psycopg.Connection[Any], role: str) -> None:
             table=table,
             expected=(True, True, False, False),
         )
-    _expect_table_privileges(
-        connection,
-        role=role,
-        table=_RUN_TABLE,
-        expected=(True, True, True, False),
-    )
+    for table in (_RUN_TABLE, _DIALOGUE_HEAD_TABLE):
+        _expect_table_privileges(
+            connection,
+            role=role,
+            table=table,
+            expected=(True, True, True, False),
+        )
     _expect_table_privileges(
         connection,
         role=role,
@@ -327,6 +333,8 @@ def _run_rollback_only_tamper_probe(connection: psycopg.Connection[Any]) -> None
     manifest_hash = "sha256:" + uuid.uuid4().hex * 2
     result_hash = "sha256:" + uuid.uuid4().hex * 2
     fingerprint = "sha256:" + uuid.uuid4().hex * 2
+    dialogue_draft_id = str(uuid.uuid4())
+    dialogue_scope = f"acl-probe-{suffix}"
     try:
         # A preceding identity query may already have opened an implicit
         # transaction.  Always reset before starting the disposable probe.
@@ -370,6 +378,39 @@ def _run_rollback_only_tamper_probe(connection: psycopg.Connection[Any]) -> None
             "'{}', NULL, 1, 'bundle_hash_v1')",
             (run_id + "-legacy", fingerprint, now, now),
         )
+        connection.execute(
+            "INSERT INTO dialogue_drafts "
+            "(draft_id, latest_revision, storage_version, turns_json) VALUES (%s, 1, 1, '[]')",
+            (dialogue_draft_id,),
+        )
+        connection.execute(
+            "INSERT INTO dialogue_draft_revisions "
+            "(draft_id, revision, payload_json) VALUES (%s, 1, '{}')",
+            (dialogue_draft_id,),
+        )
+        connection.execute(
+            "INSERT INTO dialogue_idempotency "
+            "(scope, key, request_hash, payload_json) VALUES (%s, %s, %s, '{}')",
+            (dialogue_scope, suffix, fingerprint),
+        )
+        connection.execute(
+            "INSERT INTO dialogue_backtest_reviews "
+            "(run_id, response_hash, payload_json) VALUES (%s, %s, '{}')",
+            (run_id + "-legacy", result_hash),
+        )
+        # Only the draft head is mutable: the store advances its CAS version
+        # for revisions and bounded dialogue history; frozen payloads stay insert-only.
+        head = connection.execute(
+            "UPDATE dialogue_drafts SET storage_version=storage_version+1 "
+            "WHERE draft_id=%s AND storage_version=1 RETURNING storage_version",
+            (dialogue_draft_id,),
+        ).fetchone()
+        if head != (2,):
+            raise ProductionDatabaseError("runtime cannot advance the dialogue draft head")
+        _expect_mutation_rejected(
+            connection, table=_DIALOGUE_HEAD_TABLE, key_column="draft_id",
+            key=dialogue_draft_id, operation="delete",
+        )
         for table, key_column, key in (
             ("strategy_draft_revisions_v2", "draft_id", draft_id),
             ("strategy_executable_plans_v2", "plan_id", plan_id),
@@ -377,6 +418,9 @@ def _run_rollback_only_tamper_probe(connection: psycopg.Connection[Any]) -> None
             ("backtest_run_manifests_v2", "run_id", run_id),
             ("backtest_run_results_v2", "run_id", run_id),
             ("backtest_runs", "run_id", run_id + "-legacy"),
+            ("dialogue_draft_revisions", "draft_id", dialogue_draft_id),
+            ("dialogue_idempotency", "scope", dialogue_scope),
+            ("dialogue_backtest_reviews", "run_id", run_id + "-legacy"),
         ):
             _expect_mutation_rejected(
                 connection,

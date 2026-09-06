@@ -172,6 +172,52 @@ class _CandidateDialogue:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("available", [True, False])
+async def test_ready_reply_is_model_authored_without_changing_execution(available: bool) -> None:
+    reply = "规则已准备好，你可以先核对买卖条件。"
+    dialogue = _CandidateDialogue(ClarificationDialogueAssessment(
+        reply_kind="unclear", acknowledgement_id="ask_rephrase", natural_reply=reply,
+    ) if available else None)
+    compiler = _compiler(dialogue)
+    request = CompileInput(
+        utterance="东方财富 MACD 金叉买入，死叉卖出，回测近 1 年",
+        instrument_context="300059.SZ", as_of_date=date(2026, 8, 27),
+    )
+    outcome = await compiler.compile(request)
+    assert outcome.status is CompileStatus.READY
+    message = await compiler.compose_ready_response(answer=request.utterance, outcome=outcome)
+    assert message == (reply if available else "对话模型这次未能返回有效回复，请稍后重试。")
+    assert len(dialogue.requests) == 1
+    submitted = dialogue.requests[0]
+    assert submitted.response_only and not submitted.options
+    assert outcome.strategy is not None
+    assert outcome.strategy.model_dump_json() in submitted.context_summary
+    assert not outcome.run_requested
+
+
+@pytest.mark.asyncio
+async def test_model_option_selection_reuses_its_reply_without_another_model_call() -> None:
+    state = await _paired_idea_state()
+    assert state.outcome.idea_route is not None
+    selected = state.outcome.idea_route.proposals[1]
+    reply = "已选中浪潮信息这组规则，可以先核对。"
+    dialogue = _CandidateDialogue(ClarificationDialogueAssessment(
+        reply_kind="preference", acknowledgement_id="respect_preference", natural_reply=reply,
+        selected_option_id=selected.id,
+    ))
+    turn = await _compiler(dialogue).answer_clarification(
+        original_input=state.compile_input, prior_outcome=state.outcome,
+        answer="就选第二组吧",
+    )
+    assert turn.outcome.status is CompileStatus.READY
+    assert turn.outcome.strategy is not None
+    assert turn.outcome.strategy.instrument.symbol == selected.instrument_symbol
+    assert turn.assistant_message == reply
+    assert len(dialogue.requests) == 1
+    assert not dialogue.requests[0].response_only
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("answer", [
     "帮我从查到的里面挑三只比较适合试这个规则的，别把整张表贴出来。",
     "这些候选按已有数据比较一下，推荐最多三只就好。",

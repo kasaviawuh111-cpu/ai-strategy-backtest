@@ -43,12 +43,13 @@ from .container import ApiContainer, BacktestSubmitter
 from .errors import install_exception_handlers
 from .middleware import RequestContextMiddleware
 from .routes.backtest_runs import router as backtest_runs_router
+from .routes.instruments import router as instruments_router
 from .routes.market_data import router as market_data_router
 from .routes.portfolio_reviews import router as portfolio_reviews_router
 from .routes.strategy_drafts import router as strategy_drafts_router
 from .routes.strategy_v2 import router as strategy_v2_router
 from .routes.system import router as system_router
-from .store import InMemoryDraftStore
+from .store import DraftStore, InMemoryDraftStore
 from .web_hosting import install_web_hosting
 
 DEFAULT_MAX_BODY_BYTES = 16 * 1024
@@ -74,7 +75,7 @@ def create_app(
     compiler: StrategyCompiler | None = None,
     catalog: CatalogSnapshot | None = None,
     coverage_catalog: CoverageCatalogSnapshot | None = None,
-    draft_store: InMemoryDraftStore | None = None,
+    draft_store: DraftStore | None = None,
     catalog_root: str | Path | None = None,
     service_version: str | None = None,
     max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
@@ -179,6 +180,7 @@ def create_app(
     app.include_router(backtest_runs_router)
     app.include_router(strategy_v2_router)
     app.include_router(market_data_router)
+    app.include_router(instruments_router)
     if include_portfolio_review:
         app.include_router(portfolio_reviews_router)
     install_web_hosting(app, web_dist_root)

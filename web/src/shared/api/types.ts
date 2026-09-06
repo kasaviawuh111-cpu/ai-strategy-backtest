@@ -248,6 +248,9 @@ export type ExecutionPolicy = {
   runRobustness: boolean
 }
 
+export type ExecutionSettings = Omit<ExecutionPolicy,
+  'entryPolicy' | 'exitPolicy' | 'tPlusOne' | 'dataCapability' | 'evaluationFrequency'>
+
 export type BacktestWindow = {
   start: string
   end: string
@@ -423,14 +426,20 @@ export type CompileRequest = {
   instrumentContextSource?: 'stock_page' | 'standalone_default'
   utterance: string
   editCurrentStrategy?: boolean
+  executionSettings?: Partial<ExecutionSettings>
   relatedRunIds?: string[]
   relatedReview?: { runId: string; responseHash: string }
+  relatedReviews?: Array<{ runId: string; responseHash: string }>
 }
 
 export type CompileResponse =
-  | { status: 'compiled'; draft: StrategyDraft; runRequested?: boolean; refreshData?: boolean }
+  | { status: 'compiled'; draft: StrategyDraft; runRequested?: boolean; refreshData?: boolean;
+      isStrategyEdit?: boolean; executionSettings?: Partial<ExecutionSettings>; assistantMessage?: string }
   | {
       status: 'needs_clarification'
+      isStrategyEdit?: boolean
+      /** Present (even empty) when the server owns the saved execution settings. */
+      executionSettings?: Partial<ExecutionSettings>
       draftId: string
       /** Live drafts are revision-bound; Mock responses may omit this legacy field. */
       revision?: number
@@ -497,8 +506,10 @@ export type ClarificationAnswerInput = {
   draftId: string
   revision?: number
   answer: string
+  executionSettings?: Partial<ExecutionSettings>
   relatedRunIds?: string[]
   relatedReview?: CompileRequest['relatedReview']
+  relatedReviews?: CompileRequest['relatedReviews']
   originalRequest: CompileRequest
   clarification: Clarification
 }

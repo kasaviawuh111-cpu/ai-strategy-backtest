@@ -111,6 +111,48 @@ const readyResponse = (strategy: StrategySpec = eventStrategy): LiveDraftRespons
 })
 
 describe('live strategy client', () => {
+  it('polls preview model requests without resubmitting the original POST', async () => {
+    vi.stubEnv('VITE_PRIVATE_PREVIEW', 'true')
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    const location = '/api/v1/preview-requests/12345678-1234-1234-1234-123456789abc'
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/v1/capabilities') {
+        return new Response(JSON.stringify(capabilities()))
+      }
+      if (String(input) === '/api/v1/strategy-drafts') {
+        expect(new Headers(init?.headers).get('Prefer')).toBe('respond-async')
+        return new Response('{}', { status: 202,
+          headers: { Location: location, 'X-Preview-Pending': '1' } })
+      }
+      expect(String(input)).toBe(location)
+      expect(init?.redirect).toBe('error')
+      return new Response(JSON.stringify(readyResponse()), { status: 201 })
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const { strategyApi } = await import('./client')
+    await strategyApi.compile(clarifiedRequest)
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === '/api/v1/strategy-drafts')).toHaveLength(1)
+    expect(fetcher.mock.calls.filter(([url]) => String(url) === location)).toHaveLength(1)
+  })
+
+  it('rejects an external preview poll address without following it', async () => {
+    vi.stubEnv('VITE_PRIVATE_PREVIEW', 'true')
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => (
+      String(input) === '/api/v1/capabilities'
+        ? new Response(JSON.stringify(capabilities()))
+        : new Response('{}', { status: 202, headers: {
+          Location: 'https://example.invalid/steal', 'X-Preview-Pending': '1',
+        } })
+    ))
+    vi.stubGlobal('fetch', fetcher)
+    const { strategyApi } = await import('./client')
+    await expect(strategyApi.compile(clarifiedRequest)).rejects.toMatchObject({
+      problem: expect.objectContaining({ code: 'preview_invalid_location' }),
+    })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
   afterEach(() => {
     vi.unstubAllEnvs()
     vi.unstubAllGlobals()
@@ -118,11 +160,43 @@ describe('live strategy client', () => {
     vi.resetModules()
   })
 
-  it('attaches a progress id and keeps only the latest eight backend steps', async () => {
+  it('sends execution settings only with an existing conversation parent', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    const bodies: Array<Record<string, unknown>> = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/v1/capabilities') {
+        return { ok: true, json: async () => capabilities() }
+      }
+      if (String(input) === '/api/v1/strategy-drafts') {
+        bodies.push(JSON.parse(String(init?.body)))
+        return { ok: true, json: async () => readyResponse() }
+      }
+      throw new Error(`unexpected fetch: ${String(input)}`)
+    }))
+    const { strategyApi } = await import('./client')
+    const input = { ...clarifiedRequest, executionSettings: {
+      slippageBps: 2, commissionRate: 0, minimumCommissionCny: 0,
+    } }
+    await strategyApi.compile(input)
+    await strategyApi.compile(input, 'current-parent')
+    expect(bodies[0]).not.toHaveProperty('execution_settings')
+    expect(bodies[1]?.execution_settings).toEqual({
+      slippage_bps: 2, commission_rate: 0, minimum_commission_cny: 0,
+    })
+  })
+
+  it('attaches a progress id and keeps only the latest twelve backend steps with bounded reasoning', async () => {
     vi.stubEnv('VITE_USE_MOCK', 'false')
     const progressId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     vi.stubGlobal('crypto', { randomUUID: () => progressId })
-    const updates: Array<Array<{ stage: string; message: string; elapsedMs: number }>> = []
+    const updates: Array<Array<{
+      stage: string
+      message: string
+      elapsedMs: number
+      reasoning?: string
+      reasoningTruncated?: boolean
+    }>> = []
+    const boundaryReasoning = `${'r'.repeat(59_996)}tail`
     let releaseDraft: (() => void) | undefined
     const draftGate = new Promise<void>((resolve) => { releaseDraft = resolve })
     let compileProgressHeader: string | null = null
@@ -134,10 +208,18 @@ describe('live strategy client', () => {
           ok: true,
           status: 200,
           json: async () => ({
-            events: Array.from({ length: 9 }, (_, index) => ({
+            events: Array.from({ length: 15 }, (_, index) => ({
               stage: `stage-${index + 1}`,
               message: `真实步骤 ${index + 1}`,
               elapsed_ms: index * 1_000,
+              ...(index === 13 ? {
+                reasoning: boundaryReasoning,
+                reasoning_truncated: false,
+              } : {}),
+              ...(index === 14 ? {
+                reasoning: `discarded-prefix|${boundaryReasoning}`,
+                reasoning_truncated: true,
+              } : {}),
             })),
             finished: true,
           }),
@@ -168,12 +250,30 @@ describe('live strategy client', () => {
     await compile
 
     expect(compileProgressHeader).toBe(progressId)
-    expect(updates[0]).toHaveLength(8)
+    expect(updates[0]).toHaveLength(12)
+    expect(updates[0]?.map((event) => event.stage)).toEqual(
+      Array.from({ length: 12 }, (_, index) => `stage-${index + 4}`),
+    )
     expect(updates[0]?.[0]).toEqual({
-      stage: 'stage-2',
-      message: '真实步骤 2',
-      elapsedMs: 1_000,
+      stage: 'stage-4',
+      message: '真实步骤 4',
+      elapsedMs: 3_000,
     })
+    expect(updates[0]?.[10]).toEqual({
+      stage: 'stage-14',
+      message: '真实步骤 14',
+      elapsedMs: 13_000,
+      reasoning: boundaryReasoning,
+      reasoningTruncated: false,
+    })
+    expect(updates[0]?.[11]).toEqual({
+      stage: 'stage-15',
+      message: '真实步骤 15',
+      elapsedMs: 14_000,
+      reasoning: boundaryReasoning,
+      reasoningTruncated: true,
+    })
+    expect(updates[0]?.[11]?.reasoning).toHaveLength(60_000)
   })
 
   it('allows the server-owned snapshot preparation step to outlive ordinary API calls', async () => {
@@ -376,6 +476,33 @@ describe('live strategy client', () => {
     expect(timeoutSpy).toHaveBeenCalledWith(300_000)
   })
 
+  it('posts bounded report and exposed review references without browser metrics', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    const runIds = Array.from({ length: 23 }, (_, index) => `run:${index}`)
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({}) }))
+    vi.stubGlobal('fetch', fetchMock)
+    const { backtestApi } = await import('./client')
+    await backtestApi.review('run:22', undefined, {
+      relatedRunIds: runIds,
+      relatedReviews: [
+        { runId: 'run:0', responseHash: 'sha256:outside-window' },
+        { runId: 'run:21', responseHash: 'sha256:first-version' },
+        { runId: 'run:21', responseHash: 'sha256:second-version' },
+      ],
+    })
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(path).toBe('/api/v1/backtest-runs/run%3A22/review')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      related_run_ids: runIds.slice(-20),
+      related_reviews: [
+        { run_id: 'run:21', response_hash: 'sha256:first-version' },
+        { run_id: 'run:21', response_hash: 'sha256:second-version' },
+      ],
+    })
+  })
+
   it('fails closed instead of fabricating an AI review in Mock mode', async () => {
     vi.stubEnv('VITE_USE_MOCK', 'true')
     const fetchMock = vi.fn()
@@ -446,7 +573,7 @@ describe('live strategy client', () => {
     })
   })
 
-  it('answers a saved draft revision without rebuilding the rule in the browser', async () => {
+  it('answers a saved draft revision with execution settings without rebuilding the rule in the browser', async () => {
     vi.stubEnv('VITE_USE_MOCK', 'false')
     const clarificationDraft: LiveDraftResponse = {
       draft_id: '8c91eb84-ab49-4b0c-890a-682e9cc6fe21',
@@ -456,6 +583,7 @@ describe('live strategy client', () => {
       strategy_hash: null,
       clarification: '已识别卖出条件。请补充买入条件。',
       diagnostic_code: 'entry_rule_not_recognized',
+      execution_settings: { slippage_bps: '2', commission_rate: '0', minimum_commission_cny: '0' },
       provenance: [],
       candidate_provenance: null,
       candidate_grounding: null,
@@ -474,7 +602,13 @@ describe('live strategy client', () => {
       if (path === '/api/v1/strategy-drafts/8c91eb84-ab49-4b0c-890a-682e9cc6fe21/revisions/3/clarification-answers') {
         expect(init?.method).toBe('POST')
         expect(JSON.parse(String(init?.body))).toEqual({
-          answer: 'RSI 低于 30 买入', related_run_ids: ['run:previous', 'run:current'],
+          answer: 'RSI 低于 30 买入', related_run_ids: ['run:old', 'run:previous', 'run:current'],
+          related_review: { run_id: 'run:current', response_hash: 'sha256:current' },
+          related_reviews: [
+            { run_id: 'run:old', response_hash: 'sha256:old' },
+            { run_id: 'run:current', response_hash: 'sha256:current' },
+          ],
+          execution_settings: { slippage_bps: 2, commission_rate: 0, minimum_commission_cny: 0 },
         })
         expect(new Headers(init?.headers).has('Idempotency-Key')).toBe(false)
         return {
@@ -506,7 +640,13 @@ describe('live strategy client', () => {
       draftId: pending.draftId,
       revision: pending.revision,
       answer: 'RSI 低于 30 买入',
+      executionSettings: pending.executionSettings,
       relatedRunIds: ['run:old', 'run:previous', 'run:current'],
+      relatedReview: { runId: 'run:current', responseHash: 'sha256:current' },
+      relatedReviews: [
+        { runId: 'run:old', responseHash: 'sha256:old' },
+        { runId: 'run:current', responseHash: 'sha256:current' },
+      ],
       originalRequest: { ...clarifiedRequest, utterance: 'MACD 死叉卖出' },
       clarification: pending.clarification,
     })
@@ -515,7 +655,8 @@ describe('live strategy client', () => {
       replyKind: 'clarification',
       assistantMessage: '已保留 MACD 死叉卖出，请确认 RSI 阈值。',
       suggestions: [{ id: 'idea_123456789abc' }],
-      outcome: { status: 'needs_clarification', draftId: clarificationDraft.draft_id, revision: 3 },
+      outcome: { status: 'needs_clarification', draftId: clarificationDraft.draft_id, revision: 3,
+        executionSettings: { slippageBps: 2, commissionRate: 0, minimumCommissionCny: 0 } },
     })
   })
 

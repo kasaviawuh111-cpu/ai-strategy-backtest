@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>股票原位编辑 · 第二版预览</title>
+  <style>
+    :root{--ink:#000;--text:#2b3746;--muted:#516880;--line:#d4d9df;--hairline:#e6eaee;--surface:#fff;--soft:#f6f8f9;--sunken:#f1f4f7;--blue:#2148d8;--buy:#ff0066;--sell:#2f9e5f}
+    *{box-sizing:border-box}[hidden]{display:none!important}
+    body{margin:0;background:var(--soft);color:var(--ink);font:15px/1.55 Inter,-apple-system,BlinkMacSystemFont,"Helvetica Neue","PingFang SC",sans-serif}
+    button,input{font:inherit}button{cursor:pointer}button:disabled{cursor:default}
+    :focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+    ::selection{background:#e5ebff;color:var(--ink)}input{caret-color:var(--blue)}
+    main{max-width:1056px;margin:auto;padding:36px 24px 40px}
+    h1{margin:0 0 6px;font-size:22px;line-height:32px;font-weight:600}
+    h2{margin:0 0 18px;font-size:16px;line-height:24px;font-weight:600}
+    p{margin:0}.note{font-size:13px;line-height:21px;color:var(--muted)}
+    .layout{display:grid;grid-template-columns:minmax(0,640px) minmax(220px,1fr);gap:36px;align-items:start;margin-top:26px}
+    .review{min-width:0;background:var(--surface);border:1px solid var(--hairline);border-radius:12px;padding:24px}
+    .symbol{display:flex;align-items:center;gap:12px;padding-bottom:12px;border-bottom:1px solid var(--hairline)}
+    .stock-field{position:relative;flex:1;min-width:0}
+    .stock-entry{display:flex;align-items:center;flex-wrap:wrap;gap:8px;max-width:100%;min-height:44px;margin-left:-6px;padding:4px 6px;border:0;border-radius:6px;background:none;color:var(--ink);text-align:left}
+    .stock-entry:hover{background:var(--soft)}
+    .nm{font-size:17px;line-height:24px;font-weight:600}.cd{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+    .edit-icon{width:14px;height:14px;margin-left:2px;color:var(--muted);fill:none;stroke:currentColor;stroke-width:1.5;flex:none}
+    .chev{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.5;flex:none}
+    .exec-entry{flex:none;margin-left:auto;display:inline-flex;align-items:center;gap:1px;min-height:44px;padding:2px 0 2px 6px;border:0;background:none;color:var(--muted);font-size:12px;line-height:18px;white-space:nowrap}
+    .exec-entry .v::before{content:"·";margin:0 4px;color:var(--line)}.exec-entry:hover{color:var(--text)}
+    .inline-editor{display:flex;align-items:center;gap:6px;min-height:44px}
+    .input-wrap{flex:1;min-width:0;display:flex;align-items:center;min-height:44px;border:1px solid var(--line);border-radius:6px;background:var(--surface)}
+    .input-wrap:focus-within{border-color:var(--blue);outline:1px solid var(--blue)}
+    .stock-input{width:100%;min-width:0;padding:9px 10px;border:0;outline:none;background:none;color:var(--ink);font-size:17px;font-weight:600;line-height:24px}
+    .stock-input::placeholder{color:var(--muted);font-size:15px;font-weight:400}
+    .clear{display:grid;place-items:center;width:36px;min-width:36px;height:40px;border:0;background:none;color:var(--muted);border-radius:6px}
+    .clear svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.5}.clear:hover{color:var(--ink);background:var(--soft)}
+    .cancel{min-width:40px;min-height:44px;padding:4px 0;border:0;background:none;color:var(--muted);font-size:13px}.cancel:hover{color:var(--ink)}
+    .dropdown{position:absolute;z-index:10;top:calc(100% + 6px);left:0;width:100%;min-width:260px;border-radius:8px;background:var(--surface);box-shadow:0 8px 24px rgba(20,28,68,.1);outline:1px solid var(--hairline)}
+    .dropdown-head{padding:10px 12px 8px;color:var(--muted);font-size:12px;line-height:18px;border-bottom:1px solid var(--hairline)}
+    .options{margin:0;padding:4px;list-style:none;max-height:252px;overflow-y:auto;scrollbar-color:var(--line) transparent;scrollbar-width:thin}
+    .option{display:flex;align-items:center;gap:10px;min-height:48px;padding:10px 9px;border-radius:6px;cursor:pointer}
+    .option[aria-selected="true"]{background:var(--sunken)}.option:hover{background:var(--soft)}
+    .option-name{font-size:15px;font-weight:500}.option .cd{margin-left:auto}.option .chev{color:var(--muted)}
+    .empty{padding:15px 12px;color:var(--text);font-size:14px;line-height:22px;overflow-wrap:anywhere}
+    .empty small{display:block;margin-top:4px;color:var(--muted);font-size:12px;line-height:19px}
+    .retry{min-height:40px;margin-top:4px;padding:5px 0;border:0;background:none;color:var(--blue);font-size:13px}
+    .dropdown-foot{padding:8px 12px;border-top:1px solid var(--hairline);color:var(--muted);font-size:12px;line-height:18px}
+    .erows{margin-top:10px;padding-left:32px;counter-reset:flowstep}
+    .erow{position:relative;display:flex;align-items:center;gap:10px;width:100%;min-height:52px;border:1px dashed var(--line);border-radius:8px;padding:12px;background:var(--surface)}
+    .erow::before{counter-increment:flowstep;content:counter(flowstep);position:absolute;left:-32px;top:14px;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);background:var(--surface);display:grid;place-items:center;font-size:11px;line-height:1;color:var(--muted);font-variant-numeric:tabular-nums}
+    .erow+.erow{margin-top:20px}
+    .flow-arrow{position:absolute;left:50%;bottom:-20px;transform:translateX(-50%);width:10px;height:16px;fill:none;stroke:#c3cad3;stroke-width:1.1}
+    .lb{flex:none;align-self:flex-start;margin-top:1px;padding:2px 8px;border-radius:6px;background:var(--sunken);color:var(--text);font-size:12px;line-height:18px;font-weight:500}
+    .buy .lb{background:rgba(255,0,102,.07);color:var(--buy)}.sell .lb{background:rgba(47,158,95,.08);color:var(--sell)}
+    .val{flex:1;min-width:0;font-size:15px;line-height:22px;font-weight:500;overflow-wrap:anywhere}.erow>.chev{color:var(--muted)}
+    .run{width:100%;min-height:48px;margin-top:24px;border:0;border-radius:999px;background:var(--ink);color:#fff;font-size:16px;font-weight:500}.run:hover{background:#1b2128}
+    .demo-foot{margin-top:12px;text-align:center;font-size:12px;line-height:19px;color:var(--muted)}
+    aside{min-width:0;padding-top:4px}aside p{color:var(--text);font-size:14px;line-height:23px;margin-bottom:14px}
+    .preview-controls{margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}
+    .preview-controls h2{font-size:13px;color:var(--muted);margin-bottom:6px}
+    .preview-buttons{display:flex;flex-wrap:wrap;gap:0 16px;margin-bottom:8px}
+    .preview-buttons button{min-height:40px;padding:6px 0;border:0;background:none;color:var(--muted);font-size:13px;text-align:left}
+    .preview-buttons button[aria-pressed="true"]{color:var(--ink);text-decoration:underline;text-underline-offset:5px}
+    .preview-buttons button:hover{color:var(--blue)}
+    .preview-status{font-size:13px;line-height:21px;color:var(--muted);min-height:42px}
+    .comparison{margin-top:20px;padding-top:16px;border-top:1px solid var(--line);font-size:12px;line-height:20px;color:var(--muted)}
+    .comparison strong{color:var(--text);font-weight:500}
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    @media(max-width:820px){main{max-width:660px}.layout{grid-template-columns:minmax(0,1fr);gap:28px}aside{padding:0}.preview-controls{margin-top:16px}}
+    @media(max-width:460px){main{padding:24px 16px 32px}.review{padding:20px 16px}.symbol{flex-wrap:wrap;gap:0 10px}.stock-field{flex-basis:100%}.exec-entry{min-height:32px;margin-left:auto;padding:2px 0}.dropdown{min-width:0}.erows{padding-left:26px}.erow{padding:10px;gap:8px}.erow::before{left:-26px;width:19px;height:19px;font-size:10px}.erow>.chev{display:none}}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>股票就在原位改</h1>
+    <p class="note">第二版交互预览 · 只使用四个静态股票示例，不连接实时查询、模型或回测。</p>
+    <div class="layout">
+      <section class="review" aria-label="股票原位编辑预览">
+        <h2>审阅你的策略</h2>
+        <!-- Changed: only this stock field. The strategy and settings below stay unchanged. -->
+        <div class="symbol">
+          <div class="stock-field" id="stock-field">
+            <button type="button" class="stock-entry" id="stock-opener" aria-label="修改股票：美的集团，000333.SZ" aria-expanded="false" aria-controls="stock-editor">
+              <span class="nm" id="stock-name">美的集团</span><span class="cd" id="stock-code">000333.SZ</span>
+              <svg class="edit-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 4.5 3 3M4 16l3.5-.7L16 6.8a1.7 1.7 0 0 0-2.4-2.4L5 13z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <div class="inline-editor" id="stock-editor" hidden>
+              <div class="input-wrap">
+                <label for="stock-input" class="sr-only">股票名称或代码</label>
+                <input class="stock-input" id="stock-input" type="text" role="combobox" aria-autocomplete="list" aria-controls="stock-options" aria-expanded="false" aria-describedby="example-notice" placeholder="股票名称或代码" autocomplete="off" spellcheck="false">
+                <button type="button" class="clear" id="clear-stock" aria-label="清空股票输入"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke-linecap="round"/></svg></button>
+              </div>
+              <button type="button" class="cancel" id="cancel-edit">取消</button>
+              <div class="dropdown" id="stock-dropdown">
+                <div class="dropdown-head" id="example-notice">静态示例 · 非实时查询结果</div>
+                <ul class="options" id="stock-options" role="listbox" aria-label="示例股票匹配结果"></ul>
+                <div class="empty" id="stock-empty" role="status" hidden></div>
+                <div class="dropdown-foot">上下键选择，Enter 使用 · Esc 取消</div>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="exec-entry" id="settings">成交设置<span class="v">默认</span><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></button>
+        </div>
+        <!-- Keep: all parameters, timing and execution settings from v1. -->
+        <div class="erows" aria-label="原有买卖条件与回测区间">
+          <div class="erow buy"><span class="lb">买入</span><span class="val">14 日 RSI 由下向上穿过 30 且当日成交额高于 5 亿元</span><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg><svg class="flow-arrow" viewBox="0 0 10 16" aria-hidden="true"><path d="M5 1v13M1.6 10.4 5 13.8l3.4-3.4"/></svg></div>
+          <div class="erow sell"><span class="lb">卖出</span><span class="val">14 日 RSI 高于 55、持仓亏损达到 5% 或持有满 10 个交易日，任一先触发就卖出</span><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg><svg class="flow-arrow" viewBox="0 0 10 16" aria-hidden="true"><path d="M5 1v13M1.6 10.4 5 13.8l3.4-3.4"/></svg></div>
+          <div class="erow"><span class="lb">区间</span><span class="val">近一年</span><svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></div>
+        </div>
+        <button type="button" class="run" id="run" aria-disabled="true">开始回测</button>
+        <p class="demo-foot">静态预览不会执行回测</p>
+      </section>
+      <aside aria-label="预览说明，不属于产品页面">
+        <h2>点名称，直接替换</h2>
+        <p>点股票名后自动全选。输入名称或代码，在原位下拉中选中，就更新名称与代码。</p>
+        <p>不用跳到对话框，也不再多点一次确认。取消或按 Esc，回到修改前的股票。</p>
+        <div class="preview-controls">
+          <h2>预览状态切换（不是产品按钮）</h2>
+          <div class="preview-buttons" aria-label="静态预览状态">
+            <button type="button" data-state="default" aria-pressed="true">默认态</button>
+            <button type="button" data-state="edit" aria-pressed="false">编辑态</button>
+            <button type="button" data-state="empty" aria-pressed="false">清空后</button>
+            <button type="button" data-state="unmatched" aria-pressed="false">未收录</button>
+            <button type="button" data-state="error" aria-pressed="false">请求异常</button>
+          </div>
+          <p class="preview-status" id="preview-status" aria-live="polite">可试着输入“东方财富”或“中金”。示例仅包含美的集团、东方财富、中金公司、中金黄金。</p>
+        </div>
+        <p class="comparison"><strong>只改股票入口。</strong>成交设置、买卖参数和区间保持原样。此文件只展示交互，正式页面尚未修改。</p>
+      </aside>
+    </div>
+    <p class="sr-only" id="selection-status" role="status" aria-live="polite"></p>
+    <noscript><p class="note">请启用 JavaScript 查看原位编辑交互；当前仍可查看默认样式。</p></noscript>
+  </main>
+  <script>
+    // Static, user-mentioned examples only. No API calls or generated market data.
+    const examples = Object.freeze([
+      { name: '美的集团', code: '000333.SZ', aliases: ['美的'] },
+      { name: '东方财富', code: '300059.SZ', aliases: [] },
+      { name: '中金公司', code: '601995.SH', aliases: [] },
+      { name: '中金黄金', code: '600489.SH', aliases: [] }
+    ]);
+    const field = document.getElementById('stock-field');
+    const opener = document.getElementById('stock-opener');
+    const editor = document.getElementById('stock-editor');
+    const input = document.getElementById('stock-input');
+    const list = document.getElementById('stock-options');
+    const empty = document.getElementById('stock-empty');
+    const previewStatus = document.getElementById('preview-status');
+    const selectionStatus = document.getElementById('selection-status');
+    let current = examples[0];
+    let matches = [];
+    let activeIndex = -1;
+    let composing = false;
+    let compositionEndedAt = -Infinity;
+    let simulatedError = false;
+
+    function markPreview(state) {
+      document.querySelectorAll('[data-state]').forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.state === state));
+      });
+    }
+    function renderActive() {
+      Array.from(list.children).forEach((option, index) => option.setAttribute('aria-selected', String(index === activeIndex)));
+      if (activeIndex >= 0) input.setAttribute('aria-activedescendant', 'stock-option-' + activeIndex);
+      else input.removeAttribute('aria-activedescendant');
+    }
+    function renderMatches() {
+      const query = input.value.trim().toLowerCase();
+      matches = simulatedError || !query ? [] : examples.filter(stock => [stock.name, stock.code, ...stock.aliases].some(value => value.toLowerCase().includes(query)));
+      activeIndex = matches.length ? 0 : -1;
+      list.replaceChildren();
+      empty.replaceChildren();
+      empty.hidden = matches.length > 0;
+      list.hidden = matches.length === 0;
+      matches.forEach((stock, index) => {
+        const option = document.createElement('li');
+        option.className = 'option'; option.id = 'stock-option-' + index;
+        option.setAttribute('role', 'option');
+        const name = document.createElement('span'); name.className = 'option-name'; name.textContent = stock.name;
+        const code = document.createElement('span'); code.className = 'cd'; code.textContent = stock.code;
+        option.append(name, code);
+        option.addEventListener('pointerdown', event => event.preventDefault());
+        option.addEventListener('pointermove', () => { activeIndex = index; renderActive(); });
+        option.addEventListener('click', () => selectStock(index));
+        list.append(option);
+      });
+      if (!matches.length) {
+        const title = document.createElement('div');
+        const hint = document.createElement('small');
+        title.textContent = simulatedError ? '暂时无法获取匹配股票，输入已保留。' : query ? '本预览未收录这个示例' : '输入股票名称或代码';
+        hint.textContent = simulatedError ? '这是请求异常的样式演示，没有发送实际请求。' : query ? '可试试“美的”“东方财富”或“中金”；并非真实查询无结果。' : '可继续输入“东方财富”或“中金”。取消会保留原股票。';
+        empty.append(title, hint);
+        if (simulatedError) {
+          const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'retry'; retry.textContent = '重新显示静态示例';
+          retry.addEventListener('click', () => { simulatedError = false; renderMatches(); input.focus(); });
+          empty.append(retry);
+        }
+      }
+      renderActive();
+    }
+    function openEditor(value = current.name, error = false) {
+      simulatedError = error; composing = false;
+      opener.hidden = true; editor.hidden = false;
+      opener.setAttribute('aria-expanded', 'true'); input.setAttribute('aria-expanded', 'true');
+      input.value = value; renderMatches(); input.focus(); input.select();
+      markPreview(error ? 'error' : value ? 'edit' : 'empty');
+    }
+    function closeEditor(returnFocus = true) {
+      editor.hidden = true; opener.hidden = false;
+      opener.setAttribute('aria-expanded', 'false'); input.setAttribute('aria-expanded', 'false');
+      input.removeAttribute('aria-activedescendant');
+      input.value = current.name; composing = false; simulatedError = false;
+      markPreview('default');
+      if (returnFocus) opener.focus();
+    }
+    function selectStock(index) {
+      if (composing || simulatedError || !matches[index]) return;
+      current = matches[index];
+      document.getElementById('stock-name').textContent = current.name;
+      document.getElementById('stock-code').textContent = current.code;
+      opener.setAttribute('aria-label', '修改股票：' + current.name + '，' + current.code);
+      closeEditor();
+      selectionStatus.textContent = '静态示例已切换为' + current.name + '，' + current.code + '。买卖参数与成交设置未修改。';
+    }
+    opener.addEventListener('click', () => openEditor());
+    document.getElementById('cancel-edit').addEventListener('click', () => closeEditor());
+    document.getElementById('clear-stock').addEventListener('click', () => {
+      input.value = ''; simulatedError = false; renderMatches(); input.focus(); markPreview('empty');
+    });
+    input.addEventListener('compositionstart', () => { composing = true; });
+    input.addEventListener('compositionend', () => { composing = false; compositionEndedAt = performance.now(); renderMatches(); });
+    input.addEventListener('input', () => { simulatedError = false; renderMatches(); markPreview(input.value ? 'edit' : 'empty'); });
+    input.addEventListener('keydown', event => {
+      // Some IMEs dispatch Enter just after compositionend; it confirms text, not the stock.
+      if (event.isComposing || composing || event.keyCode === 229 || (event.key === 'Enter' && performance.now() - compositionEndedAt < 80)) return;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault(); if (!matches.length) return;
+        activeIndex = (activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % matches.length;
+        renderActive(); list.children[activeIndex].scrollIntoView({ block: 'nearest' });
+      } else if (event.key === 'Enter') {
+        event.preventDefault(); selectStock(activeIndex);
+      }
+    });
+    editor.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !event.isComposing && !composing) { event.preventDefault(); closeEditor(); }
+    });
+    field.addEventListener('focusout', event => {
+      if (!editor.hidden && event.relatedTarget && !field.contains(event.relatedTarget)) closeEditor(false);
+    });
+    document.addEventListener('pointerdown', event => {
+      if (!editor.hidden && !field.contains(event.target)) closeEditor(false);
+    });
+    document.querySelectorAll('[data-state]').forEach(button => button.addEventListener('click', () => {
+      const state = button.dataset.state;
+      if (state === 'default') closeEditor(false);
+      else openEditor(state === 'empty' ? '' : state === 'unmatched' ? '未收录示例' : '中金', state === 'error');
+      markPreview(state);
+      previewStatus.textContent = state === 'error' ? '请求异常仅为样式演示；没有联网，原股票和输入不会丢失。' : '本页仅匹配四个静态示例。选择只更新股票名称与代码，不执行回测。';
+    }));
+    document.getElementById('settings').addEventListener('click', () => { previewStatus.textContent = '成交设置保留原入口与原值，本版不演示设置面板。'; });
+    document.getElementById('run').addEventListener('click', () => { previewStatus.textContent = '本页只是股票编辑预览，不会创建回测任务。'; });
+  </script>
+</body>
+</html>

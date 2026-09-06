@@ -32,7 +32,8 @@ from ashare_lab.application.turn_intent import (
     extract_change_instrument_target,
 )
 from ashare_lab.ports.candidate_generation import CompileInput
-from ashare_lab.ports.clarification_dialogue import ClarificationDialogueTurn
+from ashare_lab.ports.clarification_dialogue import ClarificationDialogueTurn, ClarificationOption
+from ashare_lab.ports.instrument_resolution import InstrumentNameAmbiguous
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,15 @@ class DialogueTurnOrchestrator:
             edited = await self.plan_strategy_edit(state=state, answer=answer)
             if edited is not None:
                 return edited
+
+        # A stock plus a pause/run instruction is one semantic choice. Do not
+        # send prose through the name-shaped fast path or repeat the old prompt.
+        if (self._compiler.has_clarification_dialogue
+                and state.pending_slot in {"instrument_required", "instrument_reuse_confirmation"}
+                and intent not in {*_FRESH_STRATEGY_INTENTS, TurnIntent.DATA_QUERY}
+                and _REUSE_ACCEPT_RE.fullmatch(answer.strip()) is None
+                and _REUSE_REJECT_RE.fullmatch(answer.strip()) is None):
+            return await self._plan_instrument_choice(state=state, answer=answer, intent=intent)
 
         if intent is TurnIntent.DATA_QUERY:
             followup = await self._compiler.answer_idea_data_followup(
@@ -376,11 +386,129 @@ class DialogueTurnOrchestrator:
             pending_instrument_reuse=remembered,
         )
 
+    async def _plan_instrument_choice(
+        self, *, state: DialogueState, answer: str, intent: TurnIntent,
+    ) -> DialogueTurnPlan:
+        remembered = state.pending_instrument_reuse
+        choices = {f"instrument:{item.symbol}": (item.symbol, item.name)
+                   for item in state.outcome.instrument_candidates}
+        if remembered is not None:
+            choices.setdefault(
+                f"instrument:{remembered.symbol}",
+                (remembered.symbol, _instrument_label(remembered)),
+            )
+        assessment = await self._compiler.assess_instrument_clarification(
+            original_input=state.compile_input, prior_outcome=state.outcome, answer=answer,
+            pending_label=_instrument_label(remembered) if remembered else None,
+            recent_turns=_model_recent_turns(state),
+            options=tuple(ClarificationOption(id=key, title=name, preview=symbol)
+                          for key, (symbol, name) in choices.items()),
+        )
+        outcome = state.outcome
+        if assessment is None:
+            message = "对话模型这次未能返回有效回复，请重试这条补充；原规则已保留。"
+        else:
+            message = assessment.natural_reply
+            # Unclear/ordinary dialogue never grants execution authority.
+            run_requested = (
+                assessment.run_requested if assessment.run_requested is not None
+                else outcome.pending_edit_run_requested or outcome.run_requested
+            )
+            name = assessment.instrument_name
+            chosen = choices.get(assessment.selected_option_id or "")
+            if (assessment.reply_kind == "preference"
+                    and (chosen is not None or (
+                        assessment.instrument_selected and name is not None and name in answer
+                    ))
+                    and assessment.strategy_inspiration is None):
+                name = chosen[1] if chosen else name
+                assert name is not None
+                candidates = ()
+                try:
+                    instrument = chosen[0] if chosen else (
+                        await self._compiler.resolve_instrument_context(name, require_details=True)
+                    )
+                except InstrumentNameAmbiguous as exc:
+                    instrument, candidates = None, exc.candidates[:3]
+                    labels = '、'.join(item.name for item in candidates)
+                    message = f"你说的“{name}”，是{labels}中的哪只？"
+                except (OSError, TimeoutError):
+                    instrument = None
+                    message = "东方财富选股 Skill 暂时无法核对股票名称，请重试；原规则已保留。"
+                except LookupError:
+                    instrument = None
+                    message = f"这次还没核实“{name}”，请补充完整股票名称或代码。"
+                if instrument is not None:
+                    turn = await self._apply_instrument(
+                        state=state, instrument=instrument, assistant_message=message,
+                    )
+                    ready = turn.outcome.status is CompileStatus.READY
+                    return DialogueTurnPlan(
+                        intent=TurnIntent.CHANGE_INSTRUMENT,
+                        clarification_turn=replace(
+                            turn,
+                            outcome=replace(
+                                turn.outcome,
+                                run_requested=bool(ready and run_requested),
+                                refresh_data=bool(ready and run_requested
+                                                  and outcome.pending_edit_refresh_data),
+                                pending_edit_run_requested=bool(not ready and run_requested),
+                                pending_edit_refresh_data=bool(
+                                    not ready and run_requested
+                                    and outcome.pending_edit_refresh_data
+                                ),
+                            ),
+                        ),
+                        verified_instrument=_resolved_instrument_memory(
+                            instrument=instrument, target=name, source="model_instrument_selection",
+                        ),
+                    )
+                if not candidates and message == assessment.natural_reply:
+                    message = f"这次还没核实“{name}”，请补充完整股票名称或代码。"
+                outcome = replace(
+                    outcome, diagnostic_code="instrument_required", clarification=message,
+                    instrument_candidates=candidates, instrument_suggestion_declined=True,
+                    run_requested=False, refresh_data=False,
+                    pending_edit_run_requested=run_requested,
+                    pending_edit_refresh_data=bool(
+                        run_requested and outcome.pending_edit_refresh_data
+                    ),
+                )
+                remembered = None
+            elif ((assessment.run_requested is False and assessment.strategy_inspiration is None)
+                  or assessment.reply_kind == "cancelled"):
+                outcome = replace(
+                    outcome, run_requested=False, refresh_data=False,
+                    pending_edit_run_requested=False, pending_edit_refresh_data=False,
+                )
+            else:
+                # A missing stock does not turn every later message into a
+                # stock answer. Reuse the model assessment for normal dialogue,
+                # rule supplements and new inspirations without classifying twice.
+                turn = await self._compiler.answer_clarification(
+                    original_input=state.compile_input, prior_outcome=state.outcome,
+                    answer=answer, recent_turns=_model_recent_turns(state),
+                    dialogue_assessment=assessment,
+                )
+                return DialogueTurnPlan(
+                    intent=intent, clarification_turn=turn,
+                    pending_instrument_reuse=remembered if not turn.revision_changed else None,
+                )
+        return DialogueTurnPlan(
+            intent=intent, pending_instrument_reuse=remembered,
+            clarification_turn=ClarificationTurnOutcome(
+                reply_kind="clarification", assistant_message=message,
+                outcome=outcome, compile_input=state.compile_input,
+                revision_changed=outcome != state.outcome,
+            ),
+        )
+
     async def _apply_instrument(
         self,
         *,
         state: DialogueState,
         instrument: str,
+        assistant_message: str | None = None,
     ) -> ClarificationTurnOutcome:
         compile_input = CompileInput(
             utterance=state.compile_input.utterance,
@@ -392,8 +520,15 @@ class DialogueTurnOrchestrator:
             outcome = self._compiler.bind_selected_idea(compile_input, state.outcome)
         if outcome is None:
             outcome = await self._compiler.compile(compile_input)
+        outcome = replace(
+            outcome, execution_settings=outcome.execution_settings.merged(
+                state.outcome.execution_settings,
+            ),
+        )
         if outcome.status is CompileStatus.READY:
-            message = "好，回测标的已经接上，买入和卖出条件也完整了。"
+            message = assistant_message or await self._compiler.compose_ready_response(
+                answer=instrument, outcome=outcome, recent_turns=_model_recent_turns(state),
+            )
         else:
             question = outcome.clarification or "还需要再补充一项策略条件。"
             message = (question if outcome.idea_route is not None else
@@ -485,7 +620,9 @@ async def _fresh_replacement_turn(
     outcome: CompileOutcome,
 ) -> ClarificationTurnOutcome:
     if outcome.status is CompileStatus.READY:
-        message = "好，我会按你刚刚说的完整新规则重新开始，旧规则不会混进来。"
+        message = await compiler.compose_ready_response(
+            answer=compile_input.utterance, outcome=outcome,
+        )
     else:
         question = outcome.clarification or "还需要再补充一项信息。"
         message = (question if outcome.idea_route is not None else

@@ -2,7 +2,9 @@
  * 对话内的摘要卡 —— 首屏只放"一眼能读完"的信息，其余全部下沉到二级页。
  * SPEC 4.2：首屏不能出现完整参数表、成交成本表、数据来源长说明或运行证据。
  */
+import { useState } from 'react';
 import { Chevron, Notice, ThinkingStream, fmtPct, signClass } from './primitives';
+import { InlineStockEditor, type InlineStockEditorActions } from './InlineStockEditor';
 import { ExcessEquation } from './ExcessEquation';
 import { MiniEquity } from './MiniEquity';
 import { secondaryMetric } from '../view-model';
@@ -72,20 +74,25 @@ export function RuleTree({ node, compact = false }: { node: StrategyRuleNode; co
 
 /** 策略确认卡：首层只保留买入、卖出、区间；本金与高级成交设置下沉。 */
 export function StrategyCard(
-  { instrument, strategy, onEditRow, onOpenMore, onRun, isStarting, isLocked, settled, editableAfterRun = false, canStart = true, disabledReason, error, executionSummary }:
+  { instrument, strategy, onEditRow, onOpenMore, onRun, isStarting, isLocked, settled, editableAfterRun = false, canStart = true, disabledReason, error, executionSummary, stockEditor }:
   { instrument: Instrument; strategy: StrategySummary;
     onEditRow: (key: EditableRow['key']) => void; onOpenMore: () => void; onRun: () => void;
     isStarting?: boolean; isLocked?: boolean; settled?: string; editableAfterRun?: boolean; canStart?: boolean; disabledReason?: string; error?: string;
     /** 当前成交设置的一句话后果，由 view-model 的 summarizeExecution 生成。 */
-    executionSummary?: string },
+    executionSummary?: string; stockEditor?: InlineStockEditorActions },
 ) {
+  const [stockEditing, setStockEditing] = useState(false);
   const isReadOnly = Boolean(isLocked || (settled && !editableAfterRun));
+  const fieldsLocked = isReadOnly || stockEditing;
   return (
-    <section className={`mcard${settled ? ' is-settled' : ''}`}>
+    <section className={`mcard${settled ? ' is-settled' : ''}${stockEditing ? ' is-stock-editing' : ''}`}>
       <div className="pad">
         <div className="symbol">
-          <span className="nm">{instrument.name}</span>
-          <span className="cd">{instrument.code}</span>
+          {stockEditor ? <InlineStockEditor instrument={instrument} disabled={isReadOnly}
+            {...stockEditor} onEditingChange={setStockEditing} /> : <>
+            <span className="nm">{instrument.name}</span>
+            <span className="cd">{instrument.code}</span>
+          </>}
           {instrument.price ? (
             <span className="px">
               <b>{instrument.price}</b>
@@ -98,9 +105,9 @@ export function StrategyCard(
           */}
           <button
             type="button"
-            className={`exec-entry${isReadOnly ? ' off' : ''}`}
+            className={`exec-entry${fieldsLocked ? ' off' : ''}`}
             onClick={onOpenMore}
-            disabled={isReadOnly}
+            disabled={fieldsLocked}
           >
             成交设置<span className="v">{executionSummary ?? '默认'}</span>
             <Chevron />
@@ -111,9 +118,9 @@ export function StrategyCard(
             <button
               key={row.key}
               type="button"
-              className={`erow${row.kind ? ` ${row.kind}` : ''}${isReadOnly ? ' off' : ''}`}
+              className={`erow${row.kind ? ` ${row.kind}` : ''}${fieldsLocked ? ' off' : ''}`}
               onClick={() => onEditRow(row.key)}
-              disabled={isReadOnly}
+              disabled={fieldsLocked}
             >
               <span className="lb">{row.label}</span>
               <span className="val">
@@ -129,7 +136,7 @@ export function StrategyCard(
         {
           label: isStarting ? '正在创建任务' : isLocked ? '回测运行中' : canStart ? '开始回测' : '请检查设置',
           onClick: onRun,
-          disabled: isLocked || !canStart,
+          disabled: isLocked || stockEditing || !canStart,
         },
       ]} />
       {!canStart && disabledReason ? <div className="card-note">{disabledReason}</div> : null}

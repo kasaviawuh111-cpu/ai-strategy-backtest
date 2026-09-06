@@ -119,9 +119,10 @@ def test_missing_stock_offers_an_active_sample_only_after_empty_results(empty_re
     if empty_result:
         assert len(provider.queries) == 2
         assert "日线策略" in provider.queries[0]
-        assert "成交额从高到低" in provider.queries[1]
+        assert "最近交易日成交额排名前10" in provider.queries[1]
         assert draft["instrument_suggestion"]["symbol"] == "300059.SZ"
-        assert "可以先用 东方财富" in draft["clarification"]
+        assert draft["instrument_suggestion"]["name"] == "东方财富"
+        assert "你想用哪只股票试试" in draft["clarification"]
     else:
         assert len(provider.queries) == 1
         assert draft["instrument_suggestion"] is None
@@ -219,6 +220,7 @@ def test_live_market_screen_returns_provider_result_with_provenance() -> None:
         "asset_type": "A股",
         "columns": ["证券代码", "证券简称", "近一年涨跌幅"],
         "rows": [{"证券代码": "300059", "证券简称": "东方财富", "近一年涨跌幅": "12.34"}],
+        "provider_metadata": {},
         "provenance": {
             "response_sha256": "sha256:" + "a" * 64,
             "retrieved_at": "2026-09-02T10:00:00Z",

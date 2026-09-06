@@ -8,7 +8,7 @@ avoid a second model interpretation of model-authored text.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -24,6 +24,7 @@ from ashare_lab.domain.strategy import (
 from ashare_lab.domain.strategy.models import Condition
 from ashare_lab.ports.candidate_generation import CompileInput
 from ashare_lab.ports.current_fact_research import CurrentFactResearchResult
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 
 
 class IdeaResearchUnavailableError(RuntimeError):
@@ -124,6 +125,8 @@ class IdeaRoute:
     # into a StrategySpec or signal timeline.
     research: CurrentFactResearchResult | None = None
     schema_version: Literal["idea-route.v1"] = "idea-route.v1"
+    execution_settings: ExecutionSettingsPatch = field(default_factory=ExecutionSettingsPatch)
+    instrument_suggestion_declined: bool = False
 
 
 class IdeaRouter(Protocol):

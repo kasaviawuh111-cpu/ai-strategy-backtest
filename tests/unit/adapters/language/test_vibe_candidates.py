@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
@@ -24,6 +25,10 @@ from ashare_lab.adapters.language.vibe_candidates import (
     _validate_join_grounding,  # pyright: ignore[reportPrivateUsage]
     build_candidate_capability_matrix,
 )
+from ashare_lab.adapters.market_data.mx_saas import MxSaasProviderNoDataError
+from ashare_lab.api import create_app
+from ashare_lab.api.container import ApiContainer
+from ashare_lab.api.routes.strategy_drafts import _offer_missing_instrument
 from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
 from ashare_lab.domain.catalog import load_catalog_directory, load_coverage_catalog_directory
 from ashare_lab.domain.strategy import (
@@ -35,6 +40,7 @@ from ashare_lab.domain.strategy import (
     TrailingDrawdownExit,
 )
 from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
+from ashare_lab.ports.live_market_data import LiveMarketDataResult
 
 ROOT = Path(__file__).parents[4]
 CATALOG = load_catalog_directory(ROOT / "catalogs")
@@ -1652,6 +1658,127 @@ async def test_model_grounded_initial_cash_flows_into_compiled_strategy(
         item.path == "/backtest/initial_cash_cny" and item.text == "本金10万元"
         for item in outcome.candidate_grounding
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("settings", "evidence"), [
+    (
+        {"slippage_bps": "0", "commission_rate": "0", "minimum_commission_cny": "0"},
+        {"slippage_bps": "滑点0", "commission_rate": "佣金0",
+         "minimum_commission_cny": "最低佣金0"},
+    ),
+    (
+        {"slippage_bps": "5", "commission_rate": "0.0003", "minimum_commission_cny": "5"},
+        {"slippage_bps": "滑点0.05%", "commission_rate": "佣金万分之三",
+         "minimum_commission_cny": "最低佣金5元"},
+    ),
+    (
+        {"slippage_bps": "5", "commission_rate": "0.0003"},
+        {"slippage_bps": "滑点5个基点", "commission_rate": "佣金率0.03%"},
+    ),
+])
+async def test_model_execution_settings_preserve_zero_and_normalized_units(
+    settings: dict[str, str], evidence: dict[str, str],
+) -> None:
+    # The model supplies the conversion; the adapter must not substitute defaults.
+    utterance = f"{DIRECT_UTTERANCE}，{'，'.join(evidence.values())}"
+    payload = _macd_batch()
+    candidate = cast(list[dict[str, object]], payload["candidates"])[0]
+    candidate.update(execution_settings=settings, execution_setting_evidence=evidence)
+    transport = _FakeTransport(payload)
+    generated = await _bounded(transport).generate(CompileInput(
+        utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
+    ))
+
+    assert generated[0].unsupported_code is None
+    assert generated[0].execution_settings.model_dump(exclude_none=True) == {
+        name: Decimal(value) for name, value in settings.items()
+    }
+    contract = transport.requests[0].system_contract
+    assert "0 和 false 是明确设置" in contract
+    assert "滑点0.05%写5" in contract and "佣金万分之三或万三写0.0003" in contract
+    assert "不能遗漏费用" in contract
+
+
+@pytest.mark.asyncio
+async def test_unmentioned_execution_settings_stay_empty_for_legacy_model_output() -> None:
+    generated = await _bounded(_FakeTransport(_macd_batch())).generate(CompileInput(
+        utterance=DIRECT_UTTERANCE, instrument_context="300059.SZ",
+        as_of_date=date(2026, 9, 5),
+    ))
+
+    assert generated[0].unsupported_code is None
+    assert generated[0].execution_settings.model_dump(exclude_none=True) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("suffix", "declined"), [
+    ("股票等我补充，先别跑", True),
+    ("先别跑，请帮我推荐三只股票", False),
+])
+async def test_model_stock_selection_preference_controls_initial_screening(
+    suffix: str, declined: bool,
+) -> None:
+    # Provider-output plumbing, not a rule-based interpretation or live acceptance.
+    payload = _macd_batch()
+    candidate = cast(list[dict[str, object]], payload["candidates"])[0]
+    candidate["instrument_suggestion_declined"] = declined
+    transport = _FakeTransport(payload)
+    compiler = StrategyCompiler(
+        generator=_bounded(transport), catalog=CATALOG,
+        catalog_id="cn_a.signals", release_version=CATALOG_RELEASE,
+        backtest_anchor_date=date(2026, 9, 5),
+    )
+    request = CompileInput(f"{DIRECT_UTTERANCE}，{suffix}", date(2026, 9, 5))
+    outcome = await compiler.compile(request)
+    assert outcome.diagnostic_code == "instrument_required"
+    assert outcome.instrument_suggestion_declined is declined
+    assert outcome.selected_idea_proposal is not None
+    assert outcome.selected_idea_proposal.strategy_template is not None
+    assert not outcome.run_requested
+
+    class Screener:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def screen(self, *, query: str, asset_type: str) -> LiveMarketDataResult:
+            self.queries.append(query)
+            raise MxSaasProviderNoDataError("fixture contains no stocks")
+
+    screener = Screener()
+    container = cast(ApiContainer, create_app(
+        compiler=compiler, live_market_data=screener,
+    ).state.container)
+    offered, selected = await _offer_missing_instrument(
+        outcome=outcome, compile_input=request, state=None, container=container,
+    )
+    assert selected is None and offered.selected_idea_proposal == outcome.selected_idea_proposal
+    assert len(screener.queries) == (0 if declined else 2)
+    contract = transport.requests[0].system_contract
+    assert "instrument_suggestion_declined=true" in contract
+    assert "缺少股票本身、或只说先别跑，不能据此拒绝推荐" in contract
+    assert "用户本轮明确请求帮忙推荐股票时，此字段为false" in contract
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("settings", "evidence"), [
+    ({"slippage_bps": "5"}, {}),
+    ({}, {"slippage_bps": "滑点0"}),
+    ({"slippage_bps": "5"}, {"slippage_bps": "滑点5个基点"}),
+    ({"slippage_bps": "0"}, {"slippage_bps": ""}),
+])
+async def test_execution_settings_require_matching_exact_quotes(
+    settings: dict[str, str], evidence: dict[str, str],
+) -> None:
+    payload = _macd_batch()
+    candidate = cast(list[dict[str, object]], payload["candidates"])[0]
+    candidate.update(execution_settings=settings, execution_setting_evidence=evidence)
+    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+        utterance=f"{DIRECT_UTTERANCE}，滑点0", instrument_context="300059.SZ",
+        as_of_date=date(2026, 9, 5),
+    ))
+
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
 
 
 @pytest.mark.asyncio

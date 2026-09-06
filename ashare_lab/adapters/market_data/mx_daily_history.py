@@ -74,8 +74,19 @@ class MxDailyHistoryCacheMissError(MxDailyHistoryError):
 class MxDailyHistoryFieldsMissingError(MxDailyHistoryError):
     """Only requested, canonical field names are safe to expose to callers."""
 
-    def __init__(self, fields: tuple[str, ...]) -> None:
+    def __init__(
+        self, fields: tuple[str, ...], *, start: date | None = None, end: date | None = None,
+    ) -> None:
+        if (start is None) != (end is None) or (
+            start is not None and end is not None
+            and (type(start) is not date or type(end) is not date or start > end)
+        ):
+            raise ValueError("missing-field context requires an ordered date pair")
         self.fields = fields
+        # The failed fetch range may include warmup or be one chunk of a long
+        # request. It is not a substitute for the user's requested backtest range.
+        self.start = start
+        self.end = end
         super().__init__("MX history response omitted fields: " + ", ".join(fields))
 
 
@@ -413,7 +424,7 @@ class MxDailyHistoryClient:
             try:
                 return await self._client.query_finance(query=query, indicators=indicators)
             except MxSaasProviderNoDataError as exc:
-                raise MxDailyHistoryFieldsMissingError(required) from exc
+                raise MxDailyHistoryFieldsMissingError(required, start=start, end=end) from exc
 
         range_text = f"{start.isoformat()}至{end.isoformat()}"
         session_indicators = "前收盘价、交易状态、是否ST"
@@ -670,7 +681,7 @@ def _history_fields(
             fields[name] = typed_values
     missing = sorted(wanted - set(fields))
     if missing:
-        raise MxDailyHistoryFieldsMissingError(tuple(missing))
+        raise MxDailyHistoryFieldsMissingError(tuple(missing), start=start, end=end)
     return dates, fields
 
 
@@ -732,7 +743,7 @@ def _board_for_symbol(symbol: str) -> Board:
     digits, market = symbol.split(".", maxsplit=1)
     if market == "SH" and digits.startswith(("688", "689")):
         return Board.STAR
-    if market == "SZ" and digits.startswith(("300", "301")):
+    if market == "SZ" and (digits.startswith(("300", "301")) or digits == "302132"):
         return Board.CHINEXT
     if (market == "SH" and digits.startswith(("600", "601", "603", "605"))) or (
         market == "SZ" and digits.startswith(("000", "001", "002", "003"))

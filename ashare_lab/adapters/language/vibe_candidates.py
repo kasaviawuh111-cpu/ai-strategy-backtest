@@ -58,6 +58,7 @@ from ashare_lab.ports.candidate_generation import (
     TrailingDrawdownIntent,
 )
 from ashare_lab.ports.dialogue_progress import emit_progress
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 
 _UPSTREAM_COMMIT = "e90b6c6cd9fea23067a85667e7fbf74f9d73ea48"
 _DEFAULT_FALLBACK_CODES = frozenset(
@@ -171,15 +172,75 @@ _SAFE_VALIDATION_MESSAGE_CODES = {
     "candidate supplied unused initial cash evidence": "initial_cash_evidence_unused",
     "explicit initial cash amount is ambiguous": "initial_cash_ambiguous",
     "explicit initial cash amount must resolve to whole CNY": "initial_cash_not_whole_cny",
+    "execution setting evidence must match changed fields": "execution_settings_evidence_mismatch",
+    "execution setting evidence must quote the current input": "execution_settings_quote_invalid",
+}
+
+
+CandidateFailureKind = Literal[
+    "unknown", "authentication_failed", "permission_denied", "insufficient_balance",
+    "billing_restricted", "rate_limited", "service_unavailable", "timeout",
+    "connection_failed", "invalid_response", "incomplete_response",
+]
+_CANDIDATE_FAILURE_MESSAGES: dict[str, str] = {
+    "authentication_failed": "模型服务鉴权失败，本次请求未完成，请检查服务端模型配置。",
+    "permission_denied": "模型服务拒绝访问，本次请求未完成，请检查服务端账户权限。",
+    "insufficient_balance": "DeepSeek 账户余额不足，本次模型请求未完成，请检查服务端账户余额。",
+    "billing_restricted": "模型服务账户计费受限，本次请求未完成，请检查服务端计费状态。",
+    "rate_limited": "模型服务请求频率受限，本次请求未完成，请稍后重试。",
+    "service_unavailable": "模型服务暂时不可用，本次请求未完成，请稍后重试。",
+    "timeout": "模型请求超时，本次请求未完成，请稍后重试。",
+    "connection_failed": "模型服务连接未完成或中断，本次请求未完成，请稍后重试。",
+    "invalid_response": "模型返回的格式无效，本次请求未完成，请重试。",
+    "incomplete_response": "模型响应未完整返回，本次请求未完成，请重试。",
 }
 
 
 class CandidateTransportError(RuntimeError):
     """Declared, sanitized transport failure that may degrade to unavailable."""
 
-    def __init__(self, message: str, *, timed_out: bool = False) -> None:
+    def __init__(
+        self, message: str, *, timed_out: bool = False,
+        failure_kind: CandidateFailureKind = "unknown", http_status: int | None = None,
+    ) -> None:
         super().__init__(message)
-        self.timed_out = timed_out
+        self.failure_kind = (
+            failure_kind if failure_kind in _CANDIDATE_FAILURE_MESSAGES else "unknown"
+        )
+        self.timed_out = timed_out or self.failure_kind == "timeout"
+        self.http_status = (
+            http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+        )
+
+    @property
+    def is_classified(self) -> bool:
+        return self.failure_kind != "unknown"
+
+    @property
+    def public_code(self) -> str:
+        suffix = self.failure_kind if self.is_classified else (
+            "timeout" if self.timed_out else "unavailable"
+        )
+        return f"candidate_provider_{suffix}"
+
+    @property
+    def public_message(self) -> str:
+        return _CANDIDATE_FAILURE_MESSAGES.get(
+            self.failure_kind, "模型服务调用未完成，请稍后重试。",
+        )
+
+    @property
+    def api_status_code(self) -> int:
+        if self.failure_kind == "timeout":
+            return 504
+        if self.failure_kind == "rate_limited":
+            return 429
+        if self.failure_kind in {
+            "authentication_failed", "permission_denied", "insufficient_balance",
+            "billing_restricted", "service_unavailable",
+        }:
+            return 503
+        return 502
 
 
 class _ParameterEvidenceError(ValueError):
@@ -669,6 +730,14 @@ type _ExitCandidate = Annotated[
 
 
 class BoundedCandidate(_StrictCandidateModel):
+    instrument_suggestion_declined: bool = Field(
+        default=False, strict=True,
+        description=(
+            "True only when the user explicitly wants to supply/select the stock themselves "
+            "or refuses stock recommendations. Missing a stock or saying do not run yet "
+            "alone is not a refusal; an explicit request for recommendations is false."
+        ),
+    )
     instrument_name: str | None = Field(
         default=None, min_length=2, max_length=32,
         description=(
@@ -705,6 +774,15 @@ class BoundedCandidate(_StrictCandidateModel):
         gt=0,
         le=1_000_000_000,
         strict=True,
+    )
+    execution_settings: ExecutionSettingsPatch = Field(default_factory=ExecutionSettingsPatch)
+    execution_setting_evidence: dict[str, str] = Field(
+        default_factory=dict,
+        max_length=12,
+        description=(
+            "Exactly one source quote for each non-null execution_settings field, "
+            "keyed by that field's snake_case name. Quote the current utterance verbatim."
+        ),
     )
 
     @model_validator(mode="after")
@@ -859,8 +937,26 @@ class VibeBoundedCandidateGenerator:
                 "若只写了公司或股票名称，无论在句子什么位置，提取原文名称 instrument_name"
                 "及其精确 instrument_span，instrument_symbol 留空，代码由证券服务确认；"
                 "若没有提到股票名称，instrument_name 留空；当日、每日、如果等不是公司名。"
+                "用户明确说股票等我补充、我自己选股票或不要推荐股票时，"
+                "instrument_suggestion_declined=true，保留买卖规则并等待用户补股票；"
+                "缺少股票本身、或只说先别跑，不能据此拒绝推荐；"
+                "用户本轮明确请求帮忙推荐股票时，此字段为false，不取消推荐。"
                 "若原话明确给出本金，必须换算为整数人民币元写入 initial_cash_cny，"
                 "并在 initial_cash_span 给出对应原文；未给本金时两字段均为 null；"
+                "原话明确给出的成交设置必须完整提取到 execution_settings，不能遗漏费用，"
+                "也不能混入买卖条件或改动固定的 StrategySpec.execution 撮合规则。"
+                "只填用户明确指定的设置；未提及的字段省略或为 null，不能填默认值。"
+                "0 和 false 是明确设置，不等于未指定；例如滑点0、佣金0、最低佣金0均须保留。"
+                "slippage_bps 单位为基点，1基点=0.01%，滑点0.05%写5，滑点5个基点也写5；"
+                "commission_rate 是比例，佣金万分之三或万三写0.0003，佣金率0.03%也写0.0003；"
+                "minimum_commission_cny 是人民币元数，最低佣金5元写5。"
+                "participation_rate 和 allocation_ratio 是比例，例如10%写0.1；"
+                "warmup_calendar_days 和 settlement_extension_days 是自然日数，"
+                "max_exit_attempts 是重试次数，retry_unfilled_exits 与 run_robustness"
+                "按用户明确要求写 true/false。"
+                "execution_setting_evidence 的键必须与 execution_settings 所有非null字段完全一致；"
+                "每个值逐字引用本轮原话中包含设置名称、数值和单位的连续文字，不得补字或改写。"
+                "未指定任何成交设置时 execution_settings 和 execution_setting_evidence 均为空对象。"
                 "未在原话出现的指标参数只有等于 Catalog default 时才可写入，"
                 "并须在 defaulted_fields "
                 "使用 /entry/{i}/params/{name} 或 /exit/{i}/params/{name} 标记；"
@@ -920,6 +1016,8 @@ class VibeBoundedCandidateGenerator:
             )
             return (_unsupported(request.instrument_context, "candidate_provider_invalid_output"),)
         except CandidateTransportError as exc:
+            if exc.is_classified:
+                raise
             _LOGGER.warning("candidate_gate_rejected reason=transport_unavailable")
             code = (
                 "candidate_provider_timeout" if exc.timed_out else "candidate_provider_unavailable"
@@ -1857,6 +1955,9 @@ def _validate_candidate_grounding(
     _validate_instrument_grounding(candidate, request)
     _validate_period_grounding(candidate, request)
     _validate_initial_cash_grounding(candidate, request)
+    candidate.execution_settings.validate_evidence(
+        candidate.execution_setting_evidence, request.utterance,
+    )
 
 
 def _log_leaf_grounding_failure(
@@ -3154,6 +3255,8 @@ def _to_candidate_ast(
         backtest_end=item.backtest_end,
         backtest_lookback_years=item.backtest_lookback_years,
         initial_cash_cny=item.initial_cash_cny,
+        execution_settings=item.execution_settings,
+        instrument_suggestion_declined=item.instrument_suggestion_declined,
         provenance=provenance,
         grounding_evidence=tuple(grounding),
     )

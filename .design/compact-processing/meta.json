@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "slug": "compact-processing",
+  "title": "合并等待与处理过程展示",
+  "source": {"type": "adhoc", "ref": "等待内容过多，保留单一入口"},
+  "status": "approved",
+  "fidelity": "full",
+  "createdAt": "2026-09-05",
+  "updatedAt": "2026-09-05",
+  "direction": {"source": "product-tokens", "note": "沿用现有 Inter/PingFang、ink-2/3/4、surface-card 和 details 控件，只减少重复层级"},
+  "asIs": {"verified": "both", "selfChecked": true, "component": "web/src/components/primitives.tsx:ThinkingStream + ModelReasoning.tsx; app.css:120-140"},
+  "versions": [{"v": 1, "file": "v1.html", "date": "2026-09-05", "summary": "现状与单一处理过程入口对比；A默认收起，B默认展开；含初始、补查、完成状态"}, {"v": 2, "file": "v2.html", "date": "2026-09-05", "summary": "用户确认处理中默认展开，完成自动收起，尊重手动折叠"}],
+  "decisions": [{"q": "默认折叠还是展开", "choice": "用户确认B：处理中默认展开；完成自动收起，其余设计照常"}],
+  "dataModel": [
+    {"field": "events.stage/message/elapsedMs", "means": "当前请求实际发出的阶段与服务说明，不是固定计时步骤", "source": "ports/dialogue_progress.py → api/dialogue_progress.py → shared/api/client.ts"},
+    {"field": "events.reasoning", "means": "本地明确开启时上游返回的原始文本；不是公开方向，也不承诺每次有", "source": "api/dialogue_progress.py.emit_reasoning → ModelReasoning.tsx"},
+    {"field": "strategy_direction", "means": "已验证模型公开方向，先于取数和组合完成显示于正常回复", "source": "strategy_drafts.py._offer_missing_instrument → App.tsx"}
+  ],
+  "build": {"entryPoints": ["web/src/components/primitives.tsx", "web/src/components/ModelReasoning.tsx", "web/src/App.tsx", "web/src/styles/app.css"], "verify": ["定向组件交互测试", "TypeScript检查", "真实浏览器等待及结束状态"]}
+}

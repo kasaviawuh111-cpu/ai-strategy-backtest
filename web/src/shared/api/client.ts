@@ -6,8 +6,10 @@ import {
   fromBacktestOptimizationCandidate,
   mergeLiveRevision,
   toLiveBacktestBody,
+  toLiveBacktestReferences,
   toLiveCompileBody,
   toLiveRevisionBody,
+  toLiveExecutionSettings,
 } from './contract'
 import type { LiveClarificationAnswerResponse, LiveDraftResponse } from './contract'
 import type {
@@ -23,6 +25,7 @@ import type {
   CompileRequest,
   CompileResponse,
   EquityPoint,
+  Instrument,
   StrategyDraft,
   StrategySpec,
   StrategySpecCondition,
@@ -86,6 +89,9 @@ const request = async <T>(
   const headers = new Headers(init?.headers)
   headers.set('Accept', 'application/json, application/problem+json')
   if (init?.body) headers.set('Content-Type', 'application/json')
+  if (import.meta.env.VITE_PRIVATE_PREVIEW === 'true' && init?.method === 'POST') {
+    headers.set('Prefer', 'respond-async')
+  }
 
   let response: Response
   try {
@@ -97,6 +103,41 @@ const request = async <T>(
   } catch (error) {
     if (error instanceof ApiError) throw error
     throw requestFailure(error, timeoutMs)
+  }
+
+  if (import.meta.env.VITE_PRIVATE_PREVIEW === 'true'
+      && response.status === 202 && response.headers.get('X-Preview-Pending') === '1') {
+    const location = response.headers.get('Location') ?? ''
+    if (!/^\/api\/v1\/preview-requests\/[0-9a-f-]{36}$/.test(location)) {
+      throw new ApiError({ type: 'about:blank', title: '请求状态异常', status: 502,
+        detail: '服务未返回有效的分析查询地址。', code: 'preview_invalid_location' })
+    }
+    while (response.status === 202 && response.headers.get('X-Preview-Pending') === '1') {
+      await new Promise<void>((resolve, reject) => {
+        const timer = window.setTimeout(done, 1_000)
+        const signal = init?.signal
+        function done() { signal?.removeEventListener('abort', abort); resolve() }
+        function abort() {
+          window.clearTimeout(timer)
+          signal?.removeEventListener('abort', abort)
+          reject(signal?.reason)
+        }
+        if (signal?.aborted) abort()
+        else signal?.addEventListener('abort', abort, { once: true })
+      })
+      try {
+        const signals = [AbortSignal.timeout(REQUEST_TIMEOUT_MS)]
+        if (init?.signal) signals.push(init.signal)
+        response = await fetch(`${baseUrl}${location}`, {
+          headers: { Accept: 'application/json, application/problem+json' },
+          signal: AbortSignal.any(signals), redirect: 'error',
+        })
+      } catch {
+        throw new ApiError({ type: 'about:blank', title: '结果查询中断', status: 0,
+          detail: '结果查询暂时中断，后台可能仍在处理。请先不要重复提交。',
+          code: 'preview_poll_interrupted' })
+      }
+    }
   }
 
   if (!response.ok) {
@@ -371,6 +412,39 @@ export const requireStrategyCapability = (
   }
 }
 
+export const instrumentApi = {
+  search: async (query: string, signal: AbortSignal): Promise<{
+    items: Instrument[]; hasMore: boolean; isStaleCache?: boolean
+  }> => {
+    const response = await request<{
+      items: Array<{ symbol: string; name: string; exchange: 'SH' | 'SZ' | 'BJ' }>
+      source: string
+      has_more: boolean
+      cache_status?: 'live' | 'fresh_cache' | 'stale_cache'
+    }>(`/api/v1/market/instruments?query=${encodeURIComponent(query.trim())}&limit=8`, {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+    })
+    const exchanges = { SH: 'SSE', SZ: 'SZSE', BJ: 'BSE' } as const
+    if (!['eastmoney_security_search', 'eastmoney_instrument_directory'].includes(response.source)
+      || !Array.isArray(response.items)
+      || typeof response.has_more !== 'boolean'
+      || response.items.some(item => !item || typeof item.name !== 'string' || !item.name.trim()
+        || !Object.hasOwn(exchanges, item.exchange)
+        || typeof item.symbol !== 'string'
+        || !/^\d{6}\.(SH|SZ|BJ)$/.test(item.symbol)
+        || !item.symbol.endsWith(`.${item.exchange}`))) {
+      throw new ApiError({ type: 'about:blank', title: '股票搜索结果无效', status: 502,
+        detail: '股票服务返回的名称或代码不完整，请重新查找。', code: 'instrument_search_invalid' })
+    }
+    return {
+      items: response.items.map(item => ({ symbol: item.symbol, name: item.name,
+        market: 'CN_A', exchange: exchanges[item.exchange] })),
+      hasMore: response.has_more,
+      ...(response.cache_status === 'stale_cache' ? { isStaleCache: true } : {}),
+    }
+  },
+}
+
 export const strategyApi = {
   compile: async (
     input: ProgressAware<CompileRequest>,
@@ -385,7 +459,8 @@ export const strategyApi = {
         request<LiveDraftResponse>('/api/v1/strategy-drafts', {
           method: 'POST',
           headers,
-          body: JSON.stringify(toLiveCompileBody(input)),
+          body: JSON.stringify(toLiveCompileBody(parentDraftId
+            ? input : { ...input, executionSettings: undefined })),
         }, DIALOGUE_TIMEOUT_MS),
         // Metadata improves labels, but it is not a prerequisite for understanding
         // or producing the server-owned StrategySpec. The page performs a separate
@@ -420,10 +495,9 @@ export const strategyApi = {
           + `/revisions/${input.revision}/clarification-answers`,
           { method: 'POST', headers, body: JSON.stringify({
             answer: input.answer,
-            ...(input.relatedRunIds?.length ? { related_run_ids: input.relatedRunIds.slice(-2) } : {}),
-            ...(input.relatedReview ? { related_review: {
-              run_id: input.relatedReview.runId, response_hash: input.relatedReview.responseHash,
-            } } : {}),
+            ...(input.executionSettings !== undefined
+              ? { execution_settings: toLiveExecutionSettings(input.executionSettings) } : {}),
+            ...toLiveBacktestReferences(input),
           }) },
           DIALOGUE_TIMEOUT_MS,
         ),
@@ -433,13 +507,16 @@ export const strategyApi = {
     })
   },
 
-  revise: async (draft: StrategyDraft, recoverIfMissing = false): Promise<StrategyDraft> => {
+  revise: async (draft: StrategyDraft, recoverIfMissing = false, signal?: AbortSignal): Promise<StrategyDraft> => {
     if (useMock) return mockApi.revise(draft)
     const capabilities = await systemApi.capabilities()
+    signal?.throwIfAborted()
     requireStrategyCapability(draft.strategySpec, capabilities)
     const response = await request<LiveDraftResponse>(
       `/api/v1/strategy-drafts/${encodeURIComponent(draft.id)}/revisions`,
-      { method: 'POST', body: JSON.stringify({
+      { method: 'POST', ...(signal ? {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+      } : {}), body: JSON.stringify({
         ...toLiveRevisionBody(draft),
         ...(recoverIfMissing ? { recover_if_missing: true } : {}),
       }) },
@@ -480,6 +557,7 @@ export const backtestApi = {
 
   review: async (
     runId: string, observer?: DialogueProgressObserver,
+    references?: Pick<CompileRequest, 'relatedRunIds' | 'relatedReviews'>,
   ): Promise<BacktestReviewResponse> => {
     if (useMock) {
       throw new ApiError({
@@ -490,9 +568,11 @@ export const backtestApi = {
         code: 'backtest_review_model_unavailable',
       })
     }
+    const body = references ? toLiveBacktestReferences(references) : undefined
     return withDialogueProgress(observer, (progressId) => request<BacktestReviewResponse>(
       `/api/v1/backtest-runs/${encodeURIComponent(runId)}/review`,
-      { method: 'POST', headers: progressId ? { 'X-Dialogue-Progress-ID': progressId } : undefined },
+      { method: 'POST', headers: progressId ? { 'X-Dialogue-Progress-ID': progressId } : undefined,
+        ...(body && Object.keys(body).length ? { body: JSON.stringify(body) } : {}) },
       BACKTEST_REVIEW_TIMEOUT_MS,
     ))
   },

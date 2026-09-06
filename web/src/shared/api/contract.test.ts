@@ -18,6 +18,7 @@ import type {
   StrategySpecIndicatorCondition,
 } from './types'
 import { toStrategySummary } from '../../view-model'
+import { DEFAULT_EXECUTION_SETTINGS } from '../config/backtest'
 
 const capabilities = (overrides: Partial<CapabilitiesResponse> = {}): CapabilitiesResponse => ({
   markets: ['CN_A'],
@@ -146,6 +147,56 @@ const withFastParameter = (condition: StrategyCondition, value: number): Strateg
       }
 
 describe('live API contract adapter', () => {
+  it('maps stored execution settings with decimal strings, explicit zero and false', () => {
+    const outcome = fromLiveDraftResponse({ ...response, execution_settings: {
+      slippage_bps: '0', commission_rate: '0', minimum_commission_cny: 0,
+      participation_rate: '0.08', allocation_ratio: null, retry_unfilled_exits: false,
+      run_robustness: false, limit_handling: 'strict_no_fill_at_limit',
+    } }, request)
+    if (outcome.status !== 'compiled') throw new Error('expected ready settings')
+    expect(outcome.executionSettings).toEqual({
+      slippageBps: 0, commissionRate: 0, minimumCommissionCny: 0,
+      participationRate: 0.08, retryUnfilledExits: false, runRobustness: false,
+      priceLimitMode: 'strict_no_fill_at_limit',
+    })
+    expect(outcome.draft.execution).toMatchObject({
+      ...DEFAULT_EXECUTION_SETTINGS, ...outcome.executionSettings,
+    })
+  })
+
+  it.each([{}, null])('does not inherit old fees into fresh server execution settings: %s', (settings) => {
+    const outcome = fromLiveDraftResponse({ ...response, execution_settings: settings }, {
+      ...request, executionSettings: { commissionRate: 0, slippageBps: 2 },
+    })
+    if (outcome.status !== 'compiled') throw new Error('expected a fresh strategy')
+    expect(outcome.executionSettings).toEqual({})
+    expect(outcome.draft.execution).toMatchObject(DEFAULT_EXECUTION_SETTINGS)
+    expect(fromLiveDraftResponse(response, request)).not.toHaveProperty('executionSettings')
+  })
+
+  it('saves all execution settings and respects the returned single-field fee update', () => {
+    const compiled = fromLiveDraftResponse(response, request)
+    if (compiled.status !== 'compiled') throw new Error('expected a draft')
+    const edited = { ...compiled.draft, execution: { ...compiled.draft.execution,
+      slippageBps: 2, commissionRate: 0, minimumCommissionCny: 0 } }
+    const body = toLiveRevisionBody(edited)
+    expect(body.execution_settings).toEqual({
+      limit_handling: 'wait_for_unlock', capacity_mode: 'point_in_time_volume',
+      participation_rate: 0.05, allocation_ratio: 1,
+      commission_rate: 0, minimum_commission_cny: 0, slippage_bps: 2,
+      retry_unfilled_exits: true, max_exit_attempts: 20, warmup_calendar_days: 180,
+      settlement_extension_days: 14, run_robustness: true,
+    })
+    expect(toLiveCompileBody({ ...request, executionSettings: edited.execution }).execution_settings)
+      .toEqual(body.execution_settings)
+    const saved = mergeLiveRevision({ ...response, revision: 2,
+      execution_settings: { ...body.execution_settings, slippage_bps: '3' },
+    }, edited)
+    expect(saved.execution).toEqual({ ...edited.execution, slippageBps: 3 })
+    expect(mergeLiveRevision({ ...response, revision: 2 }, edited).execution)
+      .toEqual(edited.execution)
+  })
+
   it('displays only a verified name matching the executable stock code', () => {
     for (const verifiedSymbol of ['600183.SH', '600519.SH']) {
       const outcome = fromLiveDraftResponse({
@@ -164,12 +215,40 @@ describe('live API contract adapter', () => {
   it('keeps a ready semantic edit executable even with an acknowledgement', () => {
     const outcome = fromLiveDraftResponse({
       ...response, assistant_message: '已修改入场周期，其余不变。', run_requested: true,
+      is_strategy_edit: true,
     }, request)
     expect(outcome.status).toBe('compiled')
     if (outcome.status !== 'compiled') throw new Error('expected a ready edit')
     expect(outcome.runRequested).toBe(true)
+    expect(outcome.isStrategyEdit).toBe(true)
+    expect(outcome.assistantMessage).toBe('已修改入场周期，其余不变。')
     expect(outcome.draft.strategySpec).toEqual(strategy)
     expect(outcome.draft.assumptions.join('')).not.toContain('100 股整手')
+  })
+
+  it('maps verified stock-edit candidates to answers on the pending revision', () => {
+    const candidates = [
+      { symbol: '601995.SH', name: '中金公司' },
+      { symbol: '600489.SH', name: '中金黄金' },
+      { symbol: '000060.SZ', name: '中金岭南' },
+      { symbol: '002500.SZ', name: '山西证券' },
+    ].map(candidate => ({ ...candidate, source: 'eastmoney_mx_screener',
+      retrieved_at: '2026-09-06T00:00:00Z', evidence: null }))
+    const outcome = fromLiveDraftResponse({
+      ...response, status: 'needs_clarification', strategy: null, strategy_hash: null,
+      diagnostic_code: 'strategy_edit_clarification', is_strategy_edit: true,
+      clarification: '你说的中金是哪只？', instrument_candidates: candidates,
+    }, request)
+    if (outcome.status !== 'needs_clarification') throw new Error('expected stock clarification')
+    expect(outcome.isStrategyEdit).toBe(true)
+    expect(outcome.clarification.choices).toEqual(candidates.slice(0, 3).map(candidate => ({
+      id: candidate.symbol, label: candidate.name, description: candidate.symbol,
+      action: 'submit_clarification', suggestedUtterance: candidate.name,
+      instrumentSymbol: candidate.symbol, instrumentName: candidate.name,
+    })))
+    expect(outcome).not.toHaveProperty('runRequested')
+    const fresh = fromLiveDraftResponse({ ...response, is_strategy_edit: false }, request)
+    expect(fresh).not.toHaveProperty('isStrategyEdit')
   })
 
   it('passes explicit refresh only to that run, not into the saved strategy', () => {
@@ -363,12 +442,13 @@ describe('live API contract adapter', () => {
     }
   })
 
-  it('passes only the last two report references for a result follow-up', () => {
+  it('passes the latest twenty report references in conversation order for a result follow-up', () => {
+    const runIds = Array.from({ length: 23 }, (_, index) => `run:${index}`)
     expect(toLiveCompileBody({
       instrument: { symbol: '300059.SZ', name: '东方财富', market: 'CN_A', exchange: 'SZSE' },
       utterance: '这次和上次相比怎么样？',
-      relatedRunIds: ['run:old', 'run:previous', 'run:current'],
-    }).related_run_ids).toEqual(['run:previous', 'run:current'])
+      relatedRunIds: runIds,
+    }).related_run_ids).toEqual(runIds.slice(-20))
   })
 
   it('passes the displayed optimization version by reference, not client strategy data', () => {
@@ -378,6 +458,20 @@ describe('live API contract adapter', () => {
     expect(body.related_review).toEqual({ run_id: relatedReview.runId,
       response_hash: relatedReview.responseHash })
     expect(body).not.toHaveProperty('optimizationCandidates')
+  })
+
+  it('keeps bounded exposed review versions only for submitted report references', () => {
+    const reviews = Array.from({ length: 23 }, (_, index) => ({
+      runId: 'run:current', responseHash: `sha256:review-${index}`,
+    }))
+    const body = toLiveCompileBody({ ...request, relatedRunIds: ['run:current'],
+      relatedReview: { runId: 'run:absent', responseHash: 'sha256:absent' },
+      relatedReviews: [...reviews, { runId: 'run:absent', responseHash: 'sha256:absent' }],
+    })
+    expect(body.related_reviews).toEqual(reviews.slice(-20).map(review => ({
+      run_id: review.runId, response_hash: review.responseHash,
+    })))
+    expect(body).not.toHaveProperty('related_review')
   })
 
   it('does not send the standalone demo stock as authoritative context', () => {
@@ -856,6 +950,39 @@ describe('live API contract adapter', () => {
       strategy_hash: null,
       diagnostic_code: 'no_supported_signal_recognized',
     }, request)).toThrow('没有识别到当前可执行的技术指标或公告事件')
+  })
+
+  it.each([
+    ['candidate_provider_authentication_failed', '模型服务鉴权失败，本次请求未完成，请检查服务端模型配置。'],
+    ['candidate_provider_permission_denied', '模型服务拒绝访问，本次请求未完成，请检查服务端账户权限。'],
+    ['candidate_provider_insufficient_balance', 'DeepSeek 账户余额不足，本次模型请求未完成，请检查服务端账户余额。'],
+    ['candidate_provider_billing_restricted', '模型服务账户计费受限，本次请求未完成，请检查服务端计费状态。'],
+    ['candidate_provider_rate_limited', '模型服务请求频率受限，本次请求未完成，请稍后重试。'],
+    ['candidate_provider_service_unavailable', '模型服务暂时不可用，本次请求未完成，请稍后重试。'],
+    ['candidate_provider_timeout', '策略生成模型请求超时，本次未生成策略。请原样重试。'],
+    ['candidate_provider_connection_failed', '模型服务连接未完成或中断，本次请求未完成，请稍后重试。'],
+    ['candidate_provider_invalid_response', '模型返回的格式无效，本次请求未完成，请重试。'],
+    ['candidate_provider_incomplete_response', '模型响应未完整返回，本次请求未完成，请重试。'],
+    ['candidate_provider_unavailable', '策略生成模型服务调用未完成，请稍后原样重试。'],
+    ['candidate_provider_invalid_output', '这次策略解析未通过结构或条件校验，尚未生成可回测结果。'],
+  ])('preserves the bounded provider failure diagnostic %s', (diagnosticCode, message) => {
+    let failure: unknown
+    try {
+      fromLiveDraftResponse({
+        ...response,
+        status: 'unsupported',
+        strategy: null,
+        strategy_hash: null,
+        clarification: null,
+        diagnostic_code: diagnosticCode,
+      }, request)
+    } catch (error) {
+      failure = error
+    }
+    expect(failure).toMatchObject({
+      name: 'ApiError',
+      problem: { status: 422, code: diagnosticCode, detail: message },
+    })
   })
 
   it('preserves the specific server explanation for unsupported strategies', () => {

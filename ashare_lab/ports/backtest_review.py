@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal, Protocol
 
@@ -29,6 +29,9 @@ class BacktestReviewRequest:
     evidence_reasons: tuple[str, ...]
     max_proposals: int = 3
     user_request: str | None = None
+    completed_runs: tuple[Mapping[str, object], ...] = ()
+    exposed_proposals: tuple[Mapping[str, object], ...] = ()
+    report_references: Mapping[str, object] = field(default_factory=lambda: dict[str, object]())
 
 
 @dataclass(frozen=True, slots=True)

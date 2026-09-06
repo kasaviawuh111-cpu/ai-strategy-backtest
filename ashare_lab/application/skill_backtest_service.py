@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Awaitable
 from dataclasses import fields, replace
 from datetime import UTC, datetime, time, timedelta
 from decimal import Decimal
-from typing import ClassVar, cast
+from typing import ClassVar, TypeVar, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -29,9 +30,17 @@ from ashare_lab.adapters.market_data.mx_indicator_contract import (
     UnsupportedSkillIndicatorError,
     build_indicator_contract,
 )
+from ashare_lab.adapters.market_data.mx_saas import (
+    MxRetryProgress,
+    MxSaasProviderAuthError,
+    MxSaasProviderError,
+    MxSaasProviderNoDataError,
+    observe_mx_retries,
+)
 from ashare_lab.adapters.market_data.provider_indicator_cache import (
     FileCachedHistoricalIndicatorData,
 )
+from ashare_lab.adapters.persistence.backtest_runs import BacktestRunConflictError
 from ashare_lab.api.result_schemas import BacktestResultBundle
 from ashare_lab.application.backtest_submission import (
     BacktestDataNotYetAvailableError,
@@ -75,6 +84,7 @@ from ashare_lab.domain.strategy import (
 from ashare_lab.domain.strategy.models import Condition, IndicatorCondition
 from ashare_lab.ports.backtest_runs import (
     BacktestJobState,
+    BacktestQueueFullError,
     BacktestRunRecord,
     BacktestRunStore,
     CreateRunResult,
@@ -85,6 +95,7 @@ from ashare_lab.ports.provider_indicator_data import (
 )
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 _PROFILE = "eastmoney_skill_research.v1"
 # Explicit formulas over Skill OHLCV, NOT provider-supplied indicator fields.
 # Keep the provider contract strict; do not use this as a generic fallback.
@@ -113,11 +124,14 @@ class SkillBacktestService:
         indicators: HistoricalIndicatorData,
         store: BacktestRunStore,
         max_workers: int = 1,
+        max_pending: int | None = None,
     ) -> None:
         self.history = history
         self.indicators = indicators
         self.store = store
-        self.queue = ThreadBacktestJobQueue(self.execute, max_workers=max_workers)
+        self.queue = ThreadBacktestJobQueue(
+            self.execute, max_workers=max_workers, max_pending=max_pending,
+        )
 
     def shutdown(self) -> None:
         self.queue.shutdown()
@@ -176,14 +190,15 @@ class SkillBacktestService:
         if not created.replayed:
             try:
                 self.queue.enqueue(run_id)
-            except Exception:
+            except Exception as exc:
+                queue_full = isinstance(exc, BacktestQueueFullError)
                 self.store.transition(
                     run_id,
                     expected=(BacktestJobState.QUEUED,),
                     target=BacktestJobState.FAILED,
                     progress_percent=0,
-                    progress_label="回测排队失败",
-                    error_code="queue_unavailable",
+                    progress_label="回测队列已满，请稍后重试" if queue_full else "回测排队失败",
+                    error_code="backtest_queue_full" if queue_full else "queue_unavailable",
                 )
                 raise
         return created
@@ -198,18 +213,20 @@ class SkillBacktestService:
             config = _config_from_json(record.config_json)
             warmup = _effective_warmup_calendar_days(strategy, config)
             history = asyncio.run(
-                self.history.load(
+                self._with_retry_progress(run_id, self.history.load(
                     instrument_id=strategy.instrument.symbol,
                     start=strategy.backtest.start - timedelta(days=warmup),
                     end=strategy.backtest.end,
                     force_refresh=config.refresh_data,
-                )
+                ))
             )
             self._stage(
                 run_id, BacktestJobState.RUNNING_SIGNAL, 45, "获取东方财富指标并判断策略条件"
             )
             entry, exit_signals, indicator_series = asyncio.run(
-                self._signals(strategy, history, force_refresh=config.refresh_data)
+                self._with_retry_progress(
+                    run_id, self._signals(strategy, history, force_refresh=config.refresh_data)
+                )
             )
             self._stage(run_id, BacktestJobState.RUNNING_EXECUTION, 70, "模拟交易并计算收益")
             result = run_skill_backtest(
@@ -265,17 +282,71 @@ class SkillBacktestService:
                 return current
             # Provider exception messages can contain request metadata; do not
             # expose them or credentials in HTTP errors or logs.
-            logger.warning("Skill backtest failed: run=%s exception=%s", run_id, type(exc).__name__)
             error_code = f"skill_{type(exc).__name__}"[:128]
             progress_label = f"{current.progress_label}失败：{type(exc).__name__}"
+            if isinstance(exc, MxSaasProviderError):
+                tool = exc.tool if exc.tool in {"selectSecurity", "searchData"} else "unknown"
+                reason = exc.reason if exc.reason in {
+                    "read_timeout", "connect_timeout", "transport_error", "http_error",
+                } else None
+                status = exc.http_status
+                if type(status) is not int or not 100 <= status <= 599:
+                    status = None
+                source = {
+                    "selectSecurity": "东方财富选股 Skill",
+                    "searchData": "东方财富查数 Skill",
+                }.get(tool, (
+                    "东方财富查数 Skill" if "获取东方财富指标" in current.progress_label
+                    else "东方财富选股/查数流程"
+                ))
+                if isinstance(exc, MxSaasProviderAuthError):
+                    error_code = "skill_mx_auth_failed"
+                    progress_label = f"{source}授权失败，本次取数未完成。"
+                elif reason == "read_timeout":
+                    error_code = "skill_mx_read_timeout"
+                    progress_label = f"等待{source}响应超时，本次取数未完成，可以重试。"
+                elif reason == "connect_timeout":
+                    error_code = "skill_mx_connect_timeout"
+                    progress_label = f"连接{source}超时，本次取数未完成，可以重试。"
+                elif reason == "transport_error":
+                    error_code = "skill_mx_transport_error"
+                    progress_label = f"与{source}的连接未完成或中断，本次取数未完成，可以重试。"
+                elif reason == "http_error":
+                    error_code = "skill_mx_http_error"
+                    status_label = f"（HTTP {status}）" if status is not None else ""
+                    failure = "请求暂时受限" if status == 429 else "返回服务异常"
+                    progress_label = (
+                        f"{source}{failure}{status_label}，本次取数未完成，请稍后重试。"
+                    )
+                elif isinstance(exc, MxSaasProviderNoDataError):
+                    error_code = "skill_mx_no_data"
+                    progress_label = f"{source}未返回本次回测所需的数据。"
+                else:
+                    # Keep legacy/unclassified provider errors on their existing
+                    # UI mapping; do not manufacture a precise transport cause.
+                    error_code = f"skill_{type(exc).__name__}"[:128]
+                logger.warning(
+                    "Skill backtest failed: run=%s tool=%s reason=%s http_status=%s code=%s "
+                    "transport_kind=%s attempts=%s call_id=%s",
+                    run_id, tool, reason, status, error_code,
+                    exc.transport_kind, exc.attempts, exc.call_id,
+                )
+            else:
+                logger.warning(
+                    "Skill backtest failed: run=%s exception=%s", run_id, type(exc).__name__,
+                )
             if isinstance(exc, MxDailyHistoryFieldsMissingError):
                 # These names come only from the adapter's requested field list,
                 # never from provider prose or request/authorization metadata.
                 error_code = "skill_history_fields_missing"
+                fetch_range = (
+                    f"{exc.start.isoformat()} 至 {exc.end.isoformat()}"
+                    if exc.start is not None and exc.end is not None else "本次区间"
+                )
                 progress_label = (
-                    "东方财富查数 Skill 未返回本次区间所需的"
+                    f"查询 {fetch_range} 的历史数据时，东方财富未返回"
                     + "、".join(exc.fields)
-                    + "历史数据，本次回测未完成。"
+                    + "。本次回测未完成，原区间和规则已保留；可修改区间或稍后重新读取。"
                 )
             return self.store.transition(
                 run_id,
@@ -285,6 +356,43 @@ class SkillBacktestService:
                 progress_label=progress_label,
                 error_code=error_code,
             )
+
+    async def _with_retry_progress(self, run_id: RunId, request: Awaitable[_T]) -> _T:
+        pending: set[str] = set()
+
+        def update(event: MxRetryProgress) -> None:
+            current = self._get(run_id)
+            if current.state is BacktestJobState.CANCEL_REQUESTED:
+                raise _Cancelled
+            if current.state not in {
+                BacktestJobState.RUNNING_DATA, BacktestJobState.RUNNING_SIGNAL,
+            }:
+                return
+            if event.recovered:
+                pending.discard(event.call_id)
+                if pending:
+                    return
+                label = "数据请求已恢复，正在继续读取。"
+            else:
+                pending.add(event.call_id)
+                label = (
+                    f"数据获取遇到临时问题，正在自动重试（{event.retry_number}/{event.max_retries}）。"
+                    "原方案已保留，无需重新提交。"
+                )
+            try:
+                self.store.transition(
+                    run_id, expected=(current.state,), target=current.state,
+                    progress_percent=current.progress_percent, progress_label=label,
+                    expected_version=current.version,
+                )
+            except BacktestRunConflictError:
+                # A simultaneous cancellation/state change wins over display-only
+                # progress; never turn that race into a backtest failure.
+                if self._get(run_id).state is BacktestJobState.CANCEL_REQUESTED:
+                    raise _Cancelled from None
+
+        with observe_mx_retries(update):
+            return await request
 
     async def _signals(
         self,
@@ -526,7 +634,9 @@ def _result_bundle(
             "kind": item.kind,
             "occurredAt": item.occurred_at,
             "side": item.side,
-            "title": {
+            "title": "卖出尝试已结束" if item.reason in {
+                "exit_retry_budget_exhausted", "exit_retry_disabled",
+            } else {
                 "signal": f"{'买入' if item.side == 'buy' else '卖出'}信号确认",
                 "order": f"提交{'买入' if item.side == 'buy' else '卖出'}委托",
                 "fill": f"{'买入' if item.side == 'buy' else '卖出'}成交",

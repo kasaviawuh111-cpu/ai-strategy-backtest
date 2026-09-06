@@ -1,0 +1,22 @@
+{
+  "title": "A/HK Portfolio Highlight Replay",
+  "slug": "portfolio-highlight-review",
+  "version": "v1",
+  "status": "approved",
+  "createdAt": "2026-09-04",
+  "updatedAt": "2026-09-04",
+  "source": "adhoc",
+  "direction": "reference",
+  "fidelity": "partial",
+  "entrypoint": "v1.html",
+  "sourceArtifact": "recovered/claude-highlight-review-20260903/original/highlight-review.html",
+  "sourceSha256": "e3d0d77792a81ec43a520a38b8aa72fead9af9688dc6a4d39b134348c7abecf5",
+  "decisions": [
+    "Retain the recovered dark, high-motion visual language.",
+    "Require a confirmed holdings import before showing a customer review.",
+    "Support cash accounts holding mainland A-shares and Hong Kong equities.",
+    "Replay only imported evidence and label the actual time granularity.",
+    "Use one responsive H5 implementation for desktop and mobile.",
+    "Local integration only; public deployment is out of scope."
+  ]
+}

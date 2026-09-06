@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, status
 from ashare_lab.adapters.market_data.mx_saas import (
     MxSaasProviderAuthError,
     MxSaasProviderDataError,
+    MxSaasProviderError,
     MxSaasProviderNoDataError,
     MxSaasProviderUnavailableError,
 )
@@ -41,7 +42,7 @@ Container = Annotated[ApiContainer, Depends(get_container)]
     response_model=LiveMarketScreenResponse,
     status_code=status.HTTP_200_OK,
     operation_id="screenLiveMarket",
-    responses=error_response_docs(404, 422, 502, 503),
+    responses=error_response_docs(404, 422, 429, 502, 503, 504),
 )
 async def screen_live_market(
     body: LiveMarketScreenRequest,
@@ -56,18 +57,8 @@ async def screen_live_market(
         )
     try:
         result = await provider.screen(query=body.query, asset_type=body.asset_type)
-    except MxSaasProviderAuthError as exc:
-        raise ApiProblem(
-            status_code=503,
-            code="live_market_data_unavailable",
-            message="东方财富选股 Skill 授权失败，暂时无法选股。",
-        ) from exc
-    except MxSaasProviderUnavailableError as exc:
-        raise ApiProblem(
-            status_code=503,
-            code="live_market_data_unavailable",
-            message="暂时无法连接东方财富选股 Skill，请稍后重试。",
-        ) from exc
+    except (MxSaasProviderAuthError, MxSaasProviderUnavailableError) as exc:
+        raise live_market_data_problem(exc, skill_name="东方财富选股 Skill") from exc
     except MxSaasProviderNoDataError as exc:
         raise ApiProblem(
             status_code=404,
@@ -88,7 +79,7 @@ async def screen_live_market(
     response_model=LiveFinanceQueryResponse,
     status_code=status.HTTP_200_OK,
     operation_id="queryLiveFinanceData",
-    responses=error_response_docs(404, 422, 502, 503),
+    responses=error_response_docs(404, 422, 429, 502, 503, 504),
 )
 async def query_live_finance_data(
     body: LiveFinanceQueryRequest,
@@ -106,18 +97,8 @@ async def query_live_finance_data(
             query=body.query,
             indicators=body.indicators,
         )
-    except MxSaasProviderAuthError as exc:
-        raise ApiProblem(
-            status_code=503,
-            code="live_market_data_unavailable",
-            message="东方财富查数 Skill 授权失败，暂时无法查询数据。",
-        ) from exc
-    except MxSaasProviderUnavailableError as exc:
-        raise ApiProblem(
-            status_code=503,
-            code="live_market_data_unavailable",
-            message="暂时无法连接东方财富查数 Skill，请稍后重试。",
-        ) from exc
+    except (MxSaasProviderAuthError, MxSaasProviderUnavailableError) as exc:
+        raise live_market_data_problem(exc, skill_name="东方财富查数 Skill") from exc
     except MxSaasProviderNoDataError as exc:
         raise ApiProblem(
             status_code=404,
@@ -138,7 +119,7 @@ async def query_live_finance_data(
     response_model=LiveScreenedFinanceQueryResponse,
     status_code=status.HTTP_200_OK,
     operation_id="screenThenQueryLiveFinanceData",
-    responses=error_response_docs(404, 422, 502, 503),
+    responses=error_response_docs(404, 422, 429, 502, 503, 504),
 )
 async def screen_then_query_live_finance_data(
     body: LiveScreenedFinanceQueryRequest,
@@ -165,18 +146,8 @@ async def screen_then_query_live_finance_data(
             asset_type=body.asset_type,
             indicators=body.indicators,
         )
-    except MxSaasProviderAuthError as exc:
-        raise ApiProblem(
-            status_code=503,
-            code="live_market_data_unavailable",
-            message="东方财富选股/查数流程授权失败，本次查询未完成。",
-        ) from exc
-    except MxSaasProviderUnavailableError as exc:
-        raise ApiProblem(
-            status_code=503,
-            code="live_market_data_unavailable",
-            message="东方财富选股/查数流程连接失败，请稍后重试。",
-        ) from exc
+    except (MxSaasProviderAuthError, MxSaasProviderUnavailableError) as exc:
+        raise live_market_data_problem(exc, skill_name="东方财富选股/查数流程") from exc
     except MxSaasProviderNoDataError as exc:
         raise ApiProblem(
             status_code=404,
@@ -200,6 +171,34 @@ async def screen_then_query_live_finance_data(
             for entity in result.entities
         ),
         batches=tuple(_finance_response(batch) for batch in result.batches),
+    )
+
+
+def live_market_data_problem(error: MxSaasProviderError, *, skill_name: str) -> ApiProblem:
+    """Classify only adapter-owned metadata, never provider response text or business codes."""
+    code, http_status, detail = "unavailable", 503, "服务未完成本次查询，请稍后重试。"
+    if isinstance(error, MxSaasProviderAuthError):
+        code, detail = "authentication_failed", "授权失败，本次查询未完成。"
+    elif isinstance(error, MxSaasProviderNoDataError):
+        code, http_status, detail = "no_results", 404, "未返回本次查询的匹配数据。"
+    elif isinstance(error, MxSaasProviderDataError):
+        code, http_status = "invalid_response", 502
+        detail = "返回的数据暂时无法使用，本次查询未完成。"
+    elif error.reason == "read_timeout":
+        code, http_status, detail = "read_timeout", 504, "等待响应超时，本次查询未完成。"
+    elif error.reason == "connect_timeout":
+        code, http_status, detail = "connect_timeout", 504, "建立连接超时，本次查询未完成。"
+    elif error.reason == "transport_error":
+        code, detail = "connection_failed", "连接或传输失败，本次查询未完成。"
+    elif error.reason == "http_error" and error.http_status == 429:
+        code, http_status, detail = "rate_limited", 429, "请求受到限流，请稍后重试。"
+    elif (
+        error.reason == "http_error" and error.http_status is not None
+        and 500 <= error.http_status <= 599
+    ):
+        code, http_status, detail = "service_unavailable", 502, "服务端暂时异常，请稍后重试。"
+    return ApiProblem(
+        status_code=http_status, code=f"live_market_data_{code}", message=f"{skill_name}{detail}",
     )
 
 

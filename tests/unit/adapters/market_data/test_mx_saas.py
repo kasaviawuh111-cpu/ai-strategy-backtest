@@ -73,6 +73,55 @@ def test_screen_preserves_provider_columns_rows_and_auditable_response_hash() ->
     assert result.provenance.retrieved_at.tzinfo is UTC
 
 
+def test_screen_preserves_actual_subset_sort_and_date_metadata_without_request_echo() -> None:
+    description = "证券类型包含A股 且 今日涨跌幅大于0 且 今日成交额从大到小排名前3"
+    column = {
+        "title": "成交额(元)", "key": "TRADING_VOLUMES{2026-09-04}",
+        "dateMsg": "14:47", "sortWay": "desc", "unit": "元", "sortable": True,
+        "indexName": "TRADING_VOLUMES", "trace": "not-for-model",
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "code": 0,
+            "data": {
+                "selectType": "A_STOCK",
+                "title": "echoed request is not execution evidence",
+                "responseConditionList": [{"describe": description, "stockCount": 3,
+                                           "ignored": "not-for-model"}],
+                "totalCondition": description,
+                "allResults": {
+                    "market": "HSJ", "query": "another echoed query",
+                    "totalCondition": {"describe": description, "stockCount": 3},
+                    "result": {
+                        "columns": [column],
+                        "dataList": [{"TRADING_VOLUMES{2026-09-04}": "fixture-value"}],
+                    },
+                },
+            },
+        })
+
+    result = asyncio.run(_client(httpx.MockTransport(handler)).screen(
+        query="查询全部A股单日成交额前三名", asset_type="A股",
+    ))
+
+    assert result.columns == ("成交额(元) 14:47",)
+    assert result.rows == ({"成交额(元) 14:47": "fixture-value"},)
+    assert result.provider_metadata == {
+        "selectType": "A_STOCK",
+        "responseConditionList": [{"describe": description, "stockCount": 3}],
+        "totalCondition": description,
+        "allResults": {
+            "market": "HSJ", "totalCondition": {"describe": description, "stockCount": 3},
+        },
+        "columns": [{key: value for key, value in column.items() if key != "trace"}],
+    }
+    assert "今日涨跌幅大于0" in str(result.provider_metadata)
+    assert "查询全部A股" not in str(result.provider_metadata)
+    assert "echoed" not in str(result.provider_metadata)
+    assert "not-for-model" not in str(result.provider_metadata)
+
+
 def test_screen_preserves_provider_column_date_context() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -290,7 +339,7 @@ def test_screen_retries_transport_failures_with_exponential_backoff() -> None:
     result = asyncio.run(client.screen(query="A股涨幅前1", asset_type="A股"))
 
     assert attempts == 3
-    assert delays == [0.25, 0.5]
+    assert delays == [1.0, 2.0]
     assert result.rows == ({"证券代码": "300059"},)
 
 
@@ -336,7 +385,7 @@ def test_screen_retries_retryable_http_status(transient_status: int) -> None:
     result = asyncio.run(client.screen(query="A股涨幅前1", asset_type="A股"))
 
     assert attempts == 2
-    assert delays == [0.25]
+    assert delays == [1.0]
     assert result.rows == ({"证券代码": "300059"},)
 
 
@@ -365,7 +414,7 @@ def test_screen_stops_after_bounded_retryable_http_failures() -> None:
         asyncio.run(client.screen(query="A股涨幅前1", asset_type="A股"))
 
     assert attempts == 3
-    assert delays == [0.25, 0.5]
+    assert delays == [1.0, 2.0]
     assert "private provider response detail" not in str(error.value)
     assert "test-provider-key" not in str(error.value)
 
@@ -376,7 +425,7 @@ def test_http_client_does_not_inherit_environment_proxy(monkeypatch: pytest.Monk
 
     def client_factory(
         *,
-        timeout: float,
+        timeout: httpx.Timeout,
         transport: httpx.AsyncBaseTransport | None,
         follow_redirects: bool,
         trust_env: bool,
@@ -424,6 +473,45 @@ def test_http_client_does_not_inherit_environment_proxy(monkeypatch: pytest.Monk
     assert result.rows == ({"证券代码": "300059"},)
     assert captured_options[0]["trust_env"] is False
     assert captured_options[0]["follow_redirects"] is False
+    timeout = captured_options[0]["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.read == 120.0
+    assert timeout.connect == 10.0
+
+
+@pytest.mark.parametrize("failure", ["read_timeout", "connect_timeout", "http_error"])
+def test_finance_transport_failure_keeps_safe_cause_and_bounded_retries(failure: str) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if failure == "http_error":
+            return httpx.Response(503, text="private gateway response")
+        error = httpx.ReadTimeout if failure == "read_timeout" else httpx.ConnectTimeout
+        raise error("private request detail", request=request)
+
+    with pytest.raises(MxSaasProviderUnavailableError) as captured:
+        asyncio.run(_client(httpx.MockTransport(handler)).query_finance(
+            query="美的集团成交额", indicators=None,
+        ))
+
+    assert attempts == 3
+    assert captured.value.tool == "searchData"
+    assert captured.value.reason == failure
+    assert captured.value.http_status == (503 if failure == "http_error" else None)
+    assert "private" not in str(captured.value)
+    assert "test-provider-key" not in str(captured.value)
+
+
+def test_non_json_auth_failure_is_not_mistaken_for_bad_data() -> None:
+    with pytest.raises(MxSaasProviderAuthError) as captured:
+        asyncio.run(_client(httpx.MockTransport(
+            lambda _request: httpx.Response(401, text="private gateway response")
+        )).query_finance(query="美的集团成交额", indicators=None))
+    assert captured.value.tool == "searchData"
+    assert captured.value.http_status == 401
+    assert "private" not in str(captured.value)
 
 
 def test_default_transport_binds_provider_calls_to_ipv4(
@@ -1624,3 +1712,37 @@ def test_name_resolver_rejects_fuzzy_or_ambiguous_provider_rows() -> None:
     client = _client(httpx.MockTransport(handler))
     with pytest.raises(LookupError):
         client.resolve_instrument_name("顺")
+
+
+def test_abbreviation_returns_verified_choices_without_binding_first_result() -> None:
+    from ashare_lab.ports.instrument_resolution import InstrumentNameAmbiguous
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "证券简称包含中金" in request.content.decode()
+        return httpx.Response(200, json={"code": 0, "data": {"allResults": {"result": {
+            "columns": [{"field": "code", "displayName": "证券代码"},
+                        {"field": "name", "displayName": "证券简称"}],
+            "dataList": [{"code": "601995", "name": "中金公司"},
+                         {"code": "600489", "name": "中金黄金"},
+                         {"code": "000060", "name": "中金岭南"},
+                         {"code": "300059", "name": "东方财富"},
+                         {"code": "bad-code", "name": "中金无效"}],
+        }}}})
+
+    with pytest.raises(InstrumentNameAmbiguous) as caught:
+        _client(httpx.MockTransport(handler)).resolve_instrument_name("中金")
+    assert {(item.name, item.symbol) for item in caught.value.candidates} == {
+        ("中金公司", "601995.SH"), ("中金黄金", "600489.SH"), ("中金岭南", "000060.SZ"),
+    }
+
+
+def test_exact_name_wins_over_other_containing_names() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0, "data": {"allResults": {"result": {
+            "columns": [{"field": "code", "displayName": "证券代码"},
+                        {"field": "name", "displayName": "证券简称"}],
+            "dataList": [{"code": "300059", "name": "东方财富测试"},
+                         {"code": "601995", "name": "中金公司"}],
+        }}}})
+
+    assert _client(httpx.MockTransport(handler)).resolve_instrument_name("中金公司") == "601995.SH"

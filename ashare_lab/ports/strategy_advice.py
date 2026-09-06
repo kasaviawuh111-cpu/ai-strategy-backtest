@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol, runtime_checkable
@@ -65,6 +66,28 @@ class StockRecommendationAdvisor(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class QueryDataReview:
+    """A model assessment of returned data, not executable tool instructions."""
+
+    satisfied: bool
+    evidence: tuple[str, ...]
+    retry_query: str | None
+    message: str
+
+
+@runtime_checkable
+class QueryDataReviewAdvisor(Protocol):
+    async def review_query_result(
+        self,
+        *,
+        question: str,
+        data_snapshot: Mapping[str, object],
+        previous_queries: tuple[str, ...] = (),
+        remaining_data_rounds: int = 1,
+    ) -> QueryDataReview | None: ...
+
+
+@dataclass(frozen=True, slots=True)
 class StockStrategyPair:
     proposal_id: str
     symbol: str
@@ -105,6 +128,8 @@ class StockStrategyPairingAdvisor(Protocol):
 
 
 __all__ = [
+    "QueryDataReview",
+    "QueryDataReviewAdvisor",
     "StockRecommendation",
     "StockRecommendationAdvisor",
     "StockStrategyDataRequest",

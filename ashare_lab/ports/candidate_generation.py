@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Literal, Protocol
@@ -15,6 +15,7 @@ from ashare_lab.domain.financials import (
     FinancialUnit,
 )
 from ashare_lab.domain.strategy.models import JsonScalar
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +144,8 @@ class CandidateAst:
     # Unresolved model-extracted name. Never grants an executable symbol until
     # the server-owned security resolver confirms it.
     instrument_name: str | None = None
+    execution_settings: ExecutionSettingsPatch = field(default_factory=ExecutionSettingsPatch)
+    instrument_suggestion_declined: bool = False
 
 
 class CandidateGenerator(Protocol):

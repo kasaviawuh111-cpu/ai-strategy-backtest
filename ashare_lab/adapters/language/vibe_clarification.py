@@ -40,13 +40,25 @@ _RESPONSE_ONLY_CONTRACT = (
     "也不能把成交活跃或均线上方直接说成已触发买入。"
     "选股候选不是回测报告；处于选股阶段且尚未回测时须明确只是待测候选，"
     "不能说根据回测结果推荐、效果更好或收益更优。"
-    "该选股阶段末尾只问一个选择问题，同时自然说明也可直接输入自己的股票。"
+    "该选股阶段若question提供了待选择的问题，末尾只问一个选择问题，"
+    "同时自然说明也可直接输入自己的股票。"
     "不提内部流程，不保证盈利；不要重新推荐其他策略方向或替用户选定股票。"
     "natural_reply 只写一段完整文本，不要换行，不加 Markdown 或固定开场白。"
+    "question 是本轮要回应的事项，不是必须原样附加的句子；正文独立成段，每个意思只说一次。"
+    "question为空时不要提出任何新问题，不要求用户重述已经明确的字段或日期口径。"
+    "只给结果摘要时就简述已取得的数据，不擅自追加选股、回测或下一步问题；"
+    "规则已经准备好时简短确认即可，不再催用户补充已有字段，也不复述整份规则。"
+    "引用数字、单位和日期时逐字保留原字段格式，不换算单位、不四舍五入、不省略前导零。"
+    "区分用户想查的口径与实际返回字段；若只拿到区间数据，不能称为单日数据，"
+    "可以简短说明已返回的实际口径，不伪称请求已完整满足。"
+    "verifiedInstruments是本次数据提供方核对过的代码与名称映射，不代替查询数值。"
+    "引用其中的证券时名称与代码成对出现，只用同一映射项的原始名称与代码；"
+    "不得凭记忆改名、换公司或将一家公司的名称配上另一家代码。"
     "只返回严格合法 JSON。reply_kind 固定 unclear，acknowledgement_id 固定 ask_rephrase，"
     "recommended_option_ids 为 []，strategy_inspiration、instrument_name、selected_option_id"
     " 均为 null，instrument_selected、requires_new_data、source_answer 为 false，source_ids 为 []。"
     "source_temporal_status 固定not_applicable。"
+    "run_requested、run_request_evidence 均为 null。"
     "所有字符串内的双引号必须转义，不得在 JSON 字符串内使用未转义换行。"
 )
 
@@ -65,6 +77,7 @@ _IDENTITY_ONLY_CONTRACT = (
     "recommended_option_ids、source_ids 固定[]，strategy_inspiration、selected_option_id"
     "固定null，requires_new_data、source_answer固定false，source_temporal_status固定not_applicable。"
     "只返回给定JSON Schema。"
+    "run_requested、run_request_evidence 均为null，不提取执行意图。"
 )
 
 
@@ -85,6 +98,8 @@ class _ProviderAssessment(BaseModel):
     instrument_selected: bool = Field(default=False, strict=True)
     selected_option_id: str | None = None
     requires_new_data: bool = False
+    run_requested: bool | None = Field(default=None, strict=True)
+    run_request_evidence: str | None = Field(default=None, min_length=1, max_length=160)
 
     @model_validator(mode="after")
     def acknowledgement_matches_kind(self) -> _ProviderAssessment:
@@ -109,6 +124,13 @@ class _ProviderAssessment(BaseModel):
             or self.strategy_inspiration is not None or self.recommended_option_ids
         ):
             raise ValueError("a new data request cannot also select or create strategy options")
+        if (self.run_requested is None) != (self.run_request_evidence is None):
+            raise ValueError("explicit run intent requires matching source evidence")
+        if self.run_requested is True and (
+            self.reply_kind != "preference"
+            or not (self.instrument_selected or self.selected_option_id is not None)
+        ):
+            raise ValueError("a run request requires an explicit stock selection")
         return self
 
     @field_validator("recommended_option_ids", "source_ids")
@@ -243,6 +265,15 @@ class VibeClarificationDialogueRouter:
                 "用户明确选择用某只股票时 instrument_selected=true；仅提及、询问、举例或"
                 "否定不用它时为false。已有候选方向时，只补股票不意味着重新生成策略，"
                 "strategy_inspiration=null，保留原方向等待选择。"
+                "等待股票时，用户给出一个明确股票名称并说先别跑、暂不回测，仍是选择股票："
+                "instrument_selected=true、reply_kind=preference，run_requested=false；"
+                "只暂停执行，不取消选股或修改。仅说先别跑但没有选股时，不填instrument_name。"
+                "明确取消本次换股才用cancelled，不选择新股票。"
+                "run_requested只表达本轮明确的运行意图：要求用所选股票回测填true，"
+                "明确不跑或取消填false，未涉及执行则null；它不是本接口的执行授权。"
+                "非null时run_request_evidence必须逐字摘取answer里的对应短句，否则两者null。"
+                "股票选择和执行意图分开判断，不因暂停回测而继续问已明确的股票，"
+                "也不能因提到股票就自行填true。自然回复简短，不声称已回测或已盈利。"
                 "用户明确选某个已展示方案（可用编号、名称或其他自然说法）时，"
                 "selected_option_id 填 allowedOptions 中对应的唯一id，reply_kind=preference。"
                 "推荐排序 recommended_option_ids 不等于用户已选中；用户询问或否定某方案时"
@@ -295,6 +326,9 @@ class VibeClarificationDialogueRouter:
                 "identityOnly": request.identity_only,
                 "allowDataQuery": request.allow_data_query,
                 "research": _research_context(request),
+                "verifiedInstruments": [
+                    {"code": code, "name": name} for code, name in request.verified_instruments
+                ] if request.response_only else [],
             },
             json_object_contract=(
                 "Return exactly one JSON object matching responseSchema. Extract only an exact "
@@ -320,6 +354,9 @@ class VibeClarificationDialogueRouter:
                 "a named historical/fictional persona or personality metaphor is a NEW strategy "
                 "inspiration, even after jokes or weather chat; populate strategy_inspiration "
                 "and use preference/respect_preference. Do not repeat a prior redirect. "
+                "For ordinary jokes or everyday questions, answer the current message naturally "
+                "and stop. No scolding, no automatic pivot to investing, no follow-up sales pitch, "
+                "and no old missing-strategy question. Do not manufacture live facts. "
                 "When responseOnly is true, only describe supplied facts and the current stage; "
                 "stock-selection candidates are not backtest results. "
                 "Selecting an existing option only prepares it for review. Never claim or "
@@ -332,6 +369,8 @@ class VibeClarificationDialogueRouter:
                 payload = await self._transport.generate_json(transport_request)
                 assessment = _parse(payload)
             except CandidateTransportError as exc:
+                if exc.is_classified:
+                    raise
                 if attempt:
                     _LOGGER.warning("dialogue_reply_rejected reason=transport_or_schema type=%s",
                                     type(exc).__name__)
@@ -355,6 +394,30 @@ class VibeClarificationDialogueRouter:
                 return None
             source_error = _source_answer_error(assessment, request)
             if source_error is None:
+                if request.response_only and not _natural_reply_is_grounded(
+                    assessment.natural_reply, request, capability_matrix=self._capability_matrix,
+                ):
+                    if attempt:
+                        return None
+                    emit_progress("reply_fact_check", "数据已返回，正在核对股票名称、数字与单位。")
+                    transport_request = replace(
+                        transport_request,
+                        system_footer=(transport_request.system_footer or "") + (
+                            " The previous reply failed validation against the supplied facts. "
+                            "Rewrite the complete natural_reply using ONLY the unchanged original "
+                            "contextSummary. Copy numeric values, units and dates verbatim, "
+                            "including decimal places and leading zeros. Do not convert units, "
+                            "round, calculate, add rankings, sources, actions or unsupported "
+                            "facts. "
+                            "When mentioning a supplied security code, use its exact matching "
+                            "provider name from unchanged verifiedInstruments, never another "
+                            "company name. If question is empty, do not ask a new question or "
+                            "request fields or dates already specified by the user. "
+                            "Keep the actual returned period distinct from the user's requested "
+                            "period. This is the final repair attempt, not another data request."
+                        ),
+                    )
+                    continue
                 break
             _LOGGER.warning("dialogue_reply_rejected reason=%s", source_error)
             if attempt:
@@ -387,7 +450,7 @@ class VibeClarificationDialogueRouter:
         if request.response_only and (
             assessment.strategy_inspiration is not None or assessment.instrument_name is not None
             or assessment.instrument_selected or assessment.selected_option_id is not None
-            or assessment.requires_new_data
+            or assessment.requires_new_data or assessment.run_requested is not None
         ):
             _LOGGER.warning("dialogue_reply_rejected reason=response_only_authority")
             return None
@@ -397,6 +460,10 @@ class VibeClarificationDialogueRouter:
         if (assessment.instrument_name is not None
                 and assessment.instrument_name not in request.answer):
             _LOGGER.warning("dialogue_reply_rejected reason=instrument_not_in_answer")
+            return None
+        if (assessment.run_request_evidence is not None
+                and assessment.run_request_evidence not in request.answer):
+            _LOGGER.warning("dialogue_reply_rejected reason=run_intent_not_in_answer")
             return None
         if any(item not in allowed for item in assessment.recommended_option_ids):
             _LOGGER.warning("dialogue_reply_rejected reason=option_not_supplied")
@@ -428,6 +495,8 @@ class VibeClarificationDialogueRouter:
             instrument_selected=assessment.instrument_selected,
             selected_option_id=assessment.selected_option_id,
             requires_new_data=assessment.requires_new_data,
+            run_requested=assessment.run_requested,
+            run_request_evidence=assessment.run_request_evidence,
         )
 
 
@@ -465,6 +534,8 @@ def _response_schema(
             "instrument_selected",
             "selected_option_id",
             "requires_new_data",
+            "run_requested",
+            "run_request_evidence",
         ],
         "properties": {
             "source_answer": {"type": "boolean"},
@@ -478,6 +549,9 @@ def _response_schema(
             "instrument_selected": {"type": "boolean"},
             "selected_option_id": {"enum": [None, *allowed_ids]},
             "requires_new_data": {"type": "boolean"},
+            "run_requested": {"type": ["boolean", "null"]},
+            "run_request_evidence": {"type": ["string", "null"], "minLength": 1,
+                                     "maxLength": 160},
             "reply_kind": {
                 "type": "string",
                 "enum": ["off_topic", "preference", "question", "unclear", "cancelled"],
@@ -514,6 +588,8 @@ def _response_schema(
             "recommended_option_ids": {"type": "array", "maxItems": 0, "items": id_schema},
             "source_ids": {"type": "array", "maxItems": 0, "items": {"type": "string"}},
             "requires_new_data": {"enum": [False]},
+            "run_requested": {"type": "null"},
+            "run_request_evidence": {"type": "null"},
             "source_answer": {"enum": [False]},
             "source_temporal_status": {"enum": ["not_applicable"]},
         })
@@ -559,6 +635,7 @@ def _identity_assessment_is_bounded(assessment: _ProviderAssessment) -> bool:
         and not assessment.recommended_option_ids
         and assessment.selected_option_id is None
         and not assessment.requires_new_data
+        and assessment.run_requested is None
         and not assessment.source_answer
         and not assessment.source_ids
         and assessment.source_temporal_status == "not_applicable"
@@ -582,7 +659,8 @@ def _source_answer_error(
     if (request.response_only or assessment.reply_kind != "question"
             or assessment.strategy_inspiration is not None or assessment.instrument_name is not None
             or assessment.instrument_selected or assessment.selected_option_id is not None
-            or assessment.requires_new_data or assessment.recommended_option_ids):
+            or assessment.requires_new_data or assessment.recommended_option_ids
+            or assessment.run_requested is not None):
         return "source_answer_has_other_authority"
     sources = {source.source_id: source for source in request.research.sources} \
         if request.research else {}
@@ -639,6 +717,8 @@ def _natural_reply_is_grounded(
             request.question,
             request.context_summary,
             json.dumps(_research_context(request), ensure_ascii=False),
+            *(f"{code} {name}" for code, name in request.verified_instruments
+              if request.response_only),
             *(f"{item.title} {item.preview}" for item in request.options),
             *(item.user_text for item in request.recent_turns),
             *(item.assistant_text for item in request.recent_turns),
@@ -649,6 +729,15 @@ def _natural_reply_is_grounded(
     if not reply_tokens <= supplied_tokens:
         _LOGGER.warning("dialogue_reply_rejected reason=unsupplied_numeric_fact")
         return False
+    if request.response_only and request.verified_instruments:
+        reply_codes = {
+            token.split(".")[0] for token in reply_tokens
+            if re.fullmatch(r"\d{6}(?:\.(?:SH|SZ|BJ))?", token)
+        }
+        if any(code.split(".")[0] in reply_codes and name not in prose
+               for code, name in request.verified_instruments):
+            _LOGGER.warning("dialogue_reply_rejected reason=security_name_code_mismatch")
+            return False
     if any(match not in supplied for match in _CHINESE_QUANTIFIED_FACT_RE.findall(reply)):
         _LOGGER.warning("dialogue_reply_rejected reason=unsupplied_quantified_fact")
         return False

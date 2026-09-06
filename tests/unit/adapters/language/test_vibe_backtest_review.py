@@ -294,3 +294,58 @@ async def test_repeated_numeric_error_is_not_shown_and_does_not_loop() -> None:
     }})
     assert await advisor.review(request) is None
     assert len(transport.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_review_receives_executed_versions_and_unrun_proposals_and_checks_previous_numbers(
+) -> None:
+    previous = {"runId": "run:previous", "summary": {"totalReturn": -0.20,
+                                                     "maxDrawdown": -0.15}}
+    current = {"runId": "run:verified", "summary": {"totalReturn": -0.17,
+                                                     "maxDrawdown": -0.10}}
+    proposals = ({"sourceRunId": "run:previous", "status": "unrun",
+                  "completedRunIds": [], "strategy": _baseline_strategy().model_dump(mode="json")},)
+    references = {"current": current, "previousDifferentStrategy": previous,
+                  "earliest": {"runId": "run:earliest"},
+                  "strategyVersionComparison": {
+                      "comparisonStatus": "limited", "sourceIdentityStatus": "missing",
+                  }}
+    payload = {**_payload(), "analysis": "上一版亏损20%，这版亏损17%，仍未达到盈利目标。",
+               "conclusion": "上版最大回撤15%，本次最大回撤10%，继续检验其他方向。"}
+    transport = _Transport([payload])
+    advisor = VibeBacktestReviewAdvisor(
+        transport,
+        capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(ROOT / "catalogs"),
+            load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
+        ),
+        provider_identity=CandidateProviderIdentityView(
+            provider="test", model="fixture", prompt_version="test", schema_version="test",
+        ),
+    )
+    request = replace(_request(), completed_runs=(previous, current), exposed_proposals=proposals,
+                      report_references=references, result_facts=current)
+    result = await advisor.review(request)
+    assert result is not None
+    assert len(transport.requests) == 1
+    sent = transport.requests[0].user_payload
+    assert sent is not None
+    assert sent["completedRuns"] == [previous, current]
+    assert sent["exposedOptimizationProposals"] == list(proposals)
+    assert sent["reportReferences"] == references
+    contract = transport.requests[0].system_contract
+    assert "用户并非质疑亏损且有上一版时" in contract
+    assert "数据版本尚未核齐" in contract
+    assert "不能将差异完全归因于策略" in contract
+    assert "不输出工程字段名" in contract
+    assert "只改该参数不算新方案" in contract
+    assert "第一句只评价实际盈亏" not in contract
+    assert _narrative_fact_errors(
+        _ProviderNarrative(analysis="上一版亏损30%，这版亏损17%。",
+                           conclusion="继续检验其他方向。"),
+        current, references,
+    ) == ("previous_totalReturn_number_or_direction",)
+    assert _narrative_fact_errors(
+        _ProviderNarrative(analysis=payload["analysis"], conclusion="继续检验其他方向。"),
+        current,
+    ) == ("previous_totalReturn_number_or_direction",)

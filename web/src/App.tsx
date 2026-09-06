@@ -13,7 +13,7 @@ import {
   ThinkingStream, Turn,
 } from './components/primitives'
 import { ChainScreen, ExecutionDetailsScreen, ExecutionEntry, ParamsScreen, ReportBody } from './screens'
-import { apiMode, backtestApi, strategyApi, systemApi } from './shared/api/client'
+import { apiMode, backtestApi, instrumentApi, strategyApi, systemApi } from './shared/api/client'
 import type { DialogueProgressEvent, DialogueProgressObserver } from './shared/api/client'
 import { fromBacktestOptimizationCandidate, toLiveBacktestBody, toLiveRevisionBody } from './shared/api/contract'
 import { ApiError } from './shared/api/types'
@@ -26,6 +26,7 @@ import type {
   ClarificationData,
   ClarificationSuggestion,
   CompileRequest,
+  ExecutionSettings,
   IdeaRouteProposal,
   Instrument as ApiInstrument,
   StrategyDraft,
@@ -82,11 +83,13 @@ type ClarificationTarget = {
   draftId: string
   revision?: number
   originalRequest: CompileRequest
+  executionContext?: Partial<ExecutionSettings>
 }
 
 type JourneySnapshot = {
   id: string
   utterance: string
+  fromPanelEdit?: boolean
   draft: StrategyDraft
   instrument: Instrument
   strategy: StrategySummary
@@ -391,16 +394,6 @@ function CurrentDataResult({
   )
 }
 
-/**
- * 「下面是几条…」是选项的说明文案，只在选项**当场还在**时才成立。
- * 提问被归进历史时选项不会跟着留下，这句话就会指向一个不存在的东西，
- * 所以归档前要摘掉它。现场那条不受影响。
- */
-const CLARIFICATION_OPTIONS_HINT = '选一个试试，或说说你想怎么改。'
-
-const withoutOptionsHint = (text: string): string =>
-  text.split('\n').filter((line) => line.trim() !== CLARIFICATION_OPTIONS_HINT).join('\n')
-
 // The server returns one complete model reply; choices remain separate UI controls.
 const clarificationMessage = (clarification: Clarification): string => clarification.question
 
@@ -418,11 +411,35 @@ const clarificationPlaceholder = (clarification: Clarification | undefined): str
   return '补充完整规则，或直接换一种说法'
 }
 
-const compileRecoveryMessage = (error: unknown): string => {
-  const code = errorCode(error)?.toLowerCase() ?? ''
-  if (code === 'strategy_draft_not_found' || code === 'strategy_draft_revision_stale') {
-    return '刚才这轮对话状态已经失效，请把这句话再发一次。'
+const contextRecoveryMessage = (error: unknown): string | undefined => {
+  const code = errorCode(error)
+  if (code === 'conversation_parent_draft_not_found' || code === 'strategy_draft_not_found') {
+    return '这轮策略的服务端记录已无法读取，本次修改和回测未执行。请从原报告进入“换个条件再回测”或“换只股票试试”；没有报告时，请新建会话并重新输入完整策略。'
   }
+  if (code === 'conversation_parent_draft_stale' || code === 'strategy_draft_revision_stale') {
+    return '这轮策略版本已更新，本次修改未提交。请从原报告重新进入修改；没有报告时，请新建会话并重新输入完整策略。'
+  }
+  if (code === 'strategy_edit_context_required') {
+    return '没有找到这次修改对应的原策略，本次未执行回测。请从原报告重新进入修改；没有报告时，请新建会话并重新输入完整策略。'
+  }
+  if (code === 'backtest_review_context_unavailable') {
+    return '这版优化建议的服务端记录已无法读取，尚未执行新回测。请回到原报告，点击“重试 AI 分析”后重新选择。'
+  }
+  if (code === 'backtest_review_result_changed') {
+    return '回测结果已更新，原优化建议不能直接沿用。请回到原报告，点击“重试 AI 分析”后重新选择。'
+  }
+  if (code === 'backtest_run_not_found') return '这次回测记录已无法读取，请重新发起回测。'
+  return undefined
+}
+
+const isReviewContextError = (error: unknown): boolean =>
+  errorCode(error) === 'backtest_review_context_unavailable'
+  || errorCode(error) === 'backtest_review_result_changed'
+
+const compileRecoveryMessage = (error: unknown): string => {
+  const contextMessage = contextRecoveryMessage(error)
+  if (contextMessage) return contextMessage
+  const code = errorCode(error)?.toLowerCase() ?? ''
   if (code === 'api_timeout') {
     return '这次识别等待超时了，请原样再发一次。'
   }
@@ -454,6 +471,8 @@ const compileRecoveryMessage = (error: unknown): string => {
 }
 
 const errorMessage = (error: unknown) => {
+  const contextMessage = contextRecoveryMessage(error)
+  if (contextMessage) return contextMessage
   if (error instanceof ApiError) {
     return error.problem.detail
   }
@@ -470,6 +489,15 @@ const backtestFailureMessage = (run: BacktestRun): string => {
     ? '东方财富查数 Skill'
     : '东方财富选股/查数流程'
   switch (run.error) {
+    case 'skill_mx_auth_failed':
+    case 'skill_mx_read_timeout':
+    case 'skill_mx_connect_timeout':
+    case 'skill_mx_transport_error':
+    case 'skill_mx_http_error':
+    case 'skill_mx_no_data':
+      // These labels are built by the server from safe tool/reason/status
+      // fields, never from provider response prose or exception messages.
+      return run.progressLabel
     case 'skill_MxSaasProviderAuthError':
       return `${source}授权失败，本次回测未完成。`
     case 'skill_MxSaasProviderUnavailableError':
@@ -666,7 +694,10 @@ export default function App({
   const rerunAfterEdit = useRef(false)
   const refreshEditedRun = useRef(false)
   const [submittedText, setSubmittedText] = useState<string>()
+  const [fromPanelEdit, setFromPanelEdit] = useState(false)
   const [draft, setDraft] = useState<StrategyDraft>()
+  const currentDraftRef = useRef<StrategyDraft | undefined>(draft)
+  useEffect(() => { currentDraftRef.current = draft }, [draft])
   const [baselineDraft, setBaselineDraft] = useState<StrategyDraft>()
   const [clarification, setClarification] = useState<Clarification>()
   const [clarificationTarget, setClarificationTarget] = useState<ClarificationTarget>()
@@ -682,10 +713,20 @@ export default function App({
    */
   const [runCommand, setRunCommand] = useState<string>()
   const [journeyHistory, setJourneyHistory] = useState<JourneySnapshot[]>([])
+  const exposedReviewReferences = useRef<NonNullable<CompileRequest['relatedReviews']>>([])
+  const rememberReviewReference = (review: BacktestReviewResponse) => {
+    const reference = { runId: review.runId, responseHash: review.modelProvenance.responseHash }
+    exposedReviewReferences.current = [
+      ...exposedReviewReferences.current.filter(item => item.runId !== reference.runId
+        || item.responseHash !== reference.responseHash),
+      reference,
+    ].slice(-20)
+  }
   // Browser-tab lifetime only. A new strategy keeps this opaque server draft
   // lineage; an explicit new conversation clears it. Never persist it globally.
   const [conversationTailDraftId, setConversationTailDraftId] = useState<string>()
   const [reportSnapshot, setReportSnapshot] = useState<JourneySnapshot>()
+  const [reviewContextError, setReviewContextError] = useState<{ runId: string; message: string }>()
 
   const [stack, setStack] = useState<Overlay[]>([])
   const [paramsFocus, setParamsFocus] = useState<EditableRow['key'] | 'more'>('entry')
@@ -748,20 +789,24 @@ export default function App({
   })
 
   const compileMutation = useMutation({
-    mutationFn: ({ text, instrumentOverride, parentDraftId, editCurrentStrategy,
-      relatedRunIds, relatedReview }: {
+    mutationFn: ({ text, instrumentOverride, parentDraftId, editCurrentStrategy, executionContext,
+      relatedRunIds, relatedReview, relatedReviews }: {
       text: string
       instrumentOverride?: ApiInstrument
       parentDraftId?: string
       editCurrentStrategy?: boolean
+      executionContext?: Partial<ExecutionSettings>
       relatedRunIds?: string[]
       relatedReview?: CompileRequest['relatedReview']
+      relatedReviews?: CompileRequest['relatedReviews']
     }) => {
       const request = {
         ...compileRequestFor({ text, instrumentOverride }),
         editCurrentStrategy,
+        executionSettings: parentDraftId ? executionContext : undefined,
         relatedRunIds,
         relatedReview,
+        relatedReviews,
         dialogueProgress: beginDialogueProgress(),
       }
       return parentDraftId
@@ -769,10 +814,11 @@ export default function App({
         : strategyApi.compile(request)
     },
     onSuccess: (outcome, variables) => {
-      if (outcome.status === 'compiled' && outcome.runRequested) {
-        rerunAfterEdit.current = true
-        refreshEditedRun.current = outcome.refreshData === true
-      }
+      // Even a rerun chip may need clarification or a user-requested pause.
+      // Only the resolved server turn can authorize the new calculation.
+      rerunAfterEdit.current = outcome.status === 'compiled' && outcome.runRequested === true
+      refreshEditedRun.current = outcome.status === 'compiled'
+        && outcome.runRequested === true && outcome.refreshData === true
       setConversationTailDraftId(
         outcome.status === 'compiled' ? outcome.draft.id : outcome.draftId,
       )
@@ -789,12 +835,17 @@ export default function App({
         setBaselineDraft(undefined)
         setClarification(outcome.clarification)
         const review = outcome.clarification.backtestReview
-        if (review) setJourneyHistory(current => current.map(item => item.id === review.runId
-          ? { ...item, review } : item))
+        if (review) {
+          rememberReviewReference(review)
+          setJourneyHistory(current => current.map(item => item.id === review.runId
+            ? { ...item, review } : item))
+        }
         setClarificationTarget({
           draftId: outcome.draftId,
           revision: outcome.revision,
           originalRequest: compileRequestFor(variables),
+          executionContext: outcome.executionSettings
+            ?? (outcome.isStrategyEdit ? variables.executionContext : undefined),
         })
         setClarificationMessages([])
         setClarificationSuggestions([])
@@ -804,43 +855,60 @@ export default function App({
         window.setTimeout(() => inputRef.current?.focus(), 0)
       } else {
         const nextDraft = cloneDraft(outcome.draft)
+        // New servers return saved settings, including explicit fee edits.
+        // Only legacy responses need the browser's previous configuration.
+        if (outcome.executionSettings === undefined && outcome.isStrategyEdit && variables.executionContext) {
+          nextDraft.execution = { ...nextDraft.execution, ...variables.executionContext }
+        }
         setClarification(undefined)
         setClarificationTarget(undefined)
         setClarificationSuggestions([])
         setClarificationPrompt(undefined)
         setClarificationData(undefined)
+        setClarificationMessages(outcome.assistantMessage?.trim()
+          ? [{ role: 'assistant', text: outcome.assistantMessage }]
+          : [])
         setDraft(nextDraft)
         setBaselineDraft(cloneDraft(nextDraft))
       }
     },
-    onError: () => {
-      setUtterance('')
+    onError: (error, variables) => {
+      if (isReviewContextError(error) && variables.relatedReview) {
+        setReviewContextError({ runId: variables.relatedReview.runId, message: errorMessage(error) })
+      }
+      setUtterance(variables.text)
       window.setTimeout(() => inputRef.current?.focus(), 0)
     },
   })
 
   const answerMutation = useMutation({
-    mutationFn: ({ answer, target, pendingClarification, relatedRunIds, relatedReview }: {
+    mutationFn: ({ answer, target, pendingClarification, relatedRunIds, relatedReview, relatedReviews }: {
       answer: string
+      inputText: string
       target: ClarificationTarget
       pendingClarification: Clarification
       relatedRunIds?: string[]
       relatedReview?: CompileRequest['relatedReview']
+      relatedReviews?: CompileRequest['relatedReviews']
     }) => strategyApi.answerClarification({
       draftId: target.draftId,
       revision: target.revision,
       answer,
+      executionSettings: target.executionContext,
       relatedRunIds,
       relatedReview,
+      relatedReviews,
       originalRequest: target.originalRequest,
       clarification: pendingClarification,
       dialogueProgress: beginDialogueProgress(),
     }),
     onSuccess: (turn, variables) => {
-      if (turn.outcome.status === 'compiled' && turn.outcome.runRequested) {
-        rerunAfterEdit.current = true
-        refreshEditedRun.current = turn.outcome.refreshData === true
-      }
+      // A clarification can confirm the pending run or explicitly cancel it.
+      // Use the resolved turn's intent, never an earlier slot's run flag.
+      rerunAfterEdit.current = turn.outcome.status === 'compiled'
+        && turn.outcome.runRequested === true
+      refreshEditedRun.current = turn.outcome.status === 'compiled'
+        && turn.outcome.runRequested === true && turn.outcome.refreshData === true
       setConversationTailDraftId(
         turn.outcome.status === 'compiled'
           ? turn.outcome.draft.id
@@ -859,18 +927,27 @@ export default function App({
         setBaselineDraft(undefined)
         setClarification(turn.outcome.clarification)
         const review = turn.outcome.clarification.backtestReview
-        if (review) setJourneyHistory(current => current.map(item => item.id === review.runId
-          ? { ...item, review } : item))
+        if (review) {
+          rememberReviewReference(review)
+          setJourneyHistory(current => current.map(item => item.id === review.runId
+            ? { ...item, review } : item))
+        }
         setClarificationTarget({
           draftId: turn.outcome.draftId,
           revision: turn.outcome.revision,
           originalRequest: variables.target.originalRequest,
+          executionContext: turn.outcome.executionSettings
+            ?? (turn.outcome.isStrategyEdit ? variables.target.executionContext : undefined),
         })
         setClarificationSuggestions(turn.suggestions)
         setClarificationPrompt(assistantText)
         setClarificationData(turn.data)
       } else {
         const nextDraft = cloneDraft(turn.outcome.draft)
+        if (turn.outcome.executionSettings === undefined
+          && turn.outcome.isStrategyEdit && variables.target.executionContext) {
+          nextDraft.execution = { ...nextDraft.execution, ...variables.target.executionContext }
+        }
         const selectedProposal = variables.pendingClarification.ideaRoute?.proposals.find(
           (proposal) => proposal.id === variables.answer && proposal.pairing_reason
             && proposal.instrument_symbol === nextDraft.instrument.symbol,
@@ -886,17 +963,19 @@ export default function App({
         setClarificationSuggestions([])
         setClarificationPrompt(undefined)
         setClarificationData(undefined)
-        setClarificationMessages((current) => [
-          ...current,
-          { role: 'assistant', text: assistantText, data: turn.data },
-        ])
+        if (assistantText.trim() || turn.data) {
+          setClarificationMessages((current) => [
+            ...current,
+            { role: 'assistant', text: assistantText, data: turn.data },
+          ])
+        }
         setDraft(nextDraft)
         setBaselineDraft(cloneDraft(nextDraft))
       }
       setUtterance('')
       window.setTimeout(() => inputRef.current?.focus(), 0)
     },
-    onError: (error) => {
+    onError: (error, variables) => {
       // A failed second-turn request must not leave the previous turn's cards
       // visible underneath a new error message. They belong to an older turn
       // and make a transport failure look like a fresh model recommendation.
@@ -904,7 +983,10 @@ export default function App({
       setClarificationSuggestions([])
       setClarificationPrompt(compileRecoveryMessage(error))
       setClarificationData(undefined)
-      setUtterance('')
+      if (isReviewContextError(error) && variables.relatedReview) {
+        setReviewContextError({ runId: variables.relatedReview.runId, message: errorMessage(error) })
+      }
+      setUtterance(variables.inputText)
       window.setTimeout(() => inputRef.current?.focus(), 0)
     },
   })
@@ -984,7 +1066,7 @@ export default function App({
   const reviewProgressAbortRef = useRef<AbortController | null>(null)
   useEffect(() => () => reviewProgressAbortRef.current?.abort(), [])
   const reviewMutation = useMutation({
-    mutationFn: (source: JourneySnapshot) => {
+    mutationFn: (source: JourneySnapshot): Promise<BacktestReviewResponse> => {
       reviewProgressAbortRef.current?.abort()
       const controller = new AbortController()
       reviewProgressAbortRef.current = controller
@@ -994,11 +1076,13 @@ export default function App({
         onProgress: (events) => {
           if (!controller.signal.aborted) setReviewProgress({ runId: source.id, events })
         },
-      })
+      }, conversationReferences(source))
     },
     onSuccess: (review) => {
+      rememberReviewReference(review)
       setJourneyHistory((current) => current.map((item) => item.id === review.runId
         ? { ...item, review } : item))
+      setReviewContextError((current) => current?.runId === review.runId ? undefined : current)
     },
   })
   const autoReviewedRunIds = useRef(new Set<string>())
@@ -1019,6 +1103,7 @@ export default function App({
         : [...current, source])
       setUtterance('')
       setSubmittedText(`回测优化方案「${candidate.title}」：${executableRuleText(optimizedDraft)}`)
+      setFromPanelEdit(false)
       setDraft(optimizedDraft)
       setBaselineDraft(cloneDraft(optimizedDraft))
       setClarification(undefined)
@@ -1054,7 +1139,8 @@ export default function App({
   const resultLoading = hasResult
     && (summaryQuery.isLoading || seriesQuery.isLoading || activitiesQuery.isLoading)
   const resultReady = Boolean(summaryQuery.data && seriesQuery.data && activitiesQuery.data)
-  const isJourneyLocked = answerMutation.isPending
+  const isJourneyLocked = compileMutation.isPending
+    || answerMutation.isPending
     || startMutation.isPending
     || optimizationMutation.isPending
     || resumeStrategyMutation.isPending
@@ -1066,6 +1152,9 @@ export default function App({
     && errorCode(compileMutation.error) === 'previous_session_limit_up_capability_unavailable'
 
   const uiStrategy = useMemo(() => draft ? toStrategySummary(draft) : undefined, [draft])
+  const readyAssistantMessageIndex = draft && uiStrategy
+    && clarificationMessages.at(-1)?.role === 'assistant' ? clarificationMessages.length - 1 : -1
+  const readyAssistantMessage = clarificationMessages[readyAssistantMessageIndex]
   const capability = useMemo(() => draft
     ? assessStrategyCapabilities(draft, capabilitiesQuery.data, apiMode)
     : undefined, [capabilitiesQuery.data, draft])
@@ -1107,6 +1196,7 @@ export default function App({
     return {
       id: runId,
       utterance: submittedText,
+      fromPanelEdit,
       draft: cloneDraft(draft),
       instrument: toUiInstrument(draft),
       strategy: uiStrategy,
@@ -1124,6 +1214,7 @@ export default function App({
     clarificationMessages,
     draft,
     evidence,
+    fromPanelEdit,
     marks,
     metrics,
     resultReady,
@@ -1134,6 +1225,25 @@ export default function App({
     uiStrategy,
     reviewMutation.data,
   ])
+
+  const conversationReferences = (source?: JourneySnapshot): {
+    relatedRunIds: string[]; relatedReviews: NonNullable<CompileRequest['relatedReviews']>
+  } => {
+    let relatedRunIds = [...new Set([
+      ...journeyHistory.map(item => item.id),
+      ...(currentSnapshot ? [currentSnapshot.id] : []),
+      ...(source ? [source.id] : []),
+    ])].slice(-20)
+    // A manually opened older report remains the source of its own review.
+    if (source && !relatedRunIds.includes(source.id)) {
+      relatedRunIds = [source.id, ...relatedRunIds.slice(-19)]
+    }
+    return {
+      relatedRunIds,
+      relatedReviews: exposedReviewReferences.current
+        .filter(reference => relatedRunIds.includes(reference.runId)),
+    }
+  }
 
   // Show the finished report immediately; request the real model independently.
   // Once per new run, never on history navigation or repeated status polling.
@@ -1167,6 +1277,7 @@ export default function App({
     setRunId(undefined)
     setRunCommand(undefined)
     setSubmittedText(undefined)
+    setFromPanelEdit(false)
     setReportSnapshot(undefined)
     setStack([])
     compileMutation.reset()
@@ -1185,7 +1296,9 @@ export default function App({
   }
 
   const startNewConversation = () => {
+    exposedReviewReferences.current = []
     setConversationTailDraftId(undefined)
+    setReviewContextError(undefined)
     setJourneyHistory([])
     setUtterance('')
     setView('chat')
@@ -1206,16 +1319,13 @@ export default function App({
     rerunAfterEdit.current = Boolean(options.rerun)
     refreshEditedRun.current = false
     // Send references only; the server loads the verified report facts itself.
-    const relatedRunIds = [...new Set([
-      ...journeyHistory.map(item => item.id),
-      ...(currentSnapshot ? [currentSnapshot.id] : []),
-    ])].slice(-20)
+    const { relatedRunIds, relatedReviews } = conversationReferences()
     const displayedReview = clarification?.backtestReview
       ?? [...journeyHistory, ...(currentSnapshot ? [currentSnapshot] : [])]
       .reverse().filter(snapshot => relatedRunIds.includes(snapshot.id))
       .map(snapshot => snapshot.review ?? (reviewMutation.data?.runId === snapshot.id
         ? reviewMutation.data : undefined)).find(Boolean)
-    const relatedReview = displayedReview ? {
+    const relatedReview = displayedReview && relatedRunIds.includes(displayedReview.runId) ? {
       runId: displayedReview.runId, responseHash: displayedReview.modelProvenance.responseHash,
     } : undefined
     setStrategySlots(undefined)
@@ -1223,7 +1333,7 @@ export default function App({
       const prompt = clarificationPrompt ?? clarificationMessage(clarification)
       setClarificationMessages((current) => [
         ...current,
-        { role: 'assistant', text: withoutOptionsHint(prompt), data: clarificationData },
+        { role: 'assistant', text: prompt, data: clarificationData },
         { role: 'user', text: normalized },
       ])
       setClarificationPrompt(undefined)
@@ -1240,16 +1350,19 @@ export default function App({
       startMutation.reset()
       answerMutation.mutate({
         answer: options.proposalId ?? normalized,
+        inputText: normalized,
         target: clarificationTarget,
         pendingClarification: clarification,
         relatedRunIds,
         relatedReview,
+        relatedReviews,
       })
       return
     }
     rememberCurrentJourney()
     setUtterance('')
     setSubmittedText(normalized)
+    setFromPanelEdit(false)
     setDraft(undefined)
     setBaselineDraft(undefined)
     setClarification(undefined)
@@ -1270,8 +1383,10 @@ export default function App({
       instrumentOverride: options.instrumentOverride,
       parentDraftId: conversationTailDraftId,
       editCurrentStrategy: options.editCurrentStrategy,
+      executionContext: strategySlots?.draft.execution ?? draft?.execution,
       relatedRunIds,
       relatedReview,
+      relatedReviews,
     })
   }
 
@@ -1287,6 +1402,12 @@ export default function App({
 
   const submitClarificationChoice = (choice: Clarification['choices'][number]) => {
     const suggested = choice.suggestedUtterance ?? choice.label
+    if (clarification?.id === 'strategy_edit_clarification') {
+      // These candidates finish the pending edit. Recompiling with a new
+      // instrument context would drop its exact parent revision and intent.
+      submitText(suggested)
+      return
+    }
     const routeSymbol = clarification?.ideaRoute?.asset_mapping.instrument_symbol ?? undefined
     const targetInstrument = clarificationTarget?.originalRequest.instrument
     const targetIsGrounded = clarificationTarget?.originalRequest.instrumentContextSource !== 'standalone_default'
@@ -1359,9 +1480,33 @@ export default function App({
 
   const handleDraftChange = (nextDraft: StrategyDraft) => {
     rememberCurrentJourney()
+    // A completed reply belongs to its archived run, not the newly edited draft.
+    if (currentSnapshot) {
+      setClarificationMessages([])
+      setFromPanelEdit(true)
+      dialogueProgressAbortRef.current?.abort()
+      setDialogueProgress([])
+    }
     setDraft(nextDraft)
     setRunId(undefined)
     setRunCommand(undefined)
+  }
+
+  const saveInlineStock = async (candidate: ApiInstrument, signal: AbortSignal) => {
+    const source = draft
+    if (!source || isJourneyLocked || signal.aborted) return
+    const edited = cloneDraft(source)
+    edited.instrument = { ...candidate }
+    edited.strategySpec = { ...edited.strategySpec,
+      instrument: { ...edited.strategySpec.instrument, symbol: candidate.symbol } }
+    const saved = await strategyApi.revise(edited, false, signal)
+    // A new conversation or any intervening draft edit owns the current UI.
+    if (signal.aborted || currentDraftRef.current !== source) return
+    rerunAfterEdit.current = false
+    refreshEditedRun.current = false
+    handleDraftChange(saved)
+    setBaselineDraft(cloneDraft(saved))
+    setConversationTailDraftId(saved.id)
   }
 
   const openChain = (trade: TradeRow) => {
@@ -1443,10 +1588,24 @@ export default function App({
     if (index === 0 && failure?.key === 'result_failed') refreshResults()
     else if (index === 0 && ['run_read_failed', 'cancel_failed'].includes(failure?.key ?? '')) {
       void runQuery.refetch()
+    } else if (failure?.key === 'run_failed') {
+      // Retrying a failed calculation must submit the same draft/settings,
+      // not clear the conversation or compile an unrelated example.
+      if (!draft || startMutation.isPending) return
+      setRunId(undefined)
+      setStack([])
+      setView('chat')
+      if (index === 0) {
+        setRunCommand('重新回测')
+        startMutation.mutate({ candidate: cloneDraft(draft), refreshData: true })
+      } else {
+        setRunCommand(undefined)
+        startMutation.reset()
+        setReviewOpen(true)
+      }
     } else if (
       failure?.key === 'data_incomplete'
       || failure?.key === 'event_time_insufficient'
-      || (failure?.key === 'run_failed' && index === 1)
     ) {
       submitText(maCrossExample)
     } else resetForEdit()
@@ -1597,7 +1756,9 @@ export default function App({
 
               {journeyHistory.map((journey) => (
                 <Fragment key={journey.id}>
-                  <Turn id={`journey-${journey.id}`} mine><Bubble>{journey.utterance}</Bubble></Turn>
+                  {!journey.fromPanelEdit
+                    ? <Turn id={`journey-${journey.id}`} mine><Bubble>{journey.utterance}</Bubble></Turn>
+                    : null}
                   {journey.clarificationMessages.map((message, index) => (
                     <Turn key={`${journey.id}-clarification-${index}`} mine={message.role === 'user'}>
                       {message.role === 'user'
@@ -1605,7 +1766,7 @@ export default function App({
                         : <Say>{message.text}</Say>}
                     </Turn>
                   ))}
-                  <Turn>
+                  <Turn id={journey.fromPanelEdit ? `journey-${journey.id}` : undefined}>
                     <ThinkBlock
                       title="策略与回测摘要"
                       meta="历史记录"
@@ -1622,6 +1783,7 @@ export default function App({
                       onOpenMore={() => undefined}
                       onRun={() => undefined}
                       settled="已完成回测"
+                      executionSummary={summarizeExecution(journey.draft)}
                     />
                   </Turn>
                   {/* 历史回合里也保留那句「开始回测」，往回翻时这一步不会凭空消失 */}
@@ -1657,9 +1819,9 @@ export default function App({
                     也像是在暗示「你应该选我给的这几个」。
                   */}
                 </Turn>
-              ) : <Turn mine><Bubble>{submittedText}</Bubble></Turn>}
+              ) : !fromPanelEdit ? <Turn mine><Bubble>{submittedText}</Bubble></Turn> : null}
 
-              {clarificationMessages.map((message, index) => (
+              {clarificationMessages.map((message, index) => index === readyAssistantMessageIndex ? null : (
                 <Turn key={`clarification-${index}`} mine={message.role === 'user'}>
                   {message.role === 'user'
                     ? <Bubble>{message.text}</Bubble>
@@ -1803,10 +1965,10 @@ export default function App({
               {draft && uiStrategy ? (
                 <Turn>
                   <ModelReasoning events={dialogueProgress} />
-                  <Say>
-                    已经把这句话整理成买卖规则。买入、卖出和回测区间都可以逐条核对，
-                    改完再开始回测。
-                  </Say>
+                  {readyAssistantMessage ? <Say>{readyAssistantMessage.text}</Say> : null}
+                  {readyAssistantMessage?.data
+                    ? <CurrentDataResult data={readyAssistantMessage.data} onAnalyze={analyzeCurrentInstrument} />
+                    : null}
                   {apiMode === 'mock' && draft.entry.conditions.some((condition) =>
                     condition.kind === 'event' && condition.documentText) ? (
                       <Notice tone="info">
@@ -1965,7 +2127,8 @@ export default function App({
                       isLoading={detailReviewIsActive && reviewMutation.isPending}
                       error={detailReviewIsActive && reviewMutation.isError
                         ? errorMessage(reviewMutation.error)
-                        : undefined}
+                        : reviewContextError?.runId === detailSnapshot.id
+                          ? reviewContextError.message : undefined}
                       onRequest={() => reviewMutation.mutate(detailSnapshot)}
                       onChangeInstrument={() => resumeStrategyMutation.mutate({
                         source: detailSnapshot, mode: 'stock',
@@ -2016,6 +2179,7 @@ export default function App({
                 <StrategyCard
                   instrument={toUiInstrument(draft)}
                   strategy={uiStrategy}
+                  stockEditor={{ onSearch: instrumentApi.search, onSave: saveInlineStock }}
                   onEditRow={openParams}
                   onOpenMore={() => openParams('more')}
                   onRun={() => {
@@ -2030,7 +2194,7 @@ export default function App({
                   canStart={canStart}
                   disabledReason={startDisabledReason}
                   error={startMutation.isError ? errorMessage(startMutation.error) : undefined}
-                  executionSummary={summarizeExecution(draft, baselineDraft)}
+                  executionSummary={summarizeExecution(draft)}
                 />
               </div>
             </aside>

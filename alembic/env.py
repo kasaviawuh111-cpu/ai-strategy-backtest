@@ -9,6 +9,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from ashare_lab.adapters.persistence import PERSISTENCE_METADATA
+from ashare_lab.api.persistent_store import DIALOGUE_METADATA
 
 config = context.config
 
@@ -21,7 +22,7 @@ database_url = os.environ.get("DATABASE_URL")
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
-target_metadata = PERSISTENCE_METADATA
+target_metadata = [PERSISTENCE_METADATA, DIALOGUE_METADATA]
 
 
 def run_migrations_offline() -> None:

@@ -8,6 +8,7 @@ import type {
   StrategySpecCondition,
   StrategySpecExitRule,
 } from './shared/api/types'
+import { DEFAULT_EXECUTION_SETTINGS } from './shared/config/backtest'
 import type {
   BacktestMetrics,
   ChainContext,
@@ -498,15 +499,11 @@ export const describeBacktestWindow = (start: string, end: string) => {
  *
  * 这一行不负责在首页把成交规则讲一遍——讲三行字既占地方，也没人在确认策略时读。
  * 它只需要回答两件事：这里可以改；现在是不是动过。想知道具体规则、想改，点进去。
- * 对照基准是「识别出来的那一版」，所以「已调整」= 用户自己改过的项。
+ * 对照固定的系统默认成交设置；保存、换股和重新识别不会把已调整项标回默认。
  */
-export const summarizeExecution = (
-  draft: StrategyDraft,
-  baseline?: StrategyDraft,
-) => {
-  if (!baseline) return '默认'
-  const keys = Object.keys(draft.execution) as Array<keyof StrategyDraft['execution']>
-  const changed = keys.filter((key) => draft.execution[key] !== baseline.execution[key]).length
+export const summarizeExecution = (draft: StrategyDraft) => {
+  const keys = Object.keys(DEFAULT_EXECUTION_SETTINGS) as Array<keyof typeof DEFAULT_EXECUTION_SETTINGS>
+  const changed = keys.filter((key) => draft.execution[key] !== DEFAULT_EXECUTION_SETTINGS[key]).length
   return changed === 0 ? '默认' : `已调整 ${changed} 项`
 }
 
@@ -955,7 +952,13 @@ const retryReasonLabels: Record<string, string> = {
   capacity_exhausted: '前次委托受成交容量限制，本次继续尝试',
 }
 
+const exitRetryStopLabels: Record<string, string> = {
+  exit_retry_budget_exhausted: '已达到卖出尝试上限，未卖出部分保留；可调整成交设置后重新回测',
+  exit_retry_disabled: '成交设置关闭了卖出重试，未卖出部分保留；可调整设置后重新回测',
+}
+
 const outcomeReasonLabels: Record<string, string> = {
+  ...exitRetryStopLabels,
   matched_at_open: '本次委托按日线开盘价代理成交',
   one_price_limit_up: '本次因一字涨停未成交',
   one_price_limit_down: '本次因一字跌停未成交',
@@ -976,7 +979,7 @@ const signalExecutionFacts = (activity: BacktestActivity): ChainFact[] => [
   ...(activity.retryReason
     ? [{ label: '重试原因', value: retryReasonLabels[activity.retryReason] ?? '已记录重试原因' }]
     : []),
-  ...(activity.outcomeReason
+  ...(activity.outcomeReason && !exitRetryStopLabels[activity.outcomeReason]
     ? [{ label: '本次结果', value: outcomeReasonLabels[activity.outcomeReason] ?? '已记录委托结果' }]
     : []),
 ]
@@ -1032,7 +1035,7 @@ export const buildChain = (
       title: activity.title,
       timestamp: activity.occurredAt,
       detail: [
-        activity.reason,
+        exitRetryStopLabels[activity.reason] ?? activity.reason,
         activity.price != null ? `价格 ¥${activity.price.toFixed(2)}` : null,
         activity.quantity != null ? `数量 ${activity.quantity.toLocaleString('zh-CN')} 股` : null,
         activity.notionalCny != null ? `模拟金额 ¥${activity.notionalCny.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}` : null,

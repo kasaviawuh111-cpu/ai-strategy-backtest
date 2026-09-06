@@ -2,11 +2,12 @@
 
 import json
 import logging
+from asyncio import timeout
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ashare_lab.adapters.language.vibe_candidates import (
     CandidateCapabilityMatrix,
@@ -15,14 +16,17 @@ from ashare_lab.adapters.language.vibe_candidates import (
     CandidateTransportError,
     CandidateTransportRequest,
 )
-from ashare_lab.domain.strategy import StrategySpec, iter_indicator_conditions
+from ashare_lab.domain.strategy import StrategySpec, canonical_hash, iter_indicator_conditions
 from ashare_lab.ports.candidate_generation import CandidateProvenance
+from ashare_lab.ports.dialogue_progress import progress_sink
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.strategy_editing import StrategyEditRequest, StrategyEditResult
 
 _LOGGER = logging.getLogger(__name__)
-_PROMPT_VERSION = "strategy-edit.prompt.v19"
-_SCHEMA_VERSION = "strategy-edit.v6"
+_PROMPT_VERSION = "strategy-edit.prompt.v23"
+_SCHEMA_VERSION = "strategy-edit.v7"
 _UPSTREAM_COMMIT = "1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7"
+_SELECTION_CONFIRMATION_TIMEOUT_SECONDS = 20
 
 
 def _report_references(request: StrategyEditRequest) -> dict[str, object]:
@@ -42,18 +46,29 @@ def _report_references(request: StrategyEditRequest) -> dict[str, object]:
             # The report boundary supplies complete JSON; never fill missing history.
             continue
         summary = cast(Mapping[str, object], summary)
-        reports.append((strategy, {
+        compact: dict[str, object] = {
             "runId": run_id,
             "strategy": strategy_json,
             "summary": {key: summary[key] for key in (
                 "totalReturn", "benchmarkReturn", "benchmarkComparisonStatus",
                 "maxDrawdown", "tradeCount", "winRate", "dataRange",
             ) if key in summary},
-        }))
+        }
+        if isinstance(report.get("executionSettings"), Mapping):
+            try:
+                compact["executionSettings"] = ExecutionSettingsPatch.model_validate(
+                    report["executionSettings"],
+                ).model_dump(mode="json", exclude_none=True)
+            except ValidationError:
+                continue
+        reports.append((strategy, compact))
+    settings = request.execution_settings.model_dump(mode="json", exclude_none=True)
     current_index = next((index for index in range(len(reports) - 1, -1, -1)
-                          if reports[index][0] == request.strategy), None)
+                          if reports[index][0] == request.strategy
+                          and reports[index][1].get("executionSettings", {}) == settings), None)
     previous = (next((report for strategy, report in reversed(reports[:current_index])
-                      if strategy != request.strategy), None)
+                      if strategy != request.strategy
+                      or report.get("executionSettings", {}) != settings), None)
                 if current_index is not None else None)
     return {
         "current": reports[current_index][1] if current_index is not None else None,
@@ -74,6 +89,13 @@ class _ProviderEdit(BaseModel):
     refresh_data: bool = Field(default=False, strict=True)
     optimization_candidate_id: str | None = Field(default=None, pattern=r"^model-opt-[1-3]$")
     instrument_refs: tuple[str, ...] = Field(default=(), max_length=2)
+    execution_settings: ExecutionSettingsPatch = Field(default_factory=ExecutionSettingsPatch)
+    execution_setting_evidence: dict[str, str] = Field(default_factory=dict, max_length=12)
+
+    @field_validator("execution_settings", mode="before")
+    @classmethod
+    def null_settings_means_no_change(cls, value: object) -> object:
+        return {} if value is None else value
 
     @model_validator(mode="after")
     def requires_exactly_one_strategy_for_apply(self) -> "_ProviderEdit":
@@ -92,7 +114,15 @@ class _ProviderEdit(BaseModel):
             raise ValueError("only an applied edit can request a run")
         if self.refresh_data and not self.run_requested:
             raise ValueError("data refresh requires an explicit run request")
+        if (self.disposition not in {"apply", "change_instrument"}
+                and self.execution_settings.model_dump(exclude_none=True)):
+            raise ValueError("only an applied edit can change execution settings")
         return self
+
+
+class _SelectionConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+    message: str = Field(min_length=1, max_length=500)
 
 
 class VibeStrategyEditor:
@@ -119,19 +149,35 @@ class VibeStrategyEditor:
             upstream_pattern_commit=_UPSTREAM_COMMIT,
             system_contract=(
                 "你负责理解用户对当前 A 股日线回测策略的多轮修改。只返回指定 JSON。"
+                "currentExecutionSettings 是当前草稿的成交配置，与 currentStrategy.execution "
+                "中的固定成交时点、T+1及数据能力不同，不能混写。用户修改滑点、佣金、"
+                "最低佣金、仓位比例、成交量参与比例、涨跌停处理或面板已有研究设置时，"
+                "返回 apply，strategy 完整保留未修改的规则，execution_settings 只写本轮"
+                "明确要改的字段；纯费用修改也有效，不能当成‘策略没有变化’或 discuss。"
+                "每个非空配置字段都在 execution_setting_evidence 用同名键逐字引用本轮原句"
+                "中对应设置和值，不能用旧对话冒充本轮证据。没有修改的字段留null或省略；"
+                "execution_settings本身必须是对象，没有配置改动时返回{}，不要返回null、数组或字符串。"
+                "0和false是明确设置，绝不能替换成默认值。slippage_bps单位基点："
+                "5基点=0.05%=5；commission_rate是比例：万分之三=0.03%=0.0003；"
+                "minimum_commission_cny是元；allocation_ratio和participation_rate用0到1比例。"
+                "不支持的费用如印花税不能塞进佣金，无法确定单位时只问该缺项。"
+                "同时要求换股票及改费用时返回change_instrument并用execution_settings提取"
+                "本轮明确配置，不忽略其中一个修改。pendingEdit.executionSettings为尚未确认"
+                "股票时暂存的配置改动，补股票后由服务端接续；不要再次输出并伪造本轮费用证据。"
                 "currentStrategy 是服务端保存的最新完整策略，比 priorUtterance 或历史文字权威；"
                 "recentTurns 只帮助消解指代，不得覆盖当前策略。"
                 "recentTurns 中的 verifiedInstrument 是当时已核实的股票与匹配依据；"
                 "询问为什么选择某只股票时据此解释，不冒充当前行情或编造选股理由。"
                 "backtestResults 是服务端读取的本会话已完成报告（最多20份），按先后排列；"
                 "最后一份是最新结果，第一份是所提供历史的最早结果，不要颠倒。"
-                "reportReferences 是服务端按完整 strategy 等价比较选定的报告角色，"
+                "reportReferences 是服务端按完整 strategy 和成交配置等价比较选定的报告角色，"
                 "每个非空角色包含 runId、当次完整 strategy 和实际 summary 指标；"
                 "版本比较必须使用这些角色，不得根据 recentTurns 或印象另选报告。"
                 "问‘这次/当前’时用 reportReferences.current，它是最新且与 currentStrategy "
                 "完全匹配的报告；‘上次/上一版’用 reportReferences.previousDifferentStrategy，"
                 "它是该当前报告之前、最近一份 strategy 不同的已完成报告；"
-                "同一 strategy 的重复回测不算不同执行版本，也不能把紧邻的讨论或确认当上一版。"
+                "同一 strategy 且成交配置相同的重复回测不算不同执行版本；"
+                "仅费用改变也属于不同执行版本，不能把紧邻的讨论或确认当上一版。"
                 "问‘最早那版’时比较 reportReferences.earliest 和 current，"
                 "earliest 是所提供历史的最早报告，不能偷换成上一版。"
                 "每份的 strategy 是当次实际执行的条件，summary 是实际结果，不能编造数字。"
@@ -147,12 +193,24 @@ class VibeStrategyEditor:
                 "optimization_candidate_id 必须为 null。若报告 strategy 与 currentStrategy 不同，"
                 "说明优化基于旧版本，先 clarify 询问是否回到旧版；不要悄悄覆盖后续修改。"
                 "没有 review 或无法唯一确定候选时先 clarify，不得猜测候选条件。"
-                "用户请求给出几个调整方向、优化方案或可继续尝试的候选时，"
+                "用户只请求给出几个调整方向、优化方案或可继续尝试的候选，"
+                "没有授权你制定一条方案并立即回测时，"
                 "返回 disposition=request_optimization、strategy=null、run_requested=false；"
                 "服务端会基于与当前规则一致的已完成报告生成可选择的完整优化方案。"
                 "即使已有 review，明确请求重新给方案也返回 request_optimization；"
                 "message 只简短说明将提供待验证方案，不能用纯文字列举方向代替这一请求。"
                 "这一轮只提出候选，保留当前股票、买卖规则和原报告，不直接执行或宣称已改善。"
+                "与只提候选不同：用户明确授权你制定一个更合理的方案并立即回测时，"
+                "例如‘改一下，给我一个你认为更合理的方案并回测’，返回 apply、"
+                "完整修改后的 strategy、run_requested=true，不返回 request_optimization。"
+                "依据 reportReferences.current 的真实报告和当前规则，选择一项有依据的"
+                "买入或卖出调整形成具体方案；只使用 capabilityMatrix 中可执行的条件。"
+                "只改这一项，另一侧规则、股票、日期、本金和成交配置全部保留。"
+                "模型自行选择改哪项的权限只来自这次明确授权，不来自亏损或历史运行要求。"
+                "不能把当前规则或已在 backtestResults 运行过的相同方案重新包装成新优化。"
+                "message 简短说明这次改了什么并将重新回测，不提前承诺盈利或声称效果变好。"
+                "若用户指定采用已展示的方案，仍用 select_optimization 选择准确候选；"
+                "若说先给几个方向、先别跑、只看看，则只提候选，不替用户挑一条运行。"
                 "用户抱怨推荐仍然亏损或要求盈利策略时，若当前已核验报告收益为负，"
                 "先承认本区间亏损、未达到用户的盈利目标；不要用跑赢基准或样本不足"
                 "为推荐辩护，也不要把相对跑赢说成已经赚钱。低胜率和小样本本身不是亏损原因；"
@@ -161,7 +219,8 @@ class VibeStrategyEditor:
                 "最多引用策略收益这一个数字，不再堆日期、代码、回撤、胜率和交易次数；"
                 "第二句必须给出基于当前规则的具体下一步（要检验哪项买入或退出条件），"
                 "不能只表示认同后结束，也不能从低胜率推出信号质量差。"
-                "明确要求调整时仍按 request_optimization 提供待验证候选，"
+                "要求调整但没有明确立即回测授权时按 request_optimization 提供待验证候选；"
+                "授权制定一条方案并立即回测时按上述 apply 路径执行。"
                 "仅质疑结果或追问原因时按 discuss 回应；不保证盈利，不擅自运行新回测。"
                 "用户只是讨论已有候选的意义、比较候选，或说暂不采用优化，返回 discuss；"
                 "用户明确采用已有某个候选时才返回 select_optimization。"
@@ -203,6 +262,13 @@ class VibeStrategyEditor:
                 "只在用户明确要求改变条件或执行一个明确的新方案时才返回 apply。"
                 "run_requested 只在 apply/change_instrument/select_optimization 且用户本轮"
                 "明确要求立即再跑时为 true；"
+                "唯一例外是 pendingEdit.runRequested=true 的未完成修改：如果本轮正在补齐"
+                "pendingEdit.question 所问的名称或条件，就接续这次修改的重跑意图；"
+                "这不是重复执行旧报告。补齐股票名称返回 change_instrument，不要再次问已补齐的名称。"
+                "pendingEdit.instrumentCandidates 是实际核实的名称候选，不是自动选股建议；"
+                "用户选其中一只仍逐字提取本轮名称/代码，不代填未说出的代码。"
+                "若本轮说先别跑、只看看、取消或另起话题，必须覆盖待完成意图，不自动重跑。"
+                "只在接续同一次修改且用户没有否定刷新时延续 pendingEdit.refreshData。"
                 "用户只是改条件先看看、核对、讨论、请求解释或取消时必须为 false。"
                 "明确修改返回 disposition=apply 和完整 strategy；仅改变用户明确要求的部分，"
                 "先区分整侧替换与局部参数修改，再决定哪些内容必须保留。"
@@ -211,7 +277,8 @@ class VibeStrategyEditor:
                 "同理，整条卖出替换整个 exit。整侧替换时‘其他保持不变’指另一侧及回测设置，"
                 "绝不表示保留被替换侧的旧过滤条件。比如旧买入为X且Y，新买入改为Z，结果只有Z。"
                 "只有用户明确改某个参数或某个子条件时，才保留同侧未指定修改的其余子条件。"
-                "未指定替换的条件、参数、布尔组合、本金和日期原样保留，不自行优化。"
+                "未指定替换的条件、参数、布尔组合、本金和日期原样保留；"
+                "只有上述明确授权制定方案的情况才由你选择一项条件调整。"
                 "可修改 entry、exit、backtest；catalog、instrument、execution 必须保持不变。"
                 "如果用户要把现有规则换到另一只股票，返回 change_instrument、strategy=null，"
                 "instrument_refs 给出目标股票在用户原文中的名称/代码，不是旧股票。"
@@ -251,7 +318,8 @@ class VibeStrategyEditor:
             system_footer=f"Edit contract: {_PROMPT_VERSION}; schema: {_SCHEMA_VERSION}.",
             json_object_contract=(
                 "Return disposition, message, strategy, run_requested, refresh_data, "
-                "optimization_candidate_id, instrument_refs. "
+                "optimization_candidate_id, instrument_refs, execution_settings, "
+                "execution_setting_evidence. "
                 "This edits a supplied StrategySpec, not candidate extraction. "
                 "Preserve unspecified fields; whole-leg replacement discards "
                 "that leg's old conditions."
@@ -260,10 +328,25 @@ class VibeStrategyEditor:
                 "answer": request.answer,
                 "priorUtterance": request.prior_utterance,
                 "currentStrategy": request.strategy.model_dump(mode="json"),
+                "currentExecutionSettings": request.execution_settings.model_dump(
+                    mode="json", exclude_none=True,
+                ),
                 "capabilityMatrix": self._matrix.model_dump(mode="json"),
                 "asOfDate": request.as_of_date.isoformat(),
                 "backtestResults": list(request.backtest_results),
                 "reportReferences": _report_references(request),
+                "pendingEdit": {
+                    "executionSettings": request.pending_execution_settings.model_dump(
+                        mode="json", exclude_none=True,
+                    ),
+                    "question": request.pending_clarification,
+                    "runRequested": request.pending_run_requested,
+                    "refreshData": request.pending_refresh_data,
+                    "instrumentCandidates": [
+                        {"name": item.name, "symbol": item.symbol}
+                        for item in request.instrument_candidates
+                    ],
+                },
                 "recentTurns": [
                     {"user": turn.user_text, "assistant": turn.assistant_text,
                      **({"verifiedInstrument": turn.verified_instrument}
@@ -319,6 +402,9 @@ class VibeStrategyEditor:
                     ))
                 ):
                     raise ValueError("instrument reference repair exceeded its source or authority")
+            parsed.execution_settings.validate_evidence(
+                parsed.execution_setting_evidence, request.answer,
+            )
             strategy = (self._selected_optimization(request, parsed.optimization_candidate_id)
                         if parsed.disposition == "select_optimization" else parsed.strategy)
             if strategy is not None:
@@ -335,21 +421,34 @@ class VibeStrategyEditor:
                 if changed:
                     raise ValueError(f"invalid strategy edit boundaries: {','.join(changed)}")
         except (TypeError, ValueError, CandidateTransportError) as exc:
-            # Field paths/codes only: no credentials, raw response or reasoning.
-            detail = ([{"path": error["loc"], "type": error["type"]}
-                       for error in exc.errors(include_input=False, include_url=False)]
+            if isinstance(exc, CandidateTransportError) and exc.is_classified:
+                raise
+            # Log input types, never input values, raw responses or reasoning.
+            detail = ([{"path": error["loc"], "type": error["type"],
+                        "input_type": type(error.get("input")).__name__}
+                       for error in exc.errors(include_input=True, include_url=False,
+                                               include_context=False)]
                       if isinstance(exc, ValidationError) else
                       str(exc) if isinstance(exc, ValueError) else None)
             _LOGGER.warning("strategy_edit_unavailable type=%s detail=%s",
                             type(exc).__name__, detail)
             return None
+        message = parsed.message
+        if parsed.disposition == "select_optimization":
+            assert strategy is not None
+            # The first model saw repeated batch-local ids. Its narrative must
+            # never describe the independently selected, exact stored strategy.
+            message = await self._confirm_selected_optimization(
+                transport_request, request, parsed, strategy,
+            )
         return StrategyEditResult(
             disposition=("apply" if parsed.disposition == "select_optimization"
                          else parsed.disposition),
-            message=parsed.message, strategy=strategy,
+            message=message, strategy=strategy,
             run_requested=parsed.run_requested,
             refresh_data=parsed.refresh_data,
             instrument_refs=parsed.instrument_refs,
+            execution_settings=parsed.execution_settings,
             provenance=CandidateProvenance(
                 source="bounded_provider", provider=self._identity.provider,
                 model=self._identity.model, prompt_version=_PROMPT_VERSION,
@@ -359,6 +458,74 @@ class VibeStrategyEditor:
                 upstream_pattern_commit=_UPSTREAM_COMMIT, candidate_rank=1,
             ),
         )
+
+    async def _confirm_selected_optimization(
+        self, original: CandidateTransportRequest, request: StrategyEditRequest,
+        parsed: _ProviderEdit, strategy: StrategySpec,
+    ) -> str:
+        """Narrate the resolved choice without another model deciding its action."""
+        indicator_ids = {leaf.indicator_id for leaf in iter_indicator_conditions(strategy)}
+        confirmation = replace(
+            original,
+            utterance="确认当前已选定的策略及已确定的操作。",
+            response_schema=cast(Mapping[str, object], _SelectionConfirmation.model_json_schema()),
+            response_schema_name="strategy_selection_confirmation",
+            capability_matrix={},
+            system_contract=(
+                "只为服务端已精确选定的方案撰写简短确认说明，返回唯一字段message。"
+                "selectedStrategy是唯一规则事实；selectedIndicators仅解释其中指标。"
+                "正常确认仅用一到两句短句，概述本次选中的股票、关键买入和退出条件，"
+                "以及是否将执行，不输出DSL字段名、JSON或hash。"
+                "不自行推导或扩写成交时点、成交价、缓存或联网行为。"
+                "holding_period_exit仅描述持有对应数量的交易日退出，例如持有10个交易日退出；"
+                "不能再套用次日开盘规则，把目标退出日延后。"
+                "runRequested和refreshData是已确定的本轮授权，不能改变或推断新的动作。"
+                "runRequested=true只说明将按此回测，不能说已经完成；false说明仅选定，暂不运行。"
+                "refreshData=false时不主动谈取数或缓存，不能说不重新取数或不重新获取数据；"
+                "true时可以说本轮将强制重新取数，不推测缓存命中结果。"
+                "不补默认费用，不保证盈利或提前评价效果。"
+                "不重新选择候选、不生成或修改策略，不补造条件，不输出任何动作或策略字段。"
+                "完整撰写一到两句确认正文，不续写其他文字。"
+            ),
+            system_footer="Confirmation contract: strategy-selection-confirmation.prompt.v2.",
+            json_object_contract=(
+                "Return only the complete model-authored message as a JSON string field."
+            ),
+            user_payload={
+                "selectedCandidateId": parsed.optimization_candidate_id,
+                "selectedStrategy": strategy.model_dump(mode="json"),
+                "selectedStrategyHash": canonical_hash(strategy),
+                "runRequested": parsed.run_requested,
+                "refreshData": parsed.refresh_data,
+                "executionSettings": request.execution_settings.model_dump(
+                    mode="json", exclude_none=True,
+                ),
+                "selectedIndicators": [item.model_dump(mode="json")
+                                       for item in self._matrix.indicators
+                                       if item.indicator_id in indicator_ids],
+            },
+        )
+        progress_token = progress_sink.set(None)
+        try:
+            async with timeout(_SELECTION_CONFIRMATION_TIMEOUT_SECONDS):
+                raw = await self._transport.generate_json(confirmation)
+            return _SelectionConfirmation.model_validate(
+                json.loads(raw) if isinstance(raw, bytes | str) else raw,
+            ).message
+        except (TypeError, ValueError, TimeoutError, CandidateTransportError) as exc:
+            _LOGGER.warning("strategy_selection_confirmation_unavailable type=%s",
+                            type(exc).__name__)
+            # A narration failure neither revokes a valid choice nor grants a
+            # new run. Never fall back to the first, history-contaminated message.
+            return (
+                f"{exc.public_message}确认说明暂不可用，请以策略卡片为准。"
+                if isinstance(exc, CandidateTransportError) and exc.is_classified
+                else "确认说明暂不可用，请以策略卡片为准。"
+            )
+        finally:
+            # The transport's generic failure must not mark the accepted choice
+            # as failed. The caller receives the local narration error instead.
+            progress_sink.reset(progress_token)
 
     @staticmethod
     def _selected_optimization(
@@ -371,6 +538,11 @@ class VibeStrategyEditor:
                 continue
             if StrategySpec.model_validate(report.get("strategy")) != request.strategy:
                 raise ValueError("optimization belongs to a different strategy revision")
+            recorded_settings = ExecutionSettingsPatch.model_validate(
+                report.get("executionSettings", {}),
+            )
+            if recorded_settings != request.execution_settings:
+                raise ValueError("optimization belongs to different execution settings")
             choices = cast(Mapping[str, object], review).get("optimizationCandidates", ())
             if not isinstance(choices, list | tuple):
                 raise ValueError("stored optimization candidates are invalid")

@@ -33,6 +33,7 @@ from ashare_lab.ports.current_fact_research import (
     ResearchPurpose,
     ResearchSource,
 )
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.idea_routing import IdeaGenerationError, IdeaResearchUnavailableError
 
 ROOT = Path(__file__).parents[4]
@@ -202,8 +203,9 @@ async def test_provider_authors_complete_strategies_but_server_owns_asset_and_ca
     assert all(item.capability_ids == () for item in route.proposals)
     assert route.provenance is not None
     assert route.provenance.provider == "deepseek"
-    assert route.provenance.prompt_version == "idea-route.prompt.v8"
-    assert route.provenance.schema_version == "idea-route-provider.v4"
+    assert route.provenance.prompt_version == "idea-route.prompt.v11"
+    assert route.provenance.schema_version == "idea-route-provider.v6"
+    assert route.execution_settings.model_dump(exclude_none=True) == {}
     assert transport.requests[0].response_schema["additionalProperties"] is False
     properties = cast(dict[str, object], transport.requests[0].response_schema["properties"])
     assert "proposals" in properties
@@ -220,12 +222,122 @@ async def test_provider_authors_complete_strategies_but_server_owns_asset_and_ca
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "settings", "evidence"),
+    [
+        (
+            "低买高卖，滑点0，佣金0，最低佣金0，不做稳健性分析",
+            {"slippage_bps": 0, "commission_rate": 0, "minimum_commission_cny": 0,
+             "run_robustness": False},
+            {"slippage_bps": "滑点0", "commission_rate": "佣金0",
+             "minimum_commission_cny": "最低佣金0", "run_robustness": "不做稳健性分析"},
+        ),
+        (
+            "低买高卖，滑点0.05%，佣金万三，最低佣金5元",
+            {"slippage_bps": 5, "commission_rate": "0.0003", "minimum_commission_cny": 5},
+            {"slippage_bps": "滑点0.05%", "commission_rate": "佣金万三",
+             "minimum_commission_cny": "最低佣金5元"},
+        ),
+    ],
+)
+async def test_idea_execution_settings_preserve_provider_values_with_exact_current_quotes(
+    capability_matrix: CandidateCapabilityMatrix,
+    utterance: str,
+    settings: dict[str, object],
+    evidence: dict[str, str],
+) -> None:
+    # Adapter contract only, not real-model/data acceptance.
+    payload = {**_provider_payload(), "execution_settings": settings,
+               "execution_setting_evidence": evidence}
+    transport = _RecordingTransport([payload])
+    route = await VibeIdeaRouter(
+        transport, capability_matrix=capability_matrix, researcher=_StaticResearcher(),
+    ).route(
+        CompileInput(utterance=utterance, as_of_date=date(2026, 9, 6)),
+    )
+    assert route is not None
+    assert route.execution_settings == ExecutionSettingsPatch.model_validate(settings)
+    assert len(transport.requests) == 1
+    schema = transport.requests[0].response_schema
+    properties = cast(dict[str, object], schema["properties"])
+    settings_schema = cast(dict[str, object], properties["execution_settings"])
+    assert set(cast(dict[str, object], settings_schema["properties"])) == set(
+        ExecutionSettingsPatch.model_fields
+    )
+    assert "execution_setting_evidence" in properties
+    for key in ExecutionSettingsPatch.model_fields:
+        assert key in transport.requests[0].system_contract
+
+
+@pytest.mark.asyncio
+async def test_idea_model_preserves_waiting_for_users_own_stock(
+    capability_matrix: CandidateCapabilityMatrix,
+) -> None:
+    transport = _RecordingTransport([{
+        **_provider_payload(), "instrument_suggestion_declined": True,
+    }])
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(),
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+        idea_router=VibeIdeaRouter(transport, capability_matrix=capability_matrix),
+        backtest_anchor_date=date(2026, 9, 5),
+    )
+    outcome = await compiler._compile_idea_guidance(CompileInput(
+        utterance="我想低买高卖，股票等我补充，先别跑", as_of_date=date(2026, 9, 5),
+    ))
+    assert outcome is not None and outcome.idea_route is not None
+    assert outcome.idea_route.instrument_suggestion_declined is True
+    assert outcome.instrument_suggestion_declined is True
+    assert outcome.strategy is None and not outcome.run_requested
+    properties = cast(dict[str, object], transport.requests[0].response_schema["properties"])
+    assert properties["instrument_suggestion_declined"] == {"type": "boolean", "default": False}
+    assert "缺少股票本身、或只说先别跑，不能据此拒绝推荐" in transport.requests[0].system_contract
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid_repair", [True, False])
+async def test_idea_execution_settings_repair_revalidates_quotes_and_field_coverage(
+    capability_matrix: CandidateCapabilityMatrix,
+    valid_repair: bool,
+) -> None:
+    malformed = {**_provider_payload(), "execution_settings": {"slippage_bps": 5},
+                 "execution_setting_evidence": {}}
+    correction = {
+        **_provider_payload(), "execution_settings": {"slippage_bps": 5},
+        "execution_setting_evidence": {
+            "slippage_bps": "滑点0.05%" if valid_repair else "滑点5基点",
+        },
+    }
+    primary, repair = _RecordingTransport([malformed]), _RecordingTransport([correction])
+    router = VibeIdeaRouter(primary, capability_matrix=capability_matrix, repair_transport=repair)
+    request = CompileInput(utterance="低买高卖，滑点0.05%", as_of_date=date(2026, 9, 6))
+    if valid_repair:
+        route = await router.route(request)
+        assert route is not None
+        assert route.execution_settings.slippage_bps == 5
+    else:
+        with pytest.raises(IdeaGenerationError) as caught:
+            await router.route(request)
+        assert caught.value.stage == "schema"
+    assert len(primary.requests) == len(repair.requests) == 1
+    repaired_payload = repair.requests[0].user_payload
+    assert repaired_payload is not None
+    assert repaired_payload["utterance"] == request.utterance
+    assert "execution setting evidence must match changed fields" in str(
+        repaired_payload["validationFeedback"]
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("unbound", [False, True])
 async def test_bound_idea_direct_dsl_preserves_server_cash_period_and_instrument(
     capability_matrix: CandidateCapabilityMatrix,
     unbound: bool,
 ) -> None:
     payload = _provider_payload()
+    payload["execution_settings"] = {"slippage_bps": 0, "commission_rate": 0}
+    payload["execution_setting_evidence"] = {"slippage_bps": "滑点0", "commission_rate": "佣金0"}
     proposals = cast(list[dict[str, object]], payload["proposals"])
     for period, proposal in zip((20, 30, 60), proposals, strict=True):
         proposal["strategy"] = StrategySpec(
@@ -272,7 +384,7 @@ async def test_bound_idea_direct_dsl_preserves_server_cash_period_and_instrument
         ),
     ).route(
         CompileInput(
-            utterance="我讨厌特朗普的关税政策，给我三个近一年策略，本金10万元",
+            utterance="我讨厌特朗普的关税政策，给我三个近一年策略，本金10万元，滑点0，佣金0",
             instrument_context=None if unbound else "300059.SZ",
             as_of_date=date(2026, 9, 4),
         )
@@ -280,6 +392,7 @@ async def test_bound_idea_direct_dsl_preserves_server_cash_period_and_instrument
 
     assert route is not None
     assert len(route.proposals) == 3
+    assert route.execution_settings.slippage_bps == route.execution_settings.commission_rate == 0
     strategies = [
         item.strategy_template if unbound else item.strategy for item in route.proposals
     ]

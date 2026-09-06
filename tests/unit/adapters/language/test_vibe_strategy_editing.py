@@ -1,6 +1,9 @@
 """The model cannot ask a non-editing reply to trigger execution."""
 
-from datetime import date
+import json
+from asyncio import sleep
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
@@ -19,9 +22,98 @@ from ashare_lab.adapters.language.vibe_strategy_editing import (
     _ProviderEdit,
     _report_references,
 )
+from ashare_lab.application.backtest_submission import resolve_execution_settings
 from ashare_lab.domain.catalog import load_catalog_directory, load_coverage_catalog_directory
-from ashare_lab.domain.strategy import FirstOfExit, IndicatorCondition, StrategySpec
+from ashare_lab.domain.strategy import FirstOfExit, IndicatorCondition, StrategySpec, canonical_hash
+from ashare_lab.ports.clarification_dialogue import ClarificationDialogueTurn
+from ashare_lab.ports.dialogue_progress import emit_progress, progress_sink
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.strategy_editing import StrategyEditRequest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forged_quote", [False, True])
+async def test_fee_only_provider_json_returns_patch_only_with_exact_current_quotes(
+    forged_quote: bool,
+) -> None:
+    root = Path(__file__).parents[4]
+    strategy = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    matrix = build_candidate_capability_matrix(
+        load_catalog_directory(root / "catalogs"),
+        load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+    )
+    requests: list[CandidateTransportRequest] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            requests.append(request)
+            return json.dumps({
+                "disposition": "apply", "message": "只调整滑点和佣金，先不运行。",
+                "strategy": strategy.model_dump(mode="json"),
+                "execution_settings": {"slippage_bps": "0", "commission_rate": "0.0003"},
+                "execution_setting_evidence": {
+                    "slippage_bps": "滑点改为5" if forged_quote else "滑点改为0",
+                    "commission_rate": "佣金设为万分之三",
+                },
+            })
+
+    current = resolve_execution_settings(ExecutionSettingsPatch(slippage_bps=Decimal("9")))
+    editor = VibeStrategyEditor(
+        Transport(), capability_matrix=matrix,
+        provider_identity=CandidateProviderIdentityView(
+            provider="test", model="test", prompt_version="test", schema_version="test",
+        ),
+    )
+    result = await editor.edit(StrategyEditRequest(
+        answer="滑点改为0，佣金设为万分之三，其他不变，先不运行。",
+        prior_utterance="旧策略", strategy=strategy, as_of_date=date(2026, 9, 5),
+        execution_settings=current,
+    ))
+    assert len(requests) == 1
+    payload = requests[0].user_payload
+    assert payload is not None
+    assert payload["currentExecutionSettings"] == current.model_dump(mode="json", exclude_none=True)
+    if forged_quote:
+        assert result is None
+    else:
+        assert result is not None and result.disposition == "apply"
+        assert result.strategy == strategy
+        assert result.execution_settings.model_dump(exclude_none=True) == {
+            "slippage_bps": Decimal("0"), "commission_rate": Decimal("0.0003"),
+        }
+        assert not result.run_requested and not result.refresh_data
+
+
+@pytest.mark.parametrize("current_slippage", [0, 3])
+def test_report_references_distinguish_cost_versions_and_unrun_settings(
+    current_slippage: int,
+) -> None:
+    strategy = StrategySpec.model_validate_json((Path(__file__).parents[4]
+        / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text())
+    reports = tuple({
+        "runId": f"run:cost-version-{index}", "strategy": strategy.model_dump(mode="json"),
+        "executionSettings": resolve_execution_settings(ExecutionSettingsPatch(
+            slippage_bps=Decimal(slippage),
+        )).model_dump(mode="json", exclude_none=True),
+        "summary": {"totalReturn": -0.1, "maxDrawdown": 0.2, "tradeCount": 3},
+    } for index, slippage in enumerate((5, 0, 0)))
+    references = _report_references(StrategyEditRequest(
+        answer="比较这次和上次的费用与结果", prior_utterance="", strategy=strategy,
+        as_of_date=date(2026, 9, 5), backtest_results=reports,
+        execution_settings=resolve_execution_settings(ExecutionSettingsPatch(
+            slippage_bps=Decimal(current_slippage),
+        )),
+    ))
+
+    assert references == {
+        "current": reports[2] if current_slippage == 0 else None,
+        "previousDifferentStrategy": reports[0] if current_slippage == 0 else None,
+        "earliest": reports[0],
+    }
 
 
 @pytest.mark.asyncio
@@ -131,7 +223,7 @@ async def test_loss_feedback_keeps_user_goal_and_does_not_defend_or_execute_reco
     assert result is not None
     assert result.disposition == disposition and result.message == model_message
     assert result.strategy is None and not result.run_requested and not result.refresh_data
-    assert result.provenance.prompt_version == "strategy-edit.prompt.v19"
+    assert result.provenance.prompt_version == "strategy-edit.prompt.v23"
     assert len(requests) == 1
     payload = requests[0].user_payload
     assert payload is not None and payload["answer"] == answer
@@ -146,6 +238,74 @@ async def test_loss_feedback_keeps_user_goal_and_does_not_defend_or_execute_reco
     assert "没有逐笔交易等证据时，不编造亏损因果" in contract
     assert "不保证盈利，不擅自运行新回测" in contract
     assert "第二句必须给出基于当前规则的具体下一步" in contract
+
+
+@pytest.mark.asyncio
+async def test_explicit_optimization_keeps_apply_run_and_unchanged_settings() -> None:
+    root = Path(__file__).parents[4]
+    baseline = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    changed = baseline.model_dump(mode="json")
+    changed["entry"]["children"][0]["params"]["fast"] = 8
+    strategy = StrategySpec.model_validate(changed)
+    settings = resolve_execution_settings(ExecutionSettingsPatch(
+        slippage_bps=Decimal("2"), commission_rate=Decimal("0"),
+        minimum_commission_cny=Decimal("0"),
+    ))
+    report = {
+        "runId": "run:prior-loss", "strategy": baseline.model_dump(mode="json"),
+        "executionSettings": settings.model_dump(mode="json", exclude_none=True),
+        "summary": {"totalReturn": -0.13, "tradeCount": 9},
+    }
+    requests: list[CandidateTransportRequest] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            requests.append(request)
+            return {
+                "disposition": "apply", "strategy": changed, "run_requested": True,
+                "message": "调整买入信号的快线周期，其他设置不变，重新回测。",
+            }
+
+    editor = VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ),
+        provider_identity=CandidateProviderIdentityView(
+            provider="test", model="test", prompt_version="test", schema_version="test",
+        ),
+    )
+    result = await editor.edit(StrategyEditRequest(
+        answer="改一下，给我一个你认为更合理的方案并回测", prior_utterance="原策略",
+        strategy=baseline, as_of_date=date(2026, 9, 5), execution_settings=settings,
+        backtest_results=(report,),
+    ))
+    assert result is not None and result.disposition == "apply"
+    assert result.run_requested and not result.refresh_data
+    assert result.strategy is not None
+    assert result.strategy == strategy and result.strategy != baseline
+    assert result.strategy.exit == baseline.exit
+    assert result.strategy.instrument == baseline.instrument
+    assert result.strategy.backtest == baseline.backtest
+    assert result.strategy.execution == baseline.execution
+    assert not result.execution_settings.model_dump(exclude_none=True)
+    assert len(requests) == 1
+    payload = requests[0].user_payload
+    assert payload is not None
+    assert payload["reportReferences"] == {
+        "current": report, "previousDifferentStrategy": None, "earliest": report,
+    }
+    assert payload["currentExecutionSettings"] == settings.model_dump(
+        mode="json", exclude_none=True,
+    )
+    contract = requests[0].system_contract
+    assert "完整修改后的 strategy、run_requested=true，不返回 request_optimization" in contract
+    assert "先别跑、只看看，则只提候选" in contract
+    assert "另一侧规则、股票、日期、本金和成交配置全部保留" in contract
 
 
 @pytest.mark.asyncio
@@ -218,7 +378,7 @@ async def test_version_comparison_keeps_ordered_reports_and_distinguishes_previo
     assert result is not None and result.disposition == "discuss"
     assert result.message == model_message and result.strategy is None
     assert not result.run_requested and not result.refresh_data
-    assert result.provenance.prompt_version == "strategy-edit.prompt.v19"
+    assert result.provenance.prompt_version == "strategy-edit.prompt.v23"
     assert len(requests) == 1
     payload = requests[0].user_payload
     assert payload is not None and payload["answer"] == answer
@@ -230,7 +390,7 @@ async def test_version_comparison_keeps_ordered_reports_and_distinguishes_previo
     contract = requests[0].system_contract
     assert "版本比较必须使用这些角色" in contract
     assert "最近一份 strategy 不同的已完成报告" in contract
-    assert "同一 strategy 的重复回测不算不同执行版本" in contract
+    assert "同一 strategy 且成交配置相同的重复回测不算不同执行版本" in contract
     assert "问‘最早那版’时比较 reportReferences.earliest 和 current" in contract
     assert "角色为 null 表示所提供历史没有相应报告" in contract
     assert "版本比较必须同时概述两版买入和卖出规则" in contract
@@ -469,7 +629,7 @@ async def test_instrument_reference_repair_is_exact_once_and_cannot_expand_autho
     assert result is not None and result.disposition == expected_disposition
     assert result.message == (original if repair_patch is None else repaired)["message"]
     assert result.strategy is None and not result.refresh_data
-    assert result.provenance.prompt_version == "strategy-edit.prompt.v19"
+    assert result.provenance.prompt_version == "strategy-edit.prompt.v23"
     if expected_disposition == "change_instrument":
         assert result.instrument_refs == ("贵州茅台", "300059")
         assert result.run_requested == original_run
@@ -504,3 +664,213 @@ def test_optimization_selection_uses_exact_server_candidate_and_rejects_stale_ba
     )
     with pytest.raises(ValueError, match="different strategy revision"):
         VibeStrategyEditor._selected_optimization(stale, "model-opt-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("confirmation_kind", "run_requested", "refresh_data"), [
+    ("success", True, True), ("success", False, False),
+    ("transport_error", True, False), ("timeout", True, False),
+    ("classified_transport_error", True, False), ("classified_transport_error", False, False),
+    ("invalid_json", True, False), ("extra_action", False, False),
+])
+async def test_selection_confirmation_uses_only_exact_dsl_and_never_changes_action(
+    confirmation_kind: str, run_requested: bool, refresh_data: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = Path(__file__).parents[4]
+    payload = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    ).model_dump(mode="json")
+    payload["entry"] = IndicatorCondition(
+        indicator_id="price.rolling_high", definition_version="1.0.0", trigger="new_high",
+        params={"period": 20, "price_field": "close"},
+    ).model_dump(mode="json")
+    payload["exit"] = {"op": "first_of", "children": [
+        {"type": "holding_period_exit", "sessions": 10},
+    ]}
+    baseline = StrategySpec.model_validate(payload)
+    old = baseline.model_dump(mode="json")
+    old["entry"] = {"type": "all", "children": [payload["entry"], IndicatorCondition(
+        indicator_id="volume.relative", definition_version="1.0.0", trigger="gte_multiple",
+        params={"baseline_period": 20, "consecutive_days": 3}, value=1.5,
+    ).model_dump(mode="json")]}
+    chosen = baseline.model_dump(mode="json")
+    chosen["entry"] = {"type": "all", "children": [payload["entry"], IndicatorCondition(
+        indicator_id="market.turnover_rate", definition_version="1.0.0", trigger="above", value=2,
+    ).model_dump(mode="json")]}
+    strategy = StrategySpec.model_validate(chosen)
+    old_message = "已采用20日新高叠加成交量达到过去20日均量1.5倍，将重新回测。"
+    confirmation_message = (
+        "已选择20日新高且换手率大于2%、持有10个交易日退出的方案，将按此重新取数并回测。"
+        if run_requested else
+        "已选择20日新高且换手率大于2%、持有10个交易日退出的方案，暂不运行。"
+    )
+    settings = resolve_execution_settings(ExecutionSettingsPatch(
+        slippage_bps=Decimal("5"), commission_rate=Decimal("0"),
+        minimum_commission_cny=Decimal("0"),
+    ))
+    old_review = {"responseHash": "old-only-batch", "optimizationCandidates": [
+        {"id": "model-opt-1", "strategy": old},
+    ]}
+    current_review = {"optimizationCandidates": [{"id": "model-opt-1", "strategy": chosen}]}
+    reports = ({"runId": "run:old", "strategy": payload, "reviews": [old_review]}, {
+        "runId": "run:current", "strategy": baseline.model_dump(mode="json"),
+        "executionSettings": settings.model_dump(mode="json", exclude_none=True),
+        "review": current_review, "reviews": [old_review, current_review],
+    })
+    requests: list[CandidateTransportRequest] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            requests.append(request)
+            if len(requests) == 1:
+                emit_progress("validation", "selection")
+                return {
+                    "disposition": "select_optimization", "strategy": None,
+                    "optimization_candidate_id": "model-opt-1", "message": old_message,
+                    "run_requested": run_requested, "refresh_data": refresh_data,
+                    "execution_settings": None,
+                }
+            if confirmation_kind == "transport_error":
+                emit_progress("failed", "transport")
+                raise CandidateTransportError("fixture unavailable")
+            if confirmation_kind == "classified_transport_error":
+                raise CandidateTransportError(
+                    "private upstream content", failure_kind="insufficient_balance",
+                    http_status=402,
+                )
+            if confirmation_kind == "timeout":
+                await sleep(0.01)
+            if confirmation_kind == "invalid_json":
+                return "invalid JSON"
+            if confirmation_kind == "extra_action":
+                return {"message": confirmation_message, "run_requested": True, "strategy": old}
+            return {"message": confirmation_message}
+
+    if confirmation_kind == "timeout":
+        monkeypatch.setattr(
+            "ashare_lab.adapters.language.vibe_strategy_editing."
+            "_SELECTION_CONFIRMATION_TIMEOUT_SECONDS", 0.001,
+        )
+    editor = VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ),
+        provider_identity=CandidateProviderIdentityView(
+            provider="test", model="test", prompt_version="test", schema_version="test",
+        ),
+    )
+    edit_request = StrategyEditRequest(
+        answer="用第一个方案再跑并重新取数" if run_requested else "选择第一个，先别跑",
+        prior_utterance=old_message, strategy=baseline, as_of_date=date(2026, 9, 5),
+        execution_settings=settings, backtest_results=reports,
+        recent_turns=(ClarificationDialogueTurn(
+            user_text="旧方案", assistant_text=old_message, intent="discuss", revision=1,
+            created_at=datetime(2026, 9, 5, tzinfo=UTC),
+        ),),
+    )
+    statuses: list[tuple[str, str]] = []
+    progress_token = progress_sink.set(lambda stage, message: statuses.append((stage, message)))
+    try:
+        result = await editor.edit(edit_request)
+        emit_progress("strategy_ready", "caller resumed")
+    finally:
+        progress_sink.reset(progress_token)
+    assert statuses == [("validation", "selection"), ("strategy_ready", "caller resumed")]
+    assert result is not None and result.disposition == "apply"
+    assert result.strategy == strategy
+    assert result.run_requested is run_requested and result.refresh_data is refresh_data
+    assert not result.execution_settings.model_dump(exclude_none=True)
+    assert result.message != old_message
+    if confirmation_kind == "success":
+        assert result.message == confirmation_message
+    elif confirmation_kind == "classified_transport_error":
+        assert result.message == (
+            "DeepSeek 账户余额不足，本次模型请求未完成，请检查服务端账户余额。"
+            "确认说明暂不可用，请以策略卡片为准。"
+        )
+    else:
+        assert result.message == "确认说明暂不可用，请以策略卡片为准。"
+    assert len(requests) == 2
+    confirmation = requests[1]
+    assert confirmation.response_schema_name == "strategy_selection_confirmation"
+    assert confirmation.capability_matrix == {}
+    facts = confirmation.user_payload
+    assert facts is not None
+    assert set(facts) == {"selectedCandidateId", "selectedStrategy", "selectedStrategyHash",
+                          "runRequested", "refreshData", "executionSettings", "selectedIndicators"}
+    assert facts["selectedStrategy"] == chosen
+    assert facts["selectedStrategyHash"] == canonical_hash(strategy)
+    assert facts["executionSettings"] == settings.model_dump(mode="json", exclude_none=True)
+    assert facts["runRequested"] is run_requested and facts["refreshData"] is refresh_data
+    assert "old-only-batch" not in json.dumps(facts, ensure_ascii=False)
+    assert old_message not in json.dumps(facts, ensure_ascii=False)
+    assert "volume.relative" not in json.dumps(facts, ensure_ascii=False)
+    assert "selectedStrategy是唯一规则事实" in confirmation.system_contract
+    assert "正常确认仅用一到两句短句" in confirmation.system_contract
+    assert "不自行推导或扩写成交时点、成交价、缓存或联网行为" in confirmation.system_contract
+    assert "持有10个交易日退出" in confirmation.system_contract
+    assert "不能再套用次日开盘规则，把目标退出日延后" in confirmation.system_contract
+    assert "refreshData=false时不主动谈取数或缓存" in confirmation.system_contract
+    assert "true时可以说本轮将强制重新取数" in confirmation.system_contract
+    assert confirmation.system_footer == (
+        "Confirmation contract: strategy-selection-confirmation.prompt.v2."
+    )
+    assert "没有配置改动时返回{}" in requests[0].system_contract
+
+
+def test_nullable_execution_settings_preserves_existing_zero_and_false_values() -> None:
+    parsed = _ProviderEdit.model_validate({
+        "disposition": "discuss", "strategy": None, "message": "没有配置修改。",
+        "execution_settings": None,
+    })
+    assert not parsed.execution_settings.model_dump(exclude_none=True)
+    current = ExecutionSettingsPatch(slippage_bps=Decimal("0"), retry_unfilled_exits=False)
+    assert current.merged(parsed.execution_settings) == current
+    explicit = _ProviderEdit.model_validate({
+        "disposition": "apply", "message": "只改指定配置。",
+        "strategy": StrategySpec.model_validate_json((Path(__file__).parents[4]
+            / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text()),
+        "execution_settings": {"slippage_bps": "0", "retry_unfilled_exits": False},
+    })
+    assert explicit.execution_settings == current
+    assert not parsed.run_requested and not parsed.refresh_data
+    assert not explicit.run_requested and not explicit.refresh_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings", [[], "private-model-value", False])
+async def test_invalid_execution_settings_logs_only_type_not_value(
+    settings: object, caplog: pytest.LogCaptureFixture,
+) -> None:
+    root = Path(__file__).parents[4]
+    strategy = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            return {"disposition": "discuss", "message": "private-model-message",
+                    "strategy": None, "execution_settings": settings}
+
+    editor = VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ),
+        provider_identity=CandidateProviderIdentityView(
+            provider="test", model="test", prompt_version="test", schema_version="test",
+        ),
+    )
+    assert await editor.edit(StrategyEditRequest(
+        answer="核对当前配置", prior_utterance="private-user-history", strategy=strategy,
+        as_of_date=date(2026, 9, 5),
+    )) is None
+    assert "'path': ('execution_settings',), 'type': 'model_type'" in caplog.text
+    assert f"'input_type': '{type(settings).__name__}'" in caplog.text
+    assert "private-" not in caplog.text

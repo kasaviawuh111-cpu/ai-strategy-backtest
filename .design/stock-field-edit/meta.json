@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "slug": "stock-field-edit",
+  "title": "股票栏原位编辑",
+  "source": {"type": "adhoc", "ref": "B28"},
+  "status": "approved",
+  "fidelity": "partial",
+  "createdAt": "2026-09-06",
+  "updatedAt": "2026-09-06",
+  "currentVersion": 2,
+  "direction": {"source": "product-tokens", "note": "沿用 SummaryCards 股票行与 app.css/tokens.css，只改变股票编辑交互。"},
+  "asIs": {"verified": "source-diff", "selfChecked": true, "component": "web/src/components/SummaryCards.tsx:74", "scope": "股票行名称17px/600、代码13px、间距8px、右侧成交设置；只复现相关局部，不声称整页像素一致。"},
+  "versions": [
+    {"v": 1, "version": 1, "file": "v1.html", "date": "2026-09-06", "summary": "股票栏更换入口复用下方完整槽位", "feedback": "用户否定跳转下方槽位：交互太差，应该直接修改。"},
+    {"v": 2, "version": 2, "file": "v2.html", "date": "2026-09-06", "summary": "股票名称原位输入、同处匹配列表、选择即替换；移除下方槽位和额外确认", "feedback": "用户明确通过，并要求正式实现同时接全 A 股模糊搜索联想及选中引用。"}
+  ],
+  "scope": ["B28 股票栏可编辑入口", "B27 简称候选的出现时机示例"],
+  "excluded": ["B19 条件分组", "B20 思考状态"],
+  "decision": "股票名称原位编辑，同处选中即替换；保留当前草稿，不跳对话槽位",
+  "decisions": [
+    {"q": "在哪里改股票", "choice": "股票名称原位编辑", "why": "用户明确拒绝返回对话槽位及二次确认"},
+    {"q": "何时回测", "choice": "单纯换股停审阅，点击开始回测才运行"},
+    {"q": "是否一并实施其他设计", "choice": "不实施 B19/B20，不改变其他规则布局"}
+  ],
+  "dataModel": [
+    {"field": "instrument", "means": "当前审阅草稿的股票身份，原位选中后只改变股票", "source": "web/src/components/SummaryCards.tsx:74"},
+    {"field": "preservedStrategy", "means": "保留服务器原规则、日期、本金及当前成交设置，不用旧报告覆盖", "source": "ashare_lab/application/compile_strategy.py:874"},
+    {"field": "instrument_candidates", "means": "正式接口的最多三项真实名称候选；预览仅有明确标注的静态案例", "source": "ashare_lab/api/routes/strategy_drafts.py:1968"}
+  ],
+  "verification": {
+    "sourceFidelity": "股票行名称字号、代码、编号虚线条件及成交设置已对照源代码；其余为局部设计预览",
+    "static": "JS语法、唯一DOM ID、引用、原规则文字及无外部请求检查通过",
+    "rendered": false,
+    "realModelOrData": false,
+    "visualStatus": "partial",
+    "reason": "浏览器 URL 安全策略阻止 file:// 自动操作；未改用服务器、其他浏览器或 headless 绕过",
+    "detector": "已运行一次；Inter与密集字阶沿用产品，深色光晕告警不符源代码的白底及8px偏移轻浮层投影，未为告警改变全站样式"
+  },
+  "build": {"status": "implemented-awaiting-user-acceptance", "productionChanged": true, "publiclyDeployed": false, "requiresUserDesignConfirmation": false, "entryPoints": ["web/src/components/InlineStockEditor.tsx", "web/src/components/SummaryCards.tsx", "web/src/App.tsx", "web/src/shared/api/client.ts", "ashare_lab/api/routes/instruments.py"], "verify": ["真实中国和中金联想、简拼", "股票编辑定向交互", "7基点当前编辑保留", "东方财富到中金公司真实回测及新旧报告独立查看", "身份缓存跨服务实例读取"], "evidence": "docs/bugfix-inline-stock-search-20260906.md", "visualScope": "正式HTTP页1280x720已检查；390px无DOM横向溢出，截图DPR比例异常，严格移动端视觉验收仍partial。上方verification只指历史file预览。"}
+}

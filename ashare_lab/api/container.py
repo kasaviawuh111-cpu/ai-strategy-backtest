@@ -19,7 +19,7 @@ from ashare_lab.ports.backtest_runs import BacktestRunRecord, BacktestRunStore, 
 from ashare_lab.ports.live_market_data import LiveFinanceData, LiveMarketData
 from ashare_lab.ports.strategy_advice import VerifiedFactStrategyAdvisor
 
-from .store import InMemoryDraftStore
+from .store import DraftStore
 
 
 class BacktestSubmitter(Protocol):
@@ -38,7 +38,7 @@ class ApiContainer:
     compiler: StrategyCompiler
     catalog: CatalogSnapshot
     coverage_catalog: CoverageCatalogSnapshot
-    drafts: InMemoryDraftStore
+    drafts: DraftStore
     service_version: str
     max_body_bytes: int
     event_backtest_probe: Callable[[], bool]

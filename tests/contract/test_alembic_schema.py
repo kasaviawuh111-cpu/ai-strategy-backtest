@@ -10,9 +10,10 @@ from sqlalchemy.exc import DatabaseError
 
 from alembic import command
 from ashare_lab.adapters.persistence import BACKTEST_RUN_METADATA, PERSISTENCE_METADATA
+from ashare_lab.api.persistent_store import DIALOGUE_METADATA
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-_HEAD_REVISION = "20260831_0005"
+_HEAD_REVISION = "20260906_0006"
 
 
 def test_fresh_database_migration_matches_run_store_metadata(
@@ -43,6 +44,10 @@ def test_fresh_database_migration_matches_run_store_metadata(
         "strategy_draft_revisions_v2",
         "strategy_executable_plans_v2",
         "strategy_validation_receipts_v2",
+    }
+    assert set(DIALOGUE_METADATA.tables) == {
+        "dialogue_drafts", "dialogue_draft_revisions", "dialogue_idempotency",
+        "dialogue_backtest_reviews",
     }
 
 
@@ -121,7 +126,7 @@ def test_receipt_plan_uniqueness_migration_round_trips_without_losing_guards(
     monkeypatch.setenv("DATABASE_URL", database_url)
     config = Config(str(_REPOSITORY_ROOT / "alembic.ini"))
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260831_0005")
     engine = create_engine(database_url)
     try:
         constraints = inspect(engine).get_unique_constraints("strategy_validation_receipts_v2")
@@ -157,4 +162,4 @@ def test_receipt_plan_uniqueness_migration_round_trips_without_losing_guards(
     finally:
         downgraded.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260831_0005")

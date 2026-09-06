@@ -14,9 +14,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ashare_lab.adapters.language import RuleBasedCandidateGenerator
+from ashare_lab.adapters.language.vibe_strategy_editing import VibeStrategyEditor
 from ashare_lab.api import backtest_review_schemas, create_app
 from ashare_lab.api.container import ApiContainer
-from ashare_lab.api.routes.backtest_runs import load_backtest_dialogue_results
+from ashare_lab.api.routes.backtest_runs import (
+    _review_strategy_identity,
+    load_backtest_dialogue_results,
+)
 from ashare_lab.api.schemas import (
     BacktestOptimizationCandidateView,
     BacktestReviewModelProvenance,
@@ -24,10 +28,16 @@ from ashare_lab.api.schemas import (
     BacktestReviewResponse,
     StrategyDraftResponse,
 )
+from ashare_lab.application.backtest_submission import resolve_execution_settings
 from ashare_lab.application.compile_strategy import StrategyCompiler
 from ashare_lab.application.result_views import calculate_result_bundle_hash
 from ashare_lab.domain.catalog import load_catalog_directory
-from ashare_lab.domain.strategy import IndicatorCondition, StrategySpec, canonical_json
+from ashare_lab.domain.strategy import (
+    IndicatorCondition,
+    StrategySpec,
+    canonical_hash,
+    canonical_json,
+)
 from ashare_lab.ports.backtest_review import (
     BacktestModelReview,
     BacktestOptimizationCandidate,
@@ -35,6 +45,7 @@ from ashare_lab.ports.backtest_review import (
 )
 from ashare_lab.ports.backtest_runs import BacktestJobState
 from ashare_lab.ports.candidate_generation import CandidateProvenance
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.strategy_editing import StrategyEditRequest, StrategyEditResult
 
 from .backtest_fakes import FakeRunStore, FakeSubmitter, make_record, result_bundle_json
@@ -180,15 +191,18 @@ def test_optimization_request_preserves_rules_and_runs_through_both_draft_endpoi
             }),
         }) for period in (20, 40))
         advisor.strategies = (variants[0], variants[1])
-        reports = [("run:optimization:other", variants[0])]
+        already_run = baseline.model_copy(update={"entry": baseline.entry.model_copy(update={
+            "params": {**baseline.entry.params, "period": 60},
+        })})
+        reports = [("run:optimization:other", already_run)]
         if matching_report:
             reports = [("run:optimization:old", baseline),
                        ("run:optimization:current", baseline), *reports]
         for run_id, strategy in reports:
-            store.seed(make_record(
+            store.seed(replace(make_record(
                 run_id, state=BacktestJobState.SUCCEEDED, strategy_json=canonical_json(strategy),
                 result_json=result_bundle_json(run_id),
-            ))
+            ), config_json=canonical_json(resolve_execution_settings(ExecutionSettingsPatch()))))
         original_records = dict(store.records)
         related_ids = [run_id for run_id, _strategy in reports]
         target = initial
@@ -292,7 +306,7 @@ def test_review_and_verified_instrument_embed_without_changing_the_http_review_c
     operation = cast(FastAPI, client.app).openapi()["paths"][
         "/api/v1/backtest-runs/{run_id}/review"
     ]["post"]
-    assert "requestBody" not in operation
+    assert operation["requestBody"].get("required", False) is False
     assert {(parameter["in"], parameter["name"]) for parameter in operation["parameters"]} == {
         ("path", "run_id"),
     }
@@ -580,3 +594,267 @@ def test_review_rejects_unlocked_invalid_or_duplicate_model_dsl(violation: str) 
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "backtest_review_candidates_unavailable"
+
+
+def test_review_rejects_completed_and_exposed_unrun_candidates_from_exact_stored_versions(
+    review_api: tuple[TestClient, FakeRunStore, _Advisor],
+) -> None:
+    client, store, advisor = review_api
+    baseline_id, current_id = "run:history:baseline", "run:history:current"
+    baseline, current = _one_year_strategy(), _strategy_variant(fast=8, slow=21, signal=5)
+    for run_id, strategy in ((baseline_id, baseline), (current_id, current)):
+        store.seed(make_record(run_id, state=BacktestJobState.SUCCEEDED,
+                               strategy_json=canonical_json(strategy),
+                               result_json=result_bundle_json(run_id)))
+    first = client.post(f"/api/v1/backtest-runs/{baseline_id}/review").json()
+    advisor.response_hash = "sha256:" + "c" * 64
+    advisor.strategies = (_strategy_variant(fast=6, slow=21, signal=5),
+                          _strategy_variant(fast=7, slow=30, signal=8))
+    second = client.post(f"/api/v1/backtest-runs/{baseline_id}/review").json()
+    context = {
+        "related_run_ids": [baseline_id, current_id],
+        "related_reviews": [{"run_id": baseline_id,
+                             "response_hash": review["modelProvenance"]["responseHash"]}
+                            for review in (first, second)],
+    }
+    original_records = dict(store.records)
+    # The original executed baseline and a proposal from the older exposed batch
+    # both remain excluded, even though a newer batch reused model-opt-1/2.
+    advisor.strategies = (baseline, _strategy_variant(fast=10, slow=30, signal=8))
+    rejected = client.post(f"/api/v1/backtest-runs/{current_id}/review", json=context)
+    assert rejected.status_code == 503
+    assert rejected.json()["error"]["code"] == "backtest_review_candidates_unavailable"
+    request = advisor.requests[-1]
+    assert [item["runId"] for item in request.completed_runs] == [baseline_id, current_id]
+    assert len(request.exposed_proposals) == 4
+    assert [item["status"] for item in request.exposed_proposals] == [
+        "completed", "unrun", "unrun", "unrun",
+    ]
+    assert request.exposed_proposals[0]["completedRunIds"] == [current_id]
+    assert {item["sourceResponseHash"] for item in request.exposed_proposals} == {
+        first["modelProvenance"]["responseHash"], second["modelProvenance"]["responseHash"],
+    }
+    advisor.response_hash = "sha256:" + "d" * 64
+    advisor.strategies = (_strategy_variant(fast=9, slow=21, signal=5),
+                          _strategy_variant(fast=11, slow=30, signal=8))
+    accepted = client.post(f"/api/v1/backtest-runs/{current_id}/review", json=context)
+    assert accepted.status_code == 200, accepted.text
+    assert store.records == original_records
+    # All three exposed batches remain available for history, but only the exact
+    # current batch may participate in resolving its locally numbered candidate.
+    current_review = accepted.json()
+    selected = BacktestReviewReference(
+        run_id=current_id, response_hash=current_review["modelProvenance"]["responseHash"],
+    )
+    container = cast(ApiContainer, cast(FastAPI, client.app).state.container)
+    assert client.portal is not None
+    facts = client.portal.call(partial(
+        load_backtest_dialogue_results, container, (baseline_id, current_id), selected,
+        review_references=(*(BacktestReviewReference.model_validate(item)
+                             for item in context["related_reviews"]), selected),
+    ))
+    assert "review" not in facts[0]
+    assert len(facts[0]["reviews"]) == 2
+    assert len(facts[1]["reviews"]) == 1
+    request = StrategyEditRequest(
+        answer="采用当前第一个方案并回测", prior_utterance="原方案",
+        strategy=current, as_of_date=date(2026, 9, 5), backtest_results=facts,
+    )
+    chosen = VibeStrategyEditor._selected_optimization(request, "model-opt-1")
+    assert chosen == advisor.strategies[0]
+
+
+def _relative_volume_strategy(
+    *, days: int = 3, trigger: str = "gte_multiple", value: float = 2, period: int = 20,
+) -> StrategySpec:
+    return _one_year_strategy().model_copy(update={"entry": IndicatorCondition(
+        indicator_id="volume.relative", definition_version="1.0.0", trigger=trigger,
+        params={"baseline_period": period, "consecutive_days": days}, value=value,
+    )})
+
+
+@pytest.mark.parametrize("source", ["baseline", "completed", "exposed", "same_batch"])
+def test_review_rejects_inactive_relative_volume_days_from_every_candidate_source(
+    review_api: tuple[TestClient, FakeRunStore, _Advisor], source: str,
+) -> None:
+    client, store, advisor = review_api
+    baseline = _relative_volume_strategy()
+    old = _relative_volume_strategy(value=3)
+    old_run, current_run = "run:effective:old", "run:effective:current"
+    for run_id, strategy in ((old_run, old), (current_run, baseline)):
+        store.seed(make_record(run_id, state=BacktestJobState.SUCCEEDED,
+                               strategy_json=canonical_json(strategy),
+                               result_json=result_bundle_json(run_id)))
+    body: dict[str, object] = {"related_run_ids": [current_run]}
+    if source == "completed":
+        body["related_run_ids"] = [old_run, current_run]
+    elif source == "exposed":
+        advisor.strategies = (old, _relative_volume_strategy(value=4))
+        exposed = client.post(f"/api/v1/backtest-runs/{current_run}/review")
+        assert exposed.status_code == 200, exposed.text
+        body["related_reviews"] = [{"run_id": current_run,
+                                    "response_hash": advisor.response_hash}]
+    duplicate = _relative_volume_strategy(days=7, value=2 if source == "baseline" else 3)
+    advisor.strategies = (duplicate, old if source == "same_batch"
+                          else _relative_volume_strategy(value=5))
+    rejected = client.post(f"/api/v1/backtest-runs/{current_run}/review", json=body)
+    assert rejected.status_code == 503, rejected.text
+    assert rejected.json()["error"]["code"] == "backtest_review_candidates_unavailable"
+    # Real threshold changes survive unchanged, including original public hashes.
+    advisor.strategies = (_relative_volume_strategy(days=7, value=6),
+                          _relative_volume_strategy(days=8, value=7))
+    accepted = client.post(f"/api/v1/backtest-runs/{current_run}/review", json=body)
+    assert accepted.status_code == 200, accepted.text
+    for candidate, strategy in zip(accepted.json()["optimizationCandidates"],
+                                   advisor.strategies, strict=True):
+        assert candidate["strategy"] == strategy.model_dump(mode="json")
+        assert candidate["strategyHash"] == canonical_hash(strategy)
+
+
+@pytest.mark.parametrize("trigger", ["gt_multiple", "gte_multiple", "lte_multiple"])
+def test_effective_identity_only_normalizes_inactive_days_without_mutating_strategy(
+    trigger: str,
+) -> None:
+    baseline = _relative_volume_strategy(trigger=trigger)
+    before = canonical_json(baseline)
+    identity = _review_strategy_identity(baseline)
+    assert identity == _review_strategy_identity(_relative_volume_strategy(trigger=trigger, days=7))
+    assert identity != _review_strategy_identity(
+        _relative_volume_strategy(trigger=trigger, value=3),
+    )
+    assert identity != _review_strategy_identity(
+        _relative_volume_strategy(trigger=trigger, period=5),
+    )
+    assert identity != _review_strategy_identity(
+        _relative_volume_strategy(trigger="consecutive_gte_multiple"),
+    )
+    assert _review_strategy_identity(
+        _relative_volume_strategy(trigger="consecutive_gte_multiple", days=3),
+    ) != _review_strategy_identity(
+        _relative_volume_strategy(trigger="consecutive_gte_multiple", days=7),
+    )
+    assert canonical_json(baseline) == before
+
+
+@pytest.mark.parametrize(("changed_costs", "identity_case"), [
+    (False, "matching"), (True, "matching"), (False, "missing"),
+    (False, "different_data"), (False, "different_code"),
+])
+def test_review_compares_previous_different_execution_version_with_recorded_results(
+    review_api: tuple[TestClient, FakeRunStore, _Advisor], changed_costs: bool, identity_case: str,
+) -> None:
+    client, store, advisor = review_api
+    current_strategy = _strategy_variant(fast=10, slow=30, signal=8)
+    run_ids = ["run:version:first", "run:version:previous", "run:version:repeat", "run:version:now"]
+    strategies = [_one_year_strategy(), _strategy_variant(fast=8, slow=21, signal=5),
+                  current_strategy, current_strategy]
+    config = {"slippage_bps": "10", "commission_rate": "0.0003",
+              "minimum_commission_cny": "5"}
+    for index, (run_id, strategy) in enumerate(zip(run_ids, strategies, strict=True)):
+        bundle = json.loads(result_bundle_json(run_id))
+        bundle["summary"]["totalReturn"] = -0.10 + index * 0.01
+        evidence = {
+            "strategyHash": canonical_hash(strategy), "catalogHash": "sha256:" + "a" * 64,
+            "dataSnapshotId": "snapshot:stable", "dataSnapshotChecksum": "sha256:" + "b" * 64,
+            "dataSchemaVersion": "market-data.v1", "codeRevision": "fixture-revision",
+            "engineVersion": "daily.v1", "executionAssumptions": {"allocation_ratio": "1"},
+        }
+        if index >= 2 and identity_case == "different_data":
+            evidence["dataSnapshotChecksum"] = "sha256:" + "c" * 64
+        if index >= 2 and identity_case == "different_code":
+            evidence["codeRevision"] = "different-revision"
+        bundle["summary"]["runEvidence"] = (
+            None if identity_case == "missing" and index >= 2 else evidence
+        )
+        bundle["audit"]["resultHash"] = calculate_result_bundle_hash(bundle)
+        run_config = {**config, "slippage_bps": "20"} if changed_costs and index >= 2 else config
+        store.seed(replace(make_record(run_id, state=BacktestJobState.SUCCEEDED,
+                                      strategy_json=canonical_json(strategy),
+                                      result_json=canonical_json(bundle)),
+                           config_json=canonical_json(run_config)))
+    advisor.strategies = (_strategy_variant(fast=6, slow=21, signal=5),
+                          _strategy_variant(fast=7, slow=30, signal=8))
+    response = client.post(f"/api/v1/backtest-runs/{run_ids[-1]}/review",
+                           json={"related_run_ids": run_ids})
+    assert response.status_code == 200, response.text
+    references = advisor.requests[-1].report_references
+    assert references["current"]["runId"] == run_ids[-1]
+    assert references["previousDifferentStrategy"]["runId"] == run_ids[1]
+    assert references["earliest"]["runId"] == run_ids[0]
+    comparison = references["strategyVersionComparison"]
+    assert comparison["comparisonStatus"] == (
+        "comparable" if not changed_costs and identity_case == "matching" else "limited"
+    )
+    assert comparison["sourceIdentityStatus"] == (
+        "matched" if identity_case == "matching" else
+        "missing" if identity_case == "missing" else "different"
+    )
+    differences = ["executionSettings"] if changed_costs else []
+    if identity_case.startswith("different"):
+        differences.append("sourceIdentity")
+    assert comparison["differences"] == differences
+    assert comparison["previousMetrics"]["totalReturn"] == pytest.approx(-0.09)
+    assert comparison["currentMetrics"]["totalReturn"] == pytest.approx(-0.07)
+
+
+@pytest.mark.parametrize("violation", ["tampered_result", "unverified_result", "forged_metrics",
+                                      "too_many_runs", "too_many_reviews"])
+def test_review_history_rejects_unverified_or_unbounded_client_context(
+    review_api: tuple[TestClient, FakeRunStore, _Advisor], violation: str,
+) -> None:
+    from ashare_lab.ports.backtest_runs import BacktestResultIntegrityPolicy
+
+    client, store, advisor = review_api
+    history_id, run_id = "run:boundary:history", "run:boundary:current"
+    for item in (history_id, run_id):
+        record = make_record(item, state=BacktestJobState.SUCCEEDED,
+                             strategy_json=canonical_json(_one_year_strategy()),
+                             result_json=result_bundle_json(item))
+        if item == history_id and violation in {"tampered_result", "unverified_result"}:
+            bundle = json.loads(record.result_json)
+            if violation == "tampered_result":
+                bundle["summary"]["totalReturn"] = 99
+            else:
+                bundle["audit"]["resultHash"] = None
+                bundle["audit"]["hashSchemaVersion"] = None
+                record = replace(record,
+                                 result_integrity_policy=BacktestResultIntegrityPolicy.LEGACY_UNVERIFIED)
+            record = replace(record, result_json=canonical_json(bundle))
+        store.seed(record)
+    body = {"related_run_ids": [history_id, run_id]}
+    if violation == "forged_metrics":
+        body["summary"] = {"totalReturn": 99}
+    elif violation == "too_many_runs":
+        body["related_run_ids"] = [history_id] * 21
+    elif violation == "too_many_reviews":
+        body["related_reviews"] = [{"run_id": history_id,
+                                    "response_hash": "sha256:" + "a" * 64}] * 21
+    response = client.post(f"/api/v1/backtest-runs/{run_id}/review", json=body)
+    assert response.status_code == (500 if violation == "tampered_result" else 422)
+    assert advisor.requests == []
+
+
+def test_unavailable_exposed_history_is_disclosed_but_exact_selection_stays_strict(
+    review_api: tuple[TestClient, FakeRunStore, _Advisor],
+) -> None:
+    from ashare_lab.api.errors import ApiProblem
+
+    client, store, advisor = review_api
+    run_id = "run:history:missing-review"
+    store.seed(make_record(run_id, state=BacktestJobState.SUCCEEDED,
+                           strategy_json=canonical_json(_one_year_strategy()),
+                           result_json=result_bundle_json(run_id)))
+    reference = {"run_id": run_id, "response_hash": "sha256:" + "f" * 64}
+    response = client.post(f"/api/v1/backtest-runs/{run_id}/review", json={
+        "related_run_ids": [run_id], "related_reviews": [reference],
+    })
+    assert response.status_code == 200, response.text
+    assert advisor.requests[-1].exposed_proposals == ()
+    scope = advisor.requests[-1].report_references["historyScope"]
+    assert scope["unavailableReviewReferences"] == 1
+    container = cast(ApiContainer, cast(FastAPI, client.app).state.container)
+    assert client.portal is not None
+    with pytest.raises(ApiProblem) as error:
+        client.portal.call(load_backtest_dialogue_results, container, (run_id,),
+                           BacktestReviewReference.model_validate(reference))
+    assert error.value.code == "backtest_review_context_unavailable"

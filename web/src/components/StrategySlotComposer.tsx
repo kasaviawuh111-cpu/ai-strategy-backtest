@@ -53,8 +53,10 @@ export function StrategySlotComposer({ draft, mode, disabled, onSubmit, onClear 
     const text = changes.map((slot) => slot === 'stock'
       ? `股票换成${values.stock.trim()}`
       : `${labels[slot]}条件改为：${values[slot].trim()}`).join('。')
-    onSubmit(`${text}。其他条件和回测设置保持不变。`, {
-      editCurrentStrategy: !changes.includes('stock'), rerun: true,
+    onSubmit(`${text}。其他条件和回测设置保持不变，按新条件重新回测。`, {
+      // Stock changes are edits too: the server binds the verified identity
+      // to this saved strategy instead of treating the text as stock discovery.
+      editCurrentStrategy: true, rerun: true,
     })
   }
 

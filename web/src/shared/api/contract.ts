@@ -1,4 +1,5 @@
 import { ApiError } from './types'
+import { DEFAULT_EXECUTION_SETTINGS } from '../config/backtest'
 import type {
   BacktestOptimizationCandidate,
   BacktestReviewResponse,
@@ -15,6 +16,7 @@ import type {
   ClarificationData,
   CompileRequest,
   CompileResponse,
+  ExecutionSettings,
   IdeaRoute,
   Instrument,
   StrategyCondition,
@@ -38,18 +40,67 @@ import type {
   StrategyTrailingDrawdownCondition,
 } from './types'
 
+const EXECUTION_SETTING_KEYS = {
+  priceLimitMode: 'limit_handling',
+  capacityMode: 'capacity_mode',
+  participationRate: 'participation_rate',
+  allocationRatio: 'allocation_ratio',
+  commissionRate: 'commission_rate',
+  minimumCommissionCny: 'minimum_commission_cny',
+  slippageBps: 'slippage_bps',
+  retryUnfilledExits: 'retry_unfilled_exits',
+  maxExitAttempts: 'max_exit_attempts',
+  warmupCalendarDays: 'warmup_calendar_days',
+  settlementExtensionDays: 'settlement_extension_days',
+  runRobustness: 'run_robustness',
+} as const satisfies Record<keyof ExecutionSettings, string>
+
+export type LiveExecutionSettings = {
+  [K in keyof ExecutionSettings as typeof EXECUTION_SETTING_KEYS[K]]?:
+    ExecutionSettings[K] | (ExecutionSettings[K] extends number ? string : never) | null
+}
+
+export const toLiveExecutionSettings = (
+  settings: Partial<ExecutionSettings>,
+): LiveExecutionSettings => Object.fromEntries(
+  (Object.keys(EXECUTION_SETTING_KEYS) as Array<keyof ExecutionSettings>)
+    .filter(key => settings[key] != null)
+    .map(key => [EXECUTION_SETTING_KEYS[key], settings[key]]),
+)
+
+const fromLiveExecutionSettings = (
+  settings: LiveExecutionSettings | null | undefined,
+): Partial<ExecutionSettings> => Object.fromEntries(
+  (Object.keys(EXECUTION_SETTING_KEYS) as Array<keyof ExecutionSettings>).flatMap(key => {
+    const raw = settings?.[EXECUTION_SETTING_KEYS[key]]
+    if (raw == null) return []
+    const value = typeof DEFAULT_EXECUTION_SETTINGS[key] === 'number'
+      && typeof raw === 'string' && raw.trim() ? Number(raw) : raw
+    if (typeof value !== typeof DEFAULT_EXECUTION_SETTINGS[key]
+      || (typeof value === 'number' && !Number.isFinite(value))) {
+      throw new ApiError({ type: 'about:blank', title: '成交设置返回格式有误', status: 502,
+        detail: '服务返回的成交设置无法读取，请重试；尚未执行新回测。',
+        code: 'execution_settings_invalid' })
+    }
+    return [[key, value]]
+  }),
+) as Partial<ExecutionSettings>
+
 export type LiveCompileBody = {
   utterance: string
   instrument_context: string | null
   as_of_date: string
   edit_current_strategy?: boolean
+  execution_settings?: LiveExecutionSettings
   related_run_ids?: string[]
   related_review?: { run_id: string; response_hash: string }
+  related_reviews?: Array<{ run_id: string; response_hash: string }>
 }
 
 export type LiveRevisionBody = {
   strategy: StrategySpec
   utterance: string
+  execution_settings: LiveExecutionSettings
 }
 
 export type LiveBacktestBody = {
@@ -126,6 +177,8 @@ export type LiveDraftResponse = {
   status: 'ready' | 'needs_clarification' | 'unsupported' | 'invalid'
   run_requested?: boolean
   refresh_data?: boolean
+  is_strategy_edit?: boolean
+  execution_settings?: LiveExecutionSettings | null
   strategy: StrategySpec | null
   strategy_hash: string | null
   clarification: string | null
@@ -138,6 +191,7 @@ export type LiveDraftResponse = {
   idea_route?: IdeaRoute | null
   instrument_suggestion?: Clarification['instrumentSuggestion'] | null
   instrument_suggestions?: Clarification['instrumentSuggestions'] | null
+  instrument_candidates?: Clarification['instrumentSuggestions'] | null
   verified_instrument?: Clarification['instrumentSuggestion'] | null
   backtest_review?: BacktestReviewResponse | null
   suggested_strategy?: StrategySpec | null
@@ -218,7 +272,16 @@ const numericBoundary = (value: number | null | undefined, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback
 
 const diagnosticMessages: Record<string, string> = {
+  candidate_provider_authentication_failed: '模型服务鉴权失败，本次请求未完成，请检查服务端模型配置。',
+  candidate_provider_permission_denied: '模型服务拒绝访问，本次请求未完成，请检查服务端账户权限。',
+  candidate_provider_insufficient_balance: 'DeepSeek 账户余额不足，本次模型请求未完成，请检查服务端账户余额。',
+  candidate_provider_billing_restricted: '模型服务账户计费受限，本次请求未完成，请检查服务端计费状态。',
+  candidate_provider_rate_limited: '模型服务请求频率受限，本次请求未完成，请稍后重试。',
+  candidate_provider_service_unavailable: '模型服务暂时不可用，本次请求未完成，请稍后重试。',
   candidate_provider_timeout: '策略生成模型请求超时，本次未生成策略。请原样重试。',
+  candidate_provider_connection_failed: '模型服务连接未完成或中断，本次请求未完成，请稍后重试。',
+  candidate_provider_invalid_response: '模型返回的格式无效，本次请求未完成，请重试。',
+  candidate_provider_incomplete_response: '模型响应未完整返回，本次请求未完成，请重试。',
   candidate_provider_unavailable: '策略生成模型服务调用未完成，请稍后原样重试。',
   candidate_provider_invalid_output: '这次策略解析未通过结构或条件校验，尚未生成可回测结果。',
   'template_not_published/big_drop_rebound': '“大跌反弹”会按选股模板处理，当前模板尚未发布，暂时不能执行回测。',
@@ -277,6 +340,25 @@ const shanghaiCalendarDate = (now: Date): string => {
 export const dataAsOfDate = (now = new Date()) =>
   import.meta.env.VITE_DATA_AS_OF_DATE?.trim() || shanghaiCalendarDate(now)
 
+/** Only server references cross the conversation boundary, never browser report facts. */
+export const toLiveBacktestReferences = (
+  input: Pick<CompileRequest, 'relatedRunIds' | 'relatedReview' | 'relatedReviews'>,
+): Pick<LiveCompileBody, 'related_run_ids' | 'related_review' | 'related_reviews'> => {
+  const runIds = [...new Set(input.relatedRunIds ?? [])].slice(-20)
+  const review = input.relatedReview && runIds.includes(input.relatedReview.runId)
+    ? input.relatedReview : undefined
+  const reviews = input.relatedReviews?.filter(item => runIds.includes(item.runId)).slice(-20)
+  return {
+    ...(runIds.length ? { related_run_ids: runIds } : {}),
+    ...(review ? { related_review: {
+      run_id: review.runId, response_hash: review.responseHash,
+    } } : {}),
+    ...(reviews?.length ? { related_reviews: reviews.map(item => ({
+      run_id: item.runId, response_hash: item.responseHash,
+    })) } : {}),
+  }
+}
+
 export const toLiveCompileBody = (
   input: CompileRequest,
   asOfDate = dataAsOfDate(),
@@ -287,10 +369,9 @@ export const toLiveCompileBody = (
       ? null : input.instrument.symbol,
     as_of_date: asOfDate,
     ...(input.editCurrentStrategy ? { edit_current_strategy: true } : {}),
-    ...(input.relatedRunIds?.length ? { related_run_ids: input.relatedRunIds.slice(-2) } : {}),
-    ...(input.relatedReview ? { related_review: {
-      run_id: input.relatedReview.runId, response_hash: input.relatedReview.responseHash,
-    } } : {}),
+    ...(input.executionSettings !== undefined
+      ? { execution_settings: toLiveExecutionSettings(input.executionSettings) } : {}),
+    ...toLiveBacktestReferences(input),
   }
 }
 
@@ -358,12 +439,18 @@ export const fromLiveDraftResponse = (
   input: CompileRequest,
   capabilities?: CapabilitiesResponse,
 ): CompileResponse => {
+  const executionState = response.execution_settings === undefined ? {} : {
+    executionSettings: fromLiveExecutionSettings(response.execution_settings),
+  }
   const currentData = response.data ? fromLiveClarificationData(response.data) : undefined
   const responseIdeaRoute = response.idea_route ?? undefined
   // An acknowledgement can accompany a ready strategy (including semantic edits).
   // It must never downgrade executable rules into a data-query clarification.
   if (response.status === 'ready' && response.strategy) {
     return { status: 'compiled', draft: toDraft(response, input, capabilities),
+      ...executionState,
+      ...(response.assistant_message ? { assistantMessage: response.assistant_message } : {}),
+      ...(response.is_strategy_edit ? { isStrategyEdit: true } : {}),
       ...(response.run_requested ? { runRequested: true,
         refreshData: response.refresh_data === true } : {}) }
   }
@@ -378,6 +465,8 @@ export const fromLiveDraftResponse = (
     && (currentData || response.diagnostic_code === 'data_query_only')) {
     return {
       status: 'needs_clarification',
+      ...executionState,
+      ...(response.is_strategy_edit ? { isStrategyEdit: true } : {}),
       draftId: response.draft_id,
       revision: response.revision,
       assistantMessage: response.assistant_message,
@@ -411,6 +500,8 @@ export const fromLiveDraftResponse = (
     const ideaAnalysis = ideaRoute?.understanding.trim()
     return {
       status: 'needs_clarification',
+      ...executionState,
+      ...(response.is_strategy_edit ? { isStrategyEdit: true } : {}),
       draftId: response.draft_id,
       revision: response.revision,
       assistantMessage: response.assistant_message ?? undefined,
@@ -435,7 +526,17 @@ export const fromLiveDraftResponse = (
           : asksForInstrument
           ? '前面的买卖条件我已经记住了，还需要补上回测标的。'
             : '还差一点关键信息。我不猜规则，你补一句就能跑。',
-        choices: ideaRoute ? ideaRoute.proposals.slice(0, 3).map((proposal) => {
+        choices: response.is_strategy_edit && response.instrument_candidates?.length
+          ? response.instrument_candidates.slice(0, 3).map(candidate => ({
+              id: candidate.symbol,
+              label: candidate.name ?? candidate.symbol,
+              description: candidate.symbol,
+              action: 'submit_clarification' as const,
+              suggestedUtterance: candidate.name ?? candidate.symbol,
+              instrumentSymbol: candidate.symbol,
+              instrumentName: candidate.name ?? undefined,
+            }))
+          : ideaRoute ? ideaRoute.proposals.slice(0, 3).map((proposal) => {
           const proposalSymbol = proposal.instrument_symbol
             ?? ideaRoute.asset_mapping.instrument_symbol
             ?? undefined
@@ -567,6 +668,7 @@ export const fromLiveClarificationAnswerResponse = (
 export const toLiveRevisionBody = (draft: StrategyDraft): LiveRevisionBody => ({
   utterance: draft.sourceText,
   strategy: strategySpecFromDraft(draft),
+  execution_settings: toLiveExecutionSettings(draft.execution),
 })
 
 export const mergeLiveRevision = (
@@ -591,7 +693,7 @@ export const mergeLiveRevision = (
   return {
     ...savedDraft,
     confidence: editedDraft.confidence,
-    execution: {
+    execution: response.execution_settings !== undefined ? savedDraft.execution : {
       ...savedDraft.execution,
       priceLimitMode: editedDraft.execution.priceLimitMode,
       capacityMode: editedDraft.execution.capacityMode,
@@ -683,23 +785,13 @@ function toDraft(
     entry,
     exit,
     execution: {
+      ...DEFAULT_EXECUTION_SETTINGS,
+      ...fromLiveExecutionSettings(response.execution_settings),
       entryPolicy: strategy.execution.entry_policy,
       exitPolicy: strategy.execution.exit_policy,
-      priceLimitMode: 'wait_for_unlock',
       tPlusOne: strategy.execution.t_plus_one,
       dataCapability: strategy.execution.data_capability,
       evaluationFrequency: strategy.execution.evaluation_frequency,
-      capacityMode: 'point_in_time_volume',
-      participationRate: 0.05,
-      allocationRatio: 1,
-      commissionRate: 0.0003,
-      minimumCommissionCny: 5,
-      slippageBps: 5,
-      retryUnfilledExits: true,
-      maxExitAttempts: 20,
-      warmupCalendarDays: 180,
-      settlementExtensionDays: 14,
-      runRobustness: true,
     },
     backtest: {
       start: strategy.backtest.start,

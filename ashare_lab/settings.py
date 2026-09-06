@@ -189,10 +189,10 @@ class AppSettings(BaseSettings):
     plan_deep_provider_thinking: Literal["disabled", "enabled"] = "disabled"
     plan_deep_provider_reasoning_effort: Literal["low", "high", "max"] | None = None
 
-    # Current-data discovery is a separate, optional provider.  It is never
-    # selected by a strategy payload and it does not feed a historical run.
+    # MX discovery and Skill-backed historical data share the provider client.
+    # Use the official finance Skill's per-request budget for large histories.
     mx_saas_api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
-    mx_saas_timeout_seconds: float = Field(default=30.0, ge=1.0, le=60.0)
+    mx_saas_timeout_seconds: float = Field(default=120.0, ge=1.0, le=120.0)
     provider_indicator_cache_root: Path = Path("var/cache/provider-indicators")
     skill_history_cache_root: Path = Path("var/cache/mx-daily-history")
     provider_indicator_cache_ttl_seconds: int = Field(

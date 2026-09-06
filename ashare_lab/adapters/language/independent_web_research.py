@@ -288,7 +288,9 @@ class QueryPlanningCurrentFactResearcher:
         try:
             payload = await self._transport.generate_json(transport_request)
             planned = _parse_query_plan(payload)
-        except (CandidateTransportError, TypeError, ValueError, ValidationError):
+        except (CandidateTransportError, TypeError, ValueError, ValidationError) as exc:
+            if isinstance(exc, CandidateTransportError) and exc.is_classified:
+                raise
             _LOGGER.info("public search query planning unavailable")
             raise WebResearchUnavailable("public search query planning unavailable") from None
         return await self._inner.research(replace(request, query=planned.query))

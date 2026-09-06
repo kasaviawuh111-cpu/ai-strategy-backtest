@@ -28,6 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+instrument-directory = ["pypinyin==0.55.0"]
 demo = [
     "baostock>=0.8.9,<1",
     "pypdfium2>=5.12,<6",
@@ -45,6 +46,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["astock_backtest*", "ashare_lab*"]
+
+[tool.setuptools.package-data]
+ashare_lab = ["resources/a_share_directory.json"]
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"

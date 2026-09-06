@@ -9,6 +9,9 @@ from ashare_lab.domain.shared import InstrumentId
 _A_SHARE_CODE_TO_SUFFIX = (
     (re.compile(r"^(?:600|601|603|605|688|689)\d{3}$"), "SH"),
     (re.compile(r"^(?:000|001|002|003|300|301)\d{3}$"), "SZ"),
+    # Exchange-approved replacement code for 中航成飞, verified in its SZSE
+    # issuer filings. Do not widen the entire 302xxx range or rewrite old history.
+    (re.compile(r"^302132$"), "SZ"),
     (re.compile(r"^(?:[48]\d{5}|920\d{3})$"), "BJ"),
 )
 

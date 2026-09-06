@@ -8,7 +8,7 @@ do not make that answer eligible for a historical strategy run.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -32,6 +32,7 @@ class LiveMarketDataResult:
     columns: tuple[str, ...]
     rows: tuple[Mapping[str, Any], ...]
     provenance: LiveMarketDataProvenance
+    provider_metadata: Mapping[str, object] = field(default_factory=dict[str, object])
 
 
 @dataclass(frozen=True, slots=True)

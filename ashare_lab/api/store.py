@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from ashare_lab.application.compile_strategy import CompileOutcome
@@ -63,6 +64,51 @@ class StoreResult:
 class _IdempotencyRecord:
     request_hash: str
     value: StoredDraftRevision
+
+
+class DraftStore(Protocol):
+    """The same draft lifecycle for isolated tests and persistent local sessions."""
+
+    async def remember_review(self, review: BacktestReviewResponse) -> None: ...
+
+    async def get_review(
+        self, run_id: str, response_hash: str,
+    ) -> BacktestReviewResponse | None: ...
+
+    async def create(
+        self, *, outcome: CompileOutcome, compile_input: CompileInput,
+        request_hash: str, idempotency_key: str | None,
+        parent_draft_id: UUID | None = None, expected_parent_revision: int | None = None,
+        pending_instrument_reuse: VerifiedInstrumentMemory | None = None,
+        preserve_parent_revision: bool = False,
+    ) -> StoreResult: ...
+
+    async def revise(
+        self, *, draft_id: UUID, outcome: CompileOutcome,
+        compile_input: CompileInput | None = None, request_hash: str,
+        idempotency_key: str | None, expected_revision: int | None = None,
+        pending_instrument_reuse: VerifiedInstrumentMemory | None = None,
+    ) -> StoreResult: ...
+
+    async def latest_for_answer(
+        self, *, draft_id: UUID, revision: int,
+    ) -> StoredDraftRevision: ...
+
+    async def load_dialogue_state(
+        self, *, draft_id: UUID, revision: int,
+    ) -> DialogueState: ...
+
+    async def load_latest_dialogue_state(self, *, draft_id: UUID) -> DialogueState: ...
+
+    async def record_dialogue_turn(
+        self, *, draft_id: UUID, user_text: str, assistant_text: str,
+        intent: str, revision: int, verified_instrument: VerifiedInstrumentMemory | None = None,
+        require_latest: bool = False,
+    ) -> DialogueTurnRecord: ...
+
+    async def dialogue_history(
+        self, *, draft_id: UUID, limit: int = 20,
+    ) -> tuple[DialogueTurnRecord, ...]: ...
 
 
 class InMemoryDraftStore:

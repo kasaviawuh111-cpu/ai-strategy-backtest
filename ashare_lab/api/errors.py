@@ -10,6 +10,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from ashare_lab.adapters.language.vibe_candidates import CandidateTransportError
+
 from .schemas import ErrorBody, ErrorDetail, ErrorEnvelope
 
 LOGGER = logging.getLogger(__name__)
@@ -57,6 +59,7 @@ def error_response(
 
 def install_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(ApiProblem, _handle_api_problem)
+    app.add_exception_handler(CandidateTransportError, _handle_candidate_provider_error)
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
     app.add_exception_handler(StarletteHTTPException, _handle_http_error)
     app.add_exception_handler(Exception, _handle_unexpected_error)
@@ -72,6 +75,24 @@ async def _handle_api_problem(request: Request, exc: Exception) -> JSONResponse:
         details=exc.details,
         request_id_value=request_id(request),
     )
+
+
+async def _handle_candidate_provider_error(request: Request, exc: Exception) -> JSONResponse:
+    if not isinstance(exc, CandidateTransportError):
+        raise TypeError("candidate handler received an incompatible exception")
+    if not exc.is_classified:
+        return await _handle_unexpected_error(request, exc)
+    LOGGER.warning(
+        "model_provider_failed reason=%s http_status=%s",
+        exc.failure_kind, exc.http_status,
+    )
+    return await _handle_api_problem(request, ApiProblem(
+        status_code=exc.api_status_code, code=exc.public_code, message=exc.public_message,
+        details=() if exc.http_status is None else (ErrorDetail(
+            location="model_provider.http_status", message=str(exc.http_status),
+            type="upstream_http_status",
+        ),),
+    ))
 
 
 async def _handle_validation_error(

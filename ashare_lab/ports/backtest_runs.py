@@ -112,3 +112,7 @@ class BacktestRunStore(Protocol):
 
 class BacktestJobQueue(Protocol):
     def enqueue(self, run_id: RunId) -> str: ...
+
+
+class BacktestQueueFullError(RuntimeError):
+    """No job was accepted because the optional local capacity is exhausted."""

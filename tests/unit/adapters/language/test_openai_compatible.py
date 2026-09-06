@@ -13,7 +13,10 @@ from ashare_lab.adapters.language.openai_compatible import (
     DisabledCandidateJsonTransport,
     OpenAICompatibleCandidateTransport,
 )
-from ashare_lab.adapters.language.vibe_candidates import CandidateTransportRequest
+from ashare_lab.adapters.language.vibe_candidates import (
+    CandidateFailureKind,
+    CandidateTransportRequest,
+)
 from ashare_lab.ports.dialogue_progress import model_reasoning_sink, progress_sink
 
 
@@ -60,6 +63,104 @@ def _request() -> CandidateTransportRequest:
         capability_projection_hash=f"sha256:{'a' * 64}",
         system_contract="只返回受限 JSON，不得生成代码。",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "kind", "api_status"), [
+    (401, "authentication_failed", 503), (403, "permission_denied", 503),
+    (402, "insufficient_balance", 503), (429, "rate_limited", 429),
+    (500, "service_unavailable", 503), (503, "service_unavailable", 503),
+])
+async def test_known_http_failure_is_classified_once_without_body_or_secret(
+    status: int, kind: CandidateFailureKind, api_status: int,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+    private = "private-body-key-reasoning-must-not-leak"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(status, text=private, request=request)
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://api.deepseek.com/chat/completions", provider="deepseek",
+        model="fixture", prompt_version="v1", schema_version="v1",
+        api_key=SecretStr(private), transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(CandidateProviderTransportError) as caught:
+        await provider.generate_json(_request())
+    error = caught.value
+    assert calls == 1
+    assert error.is_classified and error.failure_kind == kind
+    assert error.http_status == status and error.api_status_code == api_status
+    assert error.public_code == f"candidate_provider_{kind}"
+    assert f"status={status}" in caplog.text and f"reason={kind}" in caplog.text
+    assert private not in str(error) + error.public_message + caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("endpoint", "provider_name"), [
+    ("https://gateway.example.test/chat/completions", "deepseek"),
+    ("https://api.deepseek.com/chat/completions", "gateway"),
+    ("https://api.deepseek.com.example.test/chat/completions", "deepseek"),
+])
+async def test_gateway_402_does_not_claim_deepseek_balance(
+    endpoint: str, provider_name: str,
+) -> None:
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint=endpoint, provider=provider_name, model="fixture", prompt_version="v1",
+        schema_version="v1", transport=httpx.MockTransport(
+            lambda request: httpx.Response(402, request=request),
+        ),
+    )
+    with pytest.raises(CandidateProviderTransportError) as caught:
+        await provider.generate_json(_request())
+    assert caught.value.failure_kind == "billing_restricted"
+    assert "余额" not in caught.value.public_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("fault", "kind"), [
+    ("timeout", "timeout"), ("connection", "connection_failed"),
+    ("invalid_json", "invalid_response"), ("missing_choices", "invalid_response"),
+    ("truncated_stream", "incomplete_response"),
+    ("unfinished_stream", "incomplete_response"),
+])
+async def test_transport_fault_keeps_safe_classification(
+    fault: str, kind: CandidateFailureKind, caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+    private = "private-upstream-error-must-not-leak"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if fault == "timeout":
+            raise httpx.ReadTimeout(private, request=request)
+        if fault == "connection":
+            raise httpx.ConnectError(private, request=request)
+        if fault == "invalid_json":
+            return httpx.Response(200, content=private.encode(), request=request)
+        if fault == "missing_choices":
+            return httpx.Response(200, json={"private": private}, request=request)
+        chunks = (_sse_delta(content='{"candidates":[]}'),)
+        if fault == "unfinished_stream":
+            chunks += (b"data: [DONE]\n\n",)
+        return _sse_response(request, {}, stream=_CountingStream(chunks))
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://api.deepseek.com/chat/completions", provider="deepseek",
+        model="fixture", prompt_version="v1", schema_version="v1",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(CandidateProviderTransportError) as caught:
+        await provider.generate_json(_request())
+    assert calls == 1 and caught.value.failure_kind == kind
+    assert caught.value.http_status == (None if fault in {"timeout", "connection"} else 200)
+    assert caught.value.timed_out is (fault == "timeout")
+    assert f"reason={kind}" in caplog.text
+    assert private not in str(caught.value) + caught.value.public_message + caplog.text
 
 
 def _completion(content: object) -> dict[str, object]:

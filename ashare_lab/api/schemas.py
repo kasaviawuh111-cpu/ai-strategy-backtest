@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ashare_lab.application.compile_strategy import CompileStatus
 from ashare_lab.domain.strategy import StrategySpec
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 
 
 class ApiModel(BaseModel):
@@ -40,12 +41,21 @@ class BacktestReviewReference(ApiModel):
     response_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+class BacktestReviewContextRequest(ApiModel):
+    related_run_ids: tuple[Annotated[str, Field(min_length=1, max_length=128)], ...] = Field(
+        default=(), max_length=20,
+    )
+    related_reviews: tuple[BacktestReviewReference, ...] = Field(default=(), max_length=20)
+
+
 class StrategyDraftRequest(ApiModel):
     utterance: str = Field(max_length=2_000)
     instrument_context: str | None = Field(default=None, max_length=32)
     as_of_date: date
     edit_current_strategy: bool = False
+    execution_settings: ExecutionSettingsPatch = Field(default_factory=ExecutionSettingsPatch)
     related_review: BacktestReviewReference | None = None
+    related_reviews: tuple[BacktestReviewReference, ...] = Field(default=(), max_length=20)
     related_run_ids: tuple[Annotated[str, Field(min_length=1, max_length=128)], ...] = Field(
         default=(), max_length=20,
     )
@@ -53,13 +63,16 @@ class StrategyDraftRequest(ApiModel):
 
 class StrategyDraftRevisionRequest(ApiModel):
     strategy: StrategySpec
+    execution_settings: ExecutionSettingsPatch = Field(default_factory=ExecutionSettingsPatch)
     utterance: str | None = Field(default=None, max_length=2_000)
     recover_if_missing: bool = False
 
 
 class ClarificationAnswerRequest(ApiModel):
     answer: str = Field(min_length=1, max_length=2_000)
+    execution_settings: ExecutionSettingsPatch = Field(default_factory=ExecutionSettingsPatch)
     related_review: BacktestReviewReference | None = None
+    related_reviews: tuple[BacktestReviewReference, ...] = Field(default=(), max_length=20)
     related_run_ids: tuple[Annotated[str, Field(min_length=1, max_length=128)], ...] = Field(
         default=(), max_length=20,
     )
@@ -85,6 +98,7 @@ class LiveMarketScreenResponse(ApiModel):
     columns: tuple[str, ...]
     rows: tuple[dict[str, Any], ...]
     provenance: LiveMarketProvenancePayload
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class LiveFinanceQueryRequest(ApiModel):
@@ -368,12 +382,17 @@ class StrategyDraftResponse(ApiModel):
     status: CompileStatus
     run_requested: bool = Field(default=False, exclude_if=lambda value: not value)
     refresh_data: bool = Field(default=False, exclude_if=lambda value: not value)
+    is_strategy_edit: bool = Field(default=False, exclude_if=lambda value: not value)
+    execution_settings: ExecutionSettingsPatch = Field(default_factory=ExecutionSettingsPatch)
     strategy: StrategySpec | None = None
     strategy_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     clarification: str | None = None
     diagnostic_code: str | None = None
     instrument_suggestion: InstrumentSuggestionPayload | None = None
     instrument_suggestions: tuple[InstrumentSuggestionPayload, ...] = Field(
+        default=(), max_length=3, exclude_if=lambda value: not value,
+    )
+    instrument_candidates: tuple[InstrumentSuggestionPayload, ...] = Field(
         default=(), max_length=3, exclude_if=lambda value: not value,
     )
     verified_instrument: InstrumentSuggestionPayload | None = Field(

@@ -10,19 +10,24 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import ssl
 import unicodedata
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from ashare_lab.domain.market_data import AshareInstrumentCodeError, normalize_a_share_instrument
+from ashare_lab.ports.instrument_resolution import InstrumentNameAmbiguous, InstrumentNameCandidate
 from ashare_lab.ports.live_market_data import (
     LiveFinanceDataResult,
     LiveMarketDataProvenance,
@@ -43,8 +48,11 @@ _FINANCE_SCHEMA_VERSION = "eastmoney-mx.search-data.v1"
 _INDICATOR_HISTORY_SCHEMA_VERSION = "eastmoney-mx.provider-indicator-history.v1"
 _DEFAULT_BASE_URL = "https://ai-saas.eastmoney.com"
 _DEFAULT_MAX_ATTEMPTS = 3
-_RETRY_BASE_BACKOFF_SECONDS = 0.25
-_RETRY_MAX_BACKOFF_SECONDS = 1.0
+# Give a transient provider/connection failure time to recover. Keep retries
+# bounded and at this HTTP layer only, reusing the original read request.
+_RETRY_BASE_BACKOFF_SECONDS = 1.0
+_RETRY_MAX_BACKOFF_SECONDS = 4.0
+_LOGGER = logging.getLogger(__name__)
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 425, 429})
 _DIRECT_ENTITY_LIMIT = 5
 _MAX_SCREENED_ENTITIES = 500
@@ -106,10 +114,61 @@ _DISPLAY_UNIT_SUFFIXES = (
     "（手）",
 )
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
+MxTool = Literal["selectSecurity", "searchData", "unknown"]
+MxFailureReason = Literal["read_timeout", "connect_timeout", "transport_error", "http_error"]
+
+
+@dataclass(frozen=True)
+class MxRetryProgress:
+    tool: MxTool
+    call_id: str
+    retry_number: int
+    max_retries: int
+    recovered: bool = False
+
+
+_RETRY_OBSERVER: ContextVar[Callable[[MxRetryProgress], None] | None] = ContextVar(
+    "mx_retry_observer", default=None,
+)
+
+
+@contextmanager
+def observe_mx_retries(callback: Callable[[MxRetryProgress], None]) -> Generator[None]:
+    """Scope progress to the current run, including its concurrent async reads."""
+    token = _RETRY_OBSERVER.set(callback)
+    try:
+        yield
+    finally:
+        _RETRY_OBSERVER.reset(token)
+
+
+def _notify_retry_progress(event: MxRetryProgress) -> None:
+    observer = _RETRY_OBSERVER.get()
+    if observer is not None:
+        observer(event)
 
 
 class MxSaasProviderError(RuntimeError):
     """Base error that never exposes provider credentials."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        tool: MxTool = "unknown",
+        reason: MxFailureReason | None = None,
+        http_status: int | None = None,
+        transport_kind: str | None = None,
+        attempts: int | None = None,
+        call_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.tool = tool
+        self.reason = reason
+        self.http_status = http_status
+        self.transport_kind = transport_kind
+        self.attempts = attempts
+        self.call_id = call_id
 
 
 class MxSaasProviderAuthError(MxSaasProviderError):
@@ -136,7 +195,7 @@ class MxSaasMarketDataClient:
         *,
         api_key: str,
         base_url: str = _DEFAULT_BASE_URL,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 120.0,
         transport: httpx.AsyncBaseTransport | None = None,
         clock: Callable[[], datetime] | None = None,
         max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
@@ -177,7 +236,7 @@ class MxSaasMarketDataClient:
         )
         raw = response.content
         decoded = _decode_provider_response(response)
-        _raise_for_provider_status(response, decoded)
+        _raise_for_provider_status(response, decoded, tool="selectSecurity")
         result = _result_node(decoded)
         columns: tuple[str, ...] = ()
         rows: tuple[Mapping[str, Any], ...] = ()
@@ -204,6 +263,7 @@ class MxSaasMarketDataClient:
                 retrieved_at=self._validated_retrieved_at(),
                 schema_version=_SCHEMA_VERSION,
             ),
+            provider_metadata=_screen_provider_metadata(decoded, result),
         )
 
     async def query_finance(
@@ -237,7 +297,7 @@ class MxSaasMarketDataClient:
         )
         raw = response.content
         decoded = _decode_provider_response(response)
-        _raise_for_provider_status(response, decoded)
+        _raise_for_provider_status(response, decoded, tool="searchData")
         tables = _finance_tables(decoded)
         if not tables:
             raise MxSaasProviderNoDataError(
@@ -328,7 +388,7 @@ class MxSaasMarketDataClient:
         )
         raw = response.content
         decoded = _decode_provider_response(response)
-        _raise_for_provider_status(response, decoded)
+        _raise_for_provider_status(response, decoded, tool="searchData")
         tables = _finance_tables(decoded)
         points = _provider_indicator_points(
             tables=tables,
@@ -452,11 +512,11 @@ class MxSaasMarketDataClient:
         )
 
     def resolve_instrument_name(self, name: str) -> str:
-        """Resolve one exact A-share name through the provider's screener.
+        """Resolve an exact name, or retain provider identities for confirmation.
 
-        Discovery rows are never accepted by position or fuzzy similarity.  A
-        unique exact name and a syntactically valid A-share code are both
-        required before a symbol can enter the compiler.
+        A partial match never binds a strategy, even if only one row is found.
+        Asking for containing names also gives an abbreviation its choices in
+        the first lookup; a unique exact match still takes precedence.
         """
 
         cleaned_name = "".join(name.split())
@@ -465,29 +525,62 @@ class MxSaasMarketDataClient:
         try:
             result = asyncio.run(
                 self.screen(
-                    query=f"证券简称完全等于{cleaned_name}；获取证券代码和证券简称",
+                    query=f"A股证券简称包含{cleaned_name}；获取证券代码和证券简称",
                     asset_type="A股",
                 )
             )
         except MxSaasProviderError as exc:
             raise TimeoutError("instrument resolver is unavailable") from exc
         matches: set[str] = set()
+        candidates: dict[str, InstrumentNameCandidate] = {}
         for row in result.rows:
             row_name = _first_text(row, ("证券简称", "证券名称", "股票简称", "名称"))
-            if row_name is None or "".join(row_name.split()).casefold() != cleaned_name.casefold():
+            if row_name is None:
+                continue
+            normalized_name = "".join(row_name.split())
+            if (cleaned_name.casefold() not in normalized_name.casefold()
+                    or len(normalized_name) > 64):
                 continue
             raw_code = _first_text(row, ("证券代码", "股票代码", "代码"))
             if raw_code is None:
                 continue
             try:
-                matches.add(str(normalize_a_share_instrument(raw_code)))
+                symbol = str(normalize_a_share_instrument(raw_code))
             except AshareInstrumentCodeError:
                 continue
+            candidates[symbol] = InstrumentNameCandidate(
+                symbol=symbol, name=normalized_name, source=result.provider,
+                retrieved_at=result.provenance.retrieved_at,
+            )
+            if normalized_name.casefold() == cleaned_name.casefold():
+                matches.add(symbol)
         if len(matches) != 1:
+            if candidates:
+                choices = tuple(sorted(candidates.values(), key=lambda item: (
+                    item.symbol not in matches,
+                    not item.name.casefold().startswith(cleaned_name.casefold()),
+                    len(item.name), item.name, item.symbol,
+                )))[:3]
+                raise InstrumentNameAmbiguous(choices)
             raise LookupError("instrument name is unconfirmed or ambiguous")
         return next(iter(matches))
 
     async def _post(self, *, path: str, payload: Mapping[str, Any]) -> httpx.Response:
+        tool: MxTool = (
+            "selectSecurity" if path == "/proxy/b/mcp/tool/selectSecurity"
+            else "searchData" if path == "/proxy/b/mcp/tool/searchData"
+            else "unknown"
+        )
+        context = payload.get("toolContext")
+        raw_call_id = (
+            cast(Mapping[str, object], context).get("callId")
+            if isinstance(context, Mapping) else None
+        )
+        call_id = (
+            raw_call_id if isinstance(raw_call_id, str)
+            and re.fullmatch(r"(?:finance|screen)_[0-9a-f]{32}", raw_call_id)
+            else "unknown"
+        )
         # This provider currently advertises both address families, while its
         # IPv6 edge and TLS 1.3 edge close the handshake on the supported
         # Python/OpenSSL runtime.  Keep this compatibility transport scoped to
@@ -502,7 +595,11 @@ class MxSaasMarketDataClient:
                 verify=tls,
             )
         async with httpx.AsyncClient(
-            timeout=self._timeout_seconds,
+            # Match the finance Skill's 120-second read budget by default;
+            # connecting to an unavailable endpoint must still fail promptly.
+            timeout=httpx.Timeout(
+                self._timeout_seconds, connect=min(10.0, self._timeout_seconds)
+            ),
             transport=transport,
             follow_redirects=False,
             trust_env=False,
@@ -518,18 +615,67 @@ class MxSaasMarketDataClient:
                         },
                     )
                 except httpx.TransportError as exc:
+                    transport_kind = _safe_transport_kind(exc)
+                    _LOGGER.warning(
+                        "MX request interrupted: tool=%s call_id=%s attempt=%s/%s kind=%s retry=%s",
+                        tool, call_id, attempt, self._max_attempts, transport_kind,
+                        attempt < self._max_attempts,
+                    )
                     if attempt < self._max_attempts:
+                        _notify_retry_progress(MxRetryProgress(
+                            tool, call_id, attempt, self._max_attempts - 1,
+                        ))
                         await self._sleep_before_retry(attempt)
                         continue
                     raise MxSaasProviderUnavailableError(
-                        "real-time market-data provider is unavailable"
+                        "real-time market-data provider is unavailable",
+                        tool=tool,
+                        reason=(
+                            "read_timeout" if isinstance(exc, httpx.ReadTimeout)
+                            else "connect_timeout" if isinstance(exc, httpx.ConnectTimeout)
+                            else "transport_error"
+                        ),
+                        transport_kind=transport_kind, attempts=attempt, call_id=call_id,
                     ) from exc
                 if _is_retryable_http_status(response.status_code):
+                    _LOGGER.warning(
+                        "MX request unavailable: tool=%s call_id=%s attempt=%s/%s "
+                        "status=%s retry=%s",
+                        tool, call_id, attempt, self._max_attempts, response.status_code,
+                        attempt < self._max_attempts,
+                    )
                     if attempt < self._max_attempts:
+                        _notify_retry_progress(MxRetryProgress(
+                            tool, call_id, attempt, self._max_attempts - 1,
+                        ))
                         await self._sleep_before_retry(attempt)
                         continue
                     raise MxSaasProviderUnavailableError(
-                        "real-time market-data provider is unavailable"
+                        "real-time market-data provider is unavailable",
+                        tool=tool, reason="http_error", http_status=response.status_code,
+                        attempts=attempt, call_id=call_id,
+                    )
+                # Classify the HTTP status before parsing a body: gateways may
+                # return HTML/plain text for authorization and service errors.
+                if response.status_code in {401, 403}:
+                    raise MxSaasProviderAuthError(
+                        "real-time market-data provider rejected its credential",
+                        tool=tool, reason="http_error", http_status=response.status_code,
+                        attempts=attempt, call_id=call_id,
+                    )
+                if response.is_error:
+                    raise MxSaasProviderUnavailableError(
+                        "real-time market-data provider returned an error",
+                        tool=tool, reason="http_error", http_status=response.status_code,
+                        attempts=attempt, call_id=call_id,
+                    )
+                if attempt > 1:
+                    _notify_retry_progress(MxRetryProgress(
+                        tool, call_id, attempt - 1, self._max_attempts - 1, recovered=True,
+                    ))
+                    _LOGGER.info(
+                        "MX request recovered: tool=%s call_id=%s attempt=%s/%s",
+                        tool, call_id, attempt, self._max_attempts,
                     )
                 return response
         raise AssertionError("network retry loop exited unexpectedly")
@@ -546,6 +692,20 @@ class MxSaasMarketDataClient:
         if retrieved_at.tzinfo is None or retrieved_at.utcoffset() is None:
             raise MxSaasProviderDataError("real-time screening clock must include a timezone")
         return retrieved_at.astimezone(UTC)
+
+
+def _safe_transport_kind(exc: httpx.TransportError) -> str:
+    # Only known library labels reach diagnostics; never provider exception
+    # text, URLs, request bodies or credentials (including in custom subclasses).
+    for error_type in (
+        httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout, httpx.PoolTimeout,
+        httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.CloseError,
+        httpx.RemoteProtocolError, httpx.LocalProtocolError, httpx.ProxyError,
+        httpx.UnsupportedProtocol,
+    ):
+        if type(exc) is error_type:
+            return error_type.__name__
+    return "TransportError"
 
 
 def _is_retryable_http_status(status_code: int) -> bool:
@@ -578,6 +738,56 @@ def _result_node(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
     return None
 
 
+def _screen_provider_metadata(
+    payload: Mapping[str, Any], result: Mapping[str, Any] | None,
+) -> Mapping[str, object]:
+    """Keep provider-reported scope and column semantics, never the input/echoed query."""
+    raw_data = payload.get("data")
+    data = cast(Mapping[str, Any], raw_data) if isinstance(raw_data, Mapping) else payload
+    metadata = _screen_condition_metadata(data)
+    all_results = data.get("allResults")
+    if isinstance(all_results, Mapping):
+        conditions = _screen_condition_metadata(cast(Mapping[str, Any], all_results))
+        if conditions:
+            metadata["allResults"] = conditions
+    if result is not None:
+        raw_columns = result.get("columns")
+        if isinstance(raw_columns, list):
+            metadata["columns"] = [
+                _metadata_scalars(cast(Mapping[str, Any], column), (
+                    "displayName", "title", "label", "field", "name", "key", "indexName",
+                    "dateMsg", "sortWay", "unit", "sortable", "userNeed",
+                ))
+                for column in cast(list[Any], raw_columns) if isinstance(column, Mapping)
+            ]
+    return metadata
+
+
+def _screen_condition_metadata(source: Mapping[str, Any]) -> dict[str, object]:
+    metadata = _metadata_scalars(source, ("selectType", "market"))
+    conditions = source.get("responseConditionList")
+    if isinstance(conditions, list):
+        metadata["responseConditionList"] = [
+            _metadata_scalars(cast(Mapping[str, Any], item), ("describe", "stockCount"))
+            for item in cast(list[Any], conditions) if isinstance(item, Mapping)
+        ]
+    total = source.get("totalCondition")
+    if isinstance(total, Mapping):
+        metadata["totalCondition"] = _metadata_scalars(
+            cast(Mapping[str, Any], total), ("describe", "stockCount"),
+        )
+    elif isinstance(total, str):
+        metadata["totalCondition"] = total
+    return metadata
+
+
+def _metadata_scalars(source: Mapping[str, Any], fields: tuple[str, ...]) -> dict[str, object]:
+    return {
+        key: source[key] for key in fields if key in source
+        and (source[key] is None or isinstance(source[key], str | int | float | bool))
+    }
+
+
 def _decode_provider_response(response: httpx.Response) -> Mapping[str, Any]:
     try:
         decoded = response.json()
@@ -588,7 +798,9 @@ def _decode_provider_response(response: httpx.Response) -> Mapping[str, Any]:
     return cast(Mapping[str, Any], decoded)
 
 
-def _raise_for_provider_status(response: httpx.Response, decoded: Mapping[str, Any]) -> None:
+def _raise_for_provider_status(
+    response: httpx.Response, decoded: Mapping[str, Any], *, tool: MxTool = "unknown"
+) -> None:
     code = decoded.get("code")
     status = decoded.get("status")
     if (
@@ -596,7 +808,9 @@ def _raise_for_provider_status(response: httpx.Response, decoded: Mapping[str, A
         or code in _AUTH_STATUS_VALUES
         or status in _AUTH_STATUS_VALUES
     ):
-        raise MxSaasProviderAuthError("real-time market-data provider rejected its credential")
+        raise MxSaasProviderAuthError(
+            "real-time market-data provider rejected its credential", tool=tool,
+        )
     if response.is_error:
         raise MxSaasProviderUnavailableError("real-time market-data provider returned an error")
     if code not in _SUCCESS_STATUS_VALUES or status not in _SUCCESS_STATUS_VALUES:

@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
+from types import SimpleNamespace
+from typing import Literal, cast
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -12,9 +14,13 @@ from ashare_lab.adapters.market_data.mx_daily_history import (
     MX_BACK_ADJUSTMENT,
     MX_DAILY_HISTORY_PROVIDER,
     MxDailyHistory,
+    MxDailyHistoryClient,
+    MxDailyHistoryFieldsMissingError,
     MxDailyRow,
     MxQueryEvidence,
 )
+from ashare_lab.adapters.market_data.mx_saas import MxSaasProviderUnavailableError
+from ashare_lab.adapters.persistence.backtest_runs import InMemoryBacktestRunStore
 from ashare_lab.application.backtest_submission import BacktestRunConfig
 from ashare_lab.application.skill_backtest import run_skill_backtest
 from ashare_lab.application.skill_backtest_service import (
@@ -34,10 +40,94 @@ from ashare_lab.domain.strategy import (
     Instrument,
     StrategySpec,
 )
+from ashare_lab.ports.provider_indicator_data import HistoricalIndicatorData
 
 TZ = ZoneInfo("Asia/Shanghai")
 SYMBOL = "300059.SZ"
 START = date(2025, 1, 2)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code", "expected_label"),
+    [
+        (
+            MxSaasProviderUnavailableError("private", tool="searchData", reason="read_timeout"),
+            "skill_mx_read_timeout", "等待东方财富查数 Skill响应超时",
+        ),
+        (
+            MxSaasProviderUnavailableError(
+                "private", tool="selectSecurity", reason="connect_timeout",
+            ),
+            "skill_mx_connect_timeout", "连接东方财富选股 Skill超时",
+        ),
+        (
+            MxSaasProviderUnavailableError(
+                "private", tool="searchData", reason="http_error", http_status=503,
+            ),
+            "skill_mx_http_error", "东方财富查数 Skill返回服务异常（HTTP 503）",
+        ),
+    ],
+)
+def test_skill_fetch_failure_reports_exact_step_without_leaking_provider_text(
+    failure: MxSaasProviderUnavailableError,
+    expected_code: str,
+    expected_label: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Fault-injection regression only; real-data acceptance is a separate run.
+    service = SkillBacktestService(
+        history=cast(MxDailyHistoryClient, SimpleNamespace(load=AsyncMock(side_effect=failure))),
+        indicators=cast(HistoricalIndicatorData, object()),
+        store=InMemoryBacktestRunStore(),
+    )
+    monkeypatch.setattr(service.queue, "enqueue", lambda _run_id: "manual-test")
+    try:
+        created = service.submit(
+            _strategy((START, START + timedelta(days=10))), BacktestRunConfig(),
+        )
+        result = service.execute(created.record.run_id)
+        assert result.error_code == expected_code
+        assert expected_label in result.progress_label
+        assert result.progress_percent == 10
+        assert result.result_json is None
+        assert "private" not in result.progress_label + caplog.text
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.parametrize("with_range", [True, False])
+def test_missing_history_explains_fetch_range_without_changing_strategy_or_config(
+    with_range: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = MxDailyHistoryFieldsMissingError(
+        ("涨停价", "跌停价"),
+        start=date(2010, 3, 9) if with_range else None,
+        end=date(2012, 3, 8) if with_range else None,
+    )
+    service = SkillBacktestService(
+        history=cast(MxDailyHistoryClient, SimpleNamespace(load=AsyncMock(side_effect=failure))),
+        indicators=cast(HistoricalIndicatorData, object()),
+        store=InMemoryBacktestRunStore(),
+    )
+    monkeypatch.setattr(service.queue, "enqueue", lambda _run_id: "manual-test")
+    strategy = _strategy((date(2010, 9, 5), date(2026, 9, 5))).model_copy(update={
+        "instrument": Instrument(symbol="600519.SH"),
+    })
+    try:
+        created = service.submit(strategy, BacktestRunConfig(slippage_bps=Decimal("0")))
+        result = service.execute(created.record.run_id)
+        assert result.error_code == "skill_history_fields_missing"
+        expected_range = "2010-03-09 至 2012-03-08" if with_range else "本次区间"
+        assert f"查询 {expected_range} 的历史数据时" in result.progress_label
+        assert "东方财富未返回涨停价、跌停价" in result.progress_label
+        assert "原区间和规则已保留" in result.progress_label
+        assert "可修改区间或稍后重新读取" in result.progress_label
+        assert result.strategy_json == created.record.strategy_json
+        assert result.config_json == created.record.config_json
+        assert result.result_json is None
+    finally:
+        service.shutdown()
 
 
 def _condition(*, trigger: str) -> IndicatorCondition:

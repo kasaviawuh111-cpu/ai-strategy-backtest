@@ -57,6 +57,7 @@ from ashare_lab.ports.current_fact_research import (
     ResearchPurpose,
 )
 from ashare_lab.ports.dialogue_progress import emit_progress
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.idea_routing import (
     IdeaAssetMapping,
     IdeaGenerationError,
@@ -68,8 +69,8 @@ from ashare_lab.ports.idea_routing import (
 )
 
 _UPSTREAM_COMMIT = "1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7"
-_PROMPT_VERSION = "idea-route.prompt.v9"
-_PROVIDER_SCHEMA_VERSION = "idea-route-provider.v4"
+_PROMPT_VERSION = "idea-route.prompt.v11"
+_PROVIDER_SCHEMA_VERSION = "idea-route-provider.v6"
 _PROPOSAL_CONFIDENCE = 0.75
 _BUY_ACTION_RE = re.compile(r"(?:买入|买进|建仓|开仓)")
 _SELL_ACTION_RE = re.compile(r"(?:卖出|卖掉|退出|平仓|清仓|止盈|止损)")
@@ -152,6 +153,22 @@ class _ProviderIdeaRoute(_StrictIdeaModel):
     understanding: str = Field(min_length=1, max_length=240)
     hypothesis: str = Field(min_length=1, max_length=320)
     proposals: tuple[_ProviderIdeaProposal, ...] = Field(min_length=2, max_length=3)
+    instrument_suggestion_declined: bool = Field(
+        default=False, strict=True,
+        description=(
+            "True only for an explicit request to supply/select one's own stock or to "
+            "decline stock recommendations, not merely for a missing stock or a paused run."
+        ),
+    )
+    execution_settings: ExecutionSettingsPatch = Field(default_factory=ExecutionSettingsPatch)
+    execution_setting_evidence: dict[str, str] = Field(
+        default_factory=dict,
+        max_length=12,
+        description=(
+            "Exactly one source quote for each non-null execution_settings field, "
+            "keyed by that field's snake_case name. Quote the current utterance verbatim."
+        ),
+    )
 
     @model_validator(mode="after")
     def strategy_sentences_are_unique(self) -> _ProviderIdeaRoute:
@@ -266,9 +283,14 @@ class VibeIdeaRouter:
             system_footer=f"Idea contract: {_PROMPT_VERSION}; schema: {_PROVIDER_SCHEMA_VERSION}.",
             json_object_contract=(
                 "Return exactly the object in responseSchema: understanding, hypothesis, "
-                "proposals. This is strategy idea generation from the supplied context, "
-                "not extraction of existing source spans. Do not output candidates, "
-                "instrument_symbol, source spans or defaults metadata. Each proposal "
+                "proposals, instrument_suggestion_declined, execution_settings "
+                "and execution_setting_evidence. "
+                "The proposals are strategy idea generation from the supplied context, "
+                "not extraction of existing source spans. Execution settings are the "
+                "exception: extract only explicitly requested settings and quote each "
+                "one from the current utterance in execution_setting_evidence. "
+                "Do not output candidates, instrument_symbol, source spans or defaults metadata. "
+                "Each proposal "
                 "must contain complete entry, exit and backtest rules; retain the "
                 "user's explicit conditions. When strategyBoundary is present, copy its "
                 "catalog, execution and backtest exactly. If its instrument is present, "
@@ -293,13 +315,15 @@ class VibeIdeaRouter:
             try:
                 payload = await transport.generate_json(transport_request)
             except CandidateTransportError as exc:
+                if exc.is_classified:
+                    raise
                 _LOGGER.warning("idea_gate_rejected reason=transport_unavailable")
                 return self._generation_failure("transport", timed_out=exc.timed_out)
             except Exception as exc:
                 _LOGGER.error("unexpected idea transport exception type=%s", type(exc).__name__)
                 raise
             try:
-                provider_route = _parse_provider_route(payload)
+                provider_route = _parse_provider_route(payload, utterance=request.utterance)
                 break
             except (TypeError, ValueError) as exc:
                 feedback = _safe_schema_feedback(exc, transport_request.response_schema)
@@ -328,6 +352,9 @@ class VibeIdeaRouter:
                             "所有候选仍必须完整表达买入、卖出和回测规则。"
                             "strategy_template 只含模板声明字段，"
                             "不能带 instrument 或 schema_version。"
+                            "成交设置仍只提取本轮原句明确给出的字段；"
+                            "execution_setting_evidence 必须与非null设置逐项对应并逐字引用原句，"
+                            "不能引用 previousResponse、历史对话或补造缺失的证据。"
                         ),
                     },
                 )
@@ -364,6 +391,8 @@ class VibeIdeaRouter:
                 capability_matrix=self._capability_matrix,
             ),
             research=researched,
+            execution_settings=provider_route.execution_settings,
+            instrument_suggestion_declined=provider_route.instrument_suggestion_declined,
         )
 
     def _generation_failure(
@@ -423,6 +452,8 @@ class VibeIdeaRouter:
                 )
             )
         except Exception as exc:
+            if isinstance(exc, CandidateTransportError) and exc.is_classified:
+                raise
             # Research failure removes optional context, not the whole turn.
             _LOGGER.info("idea research unavailable type=%s", type(exc).__name__)
             return None
@@ -480,13 +511,22 @@ def _idea_response_schema(
             },
         },
     }
+    settings_schema = ExecutionSettingsPatch.model_json_schema()
+    settings_definitions = settings_schema.pop("$defs", {})
     return {
         "type": "object",
         "additionalProperties": False,
+        "$defs": settings_definitions,
         "required": ["understanding", "hypothesis", "proposals"],
         "properties": {
             "understanding": {"type": "string", "minLength": 1, "maxLength": 240},
             "hypothesis": {"type": "string", "minLength": 1, "maxLength": 320},
+            "instrument_suggestion_declined": {"type": "boolean", "default": False},
+            "execution_settings": settings_schema,
+            "execution_setting_evidence": {
+                "type": "object", "additionalProperties": {"type": "string"},
+                "maxProperties": 12,
+            },
             "proposals": {
                 "type": "array",
                 "minItems": 2,
@@ -503,6 +543,10 @@ def _system_contract(*, require_strategy: bool = False, unbound: bool = False) -
         "understanding 是直接给用户看的开场：用一至两句自然口语接住意思并点出策略方向，"
         "总共不超过80个汉字，不长篇复述用户原话，不重复下面方案的细节。"
         "正常回复不要提假设、未指定标的、绑定证券、Skill、Schema、能力矩阵或风控声明；"
+        "用户明确说股票等我补充、我自己选股票或不要推荐股票时，"
+        "instrument_suggestion_declined=true，先给策略方向并等待用户补股票；"
+        "缺少股票本身、或只说先别跑，不能据此拒绝推荐；"
+        "用户本轮明确请求帮忙推荐股票时，此字段为false，不取消推荐。"
         "不要机械添加免责声明，也不要说没有股票就不能继续。"
         "hypothesis 字段保留供内部核验，不要把它重复写进 understanding。"
         "ideaInspiration 若非空，是人物、情绪、比喻或风格的待确认解读；结合 recentIdeaTurns，"
@@ -512,6 +556,22 @@ def _system_contract(*, require_strategy: bool = False, unbound: bool = False) -
         "用户已明确的一侧规则必须在所有方案中逐项保持，不增加过滤或退出条件。"
         "只有买入时只生成不同卖出选择；只有卖出时只生成不同买入选择。"
         "已有明确卖出就是退出约束，不得再擅自加止损、回撤或持有期。"
+        "用户本轮明确指定的成交设置必须提取到顶层 execution_settings，适用于本批所有方向，"
+        "不能丢掉费用，不能混入买卖条件或改动 strategyBoundary.execution 的固定撮合规则。"
+        "只填原话明确给出的字段，未提及的省略或为null，不得代填默认值；0和false必须保留。"
+        "slippage_bps单位基点：5基点=0.05%=5；commission_rate用比例："
+        "万分之三或万三=0.03%=0.0003；minimum_commission_cny单位人民币元。"
+        "participation_rate与allocation_ratio用0到1比例，10%写0.1。"
+        "limit_handling按原话表达的涨跌停处理填wait_for_unlock（等待开板）、"
+        "strict_no_fill_at_limit（涨跌停价不成交）或allow_limit_volume（按限制成交量）；"
+        "capacity_mode仅填point_in_time_volume（按当时成交量约束）或unlimited（不约束容量）。"
+        "retry_unfilled_exits与run_robustness按明确要求写true/false；"
+        "max_exit_attempts是退出尝试次数，warmup_calendar_days与settlement_extension_days是自然日数。"
+        "execution_setting_evidence的键必须与execution_settings所有非null字段完全一致，"
+        "每个值逐字引用本轮原话中包含该设置、数值和单位的连续文字，不得补字或改写。"
+        "不能拿recentIdeaTurns、research、候选文案或固定默认值充当本轮费用证据；"
+        "没指定成交设置时两个字段都返回空对象。不支持的费用如印花税不能塞进佣金，"
+        "单位不清楚时不猜值。"
         "随后直接生成 2 至 3 条彼此不同、完整、零自由裁量的中文策略句。"
         "每条 suggested_utterance 必须明确写出买入动作、卖出动作和近 1 年回测，"
         "标题和说明使用自然中文，不要展示 technical.ma、period 等内部字段名。"
@@ -616,9 +676,13 @@ def _idea_user_payload(
     }
 
 
-def _parse_provider_route(payload: CandidateTransportResponse) -> _ProviderIdeaRoute:
+def _parse_provider_route(
+    payload: CandidateTransportResponse, *, utterance: str,
+) -> _ProviderIdeaRoute:
     raw: object = json.loads(payload) if isinstance(payload, bytes | str) else payload
-    return _ProviderIdeaRoute.model_validate(raw)
+    route = _ProviderIdeaRoute.model_validate(raw)
+    route.execution_settings.validate_evidence(route.execution_setting_evidence, utterance)
+    return route
 
 
 def _safe_schema_feedback(
@@ -626,6 +690,13 @@ def _safe_schema_feedback(
 ) -> list[dict[str, object]]:
     """Describe structural errors without logging model text, values or unknown keys."""
     if not isinstance(exc, ValidationError):
+        if str(exc) in {
+            "execution setting evidence must match changed fields",
+            "execution setting evidence must quote the current input",
+        }:
+            return [{
+                "loc": ("execution_setting_evidence",), "type": "value_error", "msg": str(exc),
+            }]
         return [{"loc": (), "type": "json_invalid", "msg": "Return one valid JSON object."}]
 
     declared: set[str] = set()

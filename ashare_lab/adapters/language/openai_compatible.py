@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from ashare_lab.ports.dialogue_progress import emit_model_reasoning, emit_progress
 
 from .vibe_candidates import (
+    CandidateFailureKind,
     CandidateProviderIdentityView,
     CandidateTransportError,
     CandidateTransportRequest,
@@ -313,7 +314,9 @@ class OpenAICompatibleCandidateTransport:
                         response_status = response.status_code
                         if response.status_code < 200 or response.status_code >= 300:
                             raise CandidateProviderTransportError(
-                                "candidate provider request failed"
+                                "candidate provider request failed",
+                                failure_kind=self._http_failure_kind(response.status_code),
+                                http_status=response.status_code,
                             )
                         candidate_content, response_size = await _read_deepseek_stream(
                             response,
@@ -333,7 +336,9 @@ class OpenAICompatibleCandidateTransport:
                         response_status = response.status_code
                         if response.status_code < 200 or response.status_code >= 300:
                             raise CandidateProviderTransportError(
-                                "candidate provider request failed"
+                                "candidate provider request failed",
+                                failure_kind=self._http_failure_kind(response.status_code),
+                                http_status=response.status_code,
                             )
                         raw = await _read_bounded_response(
                             response,
@@ -365,6 +370,7 @@ class OpenAICompatibleCandidateTransport:
             emit_progress("validation", "模型已返回结果，正在校验结构与可执行条件。")
             return cast(dict[str, object], candidate_payload)
         except CandidateProviderTransportError as exc:
+            failure = _classified_transport_failure(exc, response_status)
             emit_progress("failed", "模型调用未完成，正在返回错误说明。")
             _LOGGER.warning(
                 "candidate_transport_failed provider=%s model=%s status=%s elapsed_ms=%d "
@@ -377,9 +383,9 @@ class OpenAICompatibleCandidateTransport:
                 response_size,
                 self._response_mode,
                 self._thinking,
-                _transport_failure_reason(exc),
+                failure.failure_kind if failure.is_classified else _transport_failure_reason(exc),
             )
-            raise
+            raise failure from None
         except (
             httpx.HTTPError,
             TimeoutError,
@@ -390,10 +396,16 @@ class OpenAICompatibleCandidateTransport:
             ValueError,
         ) as exc:
             timed_out = isinstance(exc, (httpx.TimeoutException, TimeoutError))
+            failure_kind: CandidateFailureKind = (
+                "timeout" if timed_out else "connection_failed"
+                if isinstance(exc, httpx.HTTPError) else "invalid_response"
+            )
             emit_progress(
                 "failed",
                 "模型请求超时，正在返回错误说明。"
-                if timed_out else "模型响应未通过检查，正在返回错误说明。",
+                if timed_out else "模型连接未完成，正在返回错误说明。"
+                if failure_kind == "connection_failed"
+                else "模型响应未通过检查，正在返回错误说明。",
             )
             _LOGGER.warning(
                 "candidate_transport_failed provider=%s model=%s status=%s elapsed_ms=%d "
@@ -407,12 +419,49 @@ class OpenAICompatibleCandidateTransport:
                 response_size,
                 self._response_mode,
                 self._thinking,
-                "timeout" if timed_out else "response_parse_error",
+                failure_kind,
                 type(exc).__name__,
             )
             raise CandidateProviderTransportError(
-                "candidate provider response unavailable", timed_out=timed_out
+                "candidate provider response unavailable", timed_out=timed_out,
+                failure_kind=failure_kind, http_status=response_status,
             ) from None
+
+    def _http_failure_kind(self, status: int) -> CandidateFailureKind:
+        if status == 401:
+            return "authentication_failed"
+        if status == 403:
+            return "permission_denied"
+        if status == 402:
+            official_deepseek = (
+                self._identity.provider.casefold() == "deepseek"
+                and urlsplit(self._endpoint).hostname == "api.deepseek.com"
+            )
+            return "insufficient_balance" if official_deepseek else "billing_restricted"
+        if status == 429:
+            return "rate_limited"
+        if 500 <= status <= 599:
+            return "service_unavailable"
+        return "unknown"
+
+
+def _classified_transport_failure(
+    exc: CandidateProviderTransportError, status: int | None,
+) -> CandidateProviderTransportError:
+    if exc.is_classified:
+        return exc
+    reason = _transport_failure_reason(exc)
+    kind: CandidateFailureKind = "unknown"
+    if reason in {"stream_truncated", "stream_incomplete", "stream_empty"}:
+        kind = "incomplete_response"
+    elif reason in {
+        "non_object_payload", "response_length_invalid", "response_too_large",
+        "stream_content_type_invalid", "stream_event_invalid", "stream_error",
+    }:
+        kind = "invalid_response"
+    return CandidateProviderTransportError(
+        str(exc), timed_out=exc.timed_out, failure_kind=kind, http_status=status,
+    )
 
 
 async def _read_bounded_response(

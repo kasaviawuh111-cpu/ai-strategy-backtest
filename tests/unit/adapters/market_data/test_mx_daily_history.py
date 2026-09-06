@@ -65,6 +65,7 @@ def _table(
 class _FakeMxClient:
     def __init__(self, symbol: str, *, adjusted_dates: list[str] | None = None) -> None:
         self.symbol = symbol
+        self.name = {"688981.SH": "中芯国际", "302132.SZ": "中航成飞"}.get(symbol, "中国平安")
         self.calls: list[str] = []
         self.adjusted_dates = adjusted_dates
         self.raw_close = "52"
@@ -84,10 +85,12 @@ class _FakeMxClient:
             rows=(
                 {
                     "证券代码": self.symbol.split(".", maxsplit=1)[0],
-                    "证券简称": "中芯国际" if self.symbol == "688981.SH" else "中国平安",
+                    "证券简称": self.name,
                     "证券类型": "A股",
                     "上市状态": "正常上市",
-                    "市场类型": "上海证券交易所",
+                    "市场类型": (
+                        "深圳证券交易所" if self.symbol.endswith(".SZ") else "上海证券交易所"
+                    ),
                 },
             ),
             provenance=_provenance("a"),
@@ -108,9 +111,7 @@ class _FakeMxClient:
                     ["value"],
                     {
                         "首发上市日": ["2020-07-16"],
-                        "股票简称": [
-                            "中芯国际" if self.symbol == "688981.SH" else "中国平安"
-                        ],
+                        "股票简称": [self.name],
                         "是否上市": ["是"],
                     },
                 ),
@@ -200,6 +201,37 @@ class _FakeMxClient:
                 retrieved_at=_NOW + timedelta(seconds=self.revision),
             ),
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["302132", "302132.SZ"])
+async def test_verified_replacement_code_uses_chinext_and_preserves_provider_limits(
+    tmp_path: Path, symbol: str,
+) -> None:
+    live = _FakeMxClient("302132.SZ")
+
+    history = await MxDailyHistoryClient(live, tmp_path).load(symbol, _START, _END)
+
+    assert history.instrument_id == "302132.SZ"
+    assert history.board is Board.CHINEXT
+    # These are synthetic provider values, not inferred from a board percentage.
+    assert (history.rows[-1].upper_limit, history.rows[-1].lower_limit) == (60, 40)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "symbol",
+    ["302131", "302133", "302131.SZ", "302133.SZ", "302132.SH", "302132.BJ"],
+)
+async def test_replacement_code_exception_rejects_neighbors_and_wrong_exchange_before_query(
+    tmp_path: Path, symbol: str,
+) -> None:
+    live = _FakeMxClient("302132.SZ")
+
+    with pytest.raises(MxDailyHistoryError, match="canonical A-share stock"):
+        await MxDailyHistoryClient(live, tmp_path).load(symbol, _START, _END)
+
+    assert live.calls == []
 
 
 @pytest.mark.asyncio
@@ -520,5 +552,65 @@ async def test_history_maps_only_no_data_to_requested_missing_fields(
         await MxDailyHistoryClient(live, tmp_path).load(live.symbol, _START, _END)
     if isinstance(captured.value, MxDailyHistoryFieldsMissingError):
         assert captured.value.fields == ("涨停价", "跌停价")
+        assert (captured.value.start, captured.value.end) == (_START, _END)
         assert "provider diagnostic" not in str(captured.value)
     assert not tuple(tmp_path.rglob("*.json"))
+
+
+@pytest.mark.asyncio
+async def test_history_missing_column_retains_exact_fetch_range_not_claimed_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = _FakeMxClient("688981.SH")
+    original = live.query_finance
+
+    async def query_finance(
+        *, query: str, indicators: str | None,
+    ) -> LiveFinanceDataResult:
+        response = await original(query=query, indicators=indicators)
+        if indicators == "涨停价、跌停价":
+            return replace(response, tables=(
+                _table(live.symbol, [_END.isoformat()], {"涨停价": ["60"]}),
+            ))
+        return response
+
+    monkeypatch.setattr(live, "query_finance", query_finance)
+    with pytest.raises(MxDailyHistoryFieldsMissingError) as captured:
+        await MxDailyHistoryClient(live, tmp_path).load(live.symbol, _START, _END)
+    assert captured.value.fields == ("跌停价",)
+    assert (captured.value.start, captured.value.end) == (_START, _END)
+    assert not tuple(tmp_path.rglob("*.json"))
+
+
+@pytest.mark.parametrize(("start", "end"), [(_START, None), (None, _END), (_END, _START)])
+def test_history_missing_field_context_requires_paired_ordered_dates(
+    start: date | None, end: date | None,
+) -> None:
+    with pytest.raises(ValueError, match="ordered date pair"):
+        MxDailyHistoryFieldsMissingError(("涨停价",), start=start, end=end)
+
+
+@pytest.mark.asyncio
+async def test_later_missing_fields_report_only_failed_chunk_and_keep_completed_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = _LongRangeMxClient()
+    original = live.query_finance
+    failed_bounds: list[date] = []
+
+    async def query_finance(
+        *, query: str, indicators: str | None,
+    ) -> LiveFinanceDataResult:
+        bounds = re.findall(r"\d{4}-\d{2}-\d{2}", query)
+        if indicators == "涨停价、跌停价" and date.fromisoformat(bounds[0]) > _LONG_START:
+            failed_bounds.extend(date.fromisoformat(value) for value in bounds[:2])
+            raise MxSaasProviderNoDataError("private provider diagnostic")
+        return await original(query=query, indicators=indicators)
+
+    monkeypatch.setattr(live, "query_finance", query_finance)
+    with pytest.raises(MxDailyHistoryFieldsMissingError) as captured:
+        await MxDailyHistoryClient(live, tmp_path).load(live.symbol, _LONG_START, _LONG_END)
+    assert [captured.value.start, captured.value.end] == failed_bounds
+    assert failed_bounds[0] > _LONG_START and failed_bounds[1] == _LONG_END
+    assert len(tuple(tmp_path.rglob("*.json"))) == 1
+    assert "private provider diagnostic" not in str(captured.value)

@@ -62,6 +62,7 @@ class ClarificationDialogueRequest:
     research: CurrentFactResearchResult | None = None
     allow_data_query: bool = False
     identity_only: bool = False
+    verified_instruments: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +76,8 @@ class ClarificationDialogueAssessment:
     instrument_selected: bool = False
     selected_option_id: str | None = None
     requires_new_data: bool = False
+    run_requested: bool | None = None
+    run_request_evidence: str | None = None
 
 
 class ClarificationDialogueRouter(Protocol):

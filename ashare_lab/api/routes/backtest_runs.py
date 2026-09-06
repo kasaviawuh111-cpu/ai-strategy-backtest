@@ -45,10 +45,12 @@ from ashare_lab.domain.strategy import (
 from ashare_lab.ports.backtest_review import BacktestReviewRequest, EvidenceGrade
 from ashare_lab.ports.backtest_runs import (
     BacktestJobState,
+    BacktestQueueFullError,
     BacktestResultIntegrityPolicy,
     BacktestRunRecord,
     BacktestRunStore,
 )
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 
 from ..backtest_review_schemas import BacktestReviewResponse
 from ..backtest_schemas import (
@@ -71,7 +73,7 @@ from ..result_schemas import (
     BacktestSeriesPoint,
     BacktestSummaryView,
 )
-from ..schemas import BacktestReviewReference, error_response_docs
+from ..schemas import BacktestReviewContextRequest, BacktestReviewReference, error_response_docs
 
 router = APIRouter(prefix="/api/v1/backtest-runs", tags=["backtest-runs"])
 _LOGGER = logging.getLogger(__name__)
@@ -136,6 +138,12 @@ def create_backtest_run(
                     "in a pinned snapshot or an explicit request-preparation capability"
                 )
         result = submitter.submit(body.strategy, body.config.to_application_config())
+    except BacktestQueueFullError as exc:
+        raise ApiProblem(
+            status_code=503,
+            code="backtest_queue_full",
+            message="当前回测队列已满，本次未开始取数或回测，请稍后重试。",
+        ) from exc
     except BacktestDateRangeError as exc:
         raise ApiProblem(
             status_code=422,
@@ -282,13 +290,20 @@ def get_backtest_trades(
 async def review_backtest_run(
     run_id: RunIdPath,
     container: Container,
+    body: BacktestReviewContextRequest | None = None,
 ) -> BacktestReviewResponse:
-    """Keep the public report-review endpoint independent of dialogue input."""
-    return await build_backtest_review(run_id, container)
+    """Accept bounded references, never client-authored report facts."""
+    context = body or BacktestReviewContextRequest()
+    run_ids = tuple(dict.fromkeys((*context.related_run_ids, run_id)))
+    results = await load_backtest_dialogue_results(
+        container, run_ids, review_references=context.related_reviews,
+    )
+    return await build_backtest_review(run_id, container, dialogue_results=results)
 
 
 async def build_backtest_review(
     run_id: str, container: ApiContainer, *, user_request: str | None = None,
+    dialogue_results: tuple[Mapping[str, object], ...] = (),
 ) -> BacktestReviewResponse:
     """Use the configured deep model to review one verified completed run.
 
@@ -316,6 +331,52 @@ async def build_backtest_review(
             code="backtest_review_strategy_invalid",
             message="Stored backtest strategy does not match the strategy contract",
         ) from exc
+    # Stored dialogue state is only a source of references. Reload the results and
+    # exact exposed review versions so stale/client-provided metrics cannot enter.
+    run_ids = tuple(dict.fromkeys(
+        cast(str, item["runId"]) for item in dialogue_results if isinstance(item.get("runId"), str)
+    ))
+    if run_id not in run_ids:
+        run_ids = (*run_ids, run_id)
+    retained_ids = run_ids[-20:]
+    if run_id not in retained_ids:
+        retained_ids = (*retained_ids[-19:], run_id)
+    references: dict[tuple[str, str], BacktestReviewReference] = {}
+    for report in dialogue_results:
+        source_id = report.get("runId")
+        if not isinstance(source_id, str) or source_id not in retained_ids:
+            continue
+        reviews = report.get("reviews", ())
+        if not isinstance(reviews, list | tuple):
+            continue
+        for raw_review in cast(list[object] | tuple[object, ...], reviews):
+            if not isinstance(raw_review, Mapping):
+                continue
+            review = cast(Mapping[str, object], raw_review)
+            if isinstance(review.get("responseHash"), str):
+                reference = BacktestReviewReference(
+                    run_id=source_id, response_hash=cast(str, review["responseHash"]),
+                )
+                references[(source_id, reference.response_hash)] = reference
+        for response_hash in cast(list[str], report.get("unavailableReviewReferences", [])):
+            reference = BacktestReviewReference(run_id=source_id, response_hash=response_hash)
+            references[(source_id, reference.response_hash)] = reference
+    history = await load_backtest_dialogue_results(
+        container, retained_ids, review_references=tuple(references.values())[-20:],
+    )
+    completed_runs, exposed_proposals, report_references, history_hashes = _review_history_context(
+        history, run_id,
+    )
+    logging.getLogger("uvicorn.error").info(
+        "backtest_review_history_loaded run_id=%s completed_runs=%s exposed_reviews=%s "
+        "history_scope=%s",
+        run_id,
+        [report["runId"] for report in history],
+        [(report["runId"], review["responseHash"])
+         for report in history
+         for review in cast(list[Mapping[str, object]], report.get("reviews", []))],
+        report_references["historyScope"],
+    )
     evidence_grade, evidence_reasons = _review_evidence_gate(bundle)
     model_review = await advisor.review(
         BacktestReviewRequest(
@@ -330,13 +391,16 @@ async def build_backtest_review(
             evidence_grade=evidence_grade,
             evidence_reasons=evidence_reasons,
             user_request=user_request,
+            completed_runs=completed_runs,
+            exposed_proposals=exposed_proposals,
+            report_references=report_references,
         )
     )
     if model_review is None:
         raise _backtest_review_model_unavailable()
 
     candidates: list[dict[str, object]] = []
-    seen_hashes: set[str] = {canonical_hash(strategy)}
+    seen_hashes: set[str] = {_review_strategy_identity(strategy), *history_hashes}
     for proposal in model_review.proposals:
         revision = proposal.strategy
         try:
@@ -345,6 +409,7 @@ async def build_backtest_review(
             _LOGGER.warning("backtest_review_candidate_rejected reason=catalog")
             continue
         revision_hash = canonical_hash(revision)
+        effective_hash = _review_strategy_identity(revision)
         changes_entry = proposal.change_dimension in {"entry", "confirmation"}
         if ((changes_entry and revision.exit != strategy.exit)
                 or (not changes_entry and revision.entry != strategy.entry)):
@@ -355,11 +420,11 @@ async def build_backtest_review(
             or revision.backtest != strategy.backtest
             or revision.execution != strategy.execution
             or revision.catalog != strategy.catalog
-            or revision_hash in seen_hashes
+            or effective_hash in seen_hashes
         ):
             _LOGGER.warning("backtest_review_candidate_rejected reason=fixed_boundary_or_duplicate")
             continue
-        seen_hashes.add(revision_hash)
+        seen_hashes.add(effective_hash)
         candidates.append(
             {
                 "id": f"model-opt-{len(candidates) + 1}",
@@ -406,43 +471,182 @@ async def build_backtest_review(
 async def load_backtest_dialogue_results(
     container: ApiContainer, run_ids: tuple[str, ...],
     review_reference: BacktestReviewReference | None = None,
+    *, review_references: tuple[BacktestReviewReference, ...] = (),
 ) -> tuple[Mapping[str, object], ...]:
     """Resolve explicit conversation references using the existing report boundary."""
-    review = None
-    if review_reference is not None:
-        if review_reference.run_id in run_ids:
-            review = await container.drafts.get_review(
-                review_reference.run_id, review_reference.response_hash,
-            )
-        if review is None:
+    reviews: dict[tuple[str, str], BacktestReviewResponse] = {}
+    unavailable: dict[str, list[str]] = {}
+    references = (*review_references, *((review_reference,) if review_reference else ()))
+    for reference in references:
+        key = (reference.run_id, reference.response_hash)
+        if key in reviews:
+            continue
+        review = (await container.drafts.get_review(*key)
+                  if reference.run_id in run_ids else None)
+        if review is None and (reference == review_reference or reference.run_id not in run_ids):
             raise ApiProblem(
                 status_code=409, code="backtest_review_context_unavailable",
                 message="这版优化方案已无法读取，请重新生成 AI 分析后再选择；尚未执行新回测。",
             )
+        if review is None:
+            unavailable.setdefault(reference.run_id, []).append(reference.response_hash)
+            continue
+        reviews[key] = review
     results: list[Mapping[str, object]] = []
     for run_id in dict.fromkeys(run_ids):
         record = _get_record(container, run_id)
         bundle = _validate_completed_result(record)
+        if bundle.audit.result_hash is None:
+            raise ApiProblem(
+                status_code=422, code="backtest_review_requires_verified_result",
+                message="Model review requires a completed result with verified bundle integrity",
+            )
         strategy = StrategySpec.model_validate_json(record.strategy_json)
         grade, reasons = _review_evidence_gate(bundle)
         facts: dict[str, object] = {
             "runId": run_id,
+            "sourceResultHash": bundle.audit.result_hash,
             "strategy": strategy.model_dump(mode="json"),
             "summary": bundle.summary.model_dump(
                 mode="json", by_alias=True, exclude={"run_evidence", "data_provenance"},
             ),
             "evidenceGrade": grade, "evidenceReasons": reasons,
             "executionCosts": _execution_cost_facts(record.config_json),
+            "executionSettings": _execution_settings_facts(record.config_json),
             "dataSource": _data_source_facts(bundle),
+            "comparisonIdentity": (
+                bundle.summary.run_evidence.model_dump(
+                    mode="json", by_alias=True, exclude={"strategy_hash"},
+                ) if bundle.summary.run_evidence is not None else None
+            ),
         }
-        if review is not None and review.run_id == run_id:
+        exposed_reviews: list[dict[str, object]] = []
+        for (source_id, response_hash), review in reviews.items():
+            if source_id != run_id:
+                continue
             if review.source_result_hash != bundle.audit.result_hash:
                 raise ApiProblem(status_code=409, code="backtest_review_result_changed",
                                  message="回测结果已变化，请重新生成优化方案。")
-            facts["review"] = review.model_dump(mode="json", by_alias=True,
-                                               exclude={"model_provenance", "disclaimer"})
+            payload = review.model_dump(mode="json", by_alias=True,
+                                        exclude={"model_provenance", "disclaimer"})
+            exposed_reviews.append({**payload, "responseHash": response_hash})
+            # Only the explicit selection reference grants a batch the singular
+            # selector role. Historical batches keep their local ids in reviews.
+            if (review_reference is not None and source_id == review_reference.run_id
+                    and response_hash == review_reference.response_hash):
+                facts["review"] = payload
+        if exposed_reviews:
+            facts["reviews"] = exposed_reviews
+        if run_id in unavailable:
+            facts["unavailableReviewReferences"] = list(dict.fromkeys(unavailable[run_id]))
         results.append(facts)
     return tuple(results)
+
+
+def _review_strategy_identity(value: object) -> str:
+    """Ignore only a proven inactive parameter; keep the stored DSL/hash untouched."""
+    payload = StrategySpec.model_validate(value).model_dump(mode="json")
+    pending: list[object] = [payload["entry"], payload["exit"]]
+    while pending:
+        node = pending.pop()
+        if not isinstance(node, dict):
+            continue
+        condition = cast(dict[str, object], node)
+        if (condition.get("type") == "indicator_condition"
+                and condition.get("indicator_id") == "volume.relative"
+                and condition.get("trigger") in {"gt_multiple", "gte_multiple", "lte_multiple"}):
+            # Both provider binding and local runtime use one session here.
+            cast(dict[str, object], condition["params"])["consecutive_days"] = 1
+        children = condition.get("children")
+        if isinstance(children, list):
+            pending.extend(cast(list[object], children))
+        if "child" in condition:
+            pending.append(condition["child"])
+    return canonical_hash(payload)
+
+
+def _review_history_context(
+    history: tuple[Mapping[str, object], ...], current_run_id: str,
+) -> tuple[tuple[Mapping[str, object], ...], tuple[Mapping[str, object], ...],
+           Mapping[str, object], set[str]]:
+    """Classify verified execution versions and exposed hypotheses, without model guesses."""
+    completed = tuple({key: value for key, value in report.items()
+                       if key not in {"review", "reviews", "unavailableReviewReferences"}}
+                      for report in history)
+    current_index = next(index for index, report in enumerate(completed)
+                         if report["runId"] == current_run_id)
+    current = completed[current_index]
+    settings = current["executionSettings"]
+    previous = next((report for report in reversed(completed[:current_index])
+                     if report["strategy"] != current["strategy"]
+                     or report["executionSettings"] != settings), None)
+    seen_hashes = {_review_strategy_identity(report["strategy"]) for report in completed
+                   if report["executionSettings"] == settings}
+    proposals: list[Mapping[str, object]] = []
+    for report in history:
+        for review in cast(list[Mapping[str, object]], report.get("reviews", [])):
+            for candidate in cast(list[Mapping[str, object]], review["optimizationCandidates"]):
+                candidate_hash = _review_strategy_identity(candidate["strategy"])
+                executed_ids = [result["runId"] for result in completed
+                                if result["strategy"] == candidate["strategy"]
+                                and result["executionSettings"] == report["executionSettings"]]
+                proposals.append({
+                    **candidate, "sourceRunId": report["runId"],
+                    "sourceResponseHash": review["responseHash"],
+                    "sourceResultHash": review["sourceResultHash"],
+                    "executionSettings": report["executionSettings"],
+                    "status": "completed" if executed_ids else "unrun",
+                    "completedRunIds": executed_ids,
+                })
+                if report["executionSettings"] == settings:
+                    seen_hashes.add(candidate_hash)
+    comparison: dict[str, object] | None = None
+    if previous is not None:
+        current_strategy = cast(Mapping[str, object], current["strategy"])
+        previous_strategy = cast(Mapping[str, object], previous["strategy"])
+        current_summary = cast(Mapping[str, object], current["summary"])
+        previous_summary = cast(Mapping[str, object], previous["summary"])
+        differences = [key for key in ("instrument", "backtest")
+                       if current_strategy[key] != previous_strategy[key]]
+        if current["executionSettings"] != previous["executionSettings"]:
+            differences.append("executionSettings")
+        if current_summary.get("dataRange") != previous_summary.get("dataRange"):
+            differences.append("dataRange")
+        current_identity = current.get("comparisonIdentity")
+        previous_identity = previous.get("comparisonIdentity")
+        identity_status = (
+            "missing" if current_identity is None or previous_identity is None else
+            "matched" if current_identity == previous_identity else "different"
+        )
+        if identity_status == "different":
+            differences.append("sourceIdentity")
+        costs_complete = all(value is not None for report in (previous, current)
+                             for value in cast(Mapping[str, object],
+                                               report["executionCosts"]).values())
+        comparison = {
+            "currentRunId": current_run_id, "previousRunId": previous["runId"],
+            "comparisonStatus": (
+                "comparable" if not differences and costs_complete and identity_status == "matched"
+                else "limited"
+            ),
+            "differences": differences, "recordedCostsComplete": costs_complete,
+            "sourceIdentityStatus": identity_status,
+            "currentMetrics": {key: current_summary.get(key) for key in
+                               ("totalReturn", "maxDrawdown", "tradeCount")},
+            "previousMetrics": {key: previous_summary.get(key) for key in
+                                ("totalReturn", "maxDrawdown", "tradeCount")},
+        }
+    return completed, tuple(proposals), {
+        "current": current, "previousDifferentStrategy": previous,
+        "earliest": completed[0], "strategyVersionComparison": comparison,
+        "historyScope": {"maxRuns": 20, "maxReviewReferences": 20,
+                         "loadedRuns": len(completed),
+                         "unavailableReviewReferences": sum(
+                             len(cast(list[str], report.get("unavailableReviewReferences", [])))
+                             for report in history
+                         ),
+                         "coverage": "Only the supplied, verified recent conversation references"},
+    }, seen_hashes
 
 
 def _validate_completed_result(record: BacktestRunRecord) -> BacktestResultBundle:
@@ -518,6 +722,19 @@ def _verified_review_facts(
             "pointCount": provenance.indicator_points,
         }
     return facts
+
+
+def _execution_settings_facts(config_json: str) -> dict[str, object]:
+    """Recorded values only; do not fill absent historical settings with defaults."""
+    try:
+        raw = json.loads(config_json)
+        if not isinstance(raw, dict):
+            return {}
+        return ExecutionSettingsPatch.model_validate({
+            key: raw[key] for key in ExecutionSettingsPatch.model_fields if key in raw
+        }).model_dump(mode="json", exclude_none=True)
+    except (ValueError, TypeError):
+        return {}
 
 
 def _execution_cost_facts(config_json: str) -> Mapping[str, str | None]:

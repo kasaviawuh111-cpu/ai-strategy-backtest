@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "slug": "strategy-condition-groups",
+  "title": "策略复合条件分行与思考耗时",
+  "source": {"type":"adhoc","ref":"用户要求买卖多条件分行与真实思考耗时"},
+  "status": "in-review",
+  "fidelity": "partial",
+  "createdAt": "2026-09-06",
+  "updatedAt": "2026-09-06",
+  "direction": {"source":"product-tokens","note":"沿用 Public 风格当前 tokens；参考用户第二张图的逐行密度，不套用绿色已执行标志"},
+  "asIs": {"verified":"source-diff","selfChecked":true,"component":"web/src/components/SummaryCards.tsx","note":"复现截图内策略组与等待状态，外层页面/流程箭头未复刻，明确局部预览"},
+  "versions": [
+    {"v":1,"file":"v1.html","date":"2026-09-06","summary":"A 组头声明逻辑，B 行间逻辑；等待与完成状态","feedback":"用户选A，但要求保留条件序号和虚线框；先出第二版，不改正式页面"},
+    {"v":2,"file":"v2.html","date":"2026-09-06","summary":"买卖独立分组，组内逐条序号+虚线框；且/或标在组头；等待/完成/失败可切换预览","feedback":"逻辑需要更醒目；区间近一年应与买入卖出同级对齐"},
+    {"v":3,"file":"v3.html","date":"2026-09-06","summary":"强调全部满足才买入、任一触发就卖出，且/或独立标识；区间组标题及下方虚线框分别与买卖组对齐","feedback":"近一年不再用虚线框，改成轻量文字并明确修改入口"},
+    {"v":4,"file":"v4.html","date":"2026-09-06","summary":"区间一行显示近一年与下拉箭头；原生下拉切换常用区间，自定义日期可确认、取消及校验；其余不改"}
+  ],
+  "decisions": [
+    {"q":"展示结构","choice":"A 分组结构，保留序号和虚线框","why":"用户明确选择并补充视觉要求"},
+    {"q":"现在是否改正式页面","choice":"暂不实施，先确认第四版","why":"沿用用户先预览再操作的要求"},
+    {"q":"逻辑与区间层级","choice":"加重逻辑关键词，区间与买卖同级，但不再画虚线框","why":"用户要求逻辑明显、左侧对齐和轻量日期入口"},
+    {"q":"如何修改区间","choice":"点击近一年下拉选择常用范围；自定义展开日期编辑，确认后生效，取消保留原值","why":"轻量入口仍需可发现且可撤回；当前仅预览"}
+  ],
+  "dataModel": [
+    {"field":"StrategySummary.entryRule / exitRule","means":"源自策略DSL的递归all/any/first_of/not树，叶子独立展示，不拆自然语言字符串","source":"web/src/view-model.ts:169; web/src/types.ts:82"},
+    {"field":"DialogueProgressEvent.elapsedMs","means":"服务端monotonic计时，本轮请求开始至对应事件，完成事件即实际处理耗时，不是纯模型内部推理耗时","source":"ashare_lab/api/dialogue_progress.py:44; web/src/shared/api/client.ts:44"},
+    {"field":"first_of","means":"按日线推进任一条件启动退出，同一天同时触发只生成一条决策；不判断盘中顺序","source":"ashare_lab/application/skill_backtest.py:239,812"}
+  ],
+  "build": {"entryPoints":["web/src/components/SummaryCards.tsx","web/src/components/ModelReasoning.tsx","web/src/styles/app.css"],"verify":["targeted component tests","typecheck","local real-model strategy and same-page visual verification"]}
+}

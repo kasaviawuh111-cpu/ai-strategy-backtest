@@ -4,10 +4,10 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, vi } from 'vitest'
 
 import App from './App'
-import { backtestApi, strategyApi, systemApi, type DialogueProgressObserver } from './shared/api/client'
-import { mockApi, resetMockWaitForTests } from './shared/api/mock'
+import { backtestApi, instrumentApi, strategyApi, systemApi, type DialogueProgressObserver } from './shared/api/client'
+import { enableImmediateMockWaitForTests, mockApi, resetMockWaitForTests } from './shared/api/mock'
 import { DEFAULT_STRATEGY_EXAMPLES } from './shared/default-strategy-examples'
-import { ApiError, type BacktestRun, type CapabilitiesResponse, type Instrument } from './shared/api/types'
+import { ApiError, type BacktestOptimizationCandidate, type BacktestReviewResponse, type BacktestRun, type CapabilitiesResponse, type Instrument } from './shared/api/types'
 import { settleMockRunOnFirstPoll } from './test/mock-run'
 
 const renderApp = (
@@ -62,6 +62,498 @@ afterEach(() => {
 })
 
 describe('formal main.tsx App journey', () => {
+  it('B28 saves only the selected stock while preserving current edits and the completed report', async () => {
+    // Component wiring fixtures; provider and live backtest acceptance are separate.
+    settleMockRunOnFirstPoll()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    const selected: Instrument = { name: '中国平安', symbol: '601318.SH', market: 'CN_A', exchange: 'SSE' }
+    const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValue(fixture)
+    vi.spyOn(instrumentApi, 'search').mockResolvedValue({ items: [selected], hasMore: true })
+    const revise = vi.spyOn(strategyApi, 'revise').mockImplementation(async edited => ({
+      ...edited, revision: edited.revision + 1,
+    }))
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    const { container } = renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(await screen.findByRole('button', { name: '开始回测' }))
+    await screen.findByRole('heading', { name: '回测报告' })
+    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    await user.click(screen.getByRole('button', { name: /成交设置/ }))
+    fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
+    fireEvent.change(screen.getByLabelText(/单边滑点/), { target: { value: '7' } })
+    fireEvent.change(screen.getByLabelText(/佣金率/), { target: { value: '0.02' } })
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2022-01-04' } })
+    const condition = fixture.draft.entry.conditions.find(item => item.kind === 'indicator')
+    if (!condition || !condition.parameters[0]) throw new Error('expected an editable parameter')
+    const parameter = screen.getByRole('spinbutton', {
+      name: `${condition.label} ${condition.parameters[0].label}`,
+    })
+    fireEvent.change(parameter, { target: { value: '25' } })
+    await user.click(screen.getByRole('button', { name: '完成' }))
+    expect(revise).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: /修改股票：东方财富/ }))
+    expect(screen.getByRole('button', { name: '开始回测' })).toBeDisabled()
+    fireEvent.change(screen.getByRole('combobox', { name: '股票名称或代码' }), { target: { value: '中国' } })
+    await user.click(await screen.findByRole('option', { name: '中国平安 601318.SH' }))
+    await screen.findByRole('button', { name: /修改股票：中国平安/ })
+    expect(revise).toHaveBeenCalledTimes(1)
+    const edited = revise.mock.calls[0]?.[0]
+    if (!edited) throw new Error('expected the current draft to be saved')
+    expect(edited.instrument).toEqual(selected)
+    expect(edited.strategySpec.instrument.symbol).toBe(selected.symbol)
+    expect(edited.exit).toEqual(fixture.draft.exit)
+    expect(edited.backtest).toEqual({ ...fixture.draft.backtest, start: '2022-01-04', initialCashCny: 500000 })
+    expect(edited.execution).toEqual({ ...fixture.draft.execution, slippageBps: 7, commissionRate: 0.0002 })
+    const editedCondition = edited.entry.conditions.find(item => item.kind === 'indicator')
+    expect(editedCondition?.parameters[0]?.value).toBe(25)
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('form', { name: '编辑回测条件' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('交易规则')).not.toHaveFocus()
+    const historyCard = container.querySelector('.stream .mcard.is-settled')
+    expect(historyCard).toHaveTextContent('东方财富')
+    expect(historyCard?.querySelector('.inline-stock-entry')).toBeNull()
+    await user.click(screen.getByRole('button', { name: '查看这次报告' }))
+    expect(screen.getByRole('heading', { name: '回测报告' })).toBeVisible()
+  }, 10_000)
+
+  it('B28 ignores a late stock save after the conversation is reset', async () => {
+    enableImmediateMockWaitForTests()
+    const selected: Instrument = { name: '中国银行', symbol: '601988.SH', market: 'CN_A', exchange: 'SSE' }
+    vi.spyOn(instrumentApi, 'search').mockResolvedValue({ items: [selected], hasMore: false })
+    let finish!: () => void
+    const revise = vi.spyOn(strategyApi, 'revise').mockImplementation(edited => new Promise(resolve => {
+      finish = () => resolve({ ...edited, revision: edited.revision + 1 })
+    }))
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(await screen.findByRole('button', { name: /修改股票/ }))
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: '中国' } })
+    await user.click(await screen.findByRole('option', { name: '中国银行 601988.SH' }))
+    await user.click(screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true }))
+    expect(revise.mock.calls[0]?.[2]?.aborted).toBe(true)
+    await act(async () => finish())
+    expect(screen.queryByRole('button', { name: /修改股票/ })).not.toBeInTheDocument()
+    expect(screen.queryByText('中国银行')).not.toBeInTheDocument()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('B13 shows the current ready reply once and does not reuse it for a legacy ready response', async () => {
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    const reply = '东方财富的放量突破规则已经准备好了，你可以核对后开始回测。'
+    vi.spyOn(strategyApi, 'compile')
+      .mockImplementationOnce(async (input) => {
+        input.dialogueProgress?.onProgress([
+          { stage: 'model', message: '已调用策略生成模型', elapsedMs: 1_200 },
+          { stage: 'complete', message: '策略已准备好', elapsedMs: 2_450 },
+        ])
+        return { ...fixture, assistantMessage: reply }
+      })
+      .mockResolvedValueOnce({ ...fixture, draft: { ...fixture.draft, id: 'legacy-ready' } })
+    const user = userEvent.setup()
+    renderApp()
+    const input = screen.getByLabelText('交易规则')
+    fireEvent.change(input, { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(await screen.findByText(reply)).toBeVisible()
+    expect(screen.getAllByText(reply)).toHaveLength(1)
+    expect(screen.getByText('预览策略')).toBeVisible()
+    const readyTurn = screen.getByText('预览策略').closest('.turn')
+    const process = readyTurn?.querySelector('.model-reasoning')
+    expect(readyTurn).toContainElement(screen.getByText(reply))
+    expect(process).toBeInTheDocument()
+    expect(process!.compareDocumentPosition(screen.getByText(reply))
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText(reply).compareDocumentPosition(screen.getByText('预览策略'))
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText(/已经把这句话整理成买卖规则/)).not.toBeInTheDocument()
+
+    fireEvent.change(input, { target: { value: MOVING_AVERAGE_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(await screen.findByText('预览策略')).toBeVisible()
+    expect(screen.queryByText(reply)).not.toBeInTheDocument()
+    expect(screen.queryByText(/已经把这句话整理成买卖规则/)).not.toBeInTheDocument()
+  })
+
+  it('B13 archives each ready reply with its own completed version and clears them for a new conversation', async () => {
+    // Component state/snapshot regression only; real model acceptance is separate.
+    settleMockRunOnFirstPoll()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    const compile = vi.spyOn(strategyApi, 'compile')
+    const user = userEvent.setup()
+    const { container } = renderApp()
+    const replies = ['这一版用放量突破入场。', '这一版改成均线确认入场。']
+    for (const [index, reply] of replies.entries()) {
+      compile.mockResolvedValueOnce({ ...fixture, assistantMessage: reply,
+        draft: { ...fixture.draft, id: `ready-reply-${index}` } })
+      fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      expect(await screen.findByText(reply)).toBeVisible()
+      await user.click(screen.getByRole('button', { name: '开始回测' }))
+      await screen.findByRole('heading', { name: '回测报告' })
+      await user.click(screen.getByRole('button', { name: '回到对话' }))
+      await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
+    }
+
+    compile.mockResolvedValueOnce({ ...fixture, draft: { ...fixture.draft, id: 'ready-no-reply' } })
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: MOVING_AVERAGE_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('预览策略')
+    const archivedReplies = Array.from(container.querySelectorAll('.stream > [id^="journey-"]'),
+      turn => turn.nextElementSibling?.textContent)
+    expect(archivedReplies).toEqual(replies)
+    for (const reply of replies) expect(screen.getAllByText(reply)).toHaveLength(1)
+    expect(screen.queryByText(/已经把这句话整理成买卖规则/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true }))
+    for (const reply of replies) expect(screen.queryByText(reply)).not.toBeInTheDocument()
+  }, 12_000)
+
+  it('B13 preserves the whole archived prompt and keeps replies while editing an unrun draft', async () => {
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    const prompt = '你想用哪只股票？\n选一个试试，或说说你想怎么改。'
+    const reply = '股票已确认，刚才的买卖条件都保留了。'
+    vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
+      status: 'needs_clarification', draftId: 'whole-prompt', revision: 1,
+      assistantMessage: prompt,
+      clarification: { id: 'instrument_required', question: prompt, reason: '', choices: [] },
+    })
+    vi.spyOn(strategyApi, 'answerClarification').mockImplementationOnce(async (input) => {
+      input.dialogueProgress?.onProgress([
+        { stage: 'complete', message: '股票已确认', elapsedMs: 1_000 },
+      ])
+      return { replyKind: 'accepted', assistantMessage: reply, suggestions: [], outcome: fixture }
+    })
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    renderApp()
+    const input = screen.getByLabelText('交易规则')
+    fireEvent.change(input, { target: { value: '放量突破买入，跌破20日线卖出' } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(await screen.findByText(/你想用哪只股票/)).toHaveTextContent('选一个试试，或说说你想怎么改。')
+    fireEvent.change(input, { target: { value: '东方财富' } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('预览策略')
+    expect(screen.getByText(/你想用哪只股票/).textContent).toBe(prompt)
+
+    await user.click(screen.getByRole('button', { name: /区间/ }))
+    fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
+    await user.click(screen.getByRole('button', { name: '完成' }))
+    expect(screen.getAllByText(reply)).toHaveLength(1)
+    expect(screen.getByText(/你想用哪只股票/).textContent).toBe(prompt)
+    expect(screen.getByText('预览策略').closest('.turn')).toContainElement(screen.getByText(reply))
+    expect(screen.getByText('放量突破买入，跌破20日线卖出')).toBeVisible()
+    expect(screen.getByText('预览策略').closest('.turn')?.querySelector('.model-reasoning')).toBeInTheDocument()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('B13 leaves a completed reply only in history after editing its settings', async () => {
+    settleMockRunOnFirstPoll()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    const reply = '这一版按原本金设置回测放量突破。'
+    vi.spyOn(strategyApi, 'compile').mockImplementationOnce(async (input) => {
+      input.dialogueProgress?.onProgress([
+        { stage: 'complete', message: '策略已准备好', elapsedMs: 1_000 },
+      ])
+      return { ...fixture, assistantMessage: reply }
+    })
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    const { container } = renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('预览策略')
+    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await screen.findByRole('heading', { name: '回测报告' })
+    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    await user.click(screen.getByRole('button', { name: /区间/ }))
+    fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
+    await user.click(screen.getByRole('button', { name: '完成' }))
+
+    expect(screen.getAllByText(reply)).toHaveLength(1)
+    expect(container.querySelector('.stream > [id^="journey-"]')?.nextElementSibling)
+      .toHaveTextContent(reply)
+    expect(screen.getByText('预览策略').closest('.turn')).not.toContainElement(screen.getByText(reply))
+    expect(screen.getAllByText(VOLUME_EXAMPLE)).toHaveLength(1)
+    expect(container.querySelector('.stream .model-reasoning')).not.toBeInTheDocument()
+    expect(screen.queryByText(/想怎么交易？|说出新的买卖规则，继续回测/)).not.toBeInTheDocument()
+    expect(Array.from(container.querySelectorAll('.stream .bubble'))
+      .every(bubble => Boolean(bubble.textContent?.trim()))).toBe(true)
+    await user.click(within(screen.getByLabelText('策略审阅')).getByRole('button', { name: /区间/ }))
+    expect(screen.getByRole('spinbutton', { name: '初始资金' })).toHaveValue(500000)
+    await user.click(screen.getByRole('button', { name: '完成' }))
+    await user.click(within(screen.getByLabelText('策略审阅')).getByRole('button', { name: '开始回测' }))
+    await screen.findByRole('heading', { name: '回测报告' })
+    expect(create).toHaveBeenCalledTimes(2)
+    expect(create.mock.calls[1]?.[0].backtest.initialCashCny).toBe(500000)
+    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    await user.click(screen.getByRole('button', { name: '新建策略', hidden: true }))
+    expect(screen.getAllByText(VOLUME_EXAMPLE)).toHaveLength(1)
+    const reports = screen.getAllByRole('button', { name: '查看这次报告' })
+    expect(reports).toHaveLength(2)
+    await user.click(reports[1]!)
+    expect(await screen.findByRole('heading', { name: '回测报告' })).toBeVisible()
+  }, 12_000)
+
+  it('B26 locks compilation and keeps a missing-parent edit without silently restoring or clearing it', async () => {
+    const fixture = await mockApi.compile({
+      utterance: MOVING_AVERAGE_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' },
+    })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    let rejectCompile: ((error: ApiError) => void) | undefined
+    const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce(fixture)
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectCompile = reject }))
+      .mockResolvedValueOnce(fixture)
+    const revise = vi.spyOn(strategyApi, 'revise')
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    renderApp()
+    const input = screen.getByLabelText('交易规则')
+    fireEvent.change(input, { target: { value: MOVING_AVERAGE_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('预览策略')
+    const edit = '股票换成中金公司，其他不变，先别跑'
+    fireEvent.change(input, { target: { value: edit } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(input).toBeDisabled()
+    expect(screen.getByRole('button', { name: '新建策略', hidden: true })).toBeDisabled()
+    const newConversation = screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true })
+    expect(newConversation).toBeDisabled()
+    act(() => rejectCompile?.(new ApiError({
+      type: 'about:blank', title: 'Not found', status: 404,
+      detail: 'Conversation parent draft was not found', code: 'conversation_parent_draft_not_found',
+    })))
+    expect(await screen.findByText(/这轮策略的服务端记录已无法读取/)).toBeVisible()
+    expect(input).toBeEnabled()
+    expect(input).toHaveValue(edit)
+    expect(screen.queryByText(/Conversation parent draft was not found/)).not.toBeInTheDocument()
+    expect(compile).toHaveBeenCalledTimes(2)
+    expect(compile.mock.calls[1]?.[1]).toBe(fixture.draft.id)
+    expect(revise).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
+    // Only the user's explicit new conversation discards the old lineage.
+    await user.click(newConversation)
+    fireEvent.change(input, { target: { value: MOVING_AVERAGE_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await waitFor(() => expect(compile).toHaveBeenCalledTimes(3))
+    expect(compile.mock.calls[2]?.[1]).toBeUndefined()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('B26 preserves the readable proposal selection when its clarification draft is missing', async () => {
+    const proposal = {
+      id: 'internal-proposal-2', title: '均线确认', instrument_symbol: '600519.SH',
+      instrument_name: '贵州茅台', pairing_reason: '组件接线示例', hypothesis: '',
+      entry_summary: '上穿20日均线', exit_summary: '下穿20日均线',
+      suggested_utterance: '贵州茅台上穿20日均线买入，下穿20日均线卖出',
+      capability_ids: [], assumptions: [], confidence: 1,
+    }
+    const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
+      status: 'needs_clarification', draftId: 'lost-clarification', revision: 2,
+      clarification: {
+        id: 'idea_guidance_required', question: '选一组试试。', reason: '', choices: [],
+        ideaRoute: {
+          schema_version: 'idea-route.v1', understanding: '', hypothesis: '',
+          asset_mapping: { instrument_symbol: null, relation: 'unbound', rationale: '',
+            evidence_status: 'instrument_required' }, proposals: [proposal],
+        },
+      },
+    })
+    const answer = vi.spyOn(strategyApi, 'answerClarification').mockRejectedValueOnce(new ApiError({
+      type: 'about:blank', title: 'Not found', status: 404,
+      detail: 'Strategy draft was not found', code: 'strategy_draft_not_found',
+    }))
+    const revise = vi.spyOn(strategyApi, 'revise')
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '我想试试趋势策略' } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(await screen.findByRole('button', { name: '贵州茅台 · 均线确认' }))
+    expect(await screen.findByText(/这轮策略的服务端记录已无法读取/)).toBeVisible()
+    expect(answer).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      draftId: 'lost-clarification', revision: 2, answer: 'internal-proposal-2',
+    }))
+    expect(screen.getByLabelText('交易规则')).toHaveValue('贵州茅台 · 均线确认')
+    expect(screen.queryByRole('button', { name: '贵州茅台 · 均线确认' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Strategy draft was not found')).not.toBeInTheDocument()
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(revise).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('B26 preserves edited panel values on missing and stale revisions without creating a run', async () => {
+    enableImmediateMockWaitForTests()
+    const revise = vi.spyOn(strategyApi, 'revise')
+      .mockRejectedValueOnce(new ApiError({ type: 'about:blank', title: 'Not found', status: 404,
+        detail: 'Strategy draft was not found', code: 'strategy_draft_not_found' }))
+      .mockRejectedValueOnce(new ApiError({ type: 'about:blank', title: 'Conflict', status: 409,
+        detail: 'Strategy draft revision is stale', code: 'strategy_draft_revision_stale' }))
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: MOVING_AVERAGE_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(await screen.findByRole('button', { name: /区间/ }))
+    fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
+    await user.click(screen.getByRole('button', { name: '完成' }))
+    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    expect(await screen.findByText(/这轮策略的服务端记录已无法读取/)).toBeVisible()
+    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    expect(await screen.findByText(/这轮策略版本已更新/)).toBeVisible()
+    expect(screen.queryByText(/Strategy draft/)).not.toBeInTheDocument()
+    expect(revise).toHaveBeenCalledTimes(2)
+    expect(revise.mock.calls[0]?.[0].backtest.initialCashCny).toBe(500000)
+    expect(revise.mock.calls[1]?.[0]).toEqual(revise.mock.calls[0]?.[0])
+    expect(revise.mock.calls.every(call => call[1] !== true)).toBe(true)
+    expect(create).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: /区间/ }))
+    expect(screen.getByRole('spinbutton', { name: '初始资金' })).toHaveValue(500000)
+  }, 8_000)
+
+  it('B15 carries exposed review versions through follow-ups and the next completed run', async () => {
+    settleMockRunOnFirstPoll()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    const candidateFor = (id: 'model-opt-1' | 'model-opt-2'): BacktestOptimizationCandidate => ({
+      id, title: id, diagnosis: '组件候选', changeDimension: 'confirmation', expectedEffect: '组件接线测试',
+      tradeoff: '组件接线测试', suggestedUtterance: VOLUME_EXAMPLE, strategy: fixture.draft.strategySpec,
+      strategyHash: `sha256:${id}`, modelSuggested: true,
+    })
+    const reviewFor = (runId: string, version: string): BacktestReviewResponse => ({
+      runId, sourceResultHash: 'sha256:fixture-result', generatedAt: '2026-09-05T12:00:00Z',
+      evidenceGrade: 'limited', evidenceReasons: ['组件接线测试'], analysis: `分析版本${version}。`,
+      conclusion: '等待用户选择。',
+      optimizationCandidates: [candidateFor('model-opt-1'), candidateFor('model-opt-2')],
+      disclaimer: '历史回测与模型建议仅用于研究，不构成投资建议或真实交易指令',
+      modelProvenance: { provider: 'test', model: 'test',
+        promptVersion: 'test', schemaVersion: 'backtest-review.v1', responseHash: `sha256:${version}` },
+    })
+    const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce(fixture)
+    const answer = vi.spyOn(strategyApi, 'answerClarification')
+    const create = vi.spyOn(backtestApi, 'create')
+    const review = vi.spyOn(backtestApi, 'review').mockImplementation(async runId => reviewFor(runId, 'manual'))
+    const user = userEvent.setup()
+    renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(await screen.findByRole('button', { name: '开始回测' }))
+    await screen.findByRole('heading', { name: '回测报告' })
+    await user.click(screen.getByRole('button', { name: 'AI 分析与优化' }))
+    await screen.findByText('分析版本manual。')
+    const firstRun = await create.mock.results[0]?.value
+    expect(review.mock.calls[0]?.[2]).toEqual({ relatedRunIds: [firstRun.id], relatedReviews: [] })
+
+    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    compile.mockResolvedValueOnce({ status: 'needs_clarification', draftId: 'more-review', revision: 2,
+      assistantMessage: '这里是另一版建议。', clarification: {
+        id: 'backtest_review', question: '这里是另一版建议。', reason: '', choices: [],
+        backtestReview: reviewFor(firstRun.id, 'followup'),
+      } })
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '换一批优化建议，先别跑' } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('这里是另一版建议。')
+    const firstReference = { runId: firstRun.id, responseHash: 'sha256:manual' }
+    const secondReference = { runId: firstRun.id, responseHash: 'sha256:followup' }
+    expect(compile.mock.calls[1]?.[0]).toMatchObject({
+      relatedRunIds: [firstRun.id], relatedReview: firstReference, relatedReviews: [firstReference],
+    })
+    expect(create).toHaveBeenCalledTimes(1)
+
+    answer.mockResolvedValueOnce({ replyKind: 'accepted', assistantMessage: '按新条件回测。', suggestions: [],
+      outcome: { ...fixture, draft: { ...fixture.draft, id: 'reviewed-followup' }, runRequested: true } })
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '按新条件再跑一次' } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByRole('heading', { name: '回测报告' })
+    expect(answer.mock.calls[0]?.[0]).toMatchObject({ relatedRunIds: [firstRun.id],
+      relatedReview: secondReference, relatedReviews: [firstReference, secondReference] })
+    await user.click(screen.getByRole('button', { name: 'AI 分析与优化' }))
+    await screen.findByText('分析版本manual。')
+    const secondRun = await create.mock.results[1]?.value
+    expect(review.mock.calls[1]?.[2]).toEqual({ relatedRunIds: [firstRun.id, secondRun.id],
+      relatedReviews: [firstReference, secondReference] })
+
+    await user.click(screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true }))
+    compile.mockResolvedValueOnce(fixture)
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('预览策略')
+    expect(compile.mock.calls[2]?.[0]).toMatchObject({ relatedRunIds: [], relatedReviews: [] })
+    expect(compile.mock.calls[2]?.[0].relatedReview).toBeUndefined()
+  }, 12_000)
+
+  it('B26 offers the existing analysis retry only for the lost review and clears it after success', async () => {
+    settleMockRunOnFirstPoll()
+    const fixture = await mockApi.compile({
+      utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' },
+    })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    const candidate = (id: 'model-opt-1' | 'model-opt-2'): BacktestOptimizationCandidate => ({
+      id, title: id, diagnosis: '组件候选', changeDimension: 'confirmation', expectedEffect: '组件接线测试',
+      tradeoff: '组件接线测试', suggestedUtterance: VOLUME_EXAMPLE, strategy: fixture.draft.strategySpec,
+      strategyHash: `sha256:${id}`, modelSuggested: true,
+    })
+    const compile = vi.spyOn(strategyApi, 'compile')
+    const create = vi.spyOn(backtestApi, 'create')
+    const optimize = vi.spyOn(backtestApi, 'createOptimization')
+    const review = vi.spyOn(backtestApi, 'review').mockImplementation(async (runId): Promise<BacktestReviewResponse> => ({
+      runId, sourceResultHash: 'sha256:fixture-result', generatedAt: '2026-09-05T12:00:00Z',
+      evidenceGrade: 'limited', evidenceReasons: ['组件接线测试'], analysis: '组件中的分析结果。',
+      conclusion: '组件中的优化结论。', optimizationCandidates: [candidate('model-opt-1'), candidate('model-opt-2')],
+      disclaimer: '历史回测与模型建议仅用于研究，不构成投资建议或真实交易指令',
+      modelProvenance: { provider: 'test', model: 'test', promptVersion: 'test',
+        schemaVersion: 'backtest-review.v1', responseHash: 'sha256:fixture-review' },
+    }))
+    const user = userEvent.setup()
+    renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(await screen.findByRole('button', { name: '开始回测' }))
+    await screen.findByRole('heading', { name: '回测报告' })
+    await user.click(screen.getByRole('button', { name: 'AI 分析与优化' }))
+    await screen.findByText('组件中的分析结果。')
+    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    compile.mockRejectedValueOnce(new ApiError({ type: 'about:blank', title: 'Conflict', status: 409,
+      detail: 'Review context is missing', code: 'backtest_review_context_unavailable' }))
+    const edit = '用第二个优化方案再跑一次'
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: edit } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(await screen.findByText(/这版优化建议的服务端记录已无法读取/)).toBeVisible()
+    expect(screen.getByLabelText('交易规则')).toHaveValue(edit)
+    expect(compile.mock.calls[1]?.[0].relatedReview).toEqual({
+      runId: review.mock.calls[0]?.[0], responseHash: 'sha256:fixture-review',
+    })
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(optimize).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: '查看这次报告' }))
+    const report = within(document.querySelector('#pg-report') as HTMLElement)
+    expect(report.getByText(/这版优化建议的服务端记录已无法读取/)).toBeVisible()
+    await user.click(report.getByRole('button', { name: '重试 AI 分析' }))
+    await waitFor(() => expect(review).toHaveBeenCalledTimes(2))
+    expect(review.mock.calls[1]?.[0]).toBe(review.mock.calls[0]?.[0])
+    await waitFor(() => expect(report.queryByRole('button', { name: '重试 AI 分析' })).not.toBeInTheDocument())
+    expect(report.queryByText(/这版优化建议的服务端记录已无法读取/)).not.toBeInTheDocument()
+    expect(create).toHaveBeenCalledTimes(1)
+  }, 12_000)
+
   it('blocks a malformed saved date before an automatic backtest can start', async () => {
     const fixture = await mockApi.compile({
       utterance: VOLUME_EXAMPLE,
@@ -361,15 +853,114 @@ describe('formal main.tsx App journey', () => {
     expect(screen.getByRole('textbox', { name: '卖出' })).toHaveValue(exit)
     const saved = await revise.mock.results[0]?.value
     const edited = { ...saved, id: 'edited-slot-draft' }
-    compile.mockResolvedValueOnce({ status: 'compiled', draft: edited })
+    compile.mockResolvedValueOnce({ status: 'compiled', draft: edited,
+      isStrategyEdit: true, runRequested: true })
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
-    expect(compile.mock.calls[1]?.[0].utterance).toBe(`${edit}。其他条件和回测设置保持不变。`)
+    expect(compile.mock.calls[1]?.[0].utterance).toBe(`${edit}。其他条件和回测设置保持不变，按新条件重新回测。`)
     expect(compile.mock.calls[1]?.[1]).toBe(saved.id)
-    expect(compile.mock.calls[1]?.[0].editCurrentStrategy).toBe(slot !== '股票')
+    expect(compile.mock.calls[1]?.[0].editCurrentStrategy).toBe(true)
     // Submitting the edited slots starts a NEW run without a second Start click.
     await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2))
     expect(createRun.mock.calls[1]?.[0].id).toBe('edited-slot-draft')
+  })
+
+  it.each([
+    { reply: '候选点击', runRequested: true },
+    { reply: '中金公司', runRequested: true },
+    { reply: '中金公司，先别跑', runRequested: false },
+    { reply: '取消这次换股', runRequested: false },
+    { reply: '另起全新策略', runRequested: false },
+  ])('continues the stock clarification in its saved revision: $reply', async ({ reply, runRequested }) => {
+    // Component wiring only; the model and MX journeys are verified separately.
+    settleMockRunOnFirstPoll()
+    const fixture = await mockApi.compile({
+      utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' },
+    })
+    if (fixture.status !== 'compiled') throw new Error('expected the component fixture')
+    const configured = { ...fixture.draft, execution: {
+      ...fixture.draft.execution, commissionRate: 0, minimumCommissionCny: 0, slippageBps: 2,
+    } }
+    const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
+      status: 'compiled', draft: configured,
+    })
+    const revise = vi.spyOn(strategyApi, 'revise')
+    const createRun = vi.spyOn(backtestApi, 'create')
+    vi.spyOn(backtestApi, 'review').mockImplementation(() => new Promise(() => {}))
+    const answer = vi.spyOn(strategyApi, 'answerClarification')
+    const user = userEvent.setup()
+    renderApp()
+    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('预览策略')
+    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await screen.findByRole('heading', { name: '回测报告' })
+    await user.click(screen.getByRole('button', { name: 'AI 分析与优化' }))
+    await user.click(screen.getByRole('button', { name: '换只股票试试' }))
+    const stock = await screen.findByRole('textbox', { name: '股票' })
+    await user.clear(stock)
+    await user.type(stock, '中金')
+    const saved = await revise.mock.results[0]?.value
+    if (!saved) throw new Error('expected the saved stock-edit draft')
+    const question = '这个简称对应多只股票，你想用哪一只？'
+    const pending = {
+      status: 'needs_clarification' as const, draftId: 'ambiguous-stock', revision: 7,
+      isStrategyEdit: true,
+      assistantMessage: question,
+      clarification: {
+        id: 'strategy_edit_clarification', question, reason: '',
+        choices: [{ id: '601995.SH', label: '中金公司', description: '601995.SH',
+          action: 'submit_clarification' as const, suggestedUtterance: '中金公司',
+          instrumentName: '中金公司', instrumentSymbol: '601995.SH' }],
+      },
+    }
+    compile.mockResolvedValueOnce(pending)
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    expect(await screen.findByText(question)).toBeVisible()
+    expect(compile.mock.calls[1]?.[1]).toBe(saved.id)
+    expect(compile.mock.calls[1]?.[0].editCurrentStrategy).toBe(true)
+    expect(compile.mock.calls[1]?.[0].utterance).toContain('按新条件重新回测')
+    expect(createRun).toHaveBeenCalledTimes(1)
+
+    const changed = { ...saved, id: 'confirmed-stock', execution: fixture.draft.execution,
+      instrument: { ...saved.instrument, name: '中金公司', symbol: '601995.SH', exchange: 'SSE' as const },
+      strategySpec: { ...saved.strategySpec,
+        instrument: { ...saved.strategySpec.instrument, symbol: '601995.SH' } },
+    }
+    answer.mockResolvedValueOnce({
+      replyKind: 'accepted', assistantMessage: runRequested ? '按确认的股票继续回测。' : '暂不回测。',
+      suggestions: [],
+      outcome: { status: 'compiled', runRequested, isStrategyEdit: reply !== '另起全新策略',
+        draft: reply.startsWith('取消') ? saved : changed },
+    })
+    if (reply === '候选点击') await user.click(screen.getByRole('button', { name: '中金公司' }))
+    else {
+      await user.type(screen.getByLabelText('交易规则'), reply)
+      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    }
+    await waitFor(() => expect(answer).toHaveBeenCalledTimes(1))
+    expect(answer.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
+      draftId: 'ambiguous-stock', revision: 7,
+      answer: reply === '候选点击' ? '中金公司' : reply,
+    }))
+    expect(compile).toHaveBeenCalledTimes(2)
+    if (runRequested) {
+      await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2))
+      expect(createRun.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+        instrument: changed.instrument, entry: saved.entry, exit: saved.exit,
+        backtest: saved.backtest, execution: saved.execution,
+      }))
+    } else {
+      expect(await screen.findByRole('button', { name: '开始回测' })).toBeEnabled()
+      expect(createRun).toHaveBeenCalledTimes(1)
+      if (reply === '另起全新策略') {
+        await user.click(screen.getByRole('button', { name: '开始回测' }))
+        await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2))
+        expect(createRun.mock.calls[1]?.[0].execution).toEqual(fixture.draft.execution)
+        expect(createRun.mock.calls[1]?.[0].execution).not.toEqual(saved.execution)
+      }
+    }
   })
 
   it.each([[false, false], [true, false], [true, true]])(
@@ -407,6 +998,119 @@ describe('formal main.tsx App journey', () => {
       expect(await screen.findByRole('button', { name: '开始回测' })).toBeEnabled()
       expect(createRun).toHaveBeenCalledTimes(1)
     }
+  })
+
+  it('keeps each historical execution summary bound to its completed run', async () => {
+    // Snapshot/rendering regression only; real model/data acceptance is separate.
+    settleMockRunOnFirstPoll()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected the component fixture')
+    const compile = vi.spyOn(strategyApi, 'compile')
+    vi.spyOn(backtestApi, 'review').mockImplementation(() => new Promise(() => {}))
+    const user = userEvent.setup()
+    const { container } = renderApp()
+    const versions = [
+      { slippageBps: 0, commissionRate: 0, minimumCommissionCny: 0 },
+      { slippageBps: 8, commissionRate: 0.0003, minimumCommissionCny: 0 },
+      { slippageBps: 8, commissionRate: 0.0003, minimumCommissionCny: 5 },
+    ]
+    for (const [index, settings] of versions.entries()) {
+      compile.mockResolvedValueOnce({ status: 'compiled', executionSettings: settings,
+        draft: { ...fixture.draft, id: `history-fee-${index}`,
+          execution: { ...fixture.draft.execution, ...settings } } })
+      fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      await screen.findByText('预览策略')
+      await user.click(screen.getByRole('button', { name: '开始回测' }))
+      await screen.findByRole('heading', { name: '回测报告' })
+      await user.click(screen.getByRole('button', { name: '回到对话' }))
+      await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
+    }
+    const historicalSummaries = () => Array.from(
+      container.querySelectorAll('.stream .exec-entry .v'), element => element.textContent,
+    )
+    expect(historicalSummaries()).toEqual(['已调整 3 项', '已调整 2 项'])
+
+    // A fresh default draft must not relabel already completed run snapshots.
+    compile.mockResolvedValueOnce({ status: 'compiled', executionSettings: {},
+      draft: { ...fixture.draft, id: 'fresh-default-fees' } })
+    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('预览策略')
+    expect(within(screen.getByLabelText('策略审阅'))
+      .getByRole('button', { name: '成交设置默认' })).toBeVisible()
+    expect(historicalSummaries()).toEqual(['已调整 3 项', '已调整 2 项', '已调整 1 项'])
+  }, 15_000)
+
+  it.each(['direct', 'clarified', 'fresh'] as const)(
+    'uses server execution settings instead of stale local fees: %s', async (path) => {
+    // Configuration wiring only; real model/data acceptance runs in the live browser.
+    settleMockRunOnFirstPoll()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected the component fixture')
+    const configured = { ...fixture.draft, execution: { ...fixture.draft.execution,
+      slippageBps: 2, commissionRate: 0, minimumCommissionCny: 0 } }
+    const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
+      status: 'compiled', draft: configured,
+      executionSettings: { slippageBps: 2, commissionRate: 0, minimumCommissionCny: 0 },
+    })
+    const answer = vi.spyOn(strategyApi, 'answerClarification')
+    const createRun = vi.spyOn(backtestApi, 'create')
+    vi.spyOn(backtestApi, 'review').mockImplementation(() => new Promise(() => {}))
+    const user = userEvent.setup()
+    renderApp()
+    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('预览策略')
+    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await screen.findByRole('heading', { name: '回测报告' })
+    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
+
+    const settings = path === 'fresh' ? {} : {
+      slippageBps: 3, commissionRate: path === 'clarified' ? 0.0001 : 0, minimumCommissionCny: 0,
+    }
+    const resolved = { status: 'compiled' as const, isStrategyEdit: path !== 'fresh',
+      executionSettings: settings, runRequested: false,
+      draft: { ...fixture.draft, id: 'server-fee-draft',
+        execution: { ...fixture.draft.execution, ...settings } },
+    }
+    const pendingSettings = { slippageBps: 3, commissionRate: 0, minimumCommissionCny: 0 }
+    compile.mockResolvedValueOnce(path === 'clarified' ? {
+      status: 'needs_clarification', draftId: 'fee-unit-clarification', revision: 2,
+      isStrategyEdit: true, executionSettings: pendingSettings,
+      clarification: { id: 'strategy_edit_clarification', question: '佣金 1 是万分之一吗？',
+        reason: '', choices: [] },
+    } : resolved)
+    await user.type(screen.getByLabelText('交易规则'), path === 'fresh'
+      ? '另起一条新策略，先给我看看' : path === 'clarified'
+        ? '滑点改成3基点，佣金改成1，先别跑' : '滑点改成3基点，其他不变，先别跑')
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
+    expect(compile.mock.calls[0]?.[0].executionSettings).toBeUndefined()
+    expect(compile.mock.calls[1]?.[0].executionSettings).toMatchObject({
+      slippageBps: 2, commissionRate: 0, minimumCommissionCny: 0,
+    })
+    if (path === 'clarified') {
+      expect(await screen.findByText('佣金 1 是万分之一吗？')).toBeVisible()
+      answer.mockResolvedValueOnce({ replyKind: 'accepted', assistantMessage: '已改好，暂不回测。',
+        suggestions: [], outcome: resolved })
+      await user.type(screen.getByLabelText('交易规则'), '对，万分之一，先别跑')
+      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      await waitFor(() => expect(answer).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        draftId: 'fee-unit-clarification', revision: 2, executionSettings: pendingSettings,
+      })))
+    }
+    expect(await screen.findByRole('button', { name: '开始回测' })).toBeEnabled()
+    expect(createRun).toHaveBeenCalledTimes(1)
+    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2))
+    expect(createRun.mock.calls[1]?.[0].execution).toEqual(resolved.draft.execution)
+    expect(createRun.mock.calls[1]?.[0].entry).toEqual(configured.entry)
+    expect(createRun.mock.calls[1]?.[0].exit).toEqual(configured.exit)
+    expect(createRun.mock.calls[1]?.[0].backtest).toEqual(configured.backtest)
   })
 
   it('clears an unconsumed refresh intent before a typed preview-only follow-up', async () => {
@@ -851,7 +1555,10 @@ describe('formal main.tsx App journey', () => {
     }
   }, 12_000)
 
-  it('creates an unchanged compiled strategy directly but still revises an edited strategy', async () => {
+  it.each([
+    ['skill_mx_read_timeout', '等待东方财富查数 Skill响应超时，本次取数未完成，可以重试。'],
+    ['skill_history_fields_missing', '查询 2010-03-09 至 2012-03-08 的历史数据时，东方财富未返回涨停价、跌停价。本次回测未完成，原区间和规则已保留；可修改区间或稍后重新读取。'],
+  ])('retries and edits a failed run without resetting or replacing its strategy: %s', async (error, progressLabel) => {
     const instrument: Instrument = {
       name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE',
     }
@@ -895,12 +1602,12 @@ describe('formal main.tsx App journey', () => {
     const terminalRun = (id: string): BacktestRun => ({
       id,
       state: 'failed',
-      progress: 100,
-      progressLabel: '测试结束',
+      progress: 10,
+      progressLabel,
       createdAt: '2026-09-05T00:00:00Z',
       updatedAt: '2026-09-05T00:00:00Z',
       fingerprint: id,
-      error: 'test terminal state',
+      error,
       resultAvailable: false,
     })
     vi.spyOn(systemApi, 'capabilities').mockResolvedValue(capabilities)
@@ -911,6 +1618,7 @@ describe('formal main.tsx App journey', () => {
     }))
     const create = vi.spyOn(backtestApi, 'create')
       .mockResolvedValueOnce(terminalRun('run:unchanged'))
+      .mockResolvedValueOnce(terminalRun('run:retried'))
       .mockResolvedValueOnce(terminalRun('run:edited'))
     vi.spyOn(backtestApi, 'get').mockImplementation(async (runId) => terminalRun(runId))
     const user = userEvent.setup()
@@ -922,6 +1630,18 @@ describe('formal main.tsx App journey', () => {
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1))
     expect(revise).not.toHaveBeenCalled()
     expect(create).toHaveBeenNthCalledWith(1, compiled.draft, { refreshData: false })
+    expect(await screen.findByText(progressLabel))
+      .toBeVisible()
+    await user.click(screen.getByRole('button', { name: '重新读取' }))
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2))
+    expect(create).toHaveBeenNthCalledWith(2, compiled.draft, { refreshData: true })
+    expect(revise).not.toHaveBeenCalled()
+    expect(strategyApi.compile).toHaveBeenCalledTimes(1)
+    await user.click(await screen.findByRole('button', { name: '修改规则' }))
+    expect(screen.getByText('预览策略')).toBeVisible()
+    expect(screen.getByRole('button', { name: '开始回测' })).toBeVisible()
+    expect(strategyApi.compile).toHaveBeenCalledTimes(1)
+    expect(create).toHaveBeenCalledTimes(2)
     unchangedView.unmount()
 
     renderApp(instrument)
@@ -934,10 +1654,10 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', { name: '完成' }))
     await user.click(screen.getByRole('button', { name: '开始回测' }))
 
-    await waitFor(() => expect(create).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(3))
     expect(revise).toHaveBeenCalledTimes(1)
     expect(revise.mock.calls[0]?.[0].backtest.initialCashCny).toBe(500000)
-    expect(create.mock.calls[1]?.[0].revision).toBe(compiled.draft.revision + 1)
+    expect(create.mock.calls[2]?.[0].revision).toBe(compiled.draft.revision + 1)
   })
 
   it('keeps a complete result authoritative when a later run-status refresh returns 404', async () => {
@@ -1128,6 +1848,11 @@ describe('formal main.tsx App journey', () => {
       }),
     }))
     expect(await screen.findByText(/股票已经确认/)).toBeInTheDocument()
+    expect(screen.getAllByText('好，股票已经确认，刚才的买卖规则也都保留了。')).toHaveLength(1)
+    const readyTurn = screen.getByText('预览策略').closest('.turn')
+    expect(readyTurn).toContainElement(screen.getByText('好，股票已经确认，刚才的买卖规则也都保留了。'))
+    expect(readyTurn).not.toContainElement(screen.getByText(/请直接告诉我想回测的股票名称或 6 位证券代码/))
+    expect(screen.queryByText(/已经把这句话整理成买卖规则/)).not.toBeInTheDocument()
   })
 
   it('shows the complete clarification without appending reason recognized fields or an options hint', async () => {

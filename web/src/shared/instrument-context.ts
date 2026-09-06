@@ -16,6 +16,8 @@ export type InstrumentContextResolution = {
 const expectedExchange = (code: string): { suffix: 'SH' | 'SZ' | 'BJ'; exchange: Instrument['exchange'] } | null => {
   if (/^(?:600|601|603|605|688|689)\d{3}$/.test(code)) return { suffix: 'SH', exchange: 'SSE' }
   if (/^(?:000|001|002|003|300|301)\d{3}$/.test(code)) return { suffix: 'SZ', exchange: 'SZSE' }
+  // Mirror the backend's exact replacement-code exception, not all 302xxx codes.
+  if (code === '302132') return { suffix: 'SZ', exchange: 'SZSE' }
   if (/^(?:[48]\d{5}|920\d{3})$/.test(code)) return { suffix: 'BJ', exchange: 'BSE' }
   return null
 }
