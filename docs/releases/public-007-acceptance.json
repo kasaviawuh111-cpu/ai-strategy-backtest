@@ -1,0 +1,198 @@
+{
+  "schemaVersion": "ashare-public-acceptance.v1",
+  "recordDate": "2026-09-06",
+  "result": "PARTIAL_PASS_CORE_PERSONA_FAILED",
+  "overallAcceptancePassed": false,
+  "version": "ashare-strategy-preview-007",
+  "releaseStatus": "PUBLISHED",
+  "trafficPercent": 100,
+  "revision": "sha256:ab9ac90f989e8cfe89051d45b2dc8dfc68d3e29b7ffc60a7c7bc57437795208f",
+  "publicUrl": "https://ashare-strategy-preview-305722-11-1330091763.sh.run.tcloudbase.com",
+  "access": "public",
+  "persistence": "ephemeral",
+  "restartRecoveryVerified": false,
+  "assetReadback": {
+    "status": "PASS",
+    "metadataRevisionMatched": true,
+    "manifest": "public-007-source-manifest.json",
+    "assetCount": 2,
+    "assetSha256Matched": true,
+    "method": "public_check.py downloaded every web/dist/assets entry and checked its SHA256 before the real browser journey.",
+    "newRequestsDuringDocumentationUpdate": 0
+  },
+  "browserBaselineBacktest": {
+    "status": "PASS",
+    "viewport": {"width": 390, "height": 844},
+    "strategyPostStatus": 202,
+    "asyncLocationPresent": true,
+    "strategyFinalStatus": 201,
+    "draftStatus": "ready",
+    "draftId": "d96eca5e-0c2a-4843-ad95-239a12fd41f0",
+    "startAction": "Actual browser button click",
+    "runId": "run:3ac0f13cae9042cfbc4ca606834665c1",
+    "runState": "succeeded",
+    "resultHash": "sha256:700a4bd3044f7467477ee198c5118b30677ea872a36ac78bf830905070ad1748",
+    "resultHashIndependentlyReadBack": true
+  },
+  "apiDialogueSequence": {
+    "status": "PASS",
+    "resultDraftId": "6623374f-b712-4348-864a-adffb39d0de4",
+    "resultRevision": 1,
+    "newBacktestSubmissions": 0,
+    "turns": [
+      {
+        "label": "dfcf",
+        "input": "股票换成dfcf。其他条件和回测设置保持不变，先不要回测。",
+        "status": "PASS",
+        "seconds": 3.56,
+        "finalHttpStatus": 201,
+        "draftStatus": "ready",
+        "symbol": "300059.SZ",
+        "assistantMessage": "好的，股票已改为dfcf，其他条件和回测设置保持不变，暂不执行回测。",
+        "onlyInstrumentChanged": true,
+        "executionSettingsPreserved": true,
+        "runIntentPresent": false,
+        "refreshIntentPresent": false
+      },
+      {
+        "label": "food",
+        "input": "我想吃的",
+        "status": "PASS",
+        "seconds": 3.62,
+        "finalHttpStatus": 201,
+        "assistantMessage": "好的，那先不聊策略了。想吃点什么就好好吃，照顾好自己。",
+        "strategyAndHashPreserved": true,
+        "draftIdAndRevisionPreserved": true,
+        "executionSettingsPreserved": true,
+        "replyNotPrevious": true,
+        "runIntentPresent": false,
+        "refreshIntentPresent": false
+      },
+      {
+        "label": "weather",
+        "input": "明天下雨吗",
+        "status": "PASS",
+        "seconds": 3.56,
+        "finalHttpStatus": 201,
+        "assistantMessage": "我无法查询实时天气，建议你查看当地天气预报应用或网站获取准确信息。",
+        "strategyAndHashPreserved": true,
+        "draftIdAndRevisionPreserved": true,
+        "executionSettingsPreserved": true,
+        "replyNotPrevious": true,
+        "runIntentPresent": false,
+        "refreshIntentPresent": false
+      }
+    ]
+  },
+  "reportAnalysis": {
+    "runId": "run:3ac0f13cae9042cfbc4ca606834665c1",
+    "originalBrowserAttempt": {
+      "finalResult": "UNKNOWN",
+      "resultLocationSaved": false,
+      "known503Failure": false,
+      "limitation": "The collector timed out checking thinking visibility before saving the report response. No final status is established for this first browser request."
+    },
+    "separateApiPost": {
+      "status": "PASS",
+      "newReviewPostCount": 1,
+      "initialHttpStatus": 202,
+      "finalHttpStatus": 200,
+      "seconds": 118.08,
+      "retryAfterKnownFailure": false,
+      "cacheStatus": "UNKNOWN",
+      "sourceResultHash": "sha256:700a4bd3044f7467477ee198c5118b30677ea872a36ac78bf830905070ad1748",
+      "sourceResultHashMatched": true,
+      "evidenceGrade": "limited",
+      "candidateCount": 3,
+      "candidatesExecuted": false,
+      "modelProvenance": {
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "promptVersion": "backtest-review.prompt.v12",
+        "schemaVersion": "backtest-review.v2",
+        "responseHash": "sha256:d59a227963e91182bfe40cb1043d397e61b50fe156e4ad9d736c8833fd784c11"
+      },
+      "analysis": "区间收益+12.37%，跑输基准9.55个百分点。",
+      "conclusion": "下一步对候选同区间回测，比较收益与回撤后再评估。"
+    }
+  },
+  "personaUi": {
+    "status": "FAILED",
+    "input": "我是秦始皇",
+    "viewport": {"width": 390, "height": 844},
+    "initialHttpStatus": 202,
+    "finalHttpStatus": 201,
+    "draftId": "89deb642-38c8-45c3-acd6-31f48908ef5d",
+    "draftStatus": "needs_clarification",
+    "diagnosticCode": "dialogue_model_unavailable",
+    "strategyPresent": false,
+    "ideaRoutePresent": false,
+    "styleAcknowledgementVisible": false,
+    "editableCandidatesVisible": false,
+    "visibleReply": "对话模型这次未能返回有效回复，请稍后重试。",
+    "backtestPosts": 0,
+    "progressObservation": {
+      "modelStageCompletedAroundSeconds": 2.8,
+      "source": "Coordinating agent's read-only progress observation; not a duration derived from the UI evidence event offsets."
+    },
+    "cloudLog": {
+      "version": "ashare-strategy-preview-007",
+      "timestampUtc": "2026-09-06T19:06:03Z",
+      "event": "dialogue_reply_rejected",
+      "reason": "unsafe_reply_or_multiple_questions",
+      "classification": "reply_gate_rejection",
+      "correlation": "One matching log in the same version and 45-second request time window; the log itself contains no progress ID or draft ID.",
+      "rejectedModelTextAvailable": false,
+      "specificSubreasonKnown": false
+    },
+    "collectorError": {
+      "type": "AttributeError",
+      "message": "'NoneType' object has no attribute 'get'",
+      "scope": "Secondary collector failure when reading absent idea_route; not the cause of the already-saved product error response."
+    }
+  },
+  "publicThinkingViewport": {
+    "status": "NOT_VERIFIED",
+    "collector": "public_check.py",
+    "reason": "The collector returned to the chat pane while report thinking belongs to the report detail pane, then timed out on the wrong-pane visibility condition.",
+    "thinkingDisabledEstablished": false,
+    "additionalModelCallsForThinkingCharacters": 0
+  },
+  "localEvidenceBoundary": {
+    "scope": "Exact-package local HTTPS production-factory acceptance only",
+    "runId": "run:91f35623287045f49b46793985bc5d86",
+    "firstReviewStatus": 503,
+    "sameRunReviewRetryStatus": 200,
+    "doesNotEstablishPublicFirstAttemptStatus": true
+  },
+  "followUp008": {
+    "status": "PENDING_VERIFICATION",
+    "scope": "Bounded reply-gate repair is being prepared separately.",
+    "publicationEstablishedByThisRecord": false,
+    "realUiAcceptanceEstablishedByThisRecord": false
+  },
+  "evidenceInventory": [
+    {"file": "deployment-status.json", "sha256": "53542c2b014c903647bf599fd7c684379823946c568644d8cb52907797362be9"},
+    {"file": "public-evidence.json", "sha256": "acec30da2d0d9d6a071338e864908130d130931e4389b47d5e45a98ba071f3f4"},
+    {"file": "public-persona-ui.json", "sha256": "6bd5103eb75763a13e4fb9ffa8af790db9e5ca8f74943bef248b4c0b9e9b9bdd"},
+    {"file": "public-persona-cloud-log-sanitized.json", "sha256": "4f9ec537010c326315a21b4f007213bf40e11d3e5c59accaac14bfdc71132e3a"},
+    {"file": "api-follow-up/evidence.json", "sha256": "e47671b6adbda07ca22bd00cce9d782143b390eba22c948fcd958f8dc38e117b"},
+    {"file": "api-follow-up/01-dfcf.json", "sha256": "c44da20fd93ae6a59176f822ef94c2b3b8694c89f7f4a026f64b1797a94546a2"},
+    {"file": "api-follow-up/02-food.json", "sha256": "a1121786784360da3725d50c34f7225745fc5d9372627105e52f98431aed53a9"},
+    {"file": "api-follow-up/03-weather.json", "sha256": "f9dc0135ba3c49baa2dc4546560e01e92c66b5dad67fd429c59a09bcdd19d7fa"},
+    {"file": "api-follow-up/04-review.json", "sha256": "021c750c24df1106f576f38eb2c43d857907e368d47604a69a123daca6349e67"}
+  ],
+  "sanitization": {
+    "contents": "Public release identity, controlled test inputs and replies, bounded result identifiers, assertions, classified diagnostics and evidence hashes only.",
+    "excluded": ["credentials", "authorization headers", "raw model reasoning", "rejected model reply text", "raw cloud logs", "internal log paths", "network-address metadata", "unrelated user conversations"],
+    "inventoryPaths": "Logical evidence names only; private source files are not published by this record."
+  },
+  "boundaries": [
+    "Published with 100 percent traffic is a release fact, not an end-to-end acceptance pass.",
+    "HTTP 201 for the persona request does not mean its business result succeeded.",
+    "The first public browser report result is unknown; the later API 200 is a separate POST on the same completed run, not evidence of a known 503-to-200 retry or a cache hit.",
+    "The joint reply-gate reason does not establish which rejected phrase or how many questions the model produced.",
+    "No new API, model, data, backtest or deployment request was made for this documentation update.",
+    "This record does not establish public 008 acceptance, physical-phone behavior, load capacity, durable persistence or restart recovery."
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "ashare-public-acceptance.v1",
+  "date": "2026-09-06",
+  "status": "PASSED_IN_CHANGED_SCOPE",
+  "origin": "https://ashare-strategy-preview-305722-11-1330091763.sh.run.tcloudbase.com/",
+  "version": "ashare-strategy-preview-008",
+  "taskId": 2090285,
+  "trafficPercent": 100,
+  "revision": "sha256:35546c36a8341fc9eafe3c7476bde2a55159bbdbc5070fac6f42c7eafa0ea88f",
+  "runtimeCommit": "dd8d5ff",
+  "integrationTestCommit": "a672f93",
+  "access": "public_anonymous",
+  "persistence": "ephemeral",
+  "changedRuntimeFilesSince007": ["ashare_lab/adapters/language/vibe_clarification.py"],
+  "tests": {"adapterPassed": 100, "compilerIntegrationPassed": 2},
+  "local": {
+    "exactPackage": true,
+    "realModelAndData": true,
+    "input": "我是秦始皇",
+    "draftId": "db4b3433-b5b4-4517-83ec-c190d10ed211",
+    "elapsedSeconds": 199,
+    "proposals": 3,
+    "reasoningChars": 18911,
+    "automaticallyExecuted": false
+  },
+  "public": {
+    "realBrowserViewport": {"width": 390, "height": 844},
+    "initialHttpStatus": 202,
+    "asyncHeader": "respond-async",
+    "finalHttpStatus": 201,
+    "input": "我是秦始皇",
+    "draftId": "043a1a85-21b5-4b0c-883a-f6aa306d1fb8",
+    "diagnosticCode": "idea_guidance_required",
+    "elapsedSeconds": 197.6,
+    "reply": "按大趋势、集中建仓、长拿的方向，从成交活跃样本里挑了三组研究组合，可编辑后再看回测；想先看哪一组？",
+    "proposals": [
+      {"title": "放量突破集中进场", "symbol": "000977.SZ", "name": "浪潮信息"},
+      {"title": "趋势金叉果断跟随", "symbol": "600487.SH", "name": "亨通光电"},
+      {"title": "强势趋势持有纪律", "symbol": "300394.SZ", "name": "天孚通信"}
+    ],
+    "visibleBuyAndSellConditions": true,
+    "backtestPosts": 0,
+    "documentScrollWidth": 390,
+    "reasoningChars": 9784,
+    "shortStatusHeightPx": 48.5,
+    "inspectedReasoningViewport": {
+      "height": 160, "scrollHeight": 466, "clientHeight": 160,
+      "sampleTextChars": 571, "top": 234.5, "bottom": 394.5, "left": 16, "right": 374
+    },
+    "renderedScreenshotsInspected": true,
+    "frontendSha256Checked": ["assets/index-B2p7WQki.js", "assets/index-5ZRbCNX2.css"]
+  },
+  "unchangedPathEvidence": {
+    "source": "public-007-acceptance.json",
+    "runId": "run:3ac0f13cae9042cfbc4ca606834665c1",
+    "state": "succeeded",
+    "resultHash": "sha256:700a4bd3044f7467477ee198c5118b30677ea872a36ac78bf830905070ad1748",
+    "reviewModel": "deepseek-v4-pro",
+    "reviewSourceHashMatches": true,
+    "reviewReasoningChars": 21482,
+    "note": "Actual 007 backtest and separate report POST, not a new 008 backtest. Report, engine, frontend and scheduler files are unchanged."
+  },
+  "limits": [
+    "Mobile-size Chromium, not a physical WeChat phone test.",
+    "Proposals are model suggestions, not executed strategies or evidence of profitability.",
+    "One public persona case is not all-input reliability or latency acceptance.",
+    "007 initial persona failure remains recorded; model and data-provider failures remain possible.",
+    "Long-history fields, long-dialogue coverage, name-plus-code concatenation and persistent storage remain outside this acceptance."
+  ]
+}
