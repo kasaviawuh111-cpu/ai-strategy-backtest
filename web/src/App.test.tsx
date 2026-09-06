@@ -58,6 +58,7 @@ const expectHomeToHideDefaultCapital = (container: HTMLElement) => {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   resetMockWaitForTests()
 })
 
@@ -810,6 +811,101 @@ describe('formal main.tsx App journey', () => {
       expect(saved?.instrument.symbol).toBe(saved?.strategySpec.instrument.symbol)
     }
   }, 15_000)
+
+  it.each([390, 720])('B31 keeps accepted-run feedback visible without closing desktop review (%s px)', async (width) => {
+    enableImmediateMockWaitForTests()
+    vi.stubGlobal('innerWidth', width)
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    const queued: BacktestRun = { id: `b31-${width}`, state: 'queued', progress: 0,
+      progressLabel: '等待回测', createdAt: '2026-09-06T10:00:00Z', updatedAt: '2026-09-06T10:00:00Z',
+      fingerprint: 'b31', error: null, resultAvailable: false }
+    vi.spyOn(strategyApi, 'compile').mockResolvedValue(fixture)
+    const revise = vi.spyOn(strategyApi, 'revise')
+    const create = vi.spyOn(backtestApi, 'create').mockResolvedValue(queued)
+    let finish!: (run: BacktestRun) => void
+    const getRun = vi.spyOn(backtestApi, 'get').mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const user = userEvent.setup()
+    const { container } = renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(await screen.findByRole('button', { name: '开始回测' }))
+    await waitFor(() => expect(getRun).toHaveBeenCalled())
+    expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', width <= 719 ? 'false' : 'true')
+    expect(screen.getByRole('button', { name: '取消回测' })).toBeInTheDocument()
+    expect(create).toHaveBeenCalledExactlyOnceWith(fixture.draft, { refreshData: false })
+    expect(revise).not.toHaveBeenCalled()
+    await act(async () => finish({ ...queued, state: 'failed', error: 'skill_mx_transport_error',
+      progressLabel: '本次取数未完成' }))
+    expect(await screen.findByText('回测失败')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新读取' })).toBeInTheDocument()
+    expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', width <= 719 ? 'false' : 'true')
+    if (width <= 719) {
+      await user.click(screen.getByRole('button', { name: '修改规则' }))
+      expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', 'true')
+      // JSDOM 不执行移动媒体查询；此处验证点击接线，尺寸与可见性另走浏览器验收。
+      await user.click(screen.getByLabelText('返回对话'))
+      expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', 'false')
+      expect(container.querySelector('.review-title')).toHaveTextContent('东方财富')
+    }
+  })
+
+  it.each(['revision', 'create', 'closed-create'] as const)(
+    'B31 exposes a mobile %s error and retries the same edited draft', async (failurePoint) => {
+    enableImmediateMockWaitForTests()
+    vi.stubGlobal('innerWidth', 390)
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    vi.spyOn(strategyApi, 'compile').mockResolvedValue(fixture)
+    const message = '这次提交未完成，请重试。'
+    let rejectRequest!: (error: Error) => void
+    const revise = vi.spyOn(strategyApi, 'revise').mockImplementation(async draft => ({
+      ...draft, revision: draft.revision + 1,
+    }))
+    const queued: BacktestRun = { id: `b31-retry-${failurePoint}`, state: 'queued', progress: 0,
+      progressLabel: '等待回测', createdAt: '2026-09-06T10:00:00Z', updatedAt: '2026-09-06T10:00:00Z',
+      fingerprint: 'b31-retry', error: null, resultAvailable: false }
+    const create = vi.spyOn(backtestApi, 'create').mockResolvedValue(queued)
+    vi.spyOn(backtestApi, 'get').mockImplementation(() => new Promise(() => {}))
+    if (failurePoint === 'revision') revise.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRequest = reject }))
+    else create.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectRequest = reject }))
+    const user = userEvent.setup()
+    const { container } = renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(await screen.findByRole('button', { name: /成交设置/ }))
+    fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
+    fireEvent.change(screen.getByLabelText(/单边滑点/), { target: { value: '7' } })
+    fireEvent.change(screen.getByLabelText(/佣金率/), { target: { value: '0.02' } })
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2022-01-04' } })
+    await user.click(screen.getByRole('button', { name: '完成' }))
+    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await waitFor(() => expect(rejectRequest).toBeDefined())
+    if (failurePoint === 'closed-create') await user.click(screen.getByLabelText('返回对话'))
+    await act(async () => rejectRequest(new Error(message)))
+    expect(await screen.findByRole('alert')).toHaveTextContent(message)
+    expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', 'false')
+    expect(screen.getAllByText(message)).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: '审阅策略' }))
+    expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', 'true')
+    expect(screen.getAllByText(message)).toHaveLength(1)
+    await user.click(screen.getByLabelText('返回对话'))
+    await user.click(screen.getByRole('button', { name: '重试回测' }))
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(failurePoint === 'revision' ? 1 : 2))
+    const submitted = create.mock.calls.at(-1)?.[0]
+    expect(submitted).toMatchObject({ instrument: fixture.draft.instrument,
+      entry: fixture.draft.entry, exit: fixture.draft.exit,
+      backtest: { ...fixture.draft.backtest, initialCashCny: 500000, start: '2022-01-04' },
+      execution: { ...fixture.draft.execution, slippageBps: 7, commissionRate: 0.0002 },
+      revision: fixture.draft.revision + 1 })
+    expect(create.mock.calls.at(-1)?.[1]).toEqual({ refreshData: false })
+    expect(revise).toHaveBeenCalledTimes(failurePoint === 'revision' ? 2 : 1)
+    if (failurePoint !== 'revision') expect(submitted).toEqual(create.mock.calls[0]?.[0])
+    await waitFor(() => expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', 'false'))
+    expect(screen.queryByText(message)).not.toBeInTheDocument()
+  })
 
   it.each([
     ['换个条件再回测', '买入', '创30日新高且放量2倍', '买入条件改为：创30日新高且放量2倍'],

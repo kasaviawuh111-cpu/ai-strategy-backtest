@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>手机报告页 · 返回与标题对齐预览</title>
+  <style>
+    :root{--ink:#000;--text:#2b3746;--muted:#516880;--line:#e6eaee;--line-strong:#d4d9df;--card:#f6f8f9;--blue:#2148d8;--font:Inter,"Invest Pro",-apple-system,BlinkMacSystemFont,"Helvetica Neue","PingFang SC","Microsoft YaHei",sans-serif;--display:Denton,"Times New Roman","Songti SC","Noto Serif SC","STSong",serif}
+    *{box-sizing:border-box}body{margin:0;background:var(--card);color:var(--ink);font-family:var(--font);-webkit-font-smoothing:antialiased}button{font:inherit;cursor:pointer}button:focus-visible,summary:focus-visible{outline:2px solid var(--blue);outline-offset:3px}button:disabled{cursor:default}[hidden]{display:none!important}
+    .preview{max-width:960px;margin:auto;padding:28px 24px 40px}.preview>h1{font-size:23px;line-height:32px;margin:0 0 8px;font-weight:600}.intro{font-size:14px;line-height:24px;color:var(--muted);margin:0;max-width:65ch}.legend{display:flex;flex-wrap:wrap;gap:18px;margin:16px 0 24px;font-size:12px;color:var(--muted)}.legend span{display:flex;align-items:center;gap:6px}.legend i{width:8px;height:8px;background:#a4bdd6;border-radius:2px}.legend .changed{background:#dcb966}.legend .added{background:#8db5a0}
+    .comparison{display:grid;grid-template-columns:repeat(2,minmax(0,390px));gap:32px;justify-content:center}.column{min-width:0}.column>h2{margin:0 0 12px;font-size:15px;line-height:24px;font-weight:600}.phone{width:100%;height:760px;display:flex;flex-direction:column;overflow:hidden;background:#fff;border:1px solid var(--line-strong);border-radius:14px}.brand{height:56px;flex:0 0 56px;display:flex;align-items:center;gap:8px;padding:0 16px;border-bottom:1px solid var(--line);font-size:17px;font-weight:600}.brand:before{content:"";width:9px;height:9px;background:var(--blue);border-radius:50%}.screen{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
+    /* AS-IS: App detail-top/meta/tabs/panel + app.css; 390px viewport. */
+    .detail-inner{padding:28px 16px 60px}.detail-top{display:flex;align-items:flex-start;gap:10px}.detail-back{flex:0 0 auto;width:34px;height:34px;margin-top:4px;border:0;background:none;padding:0;display:grid;place-items:center;border-radius:50%;color:var(--text)}.detail-back:hover{background:#f1f4f7}.detail-title{flex:1;min-width:0;margin:0;font-family:var(--display);font-weight:400;font-size:24px;line-height:1.22;letter-spacing:-.02em;overflow-wrap:anywhere}.detail-edit{flex:0 0 auto;margin-top:2px;border:1px solid var(--line-strong);background:#fff;border-radius:999px;padding:8px 16px;color:#000;font-size:14px;line-height:20px;font-weight:500;white-space:nowrap}.detail-edit:hover{border-color:#000}.detail-meta{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin:10px 0 0 44px;font-size:14px;line-height:21px;color:var(--muted)}.detail-meta b{font-weight:600;color:#000}.detail-meta em{font-style:normal;border:1px solid var(--line-strong);border-radius:999px;padding:1px 9px;font-size:12px;line-height:18px}.detail-tabs{display:flex;gap:26px;margin:28px 0 0 44px;border-bottom:1px solid var(--line)}.detail-tabs button{border:0;background:none;padding:0 0 11px;position:relative;color:var(--muted);font-size:16px;line-height:24px;font-weight:500}.detail-tabs button.on{color:#000}.detail-tabs button.on:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:#000;border-radius:2px}.detail-panel{margin-left:44px;padding-top:22px}
+    .report-summary{margin-top:12px;padding:16px;background:var(--card);border-radius:12px}.report-summary-meta{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;line-height:18px}.report-summary h2{margin:10px 0 12px;font-family:var(--display);font-size:24px;line-height:34px;font-weight:400;letter-spacing:-.015em}.snapshot-note{font-size:12px;line-height:20px;margin:16px 0 0;color:var(--muted)}.detail-panel .snapshot-note{margin-top:20px}.flow-copy{margin:0;font-size:15px;line-height:25px;color:var(--text)}.flow-copy+p{margin-top:12px}
+    /* TO-BE: only phone report navigation and alignment. No strategy rewrite. */
+    .proposal .detail-inner{padding-top:0}.detail-nav{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:60px;margin-bottom:16px;border-bottom:1px solid var(--line)}.detail-nav .detail-back{display:flex;align-items:center;gap:5px;width:auto;height:44px;margin:0;padding:0 3px 0 0;border-radius:6px;font-size:14px;line-height:20px}.detail-nav .detail-edit{margin:0;min-height:44px;padding:10px 16px}.proposal .detail-title{line-height:1.4;letter-spacing:-.01em}.proposal .detail-meta,.proposal .detail-tabs,.proposal .detail-panel{margin-left:0}
+    .alternate{padding:0 16px 28px}.alternate nav{min-height:60px;border-bottom:1px solid var(--line);display:flex;align-items:center}.alternate nav button{border:0;background:none;padding:0;color:var(--text);min-height:44px;font-size:14px;display:flex;gap:5px;align-items:center}.alternate h2{font-size:21px;font-weight:500;margin:24px 0 14px}.alternate p{font-size:15px;line-height:26px;color:var(--text)}.saved-report{display:block;width:100%;padding:16px;border:1px solid var(--line-strong);border-radius:12px;text-align:left;background:#fff;color:var(--text);font-size:15px;line-height:24px}.saved-report span{display:block;margin-bottom:4px;font-size:12px;color:var(--muted)}
+    .caption{font-size:13px;line-height:23px;color:var(--muted);margin:14px 0 0}.notes{border-top:1px solid var(--line-strong);margin-top:28px;padding-top:18px;color:var(--muted);font-size:13px;line-height:24px}.notes p{margin:0 0 8px}.notes summary{cursor:pointer;min-height:32px}.notes code{font-size:12px}a{color:var(--blue)}::selection{background:#e5ebff;color:#000}
+    @media(max-width:850px){.comparison{grid-template-columns:minmax(0,390px);gap:26px}.proposal-column{order:-1}.preview{padding:20px 16px 32px}.preview>h1{font-size:21px}.phone{height:740px}}
+  </style>
+</head>
+<body>
+  <main class="preview">
+    <h1>返回归导航，标题不再让位</h1>
+    <p class="intro">手机报告页预览。上面一行负责返回与编辑，下面完整展示策略；股票信息、页签、报告统一左对齐。桌面不改。</p>
+    <div class="legend"><span><i></i>保留 · 策略内容与现有字体</span><span><i class="changed"></i>调整 · 返回、编辑的位置</span><span><i class="added"></i>补充 · 返回目的地文字</span></div>
+    <div class="comparison">
+      <section class="column"><h2>当前布局 · 标题被两边挤窄</h2><div class="phone"><div class="brand">策略回测</div><div class="screen" id="current"></div></div><p class="caption">返回占34px，再加10px间距；股票信息、页签及正文都沿用44px左缩进。</p></section>
+      <section class="column proposal-column"><h2>调整后 · 一条导航，一条内容轴线</h2><div class="phone proposal"><div class="brand">策略回测</div><div class="screen" id="proposed"></div></div><p class="caption" id="caption" role="status">可以点顶部“返回对话”和“编辑策略”试一下。只演示落点，不执行回测。</p></section>
+    </div>
+    <section class="notes">
+      <p>这里仅预览报告页的头部和内容对齐，尚未修改正式报告页，也没有发布公网。先前选定的手机方案A已经本地实现，互不覆盖。</p>
+      <details><summary>范围与依据</summary><p>头部复用 <code>App.tsx detail-top / meta / tabs / panel</code> 的真实结构及产品配色。当前态按390px宽度复现；沿用本机字体回退，未承诺不同系统像素一致。下方只截取现有报告结论快照，不新增图表或收益测算。没有策略时正式页面不会进入详情，因此不构造虚假的空报告。</p><p>返回仅切回当前对话；编辑打开同一份策略审阅。都不清空股票、买卖条件、参数或历史报告。工作流页签同样取消手机44px缩进。标题不截断、不改写；只增加可读行距。</p></details>
+      <a href="v1.html">查看上一版：手机回测反馈方案A / B</a>
+    </section>
+  </main>
+  <script>
+    (()=>{
+      const title='贵州茅台 （收盘价创前 20 日新高 且 成交量超过前 20 日均量的 1.5倍）买入，任一先发生（持仓后收盘高点回撤 8% 卖出 / 实际买入成交后第 40 个交易日卖出）卖出';
+      const arrow='<svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M12 4.5 6.5 10l5.5 5.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      const back=(newLayout)=>`<button class="detail-back" data-action="chat" aria-label="返回对话">${arrow}${newLayout?'<span>返回对话</span>':''}</button>`;
+      const edit='<button class="detail-edit" data-action="edit">编辑策略</button>';
+      const report='<section class="report-summary"><div class="report-summary-meta">2025-09-06 至 2026-09-06</div><h2>策略盈利 4.68%，同样的钱买入后一直持有亏损 6.71%，相对领先 11.38 个百分点。</h2></section><p class="snapshot-note">当前页面结论快照，仅对比排版。净值图、交易明细和分析继续沿用原报告，此预览不重画、不重算。</p>';
+      const flow='<p class="flow-copy">买入：收盘价创前20日新高，且成交量超过前20日均量的1.5倍。</p><p class="flow-copy">卖出：持仓后收盘高点回撤8%，或实际买入成交后第40个交易日，任一先发生就卖出。</p><p class="snapshot-note">只展示原规则内容；本次不调整条件分组的设计。</p>';
+      function render(target,newLayout,tab='report'){
+        target.innerHTML=`<div class="detail-inner">${newLayout?`<nav class="detail-nav" aria-label="策略详情导航">${back(true)}${edit}</nav><h1 class="detail-title">${title}</h1>`:`<div class="detail-top">${back(false)}<h1 class="detail-title">${title}</h1>${edit}</div>`}<p class="detail-meta"><b>贵州茅台</b><span>600519.SH</span><em>回测服务</em></p><div class="detail-tabs" role="tablist" aria-label="策略详情分区"><button role="tab" aria-selected="${tab==='flow'}" data-tab="flow" class="${tab==='flow'?'on':''}">工作流</button><button role="tab" aria-selected="${tab==='report'}" data-tab="report" class="${tab==='report'?'on':''}">回测报告</button></div><div class="detail-panel" role="tabpanel">${tab==='report'?report:flow}</div></div>`;
+        target.scrollTop=0;
+      }
+      const current=document.getElementById('current'),proposed=document.getElementById('proposed'),caption=document.getElementById('caption');
+      render(current,false);render(proposed,true);
+      function alternate(target,editing){target.innerHTML=`<section class="alternate"><nav><button data-action="report">${arrow}返回报告预览</button></nav><h2>${editing?'审阅你的策略':'当前对话'}</h2><p>${editing?'贵州茅台 · 600519.SH<br>买卖条件、日期与成交设置继续保留。此预览不修改参数。':'这条策略的报告仍在，返回不会清空对话。'}</p><button class="saved-report" data-action="report"><span>${editing?'原报告保留':'查看这次报告'}</span>贵州茅台 · 量价条件回测</button></section>`;target.scrollTop=0;}
+      for(const [target,newLayout] of [[current,false],[proposed,true]])target.addEventListener('click',event=>{const button=event.target.closest('button');if(!button)return;if(button.dataset.tab){render(target,newLayout,button.dataset.tab);return;}const action=button.dataset.action;if(action==='report')render(target,newLayout);else if(action==='chat'||action==='edit'){alternate(target,action==='edit');if(newLayout)caption.textContent=action==='edit'?'预览落点：打开同一份策略审阅，不创建新策略。':'预览落点：回到当前对话，报告和规则仍保留。';}});
+    })();
+  </script>
+</body>
+</html>

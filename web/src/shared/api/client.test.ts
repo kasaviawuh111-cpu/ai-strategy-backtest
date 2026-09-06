@@ -276,6 +276,122 @@ describe('live strategy client', () => {
     expect(updates[0]?.[11]?.reasoning).toHaveLength(60_000)
   })
 
+  describe('final dialogue progress snapshot', () => {
+    const progressId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const completed = { finished: true, events: [
+      { stage: 'complete', message: '本轮处理已结束', elapsed_ms: 2_000 },
+    ] }
+    const begin = async (
+      finalRead: (signal: AbortSignal) => Promise<Response>,
+      signal?: AbortSignal,
+      failDraft = false,
+    ) => {
+      vi.stubEnv('VITE_USE_MOCK', 'false')
+      vi.stubGlobal('crypto', { randomUUID: () => progressId })
+      let releaseDraft!: () => void
+      const draftGate = new Promise<void>(resolve => { releaseDraft = resolve })
+      let progressReads = 0
+      const onProgress = vi.fn()
+      const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input)
+        if (path === '/api/v1/capabilities') return new Response(JSON.stringify(capabilities()))
+        if (path === '/api/v1/strategy-drafts') {
+          await draftGate
+          return failDraft
+            ? new Response(JSON.stringify({ code: 'original_failure', detail: '原始错误' }), { status: 503 })
+            : new Response(JSON.stringify(readyResponse()), { status: 201 })
+        }
+        expect(path).toBe(`/api/v1/dialogue-progress/${progressId}`)
+        progressReads += 1
+        if (progressReads === 1) return new Response(JSON.stringify({ finished: false, events: [
+          { stage: 'model', message: '模型正在生成', elapsed_ms: 1_000 },
+        ] }))
+        return finalRead(init!.signal as AbortSignal)
+      })
+      vi.stubGlobal('fetch', fetcher)
+      const { strategyApi } = await import('./client')
+      const compile = strategyApi.compile({
+        ...clarifiedRequest, dialogueProgress: { onProgress, signal },
+      })
+      await vi.waitFor(() => expect(onProgress).toHaveBeenCalledTimes(1))
+      return { compile, releaseDraft, onProgress, fetcher, reads: () => progressReads }
+    }
+
+    it('reads the terminal snapshot once when the main response arrives between polls', async () => {
+      const state = await begin(async () => new Response(JSON.stringify(completed)))
+      state.releaseDraft()
+      await state.compile
+      expect(state.onProgress).toHaveBeenLastCalledWith([
+        { stage: 'complete', message: '本轮处理已结束', elapsedMs: 2_000 },
+      ])
+      expect(state.reads()).toBe(2)
+      expect(state.fetcher.mock.calls.filter(([url]) => String(url) === '/api/v1/strategy-drafts')).toHaveLength(1)
+    })
+
+    it.each([false, true])('does not replace the main result when final GET fails (main failure: %s)', async (failDraft) => {
+      const state = await begin(async () => { throw new Error('progress unavailable') }, undefined, failDraft)
+      const result = failDraft
+        ? expect(state.compile).rejects.toMatchObject({ problem: { code: 'original_failure' } })
+        : expect(state.compile).resolves.toBeDefined()
+      state.releaseDraft()
+      await result
+      expect(state.onProgress).toHaveBeenCalledTimes(1)
+      expect(state.reads()).toBe(2)
+    })
+
+    it('limits the final GET to one second without a new AbortSignal timeout dependency', async () => {
+      let finalSignal: AbortSignal | undefined
+      const state = await begin(signal => {
+        finalSignal = signal
+        return new Promise((_resolve, reject) => signal.addEventListener('abort', () => {
+          reject(new DOMException('Aborted', 'AbortError'))
+        }, { once: true }))
+      })
+      vi.useFakeTimers()
+      try {
+        state.releaseDraft()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(finalSignal?.aborted).toBe(false)
+        await vi.advanceTimersByTimeAsync(1_000)
+        await expect(state.compile).resolves.toBeDefined()
+        expect(finalSignal?.aborted).toBe(true)
+        expect(state.reads()).toBe(2)
+        expect(state.onProgress).toHaveBeenCalledTimes(1)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('skips the final GET when the observer was cancelled for another turn', async () => {
+      const controller = new AbortController()
+      const finalRead = vi.fn(async () => new Response(JSON.stringify(completed)))
+      const state = await begin(finalRead, controller.signal)
+      controller.abort()
+      state.releaseDraft()
+      await state.compile
+      expect(finalRead).not.toHaveBeenCalled()
+      expect(state.onProgress).toHaveBeenCalledTimes(1)
+    })
+
+    it('ignores a late final response after its observer is cancelled', async () => {
+      const controller = new AbortController()
+      let releaseFinal!: () => void
+      const finalGate = new Promise<void>(resolve => { releaseFinal = resolve })
+      const finalRead = vi.fn(async () => {
+        await finalGate
+        return new Response(JSON.stringify(completed))
+      })
+      const state = await begin(finalRead, controller.signal)
+      state.releaseDraft()
+      await vi.waitFor(() => expect(finalRead).toHaveBeenCalledTimes(1))
+      controller.abort()
+      releaseFinal()
+      await state.compile
+      expect(state.onProgress).toHaveBeenCalledTimes(1)
+      expect(state.reads()).toBe(2)
+    })
+  })
+
   it('allows the server-owned snapshot preparation step to outlive ordinary API calls', async () => {
     vi.stubEnv('VITE_USE_MOCK', 'false')
     const supported = capabilities({

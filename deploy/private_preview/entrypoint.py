@@ -32,7 +32,9 @@ def create_app() -> ASGIApp:
     access = PreviewAccessConfig.from_environment(environment)
     settings = AppSettings(_env_file=None)  # pyright: ignore[reportCallIssue]
     _validate_preview_settings(settings, environment, access)
-    app = _compose_skill_app(settings, include_model_reasoning=False, max_pending=2)
+    # Match the local Skill entrypoint: expose only provider-emitted reasoning
+    # through the existing request-scoped progress stream, without another call.
+    app = _compose_skill_app(settings, include_model_reasoning=True, max_pending=2)
 
     async def preview_meta() -> dict[str, object]:
         return {"persistence": "ephemeral", "revision": settings.code_revision}

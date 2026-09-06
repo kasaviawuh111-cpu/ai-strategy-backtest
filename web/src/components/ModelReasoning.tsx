@@ -18,20 +18,21 @@ export function ModelReasoning({ events, active = false, fallbackStatus, progres
   fallbackStatus?: ReactNode
   progressLabel?: string
 }) {
-  const streams = events.filter((event) => Boolean(event.reasoning))
+  // Keep public strategy prose in the conversation, not in the progress log.
+  const content = events.filter(event => event.stage !== 'strategy_direction')
   const [open, setOpen] = useState(active)
   const previousActive = useRef(active)
   const body = useRef<HTMLDivElement>(null)
   const followTail = useRef(true)
-  const text = streams.map((event) => event.reasoning).join('\n\n')
-  const hasText = Boolean(text.trim())
+  const latest = content.at(-1)
+  const hasText = Boolean(latest?.reasoning?.trim())
+  const text = content.map(event => event.reasoning?.trim() || event.message.trim()
+    || stageLabels[event.stage] || '').join('\n\n')
   const waitingInBody = active && !hasText && open
-  const details = events.filter(event => ![
-    'model', 'model_reasoning', 'model_output', 'received', 'complete', 'strategy_direction',
-  ].includes(event.stage)).slice(-4)
-  const latest = events.filter(event => event.stage !== 'strategy_direction').at(-1)
   const status = active
-    ? (latest ? stageLabels[latest.stage] ?? latest.message : fallbackStatus ?? '正在理解你的想法')
+    ? (latest ? (hasText ? stageLabels[latest.stage] ?? latest.message
+      : latest.message.trim() || stageLabels[latest.stage]) : undefined)
+      || fallbackStatus || '正在理解你的想法'
     : latest?.stage === 'failed' ? '未完成' : '已完成'
   useLayoutEffect(() => {
     if (previousActive.current !== active) {
@@ -54,23 +55,30 @@ export function ModelReasoning({ events, active = false, fallbackStatus, progres
         aria-live={active && !waitingInBody ? 'polite' : undefined}>
           {waitingInBody ? null : status}
         </span></summary>
-      {(active && open) || hasText ? <div className="model-reasoning__body" ref={body} tabIndex={0}
+      {(active && open) || content.length ? <div className="model-reasoning__body" ref={body} tabIndex={0}
         aria-label="处理过程内容"
         onScroll={(event) => {
           const box = event.currentTarget
           followTail.current = box.scrollHeight - box.scrollTop - box.clientHeight < 40
         }}>
-        {streams.some((event) => event.reasoningTruncated)
-          ? <p className="model-reasoning__hint">内容较长，仅显示最近返回的部分。</p> : null}
-        <p role={waitingInBody ? 'status' : undefined}
+        {content.length ? content.map((event, index) => {
+          const current = index === content.length - 1
+          const live = current && waitingInBody
+          return <div className="model-reasoning__entry" key={`${event.stage}-${index}`}>
+            {event.reasoningTruncated
+              ? <p className="model-reasoning__hint">内容较长，仅显示最近返回的部分。</p> : null}
+            <p role={live ? 'status' : undefined} aria-label={live ? progressLabel : undefined}
+              aria-live={live ? 'polite' : undefined}>
+              {event.reasoning?.trim() || event.message.trim() || stageLabels[event.stage] || status}
+              {live ? <span className="dots" aria-hidden="true"><i /><i /><i /></span> : null}
+            </p>
+          </div>
+        }) : <p role={waitingInBody ? 'status' : undefined}
           aria-label={waitingInBody ? progressLabel : undefined}
           aria-live={waitingInBody ? 'polite' : undefined}>
-          {hasText ? text : <>{status}<span className="dots" aria-hidden="true"><i /><i /><i /></span></>}
-        </p>
+          {status}{active ? <span className="dots" aria-hidden="true"><i /><i /><i /></span> : null}
+        </p>}
       </div> : null}
-      {details.length ? <ul className="model-reasoning__events">
-        {details.map((event, index) => <li key={`${event.stage}-${index}`}>{event.message}</li>)}
-      </ul> : null}
     </details>
   )
 }

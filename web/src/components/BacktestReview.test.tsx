@@ -127,9 +127,9 @@ describe('BacktestReview', () => {
         progress={[{ stage: 'model_reasoning', message: '模型仍在生成。', elapsedMs: 23000 }]} />,
     )
     expect(screen.getByText(/你可以先试试下面的问题/)).toBeVisible()
-    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent('正在分析')
+    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent('模型仍在生成。')
     expect(screen.getAllByText('处理过程')).toHaveLength(1)
-    expect(screen.queryByText('模型仍在生成。')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('处理过程内容')).toContainElement(screen.getByRole('status', { name: '处理进度' }))
     expect(screen.queryByText('模型思考')).not.toBeInTheDocument()
     expect(screen.queryByText('你可以接着问')).not.toBeInTheDocument()
 

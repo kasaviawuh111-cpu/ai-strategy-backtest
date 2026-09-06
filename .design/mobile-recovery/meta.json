@@ -7,7 +7,7 @@
   "fidelity": "partial",
   "createdAt": "2026-09-06",
   "updatedAt": "2026-09-06",
-  "tags": ["mobile", "wechat", "navigation", "recovery", "preview-only"],
+  "tags": ["mobile", "wechat", "navigation", "recovery", "local-only"],
   "direction": {
     "source": "product-tokens",
     "note": "保留 app.css、tokens.css、SummaryCards 的白底、黑色主按钮、蓝色次操作、编号与虚线。仅对比反馈落点；不重做 B19 条件分组。微信外部确认页不属于本预览。"
@@ -23,12 +23,22 @@
     "file": "v1.html",
     "date": "2026-09-06",
     "summary": "独立点击预览：A回到对话看进度、B留在策略页看进度；顶部返回对话与标题分开；包含首页、处理中、查询暂断、最终失败与恢复状态。",
-    "decisions": ["用户明确要求先看预览；未批准实施。", "顶部返回导航与A反馈落点只针对手机版，桌面布局和原关闭入口保持；保存到下一批，不立即发布。"]
+    "decisions": ["用户先要求预览；之后已明确选择A并本地实施。", "顶部返回导航与A反馈落点只针对手机版，桌面布局和原关闭入口保持；保存到下一批，不立即发布。"]
+  }, {
+    "v": 2,
+    "file": "v2.html",
+    "date": "2026-09-06",
+    "summary": "针对报告/详情页：独立一行返回对话与编辑策略，标题通栏，取消手机meta/tabs/panel的44px左缩进；含现状与调整后及返回/编辑落点。",
+    "decisions": ["新增报告页提案待确认，不修改正式报告页；此前A实施继续保留。", "只针对手机版，不修改桌面或规则内容。"]
   }],
   "decisions": [{
     "q": "是否直接修改正式页面？",
     "choice": "否，先预览",
-    "why": "用户最新要求；本轮已开始的局部产品代码与新增测试均精确撤回，既有改动保留。"
+    "why": "早期决定，局部代码曾撤回；后续用户已选A，以下决定取代这项对B31/B32的限制。"
+  }, {
+    "q": "回测反馈使用哪个方案？",
+    "choice": "用户确认A，仅手机版；已在本地实现，桌面不变",
+    "why": "受理后回到对话，失败同样可见；返回对话入口与长策略标题分开。B30兼容恢复仍未实施，不部署公网。"
   }],
   "dataModel": [
     { "field": "mobile return", "means": "提案：产品页顶部使用返回对话，替代审阅标题旁的关闭符号；不修改微信自带的底部浏览器箭头。", "source": "用户微信录屏; web/src/App.tsx review-close" },
@@ -36,11 +46,12 @@
     { "field": "run.state", "means": "create受理后返回的运行状态，非单纯按钮动画；成功／失败／取消为终态。", "source": "web/src/App.tsx startMutation/runQuery; web/src/components/SummaryCards.tsx RunningCard" },
     { "field": "progressLabel", "means": "后端真实进度文案；断线重试只在真实重试事件发生时展示。预览状态由演示控件驱动。", "source": "web/src/components/SummaryCards.tsx RunningCard; ashare_lab/application/skill_backtest_service.py" },
     { "field": "preview-request Location", "means": "202受理后的结果查询地址。恢复应重查原结果，不能默默再次POST。", "source": "web/src/shared/api/client.ts request; deploy/private_preview/dialogue_requests.py" },
-    { "field": "default example", "means": "首页chip提交完整例句及对应股票上下文。重开网页的浏览器兼容问题未被窄视口测试排除。", "source": "web/src/App.tsx home-examples; web/src/shared/default-strategy-examples.ts" }
+    { "field": "default example", "means": "首页chip提交完整例句及对应股票上下文。重开网页的浏览器兼容问题未被窄视口测试排除。", "source": "web/src/App.tsx home-examples; web/src/shared/default-strategy-examples.ts" },
+    { "field": "detail navigation", "means": "返回仅setView(chat)，编辑打开同一策略审阅；现有meta/tabs/panel的44px左缩进在手机挤压正文，v2提案仅在手机归零。", "source": "web/src/App.tsx detailSnapshot; web/src/styles/app.css detail-top/detail-meta/detail-tabs/detail-panel" }
   ],
   "build": {
     "entryPoints": ["web/src/App.tsx", "web/src/shared/api/client.ts"],
-    "verify": ["用户确认后才实施；定向状态与兼容测试、实际本地手机尺寸链路、线上另行验收"],
-    "authorized": false
+    "verify": ["B31/B32审阅定向回归及390px真实本地链路已验证；手机微信真机与公网另行验收", "v2报告页提案待确认，尚未实施；本地文件浏览器检查受限，用户预览另验", "B30兼容恢复仍未实施"],
+    "authorized": true
   }
 }

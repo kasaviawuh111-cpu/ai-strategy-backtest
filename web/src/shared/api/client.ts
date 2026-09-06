@@ -42,6 +42,7 @@ const DIALOGUE_TIMEOUT_MS = null
 const BACKTEST_CREATE_TIMEOUT_MS = 300_000
 const BACKTEST_REVIEW_TIMEOUT_MS = null
 const DIALOGUE_PROGRESS_POLL_MS = 1_000
+const DIALOGUE_PROGRESS_FINAL_TIMEOUT_MS = 1_000
 const DIALOGUE_PROGRESS_LIMIT = 12
 
 export type DialogueProgressEvent = {
@@ -205,27 +206,55 @@ const pollDialogueProgress = async (
   progressId: string,
   observer: DialogueProgressObserver,
   signal: AbortSignal,
-): Promise<void> => {
+): Promise<boolean> => {
   while (!signal.aborted) {
     try {
       const snapshot = await request<LiveDialogueProgress>(
         `/api/v1/dialogue-progress/${encodeURIComponent(progressId)}`,
         { signal },
       )
-      if (signal.aborted) return
+      if (signal.aborted) return false
       const events = normalizedDialogueProgress(snapshot)
       try {
         observer.onProgress(events)
       } catch {
         // Rendering progress is best-effort and must never fail the real request.
       }
-      if (snapshot.finished) return
+      if (snapshot.finished) return true
     } catch {
       // A 404 before the request registers, an unavailable poll, or an aborted
       // component never changes the compile/clarification result.
-      if (signal.aborted) return
+      if (signal.aborted) return false
     }
     await delayUntilNextProgressPoll(signal)
+  }
+  return false
+}
+
+const readFinalDialogueProgress = async (
+  progressId: string,
+  observer: DialogueProgressObserver,
+): Promise<void> => {
+  if (observer.signal?.aborted) return
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  const timer = window.setTimeout(abort, DIALOGUE_PROGRESS_FINAL_TIMEOUT_MS)
+  observer.signal?.addEventListener('abort', abort, { once: true })
+  try {
+    // The main response can arrive between polls. Read its last real snapshot
+    // once, without keeping a completed conversation waiting on the network.
+    const snapshot = await request<LiveDialogueProgress>(
+      `/api/v1/dialogue-progress/${encodeURIComponent(progressId)}`,
+      { signal: controller.signal }, null,
+    )
+    if (!controller.signal.aborted && !observer.signal?.aborted) {
+      observer.onProgress(normalizedDialogueProgress(snapshot))
+    }
+  } catch {
+    // Progress must never replace a successful result or its original error.
+  } finally {
+    window.clearTimeout(timer)
+    observer.signal?.removeEventListener('abort', abort)
   }
 }
 
@@ -250,8 +279,9 @@ const withDialogueProgress = async <T>(
     return await operation(progressId)
   } finally {
     stopPolling()
+    const finished = await poll
+    if (!finished) await readFinalDialogueProgress(progressId, observer)
     observer.signal?.removeEventListener('abort', stopPolling)
-    await poll
   }
 }
 

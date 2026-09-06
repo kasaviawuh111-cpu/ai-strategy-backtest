@@ -32,14 +32,14 @@ describe('provider reasoning display', () => {
     const model = { stage: 'model', message: '模型处理中', elapsedMs: 10 }
     const search = { stage: 'web_search', message: '检索公开资料', elapsedMs: 20 }
     const { rerender, container } = render(<ModelReasoning events={[model]} active />)
-    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent('正在分析')
+    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent(model.message)
     expect(screen.getByRole('status').closest('summary')).toBeNull()
-    expect(screen.getAllByText('正在分析')).toHaveLength(1)
+    expect(screen.getAllByText(model.message)).toHaveLength(1)
 
     rerender(<ModelReasoning events={[model, search]} active />)
-    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent('正在检索')
+    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent(search.message)
     expect(screen.getByLabelText('处理过程内容')).toContainElement(screen.getByRole('status'))
-    expect(screen.getAllByText('正在检索')).toHaveLength(1)
+    expect(screen.getAllByText(search.message)).toHaveLength(1)
     expect(screen.queryByText('正在分析')).not.toBeInTheDocument()
     expect(screen.queryByText(/暂无|没有返回/)).not.toBeInTheDocument()
 
@@ -48,21 +48,22 @@ describe('provider reasoning display', () => {
       expect(container.querySelector('details')).not.toHaveAttribute('open')
       expect(screen.getByRole('status').closest('summary')).not.toBeNull()
     })
-    expect(screen.getByRole('status')).toHaveTextContent('正在检索')
+    expect(screen.getByRole('status')).toHaveTextContent(search.message)
     expect(screen.getByRole('status')).toBeVisible()
-    expect(screen.getAllByText('正在检索')).toHaveLength(1)
+    expect(screen.getByLabelText('处理过程内容')).not.toBeVisible()
   })
 
-  it('does not keep an empty content box or placeholder when finished without text', () => {
+  it('collapses on completion and lets users reopen the received status history', () => {
     const event = { stage: 'model', message: '模型处理中', elapsedMs: 10 }
     const { rerender, container } = render(<ModelReasoning events={[event]} active />)
     rerender(<ModelReasoning events={[event]} />)
     expect(container.querySelector('details')).not.toHaveAttribute('open')
     expect(screen.getByText('已完成')).toBeVisible()
-    expect(screen.queryByLabelText('处理过程内容')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('处理过程内容')).not.toBeVisible()
     expect(screen.queryByText(/暂无|没有返回/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByText('处理过程'))
-    expect(screen.queryByLabelText('处理过程内容')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('处理过程内容')).toBeVisible()
+    expect(screen.getByLabelText('处理过程内容')).toHaveTextContent(event.message)
     expect(screen.queryByText(/暂无|没有返回/)).not.toBeInTheDocument()
   })
 
@@ -80,5 +81,40 @@ describe('provider reasoning display', () => {
     expect(container.querySelector('details')).toHaveAttribute('open')
     expect(screen.getAllByText('处理过程')).toHaveLength(1)
     expect(screen.queryByText('模型思考')).not.toBeInTheDocument()
+  })
+
+  it('keeps reasoning and the latest real phrase in one scroll region without an outside list', () => {
+    const reasoning = { stage: 'model_reasoning', message: '收到推理流', elapsedMs: 10,
+      reasoning: '接口实际返回的文本' }
+    const pairing = { stage: 'stock_strategy_pairing', message: '正在把股票与策略匹配成可选方案。', elapsedMs: 20 }
+    const { container, rerender } = render(<ModelReasoning events={[reasoning]} active />)
+    rerender(<ModelReasoning events={[reasoning, pairing]} active />)
+    const box = screen.getByLabelText('处理过程内容')
+    expect(box).toContainElement(screen.getByText(reasoning.reasoning))
+    expect(box).toContainElement(screen.getByRole('status'))
+    expect(screen.getByRole('status')).toHaveTextContent(pairing.message)
+    expect(screen.getAllByText(pairing.message)).toHaveLength(1)
+    expect(container.querySelector('.model-reasoning__events')).toBeNull()
+    expect(screen.queryByText('正在匹配方案')).not.toBeInTheDocument()
+  })
+
+  it('follows new status phrases unless the user has scrolled up', () => {
+    const first = { stage: 'web_search', message: '正在检索资料', elapsedMs: 10 }
+    const { rerender } = render(<ModelReasoning events={[first]} active />)
+    const box = screen.getByLabelText('处理过程内容')
+    Object.defineProperties(box, {
+      scrollHeight: { configurable: true, value: 600 },
+      clientHeight: { configurable: true, value: 160 },
+    })
+    const second = { stage: 'stock_screening', message: '正在筛选符合条件的股票', elapsedMs: 20 }
+    rerender(<ModelReasoning events={[first, second]} active />)
+    expect(box.scrollTop).toBe(600)
+    fireEvent.scroll(box, { target: { scrollTop: 40 } })
+    const third = { stage: 'stock_data_enrichment', message: '正在补查候选股票的成交额', elapsedMs: 30 }
+    rerender(<ModelReasoning events={[first, second, third]} active />)
+    expect(box.scrollTop).toBe(40)
+    fireEvent.scroll(box, { target: { scrollTop: 440 } })
+    rerender(<ModelReasoning events={[first, second, third, { ...third, message: '补查已经完成', elapsedMs: 40 }]} active />)
+    expect(box.scrollTop).toBe(600)
   })
 })

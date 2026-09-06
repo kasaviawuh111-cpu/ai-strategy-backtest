@@ -9,7 +9,7 @@ import { ColumnResizer } from './components/ColumnResizer'
 import { useStoredColumnWidths } from './components/column-widths'
 import { Proposals, type ProposalItem } from './components/Proposals'
 import {
-  Bubble, Chip, Chips, DayDivider, Notice, Say, ThinkBlock,
+  BackIcon, Bubble, Chip, Chips, DayDivider, Notice, Say, ThinkBlock,
   ThinkingStream, Turn,
 } from './components/primitives'
 import { ChainScreen, ExecutionDetailsScreen, ExecutionEntry, ParamsScreen, ReportBody } from './screens'
@@ -116,6 +116,8 @@ const terminalStates = new Set(['succeeded', 'failed', 'cancelled'])
 /** 点「开始回测」时替用户发出的那句话；和按钮文案保持同一个词。 */
 const RUN_COMMAND = '开始回测'
 const cloneDraft = (draft: StrategyDraft): StrategyDraft => JSON.parse(JSON.stringify(draft)) as StrategyDraft
+const isMobileReview = (): boolean =>
+  window.matchMedia?.('(max-width: 719px)').matches ?? window.innerWidth <= 719
 const sameExecutableDraft = (candidate: StrategyDraft, baseline: StrategyDraft): boolean =>
   JSON.stringify({
     strategy: toLiveRevisionBody(candidate).strategy,
@@ -1007,6 +1009,9 @@ export default function App({
       const savedDraft = baselineDraft && sameExecutableDraft(candidate, baselineDraft)
         ? candidate
         : await strategyApi.revise(candidate)
+      // 保存成功后即保留版本；创建任务失败时仍能用同一份参数重试。
+      setDraft(savedDraft)
+      setBaselineDraft(cloneDraft(savedDraft))
       const run = await backtestApi.create(savedDraft, { refreshData })
       return { savedDraft, run }
     },
@@ -1016,6 +1021,14 @@ export default function App({
       queryClient.setQueryData(['backtest-run', run.id], run)
       setRunId(run.id)
       setStack([])
+      if (currentDraftRef.current?.id === savedDraft.id && isMobileReview()) {
+        setReviewOpen(false)
+      }
+    },
+    onError: (_error, { candidate }) => {
+      if (currentDraftRef.current?.id === candidate.id && isMobileReview()) {
+        setReviewOpen(false)
+      }
     },
   })
 
@@ -1653,6 +1666,7 @@ export default function App({
     journeyHistory.length,
     resultReady,
     runQuery.data?.state,
+    startMutation.isError,
     submittedText,
   ])
 
@@ -2024,7 +2038,24 @@ export default function App({
 
 
 
-              {failure ? (
+              {startMutation.isError && draft && !reviewOpen ? (
+                <Turn>
+                  <div role="alert"><Say>{errorMessage(startMutation.error)}</Say></div>
+                  <Chips>
+                    <Chip disabled={isJourneyLocked} onClick={() => {
+                      setRunCommand('重新提交回测')
+                      setRunId(undefined)
+                      startMutation.mutate({
+                        candidate: draft,
+                        refreshData: startMutation.variables?.refreshData ?? false,
+                      })
+                    }}>重试回测</Chip>
+                    <Chip disabled={isJourneyLocked} onClick={() => setReviewOpen(true)}>审阅策略</Chip>
+                  </Chips>
+                </Turn>
+              ) : null}
+
+              {failure && !startMutation.isError ? (
                 <Turn><FailureCard state={failure} onAction={handleFailureAction} /></Turn>
               ) : null}
 
@@ -2164,6 +2195,11 @@ export default function App({
           */}
           {draft && uiStrategy ? (
             <aside className="review" aria-label="策略审阅">
+              <button type="button" className="mobile-review-back" aria-label="返回对话"
+                onClick={() => setReviewOpen(false)}>
+                <BackIcon />
+                <span>返回对话</span>
+              </button>
               <div className="review-head">
                 <span className="review-eyebrow">审阅你的策略</span>
                 <span className="review-title">{strategyTitle(toUiInstrument(draft), uiStrategy)}</span>
@@ -2193,7 +2229,7 @@ export default function App({
                   editableAfterRun
                   canStart={canStart}
                   disabledReason={startDisabledReason}
-                  error={startMutation.isError ? errorMessage(startMutation.error) : undefined}
+                  error={startMutation.isError && reviewOpen ? errorMessage(startMutation.error) : undefined}
                   executionSummary={summarizeExecution(draft)}
                 />
               </div>
