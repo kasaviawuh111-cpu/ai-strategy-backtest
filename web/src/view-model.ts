@@ -178,8 +178,8 @@ export const strategyRuleTrees = (draft: StrategyDraft) => {
     exit: {
       kind: 'group',
       id: 'exit',
-      operator: 'first_of',
-      label: operatorLabels.first_of,
+      operator: draft.strategySpec.exit.op,
+      label: operatorLabels[draft.strategySpec.exit.op],
       children: draft.strategySpec.exit.children.map((condition, index) =>
         buildExitRule(condition, draft.exit.conditions, exitCursor, `exit-${index}`)),
     } satisfies StrategyRuleNode,

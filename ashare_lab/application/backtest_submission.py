@@ -195,9 +195,9 @@ class BacktestRunConfig:
 def resolve_execution_settings(patch: ExecutionSettingsPatch) -> ExecutionSettingsPatch:
     """Use the engine's existing defaults for a complete draft configuration."""
     defaults = BacktestRunConfig()
-    return ExecutionSettingsPatch.model_validate({
-        key: getattr(defaults, key) for key in ExecutionSettingsPatch.model_fields
-    }).merged(patch)
+    return ExecutionSettingsPatch.model_validate(
+        {key: getattr(defaults, key) for key in ExecutionSettingsPatch.model_fields}
+    ).merged(patch)
 
 
 @dataclass(frozen=True, slots=True)
@@ -528,9 +528,7 @@ async def _provider_series_for_condition(
             "series": _provider_indicator_series_payload(series),
         }
 
-    return tuple(
-        await asyncio.gather(*(fetch(path, leaf) for path, leaf in leaves))
-    )
+    return tuple(await asyncio.gather(*(fetch(path, leaf) for path, leaf in leaves)))
 
 
 def _provider_indicator_series_payload(series: ProviderIndicatorSeries) -> dict[str, object]:
@@ -575,9 +573,17 @@ def _exit_condition(strategy: StrategySpec) -> Condition | None:
     )
     if not children:
         return None
-    from ashare_lab.domain.strategy import AnyCondition
+    from ashare_lab.domain.strategy import AllCondition, AnyCondition
 
-    return children[0] if len(children) == 1 else AnyCondition(children=children)
+    return (
+        children[0]
+        if len(children) == 1
+        else (
+            AllCondition(children=children)
+            if strategy.exit.op == "all"
+            else AnyCondition(children=children)
+        )
+    )
 
 
 def _financial_snapshot_payload(bundle: PinnedFinancialFacts) -> dict[str, object]:

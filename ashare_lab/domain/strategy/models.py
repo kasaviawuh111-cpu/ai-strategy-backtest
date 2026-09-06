@@ -212,7 +212,8 @@ type Condition = Annotated[
 
 
 class FirstOfExit(FrozenModel):
-    op: Literal["first_of"] = "first_of"
+    # ALL exits are evaluated together at daily close; holding maturity remains true afterwards.
+    op: Literal["first_of", "all"] = "first_of"
     children: tuple[ExitRule, ...] = Field(min_length=1, max_length=16)
 
     @model_validator(mode="after")

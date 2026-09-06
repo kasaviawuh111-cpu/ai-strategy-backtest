@@ -115,7 +115,11 @@ export function StrategyCard(
         </div>
         <div className="condition-sections">
           {strategy.rows.map((row) => {
-            const node = row.key === 'entry' ? strategy.entryRule : row.key === 'exit' ? strategy.exitRule : null;
+            const root = row.key === 'entry' ? strategy.entryRule : row.key === 'exit' ? strategy.exitRule : null;
+            // first_of with a single market-condition group delegates to that group.
+            // Do not label an ALL group as OR just because the exit envelope is first_of.
+            const node = root?.kind === 'group' && root.operator === 'first_of' && root.children.length === 1
+              ? root.children[0] : root;
             if (node) {
               const children = node.kind === 'group' && node.operator !== 'not' ? node.children : [node];
               const operator = node.kind === 'group' ? node.operator : 'all';

@@ -300,6 +300,8 @@ class _IdSequence:
 
 
 def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
+    if request.strategy.exit.op == "all":
+        raise ValueError("ALL exit groups require the skill daily-close execution engine")
     """Run Strategy DSL v1 through signals, orders, matching, lots and ledger."""
 
     bars, signal_bars, sessions, first_trade_index = _validate_and_select_inputs(request)

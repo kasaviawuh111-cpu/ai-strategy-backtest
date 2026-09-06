@@ -113,7 +113,8 @@ class _Cancelled(Exception):
 class SkillBacktestService:
     available_indicator_ids = ACTIVE_SKILL_INDICATORS | SKILL_DERIVED_INDICATORS.keys()
     indicator_unavailable_reasons: ClassVar[dict[str, str]] = {
-        key: value for key, value in UNSUPPORTED_SKILL_INDICATOR_REASONS.items()
+        key: value
+        for key, value in UNSUPPORTED_SKILL_INDICATOR_REASONS.items()
         if key not in SKILL_DERIVED_INDICATORS
     }
 
@@ -130,7 +131,9 @@ class SkillBacktestService:
         self.indicators = indicators
         self.store = store
         self.queue = ThreadBacktestJobQueue(
-            self.execute, max_workers=max_workers, max_pending=max_pending,
+            self.execute,
+            max_workers=max_workers,
+            max_pending=max_pending,
         )
 
     def shutdown(self) -> None:
@@ -213,12 +216,15 @@ class SkillBacktestService:
             config = _config_from_json(record.config_json)
             warmup = _effective_warmup_calendar_days(strategy, config)
             history = asyncio.run(
-                self._with_retry_progress(run_id, self.history.load(
-                    instrument_id=strategy.instrument.symbol,
-                    start=strategy.backtest.start - timedelta(days=warmup),
-                    end=strategy.backtest.end,
-                    force_refresh=config.refresh_data,
-                ))
+                self._with_retry_progress(
+                    run_id,
+                    self.history.load(
+                        instrument_id=strategy.instrument.symbol,
+                        start=strategy.backtest.start - timedelta(days=warmup),
+                        end=strategy.backtest.end,
+                        force_refresh=config.refresh_data,
+                    ),
+                )
             )
             self._stage(
                 run_id, BacktestJobState.RUNNING_SIGNAL, 45, "获取东方财富指标并判断策略条件"
@@ -286,19 +292,31 @@ class SkillBacktestService:
             progress_label = f"{current.progress_label}失败：{type(exc).__name__}"
             if isinstance(exc, MxSaasProviderError):
                 tool = exc.tool if exc.tool in {"selectSecurity", "searchData"} else "unknown"
-                reason = exc.reason if exc.reason in {
-                    "read_timeout", "connect_timeout", "transport_error", "http_error",
-                } else None
+                reason = (
+                    exc.reason
+                    if exc.reason
+                    in {
+                        "read_timeout",
+                        "connect_timeout",
+                        "transport_error",
+                        "http_error",
+                    }
+                    else None
+                )
                 status = exc.http_status
                 if type(status) is not int or not 100 <= status <= 599:
                     status = None
                 source = {
                     "selectSecurity": "东方财富选股 Skill",
                     "searchData": "东方财富查数 Skill",
-                }.get(tool, (
-                    "东方财富查数 Skill" if "获取东方财富指标" in current.progress_label
-                    else "东方财富选股/查数流程"
-                ))
+                }.get(
+                    tool,
+                    (
+                        "东方财富查数 Skill"
+                        if "获取东方财富指标" in current.progress_label
+                        else "东方财富选股/查数流程"
+                    ),
+                )
                 if isinstance(exc, MxSaasProviderAuthError):
                     error_code = "skill_mx_auth_failed"
                     progress_label = f"{source}授权失败，本次取数未完成。"
@@ -328,12 +346,20 @@ class SkillBacktestService:
                 logger.warning(
                     "Skill backtest failed: run=%s tool=%s reason=%s http_status=%s code=%s "
                     "transport_kind=%s attempts=%s call_id=%s",
-                    run_id, tool, reason, status, error_code,
-                    exc.transport_kind, exc.attempts, exc.call_id,
+                    run_id,
+                    tool,
+                    reason,
+                    status,
+                    error_code,
+                    exc.transport_kind,
+                    exc.attempts,
+                    exc.call_id,
                 )
             else:
                 logger.warning(
-                    "Skill backtest failed: run=%s exception=%s", run_id, type(exc).__name__,
+                    "Skill backtest failed: run=%s exception=%s",
+                    run_id,
+                    type(exc).__name__,
                 )
             if isinstance(exc, MxDailyHistoryFieldsMissingError):
                 # These names come only from the adapter's requested field list,
@@ -341,7 +367,8 @@ class SkillBacktestService:
                 error_code = "skill_history_fields_missing"
                 fetch_range = (
                     f"{exc.start.isoformat()} 至 {exc.end.isoformat()}"
-                    if exc.start is not None and exc.end is not None else "本次区间"
+                    if exc.start is not None and exc.end is not None
+                    else "本次区间"
                 )
                 progress_label = (
                     f"查询 {fetch_range} 的历史数据时，东方财富未返回"
@@ -365,7 +392,8 @@ class SkillBacktestService:
             if current.state is BacktestJobState.CANCEL_REQUESTED:
                 raise _Cancelled
             if current.state not in {
-                BacktestJobState.RUNNING_DATA, BacktestJobState.RUNNING_SIGNAL,
+                BacktestJobState.RUNNING_DATA,
+                BacktestJobState.RUNNING_SIGNAL,
             }:
                 return
             if event.recovered:
@@ -381,8 +409,11 @@ class SkillBacktestService:
                 )
             try:
                 self.store.transition(
-                    run_id, expected=(current.state,), target=current.state,
-                    progress_percent=current.progress_percent, progress_label=label,
+                    run_id,
+                    expected=(current.state,),
+                    target=current.state,
+                    progress_percent=current.progress_percent,
+                    progress_label=label,
                     expected_version=current.version,
                 )
             except BacktestRunConflictError:
@@ -492,7 +523,8 @@ class SkillBacktestService:
 
 
 def _skill_derived_timeline(
-    condition: IndicatorCondition, history: MxDailyHistory,
+    condition: IndicatorCondition,
+    history: MxDailyHistory,
 ) -> tuple[SignalFact | None, ...]:
     """Reuse the engine's causal formulas on real Skill bars, with explicit provenance."""
 
@@ -502,9 +534,12 @@ def _skill_derived_timeline(
         DailyBar(
             instrument_id=InstrumentId(history.instrument_id),
             session_date=row.session_date,
-            open=Price(row.adjusted_open), high=Price(row.adjusted_high),
-            low=Price(row.adjusted_low), close=Price(row.adjusted_close),
-            volume=Quantity(row.volume), turnover=row.amount,
+            open=Price(row.adjusted_open),
+            high=Price(row.adjusted_high),
+            low=Price(row.adjusted_low),
+            close=Price(row.adjusted_close),
+            volume=Quantity(row.volume),
+            turnover=row.amount,
             available_at=datetime.combine(row.session_date, time(15), ZoneInfo("Asia/Shanghai")),
             price_basis=PriceBasis.BACK_ADJUSTED,
         )
@@ -513,24 +548,30 @@ def _skill_derived_timeline(
     # available_at is the daily-close simulation clock, not a claim about the
     # provider's historical publication time. Actual retrieval is recorded separately.
     return tuple(
-        None if fact is None else replace(
+        None
+        if fact is None
+        else replace(
             fact,
             reason=f"local_formula_on_eastmoney_skill_ohlcv:{fact.reason}",
-            evidence=(SignalEvidence(
-                evidence_type="skill_ohlcv_derived_indicator",
-                evidence_id=f"{history.instrument_id}:{fact.condition_ref}:{fact.session_date}",
-                available_at=fact.available_at,
-                provider=history.provider,
-                time_quality="daily_close_simulation",
-                timestamp_precision="date",
-                validation_status="local_formula_on_provider_ohlcv",
-            ),),
+            evidence=(
+                SignalEvidence(
+                    evidence_type="skill_ohlcv_derived_indicator",
+                    evidence_id=f"{history.instrument_id}:{fact.condition_ref}:{fact.session_date}",
+                    available_at=fact.available_at,
+                    provider=history.provider,
+                    time_quality="daily_close_simulation",
+                    timestamp_precision="date",
+                    validation_status="local_formula_on_provider_ohlcv",
+                ),
+            ),
         )
         for fact in SignalRuntime().evaluate_aligned(condition, bars)
     )
 
 
 def _exit_condition(strategy: StrategySpec) -> Condition | None:
+    from ashare_lab.domain.strategy import AllCondition
+
     children = tuple(
         child
         for child in strategy.exit.children
@@ -540,7 +581,15 @@ def _exit_condition(strategy: StrategySpec) -> Condition | None:
         )
     )
     return (
-        (children[0] if len(children) == 1 else AnyCondition(children=children))
+        (
+            children[0]
+            if len(children) == 1
+            else (
+                AllCondition(children=children)
+                if strategy.exit.op == "all"
+                else AnyCondition(children=children)
+            )
+        )
         if children
         else None
     )
@@ -602,7 +651,8 @@ def _result_bundle(
                 else "positive_volume_sessions_excluding_current"
             ),
         }
-        for condition in (strategy.entry, _exit_condition(strategy)) if condition is not None
+        for condition in (strategy.entry, _exit_condition(strategy))
+        if condition is not None
         for _, leaf in provider_condition_leaves(condition)
         if leaf.indicator_id in SKILL_DERIVED_INDICATORS
     ]
@@ -634,15 +684,17 @@ def _result_bundle(
             "kind": item.kind,
             "occurredAt": item.occurred_at,
             "side": item.side,
-            "title": "卖出尝试已结束" if item.reason in {
-                "exit_retry_budget_exhausted", "exit_retry_disabled",
-            } else {
+            "title": "卖出尝试已结束"
+            if item.reason
+            in {
+                "exit_retry_budget_exhausted",
+                "exit_retry_disabled",
+            }
+            else {
                 "signal": f"{'买入' if item.side == 'buy' else '卖出'}信号确认",
                 "order": f"提交{'买入' if item.side == 'buy' else '卖出'}委托",
                 "fill": f"{'买入' if item.side == 'buy' else '卖出'}成交",
-                "partial_fill": (
-                    f"{'买入' if item.side == 'buy' else '卖出'}部分成交"
-                ),
+                "partial_fill": (f"{'买入' if item.side == 'buy' else '卖出'}部分成交"),
                 "unfilled": f"{'买入' if item.side == 'buy' else '卖出'}委托未成交",
             }[item.kind],
             "price": None if item.raw_reference_price is None else float(item.raw_reference_price),
@@ -661,9 +713,7 @@ def _result_bundle(
             "attemptNo": item.attempt_no,
             "originSignalId": item.origin_signal_id,
             "outcomeReason": (
-                item.reason
-                if item.kind in {"fill", "partial_fill", "unfilled"}
-                else None
+                item.reason if item.kind in {"fill", "partial_fill", "unfilled"} else None
             ),
             "evidence": []
             if item.kind != "signal" or item.signal is None

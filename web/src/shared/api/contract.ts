@@ -749,7 +749,7 @@ export const withEditedStrategySpec = (draft: StrategyDraft, strategySpec: Strat
   capabilities?: CapabilitiesResponse): StrategyDraft => ({
   ...draft, strategySpec,
   entry: toLeg(strategySpec.entry, 'entry', capabilities),
-  exit: toExitLeg(strategySpec.exit.children, capabilities),
+  exit: toExitLeg(strategySpec.exit.children, capabilities, strategySpec.exit.op),
 })
 
 export const toLiveBacktestBody = (
@@ -780,7 +780,7 @@ function toDraft(
 ): StrategyDraft {
   const strategy = response.strategy as StrategySpec
   const entry = toLeg(strategy.entry, 'entry', capabilities)
-  const exit = toExitLeg(strategy.exit.children, capabilities)
+  const exit = toExitLeg(strategy.exit.children, capabilities, strategy.exit.op)
   return {
     id: response.draft_id,
     revision: response.revision,
@@ -853,12 +853,16 @@ function toLeg(
 function toExitLeg(
   conditions: StrategySpecExitRule[],
   capabilities?: CapabilitiesResponse,
+  operator: 'first_of' | 'all' = 'first_of',
 ): StrategyLeg {
   return {
-    operator: 'first_of',
+    operator,
     conditions: conditions.flatMap((condition, index) => {
       const id = `exit-${index}`
-      if (condition.type === 'holding_period_exit') return [toUiHoldingPeriod(condition, id)]
+      if (condition.type === 'holding_period_exit') {
+        const item = toUiHoldingPeriod(condition, id)
+        return [operator === 'all' ? { ...item, label: `持有满 ${condition.sessions} 个交易日`, trigger: '期满后持续成立；与其他条件在收盘同时确认，下一交易日尝试卖出' } : item]
+      }
       if (condition.type === 'position_return_exit') return [toUiPositionReturn(condition, id)]
       if (condition.type === 'trailing_drawdown_exit') return [toUiTrailingDrawdown(condition, id)]
       return flattenConditions(condition, id, capabilities)

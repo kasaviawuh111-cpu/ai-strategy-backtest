@@ -112,7 +112,7 @@ export type StrategySpec = {
   }
   entry: StrategySpecCondition
   exit: {
-    op: 'first_of'
+    op: 'first_of' | 'all'
     children: StrategySpecExitRule[]
   }
   execution: {

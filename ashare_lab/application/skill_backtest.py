@@ -35,9 +35,7 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 MX_HISTORY_PROVIDER = "eastmoney_mx_finance_data"
 MX_ADJUSTMENT_POLICY = "provider_declared_back_adjusted"
 _BPS_DENOMINATOR = Decimal("10000")
-_EDGE_TRIGGER_IDS = frozenset(
-    {"bearish", "bullish", "new_high", "surge_down", "surge_up"}
-)
+_EDGE_TRIGGER_IDS = frozenset({"bearish", "bullish", "new_high", "surge_down", "surge_up"})
 
 
 class SkillBacktestInputError(DomainValidationError):
@@ -239,6 +237,7 @@ def run_skill_backtest(
         sold_today = False
         if (
             position is not None
+            and strategy.exit.op == "first_of"
             and pending_exit is None
             and position.holding_exit_index is not None
             and index >= position.holding_exit_index
@@ -318,8 +317,7 @@ def run_skill_backtest(
                                 entry_date=position.entry_date,
                                 exit_date=row.session_date,
                                 net_pnl=(
-                                    position.realized_net_proceeds_cny
-                                    - position.total_cost_cny
+                                    position.realized_net_proceeds_cny - position.total_cost_cny
                                 ),
                             )
                         )
@@ -456,9 +454,7 @@ def run_skill_backtest(
                         pending_entry = None
 
         strategy_equity = cash + (
-            Decimal("0")
-            if position is None
-            else position.return_units * row.adjusted_close
+            Decimal("0") if position is None else position.return_units * row.adjusted_close
         )
         benchmark_equity = benchmark.cash + benchmark.return_units * row.adjusted_close
         if strategy_equity <= 0 or benchmark_equity <= 0:
@@ -479,7 +475,12 @@ def run_skill_backtest(
             unknown_exit_sessions.append(row.session_date)
 
         if position is None:
-            if exit_fact is not None and exit_fact.triggered and pending_entry is not None:
+            if (
+                exit_fact is not None
+                and exit_fact.triggered
+                and pending_entry is not None
+                and strategy.exit.op == "first_of"
+            ):
                 if pending_entry.last_order_id is not None:
                     append_activity(
                         kind="unfilled",
@@ -526,6 +527,7 @@ def run_skill_backtest(
                     position=position,
                     adjusted_close=row.adjusted_close,
                     exit_fact=exit_fact,
+                    session_index=index,
                 )
                 if exit_reason is not None:
                     reason, signal = exit_reason
@@ -576,9 +578,7 @@ def run_skill_backtest(
             )
 
     open_notional = (
-        Decimal("0")
-        if position is None
-        else position.return_units * final_row.adjusted_close
+        Decimal("0") if position is None else position.return_units * final_row.adjusted_close
     )
     limitations = [
         (
@@ -590,15 +590,10 @@ def run_skill_backtest(
             "quantity 恒为空，不推断真实股数、排队位置或逐笔成交。"
         ),
         "日线开盘价是模拟成交代理，不是 09:30 逐笔撮合证据。",
-        (
-            "费用仅包含 BacktestRunConfig 提供的佣金率与最低佣金；"
-            "配置未提供的印花税等费用不作猜测。"
-        ),
+        ("费用仅包含 BacktestRunConfig 提供的佣金率与最低佣金；配置未提供的印花税等费用不作猜测。"),
     ]
     if unknown_entry_sessions or unknown_exit_sessions:
-        limitations.append(
-            "SignalFact=None 保留为未知而非 false；未知日期已在结果中单独列出。"
-        )
+        limitations.append("SignalFact=None 保留为未知而非 false；未知日期已在结果中单独列出。")
 
     result_curve = tuple(curve)
     result_round_trips = tuple(round_trips)
@@ -668,9 +663,7 @@ def _buy_exposure(
     fee = _commission(filled, config)
     if filled <= 0 or filled + fee > budget:
         return _empty_fill("insufficient_executable_notional_after_fee", requested=requested)
-    adjusted_price = row.adjusted_open * (
-        Decimal("1") + config.slippage_bps / _BPS_DENOMINATOR
-    )
+    adjusted_price = row.adjusted_open * (Decimal("1") + config.slippage_bps / _BPS_DENOMINATOR)
     if adjusted_price <= 0:
         return _empty_fill("invalid_adjusted_open", requested=requested)
     return _ExposureFill(
@@ -698,9 +691,7 @@ def _sell_exposure(
         side="sell",
         config=config,
     )
-    adjusted_price = row.adjusted_open * (
-        Decimal("1") - config.slippage_bps / _BPS_DENOMINATOR
-    )
+    adjusted_price = row.adjusted_open * (Decimal("1") - config.slippage_bps / _BPS_DENOMINATOR)
     requested = return_units * adjusted_price
     if reason is not None or requested <= 0 or adjusted_price <= 0:
         return _empty_fill(reason or "invalid_adjusted_open", requested=requested)
@@ -733,14 +724,8 @@ def _execution_capacity(
     if row.raw_open <= 0 or row.adjusted_open <= 0:
         return "invalid_open_price", Decimal("0")
     adverse_limit = (
-        row.upper_limit is not None
-        and side == "buy"
-        and row.raw_open >= row.upper_limit
-    ) or (
-        row.lower_limit is not None
-        and side == "sell"
-        and row.raw_open <= row.lower_limit
-    )
+        row.upper_limit is not None and side == "buy" and row.raw_open >= row.upper_limit
+    ) or (row.lower_limit is not None and side == "sell" and row.raw_open <= row.lower_limit)
     if adverse_limit and config.limit_handling is not LimitHandling.ALLOW_LIMIT_VOLUME:
         return (
             "adverse_price_limit"
@@ -830,7 +815,31 @@ def _close_exit_reason(
     position: _Position,
     adjusted_close: Decimal,
     exit_fact: SignalFact | None,
+    session_index: int | None = None,
 ) -> tuple[str, SignalFact | None] | None:
+    if strategy.exit.op == "all":
+        if _has_market_exit(strategy) and (exit_fact is None or not exit_fact.triggered):
+            return None
+        for rule in strategy.exit.children:
+            if isinstance(rule, HoldingPeriodExit):
+                if (
+                    session_index is None
+                    or position.holding_exit_index is None
+                    or session_index < position.holding_exit_index
+                ):
+                    return None
+            elif isinstance(rule, PositionReturnExit):
+                result = adjusted_close / position.adjusted_entry_price - Decimal("1")
+                threshold = Decimal(str(rule.threshold_pct)) / Decimal("100")
+                if (rule.trigger == "take_profit" and result < threshold) or (
+                    rule.trigger == "stop_loss" and result > -threshold
+                ):
+                    return None
+            elif isinstance(rule, TrailingDrawdownExit):
+                drawdown = adjusted_close / position.peak_adjusted_close - Decimal("1")
+                if drawdown > -Decimal(str(rule.threshold_pct)) / Decimal("100"):
+                    return None
+        return "all_exit_conditions_close_confirmed", exit_fact
     if exit_fact is not None and exit_fact.triggered:
         return exit_fact.reason, exit_fact
     position_return = adjusted_close / position.adjusted_entry_price - Decimal("1")
@@ -859,9 +868,7 @@ def _validate_input(
     if history.provider != MX_HISTORY_PROVIDER:
         raise SkillBacktestInputError("history provider must be eastmoney_mx_finance_data")
     if history.adjustment != MX_ADJUSTMENT_POLICY:
-        raise SkillBacktestInputError(
-            "history must declare provider_declared_back_adjusted prices"
-        )
+        raise SkillBacktestInputError("history must declare provider_declared_back_adjusted prices")
     if str(history.instrument_id) != strategy.instrument.symbol:
         raise SkillBacktestInputError("history instrument does not match strategy")
     rows = tuple(history.rows)

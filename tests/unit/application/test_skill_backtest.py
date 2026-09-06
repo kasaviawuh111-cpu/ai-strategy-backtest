@@ -52,19 +52,27 @@ START = date(2025, 1, 2)
     [
         (
             MxSaasProviderUnavailableError("private", tool="searchData", reason="read_timeout"),
-            "skill_mx_read_timeout", "等待东方财富查数 Skill响应超时",
+            "skill_mx_read_timeout",
+            "等待东方财富查数 Skill响应超时",
         ),
         (
             MxSaasProviderUnavailableError(
-                "private", tool="selectSecurity", reason="connect_timeout",
+                "private",
+                tool="selectSecurity",
+                reason="connect_timeout",
             ),
-            "skill_mx_connect_timeout", "连接东方财富选股 Skill超时",
+            "skill_mx_connect_timeout",
+            "连接东方财富选股 Skill超时",
         ),
         (
             MxSaasProviderUnavailableError(
-                "private", tool="searchData", reason="http_error", http_status=503,
+                "private",
+                tool="searchData",
+                reason="http_error",
+                http_status=503,
             ),
-            "skill_mx_http_error", "东方财富查数 Skill返回服务异常（HTTP 503）",
+            "skill_mx_http_error",
+            "东方财富查数 Skill返回服务异常（HTTP 503）",
         ),
     ],
 )
@@ -84,7 +92,8 @@ def test_skill_fetch_failure_reports_exact_step_without_leaking_provider_text(
     monkeypatch.setattr(service.queue, "enqueue", lambda _run_id: "manual-test")
     try:
         created = service.submit(
-            _strategy((START, START + timedelta(days=10))), BacktestRunConfig(),
+            _strategy((START, START + timedelta(days=10))),
+            BacktestRunConfig(),
         )
         result = service.execute(created.record.run_id)
         assert result.error_code == expected_code
@@ -98,7 +107,8 @@ def test_skill_fetch_failure_reports_exact_step_without_leaking_provider_text(
 
 @pytest.mark.parametrize("with_range", [True, False])
 def test_missing_history_explains_fetch_range_without_changing_strategy_or_config(
-    with_range: bool, monkeypatch: pytest.MonkeyPatch,
+    with_range: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     failure = MxDailyHistoryFieldsMissingError(
         ("涨停价", "跌停价"),
@@ -111,9 +121,11 @@ def test_missing_history_explains_fetch_range_without_changing_strategy_or_confi
         store=InMemoryBacktestRunStore(),
     )
     monkeypatch.setattr(service.queue, "enqueue", lambda _run_id: "manual-test")
-    strategy = _strategy((date(2010, 9, 5), date(2026, 9, 5))).model_copy(update={
-        "instrument": Instrument(symbol="600519.SH"),
-    })
+    strategy = _strategy((date(2010, 9, 5), date(2026, 9, 5))).model_copy(
+        update={
+            "instrument": Instrument(symbol="600519.SH"),
+        }
+    )
     try:
         created = service.submit(strategy, BacktestRunConfig(slippage_bps=Decimal("0")))
         result = service.execute(created.record.run_id)
@@ -180,13 +192,15 @@ def _row(
         upper = lower = None
         volume = 0
         amount = Decimal("0")
-        limit_source: Literal[
-            "eastmoney_mx_finance_data", "not_applicable_suspended"
-        ] = "not_applicable_suspended"
+        limit_source: Literal["eastmoney_mx_finance_data", "not_applicable_suspended"] = (
+            "not_applicable_suspended"
+        )
     else:
         upper = open_value if at_limit == "up" else max(high + Decimal("1"), open_value)
-        lower = open_value if at_limit == "down" else max(
-            Decimal("0.01"), min(low - Decimal("0.5"), open_value - Decimal("0.01"))
+        lower = (
+            open_value
+            if at_limit == "down"
+            else max(Decimal("0.01"), min(low - Decimal("0.5"), open_value - Decimal("0.01")))
         )
         volume = 1_000_000
         amount = open_value * volume
@@ -256,12 +270,15 @@ def test_skill_derived_window_is_causal_and_preserves_source(indicator_id: str) 
     rows = tuple(_row(START + timedelta(days=i), raw_open="10") for i in range(20))
     suspended = _row(START + timedelta(days=20), raw_open="10", status=TradingStatus.SUSPENDED)
     breakout = replace(
-        _row(START + timedelta(days=21), raw_open="11"), volume=1_500_000,
+        _row(START + timedelta(days=21), raw_open="11"),
+        volume=1_500_000,
     )
     future = _row(START + timedelta(days=22), raw_open="999")
     condition = IndicatorCondition(
-        indicator_id=indicator_id, definition_version="1.0.0",
-        params={"period": 20, "price_field": "close"} if indicator_id == "price.rolling_high"
+        indicator_id=indicator_id,
+        definition_version="1.0.0",
+        params={"period": 20, "price_field": "close"}
+        if indicator_id == "price.rolling_high"
         else {"baseline_period": 20, "consecutive_days": 1},
         trigger="new_high" if indicator_id == "price.rolling_high" else "gte_multiple",
         value=None if indicator_id == "price.rolling_high" else Decimal("1.5"),
@@ -285,7 +302,8 @@ def test_skill_derived_ma20_cross_uses_exact_window() -> None:
     rising = _row(START + timedelta(days=20), raw_open="11")
     falling = _row(START + timedelta(days=21), raw_open="9")
     timeline = _skill_derived_timeline(
-        _condition(trigger="price_crosses_below"), _history((*rows, rising, falling)),
+        _condition(trigger="price_crosses_below"),
+        _history((*rows, rising, falling)),
     )
     assert timeline[:19] == (None,) * 19
     assert timeline[-2] is not None and not timeline[-2].triggered
@@ -305,6 +323,104 @@ def _config(**overrides: object) -> BacktestRunConfig:
     return BacktestRunConfig(**values)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(("operator", "sell_index"), [("all", 5), ("first_of", 3)])
+def test_combined_exit_holding_maturity_waits_for_same_close_signal(
+    operator: str, sell_index: int
+) -> None:
+    dates = tuple(START + timedelta(days=i) for i in range(6))
+    strategy = _strategy(dates).model_copy(
+        update={
+            "exit": FirstOfExit.model_validate(
+                {
+                    "op": operator,
+                    "children": [
+                        HoldingPeriodExit(sessions=2),
+                        _condition(trigger="price_crosses_below"),
+                    ],
+                }
+            )
+        }
+    )
+    result = run_skill_backtest(
+        strategy=strategy,
+        history=_history(tuple(_row(day, raw_open="10") for day in dates)),
+        entry_timeline=tuple(
+            _fact(day, triggered=i == 0, ref="entry") for i, day in enumerate(dates)
+        ),
+        # True before maturity must not latch forever. At maturity it is false,
+        # then becomes true after maturity; ALL sells at the following open.
+        exit_timeline=tuple(
+            _fact(day, triggered=i in (2, 4), ref="exit") for i, day in enumerate(dates)
+        ),
+        config=_config(),
+    )
+    fills = [item for item in result.activities if item.kind == "fill"]
+    assert [(item.side, item.occurred_at.date()) for item in fills] == [
+        ("buy", dates[1]),
+        ("sell", dates[sell_index]),
+    ]
+
+
+@pytest.mark.parametrize("position_rule", ["stop_loss", "trailing_drawdown"])
+def test_all_exit_does_not_trigger_on_position_rule_alone(position_rule: str) -> None:
+    from ashare_lab.domain.strategy import PositionReturnExit, TrailingDrawdownExit
+
+    dates = tuple(START + timedelta(days=i) for i in range(6))
+    risk_rule = (
+        PositionReturnExit(trigger="stop_loss", threshold_pct=5)
+        if position_rule == "stop_loss"
+        else TrailingDrawdownExit(threshold_pct=5)
+    )
+    strategy = _strategy(dates).model_copy(
+        update={
+            "exit": FirstOfExit(
+                op="all",
+                children=(_condition(trigger="price_crosses_below"), risk_rule),
+            )
+        }
+    )
+    # Position threshold holds on day 2, but market evidence is unknown/false.
+    # Only the day-4 close has both facts; no early exit is allowed.
+    result = run_skill_backtest(
+        strategy=strategy,
+        history=_history(
+            tuple(
+                _row(day, raw_open="10", raw_close="9" if i >= 2 else "10")
+                for i, day in enumerate(dates)
+            )
+        ),
+        entry_timeline=tuple(
+            _fact(day, triggered=i == 0, ref="entry") for i, day in enumerate(dates)
+        ),
+        exit_timeline=tuple(
+            None if i == 2 else _fact(day, triggered=i == 4, ref="exit")
+            for i, day in enumerate(dates)
+        ),
+        config=_config(),
+    )
+    sells = [item for item in result.activities if item.kind == "fill" and item.side == "sell"]
+    assert [item.occurred_at.date() for item in sells] == [dates[5]]
+
+
+def test_all_exit_market_timeline_combines_indicators_with_and() -> None:
+    from ashare_lab.application.skill_backtest_service import _exit_condition
+    from ashare_lab.domain.strategy import AllCondition
+
+    dates = (START, START + timedelta(days=1))
+    strategy = _strategy(dates).model_copy(
+        update={
+            "exit": FirstOfExit(
+                op="all",
+                children=(
+                    _condition(trigger="price_crosses_above"),
+                    _condition(trigger="price_crosses_below"),
+                ),
+            )
+        }
+    )
+    assert isinstance(_exit_condition(strategy), AllCondition)
+
+
 def test_close_signals_execute_next_open_with_configured_fees() -> None:
     dates = tuple(START + timedelta(days=offset) for offset in range(4))
     rows = tuple(
@@ -319,9 +435,7 @@ def test_close_signals_execute_next_open_with_configured_fees() -> None:
     entries = tuple(
         _fact(day, triggered=index == 0, ref="entry") for index, day in enumerate(dates)
     )
-    exits = tuple(
-        _fact(day, triggered=index == 1, ref="exit") for index, day in enumerate(dates)
-    )
+    exits = tuple(_fact(day, triggered=index == 1, ref="exit") for index, day in enumerate(dates))
 
     result = run_skill_backtest(
         strategy=_strategy(dates),
@@ -410,8 +524,7 @@ def test_entry_validity_and_exit_retry_cover_suspension_and_price_limits() -> No
         outcomes = [
             item
             for item in result.activities
-            if item.kind in {"fill", "partial_fill", "unfilled"}
-            and item.order_id == order.order_id
+            if item.kind in {"fill", "partial_fill", "unfilled"} and item.order_id == order.order_id
         ]
         assert len(outcomes) == 1
         assert outcomes[0].parent_id == order.id
