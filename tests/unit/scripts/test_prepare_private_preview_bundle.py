@@ -26,11 +26,14 @@ def _source(tmp_path: Path) -> Path:
         "deploy/private_preview/Dockerfile": "FROM python:3.12-slim\n",
         "scripts/prepare_private_preview_bundle.py": "# packager\n",
         "web/dist/index.html": '<script src="/assets/app.js"></script>',
-        "web/dist/assets/app.js": 'const mode="live";({"data-api-mode":mode});"/api/v1/strategy-drafts";',
+        "web/dist/assets/app.js": (
+            'const mode="live";({"data-api-mode":mode});"/api/v1/strategy-drafts";'
+            '"respond-async";"backtest-preview-client";'
+        ),
         "ashare_lab/resources/a_share_directory.json": json.dumps({
             "reported_total": 5567,
             "items": [
-                {"symbol": f"{index:06}.{'SH' if index % 3 == 0 else 'SZ' if index % 3 == 1 else 'BJ'}",
+                {"symbol": f"{index:06}.{('SH', 'SZ', 'BJ')[index % 3]}",
                  "exchange": ("SH", "SZ", "BJ")[index % 3]}
                 for index in range(5567)
             ],
@@ -79,6 +82,17 @@ def test_mock_or_local_web_is_rejected(tmp_path: Path, marker: str) -> None:
     )
     with pytest.raises(BundleError, match="web/dist"):
         prepare_bundle(repository=root, output=tmp_path / "bundle")
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize("marker", ["respond-async", "backtest-preview-client"])
+def test_missing_preview_client_marker_is_rejected(tmp_path: Path, marker: str) -> None:
+    root = _source(tmp_path)
+    javascript = root / "web/dist/assets/app.js"
+    javascript.write_text(javascript.read_text().replace(marker, ""))
+    with pytest.raises(BundleError, match="VITE_PRIVATE_PREVIEW=true") as error:
+        prepare_bundle(repository=root, output=tmp_path / "bundle")
+    assert marker in str(error.value)
     assert not (tmp_path / "bundle").exists()
 
 

@@ -1,6 +1,6 @@
 {
   "schemaVersion": "ashare-lab.private-preview-source-bundle.v1",
-  "codeRevision": "sha256:98a71ddf6fd24a17ff4c5705159005edd3b4ca344195cc3ceb8b47e08ae0f3b9",
+  "codeRevision": "sha256:ab9ac90f989e8cfe89051d45b2dc8dfc68d3e29b7ffc60a7c7bc57437795208f",
   "files": [
     {
       "path": "Dockerfile",
@@ -1196,7 +1196,7 @@
     },
     {
       "path": "scripts/prepare_private_preview_bundle.py",
-      "sha256": "d7af5d29a6cc4ca5f88644f7b412cb00c849f463b55c4953a4dd8b477b62d97c"
+      "sha256": "635e8de0943b52ebe883e1468bd0fd62e71e66f715c7f22c4d15c507aad8fd94"
     },
     {
       "path": "uv.lock",
@@ -1207,12 +1207,12 @@
       "sha256": "988ec4237c5c004bed6409066ab370da4d7703e94cef3a078b780ad62637e40e"
     },
     {
-      "path": "web/dist/assets/index-C8EVEXO0.js",
-      "sha256": "05b9de87c0b498df9f4c95b3d128d722fda32717b408e8db62a74b3ee4394da8"
+      "path": "web/dist/assets/index-B2p7WQki.js",
+      "sha256": "b5e261c9c5293805765dc9d23718c056a15de4f51eac52a2769426c8898dbfcc"
     },
     {
       "path": "web/dist/index.html",
-      "sha256": "d7267b45744ddfa5061f57e6d278a3c4baebb72dc1c4dbfb7761203022f93897"
+      "sha256": "244d8cfc7fab1eca36b617bd6ef178c287b873cf30e2734c7f15db72afb320d9"
     }
   ],
   "digestDefinition": "sha256(UTF-8 compact JSON of files, keys ordered path then sha256)",

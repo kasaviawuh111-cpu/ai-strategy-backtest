@@ -91,6 +91,12 @@ def _validate_web(files: dict[str, Path]) -> None:
         for mode in modes
     ):
         raise BundleError("web/dist does not expose a statically live application mode")
+    for marker in (b"respond-async", b"backtest-preview-client"):
+        if marker not in javascript:
+            raise BundleError(
+                f"web/dist is missing required preview marker {marker.decode('ascii')}; "
+                "rebuild with VITE_PRIVATE_PREVIEW=true before preparing the bundle"
+            )
 
 
 def _validate_directory(path: Path) -> dict[str, object]:
