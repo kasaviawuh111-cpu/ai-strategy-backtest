@@ -26,6 +26,7 @@ import {
 import { EquityChart } from '../components/EquityChart'
 import { ExcessEquation } from '../components/ExcessEquation'
 import { RuleTree } from '../components/SummaryCards'
+import { InlineStockEditor, type InlineStockEditorActions } from '../components/InlineStockEditor'
 import { numericResultConclusion } from '../result-conclusion'
 import { secondaryMetric, strategyRuleTrees, toOrderRows } from '../view-model'
 import type {
@@ -68,7 +69,7 @@ export function Page(
   useEffect(() => {
     if (!open) return
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
+      if (event.key !== 'Escape' || event.defaultPrevented) return
       event.preventDefault()
       onBack()
     }
@@ -121,12 +122,20 @@ const priceLimitLabel: Record<PriceLimitMode, string> = {
   allow_limit_volume: '研究：允许限价容量估算',
 }
 
+const priceLimitHelp: Record<PriceLimitMode, string> = {
+  wait_for_unlock: '买入遇涨停开盘、卖出遇跌停开盘时，日线无法证明何时能排队成交，因此这笔委托不成交；即使当天曾开板，也不会猜成交时间。',
+  strict_no_fill_at_limit: '买入遇涨停开盘、卖出遇跌停开盘时，直接判这笔委托不成交。当前日线模式下，与默认保守的成交结果通常相同，区别在拒绝原因。',
+  allow_limit_volume: '研究用的偏乐观假定：允许按涨跌停价尝试成交，仍受资金、参与率和可用容量限制；没有容量证据时仍可能不成交，不代表真实排队能买到或卖出。',
+}
+
 export function ParamsScreen(
-  { open, onBack, draft, onChange, onReset, isLocked, focus }:
+  { open, onBack, draft, onChange, onReset, isLocked, focus, stockEditor }:
   { open: boolean; onBack: () => void; draft: StrategyDraft;
     onChange: (draft: StrategyDraft) => void; onReset: () => void; isLocked: boolean;
-    focus: EditableRow['key'] | 'more' },
+    focus: EditableRow['key'] | 'more'; stockEditor?: InlineStockEditorActions },
 ) {
+  const [stockEditing, setStockEditing] = useState(false)
+  if (!open && stockEditing) setStockEditing(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const startDateRef = useRef<HTMLInputElement>(null)
   const endDateRef = useRef<HTMLInputElement>(null)
@@ -166,6 +175,7 @@ export function ParamsScreen(
   const syncDateInputs = () => setDateEdits({ draftId: draft.id, ...currentDateValues() })
 
   const finishEditing = () => {
+    if (stockEditing) return
     // Native date controls may change their displayed value without React's change event.
     const currentDates = currentDateValues()
     const currentValidation = validateBacktestDates(currentDates.start, currentDates.end, latestDate)
@@ -201,13 +211,21 @@ export function ParamsScreen(
           <button type="button" className="btn ghost" onClick={() => {
             setDateEdits(null)
             onReset()
-          }} disabled={isLocked}>重置为识别结果</button>
-          <button type="button" className="btn solid" onClick={finishEditing}>完成</button>
+          }} disabled={isLocked || stockEditing}>重置为识别结果</button>
+          <button type="button" className="btn solid" disabled={stockEditing} onClick={finishEditing}>完成</button>
         </div>
       }
     >
       <div className="scroll" ref={scrollRef}>
         <div className="sect">
+          <Section title="股票">
+            <div className="settings-stock">
+              {stockEditor ? <InlineStockEditor key={`${draft.id}-${open}`} instrument={{ name: draft.instrument.name, code: draft.instrument.symbol }}
+                disabled={isLocked} {...stockEditor} onEditingChange={setStockEditing} />
+                : <span>{draft.instrument.name} {draft.instrument.symbol}</span>}
+            </div>
+          </Section>
+          <fieldset className="settings-fields" disabled={isLocked || stockEditing}>
           <div data-focus="entry" className="section-anchor" />
           <Section title="交易规则" aside="来自服务端最终策略规则">
             <div className="rule-settings">
@@ -302,6 +320,7 @@ export function ParamsScreen(
                 <option value="allow_limit_volume">限价容量估算</option>
               </select>
             </label>
+            <p className="settings-help" role="note">{priceLimitHelp[draft.execution.priceLimitMode]}</p>
             <label className="grow setting-row">
               <span className="k">单边滑点</span>
               <span className="setting-with-unit">
@@ -331,7 +350,7 @@ export function ParamsScreen(
             </label>
           </Section>
 
-          <details className="advanced-settings">
+          <details className="advanced-settings" open>
             <summary>
               <span>高级研究设置</span>
               <small>容量、仓位、退出重试与预热</small>
@@ -407,6 +426,8 @@ export function ParamsScreen(
               </label>
             </Section>
           </details>
+
+          </fieldset>
 
           <div className="settings-note">
             <Notice tone="info">

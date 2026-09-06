@@ -38,9 +38,9 @@ function CardFoot(
 }
 
 const operatorJoiner: Record<Extract<StrategyRuleNode, { kind: 'group' }>['operator'], string> = {
-  all: '并且',
-  any: '或者',
-  first_of: '任一先发生',
+  all: '全部满足（且）',
+  any: '任一满足（或）',
+  first_of: '任一先触发，即卖出',
   not: '不满足',
 };
 
@@ -123,10 +123,11 @@ export function StrategyCard(
               disabled={fieldsLocked}
             >
               <span className="lb">{row.label}</span>
-              <span className="val">
-                {row.value}
+              <div className="val">
+                {row.key === 'entry' ? <RuleTree node={strategy.entryRule} compact />
+                  : row.key === 'exit' ? <RuleTree node={strategy.exitRule} compact /> : row.value}
                 {row.sub ? <small>{row.sub}</small> : null}
-              </span>
+              </div>
               <Chevron />
             </button>
           ))}

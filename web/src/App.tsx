@@ -2093,6 +2093,7 @@ export default function App({
                       <path d="M12 4.5 6.5 10l5.5 5.5" stroke="currentColor" strokeWidth="1.6"
                         strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
+                    <span className="detail-back-label">返回对话</span>
                   </button>
                   <h1 className="detail-title">
                     {strategyTitle(detailSnapshot.instrument, detailSnapshot.strategy)}
@@ -2290,6 +2291,8 @@ export default function App({
 
         {draft ? (
           <ParamsScreen open={activeOverlay === 'params'} onBack={back} draft={draft}
+            // Reuse the same verified search/save path as the review card.
+            stockEditor={{ onSearch: instrumentApi.search, onSave: saveInlineStock }}
             onChange={handleDraftChange}
             onReset={() => baselineDraft && setDraft(cloneDraft(baselineDraft))}
             isLocked={isJourneyLocked} focus={paramsFocus} />

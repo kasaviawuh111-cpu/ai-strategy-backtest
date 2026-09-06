@@ -29,6 +29,34 @@ const renderSettings = () => {
 }
 
 describe('backtest date editing', () => {
+  it('opens advanced settings and explains all three limit modes', () => {
+    const { onChange } = renderSettings()
+    expect(screen.getByText('高级研究设置').closest('details')).toHaveAttribute('open')
+    expect(screen.getByRole('note')).toHaveTextContent('即使当天曾开板')
+    fireEvent.change(screen.getByRole('combobox', { name: /涨跌停处理/ }), {
+      target: { value: 'allow_limit_volume' },
+    })
+    expect(onChange.mock.calls.at(-1)?.[0].execution.priceLimitMode).toBe('allow_limit_volume')
+  })
+
+  it('reuses inline stock selection and blocks completion while editing', async () => {
+    const selected = { symbol: '601988.SH', name: '中国银行', market: 'CN_A', exchange: 'SSE' } as const
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const onBack = vi.fn()
+    render(<ParamsScreen open draft={draft} onChange={vi.fn()} onBack={onBack}
+      onReset={vi.fn()} isLocked={false} focus="more"
+      stockEditor={{ onSearch: vi.fn().mockResolvedValue({ items: [selected], hasMore: false }), onSave }} />)
+    fireEvent.click(screen.getByRole('button', { name: /修改股票/ }))
+    expect(screen.getByRole('button', { name: '完成' })).toBeDisabled()
+    expect(screen.getByLabelText('初始资金')).toBeDisabled()
+    fireEvent.change(screen.getByRole('combobox', { name: '股票名称或代码' }), { target: { value: '中国' } })
+    fireEvent.click(await screen.findByRole('option', { name: '中国银行 601988.SH' }))
+    await screen.findByRole('button', { name: /修改股票/ })
+    expect(onSave).toHaveBeenCalledWith(selected, expect.any(AbortSignal))
+    expect(screen.getByRole('button', { name: '完成' })).toBeEnabled()
+    expect(onBack).not.toHaveBeenCalled()
+  })
+
   it('validates and commits the native date value even when no change event fires', () => {
     const { onChange, onBack } = renderSettings()
     const start = screen.getByLabelText<HTMLInputElement>('开始日期')
