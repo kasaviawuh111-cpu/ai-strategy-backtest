@@ -498,6 +498,80 @@ async def test_ordinary_reply_keeps_its_original_short_length_limit(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_kind", ["schema", "unsupported_prose", "two_questions"])
+@pytest.mark.parametrize("repaired", [True, False])
+async def test_initial_conversation_repairs_rejected_model_reply_once_without_weakening_gates(
+    capability_matrix: CandidateCapabilityMatrix, invalid_kind: str, repaired: bool,
+) -> None:
+    reply = "可以把曹操的果断与攻守权衡作为策略灵感，先整理成可修改的方向。"
+    valid = {
+        "reply_kind": "preference", "acknowledgement_id": "respect_preference",
+        "natural_reply": reply, "recommended_option_ids": [],
+        "strategy_inspiration": "以果断与攻守权衡为灵感，探索有明确退出约束的交易风格。",
+    }
+    invalid = {**valid, **(
+        {"acknowledgement_id": "light_redirect"} if invalid_kind == "schema"
+        else {"natural_reply": "想从趋势展开吗？还是先看反转？"} if invalid_kind == "two_questions"
+        else {"natural_reply": "可以先整理3种风格方向。"}
+    )}
+
+    class Sequence(_RecordingTransport):
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.requests.append(request)
+            return valid if repaired and len(self.requests) == 2 else invalid
+
+    transport = Sequence(None)
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(replace(
+        _request(), answer="我是曹操", prior_utterance="", question="", options=(),
+        diagnostic_code="conversation_only", context_summary="首次对话，可形成策略灵感。",
+    ))
+    assert len(transport.requests) == 2
+    assert transport.requests[1].user_payload == transport.requests[0].user_payload
+    assert "final repair attempt" in (transport.requests[1].system_footer or "")
+    assert "at most one question" in (transport.requests[1].system_footer or "")
+    if repaired:
+        assert result is not None and result.natural_reply == reply
+        assert result.strategy_inspiration == valid["strategy_inspiration"]
+        assert result.run_requested is None and result.selected_option_id is None
+    else:
+        assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_kind", ["schema", "unsupported_prose"])
+async def test_initial_conversation_transport_and_reply_repair_share_one_budget(
+    capability_matrix: CandidateCapabilityMatrix, invalid_kind: str,
+) -> None:
+    class InterruptedThenInvalid(_RecordingTransport):
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise CandidateTransportError("fixture interrupted")
+            return {
+                "reply_kind": "preference",
+                "acknowledgement_id": "light_redirect" if invalid_kind == "schema"
+                else "respect_preference",
+                "natural_reply": "先整理3种风格方向。",
+                "strategy_inspiration": "将人物意象作为策略灵感。",
+            }
+
+    transport = InterruptedThenInvalid(None)
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(replace(
+        _request(), answer="我是曹操", prior_utterance="", question="", options=(),
+        diagnostic_code="conversation_only", context_summary="首次对话。",
+    ))
+    assert result is None and len(transport.requests) == 2
+
+
+@pytest.mark.asyncio
 async def test_interrupted_dialogue_transport_retries_once_and_returns_model_reply_verbatim(
     capability_matrix: CandidateCapabilityMatrix,
 ) -> None:

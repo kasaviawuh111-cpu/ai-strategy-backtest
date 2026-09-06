@@ -29,6 +29,19 @@ from .vibe_candidates import (
 
 _LOGGER = logging.getLogger(__name__)
 
+_CONVERSATION_REPAIR_CONTRACT = (
+    " The previous response failed the dialogue schema or display-only grounding contract. "
+    "Using only the SAME original answer and context, return a complete corrected JSON object. "
+    "Keep the user's meaning and any suitable hypothetical style inspiration; do not ask the "
+    "user to rephrase or invent specific indicators, numeric parameters, securities, selections "
+    "or execution claims. natural_reply is a brief natural acknowledgement, not trading rules. "
+    "Use at most one question; do not mention internal workflow terms or UI instructions. "
+    "Use matching reply_kind/acknowledgement_id pairs: preference/respect_preference, "
+    "off_topic/light_redirect, question/answer_question, unclear/ask_rephrase, "
+    "cancelled/confirm_cancel. Keep unused selection and execution fields null or false, "
+    "and unused option/source arrays empty. This is the final repair attempt."
+)
+
 _RESPONSE_ONLY_CONTRACT = (
     "只把 contextSummary 中已核验的事实、当前进展和 question 写成用户直接阅读的完整中文回复。"
     "不重新识别交易意图，不生成策略，不新增证券、数字、规则或执行结论。"
@@ -176,6 +189,10 @@ class VibeClarificationDialogueRouter:
         if request.identity_only and request.response_only:
             _LOGGER.warning("dialogue_reply_rejected reason=conflicting_dialogue_modes")
             return None
+        repair_conversation = (
+            request.diagnostic_code == "conversation_only"
+            and not request.response_only and not request.identity_only
+        )
         allowed_ids = tuple(item.id for item in request.options)
         source_ids = tuple(source.source_id for source in request.research.sources) \
             if request.research else ()
@@ -406,12 +423,37 @@ class VibeClarificationDialogueRouter:
             except (TypeError, ValueError, ValidationError) as exc:
                 _LOGGER.warning("dialogue_reply_rejected reason=transport_or_schema type=%s",
                                 type(exc).__name__)
+                if repair_conversation and not attempt:
+                    emit_progress("model_retry", "正在修正对话回复的结构，继续承接你的表达。")
+                    transport_request = replace(
+                        transport_request,
+                        system_footer=(transport_request.system_footer or "")
+                        + _CONVERSATION_REPAIR_CONTRACT,
+                    )
+                    continue
                 return None
             if request.identity_only and not _identity_assessment_is_bounded(assessment):
                 _LOGGER.warning("dialogue_reply_rejected reason=identity_only_authority")
                 return None
             source_error = _source_answer_error(assessment, request)
             if source_error is None:
+                if repair_conversation and not _natural_reply_is_grounded(
+                    assessment.natural_reply, request, capability_matrix=self._capability_matrix,
+                    style_inspiration=assessment.strategy_inspiration is not None,
+                ):
+                    _LOGGER.warning(
+                        "dialogue_reply_rejected reason=conversation_grounding_invalid attempt=%d",
+                        attempt + 1,
+                    )
+                    if attempt:
+                        return None
+                    emit_progress("model_retry", "正在核对对话回复，保留原意并去掉未经确认的细节。")
+                    transport_request = replace(
+                        transport_request,
+                        system_footer=(transport_request.system_footer or "")
+                        + _CONVERSATION_REPAIR_CONTRACT,
+                    )
+                    continue
                 if request.response_only and not _natural_reply_is_grounded(
                     assessment.natural_reply, request, capability_matrix=self._capability_matrix,
                 ):
