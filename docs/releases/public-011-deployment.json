@@ -1,0 +1,37 @@
+{
+  "task": "finished",
+  "steps": [
+    {
+      "name": "CreateVersion",
+      "status": "finished"
+    },
+    {
+      "name": "RunPipeline",
+      "status": "notInvolve"
+    },
+    {
+      "name": "GrayRelease",
+      "status": "notInvolve"
+    },
+    {
+      "name": "ReleaseVersion",
+      "status": "finished"
+    }
+  ],
+  "online": [
+    {
+      "name": "ashare-strategy-preview-011",
+      "flow": "100"
+    }
+  ],
+  "revision": "sha256:35db0acae6534cbc23670cfb1c478658d478a278ac794a42a42362f00deb98d3",
+  "access": "public",
+  "credentialsConfigured": false,
+  "models": {
+    "CANDIDATE_PROVIDER_MODEL": "deepseek-v4-flash",
+    "CANDIDATE_PROVIDER_THINKING": "disabled",
+    "PLAN_DEEP_PROVIDER_MODEL": "deepseek-v4-pro",
+    "PLAN_DEEP_PROVIDER_THINKING": "enabled",
+    "PLAN_DEEP_PROVIDER_REASONING_EFFORT": "high"
+  }
+}

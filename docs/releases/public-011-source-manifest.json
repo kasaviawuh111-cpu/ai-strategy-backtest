@@ -1,0 +1,1240 @@
+{
+  "schemaVersion": "ashare-lab.private-preview-source-bundle.v1",
+  "codeRevision": "sha256:35db0acae6534cbc23670cfb1c478658d478a278ac794a42a42362f00deb98d3",
+  "files": [
+    {
+      "path": "Dockerfile",
+      "sha256": "24a1830d1df6c825eccde8bc19f6344305e0541a93662aa87b3736091d68f8ae"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "5ab1b627130c0ded29307914a37f34eb771fc155ebbfb5f43701185f6e3c1a5f"
+    },
+    {
+      "path": "README.md",
+      "sha256": "956bf8b1ce14b869ea4157814b7eb3ccf54fa1309eca6de8bf93f86e85f4cee6"
+    },
+    {
+      "path": "alembic.ini",
+      "sha256": "d536b13bb787b744600797e532942c3f017bdb354edb868edd4cb944340d4346"
+    },
+    {
+      "path": "alembic/env.py",
+      "sha256": "06fbd41921663e4b398849ca694879c5cee550efc4658c8de33eaadc20589f4c"
+    },
+    {
+      "path": "alembic/script.py.mako",
+      "sha256": "8f04eceacc65e51e5371acb08200412129d28d866c44cf9c8d87b91f6e5474f5"
+    },
+    {
+      "path": "alembic/versions/20260828_0001_create_backtest_runs.py",
+      "sha256": "d8315a1bba187ed5f5444978fe0760a4f6c0c9258a542aa5e6aa97671bd4eb92"
+    },
+    {
+      "path": "alembic/versions/20260830_0002_add_result_integrity_policy.py",
+      "sha256": "82f17babe6656ee8e006cf9454c9cc9cd2dfa98caca4ab3b6ffc3ce69ce7be2f"
+    },
+    {
+      "path": "alembic/versions/20260831_0003_add_strategy_v2_artifacts.py",
+      "sha256": "4591a9b9fde54aa95a92d10c77816c9077786add10cbdaa7a0e5cb891726354f"
+    },
+    {
+      "path": "alembic/versions/20260831_0004_add_v2_results_and_immutability.py",
+      "sha256": "9291e809d10962678294a9f346844f82c8f5d25d10ae56ada0b16e7da6c57b41"
+    },
+    {
+      "path": "alembic/versions/20260831_0005_allow_multiple_validation_receipts.py",
+      "sha256": "e8f24a7355e68764cb2281fc27a373a4486614bdc6048f7e51cb24de25520330"
+    },
+    {
+      "path": "alembic/versions/20260906_0006_add_dialogue_store.py",
+      "sha256": "36b4ae4af06a6ca7db2f8e30fa6976c163d8c0e5cb7b0872518c4108e34031c1"
+    },
+    {
+      "path": "ashare_lab/__init__.py",
+      "sha256": "01fb123758b2e5c65431db4ea93d42d5b43c80705a3e6f64b5d815791b0f0029"
+    },
+    {
+      "path": "ashare_lab/adapters/__init__.py",
+      "sha256": "b259aae00367ad8a9e78767f6a7f27aa02ca675d688e151a6fb64ab27e52a9c8"
+    },
+    {
+      "path": "ashare_lab/adapters/event_sources/__init__.py",
+      "sha256": "83711fe9375fc51eb077046c8e1a768f1a5f5df5295d699a08cba3848f4694ec"
+    },
+    {
+      "path": "ashare_lab/adapters/event_sources/announcement_acceptance.py",
+      "sha256": "d546c56991a645f9dc130dbca7b0d3dd5028082bb94c4dd58fb9f5827734729e"
+    },
+    {
+      "path": "ashare_lab/adapters/event_sources/collector.py",
+      "sha256": "809340e9479bbe02a089ff81c58e1b06d82d736637cf64a3207ecdbbebdeed72"
+    },
+    {
+      "path": "ashare_lab/adapters/event_sources/document_text.py",
+      "sha256": "514a4f1d1d9cbbf1462e4faeb3234a0738d6ddeb3af6aeb754d8c7cc86803f54"
+    },
+    {
+      "path": "ashare_lab/adapters/event_sources/eastmoney.py",
+      "sha256": "e1127b8f2fe6fc7980b5d69ce9a1fc0f8264f3d06cf0a6945a216a6501ce83d0"
+    },
+    {
+      "path": "ashare_lab/adapters/event_sources/ifind.py",
+      "sha256": "ccb951fa50bb887acceadb71004d3778d56c21b266117ee7ca15e49049844a72"
+    },
+    {
+      "path": "ashare_lab/adapters/event_sources/rqdata.py",
+      "sha256": "80f2ed60cee79f0a9c4711628f40aa9d0b9a86bdabfff93dc91107afe43e3ba0"
+    },
+    {
+      "path": "ashare_lab/adapters/event_sources/tushare.py",
+      "sha256": "20d0e7204512b2874bc95744afbaecd2e3bffd5d168bb13fbedfb0741c9bfb3f"
+    },
+    {
+      "path": "ashare_lab/adapters/event_sources/web_evidence.py",
+      "sha256": "8e700628607c5b35698e21016b7b5a064049565faacd56319451319d60df730f"
+    },
+    {
+      "path": "ashare_lab/adapters/financial_sources/__init__.py",
+      "sha256": "b5901ce4bd09dc3077c2d6770f4613823863db93a4dd1e51cef03b7fac0e0cde"
+    },
+    {
+      "path": "ashare_lab/adapters/financial_sources/eastmoney_operator.py",
+      "sha256": "214a7936504b37c6bdab4af99927712d8e120e1b642b8f589dde397f0b3d18ac"
+    },
+    {
+      "path": "ashare_lab/adapters/financial_sources/operator_loader.py",
+      "sha256": "15f238ccb465a4c07edaf21079d87daef50cc9fb1d4e205a16ff10487c005bf7"
+    },
+    {
+      "path": "ashare_lab/adapters/financial_sources/operator_normalize.py",
+      "sha256": "46add86e2337f698452de49054f6f16dd376ffd806e2e8faa6d83d44f49a35a0"
+    },
+    {
+      "path": "ashare_lab/adapters/financial_sources/publication_resolver.py",
+      "sha256": "f11cdd7eb1de814dc438f9cd7385efb7267328c1fa4ee427563e0ce5fe94186e"
+    },
+    {
+      "path": "ashare_lab/adapters/fund_flow/__init__.py",
+      "sha256": "c5f09fcb4dbcdc9235dc8d0b5e1bb67a3db746a2b313f96dc2de9f82773d823d"
+    },
+    {
+      "path": "ashare_lab/adapters/fund_flow/eastmoney.py",
+      "sha256": "6bfd4facadf7edb1bc072cd6b0d64515f1fa1bc57154a85c130ea6cc3e2c09db"
+    },
+    {
+      "path": "ashare_lab/adapters/fund_flow/snapshot.py",
+      "sha256": "e2f4d417ac8c6db0807d426d9d62e35d7489cc83a66760f2d33ce831d46faf5f"
+    },
+    {
+      "path": "ashare_lab/adapters/host_http.py",
+      "sha256": "38dd32641baf0ae8c6bd13f734c3984b5cfbf2dcd2e673b45b34b4c7ce477be8"
+    },
+    {
+      "path": "ashare_lab/adapters/jobs/__init__.py",
+      "sha256": "85c9634eb85648d0dd756f4e0b9ccea9d61b70b8a41193fcb4d979069ccb6510"
+    },
+    {
+      "path": "ashare_lab/adapters/jobs/rq.py",
+      "sha256": "a6e1d822c130c7aac18a9f0b4b7fd7f8019925cdb237e84deec0ba507e4e8666"
+    },
+    {
+      "path": "ashare_lab/adapters/jobs/threaded.py",
+      "sha256": "7a3c23dabf5a4b3a4873655278eacf844258e2007e6a5aa41d1dca3aff782153"
+    },
+    {
+      "path": "ashare_lab/adapters/language/__init__.py",
+      "sha256": "b8fa8497f834937857bc57a6e140419fde59d2143a607a8d70b2df64919929c7"
+    },
+    {
+      "path": "ashare_lab/adapters/language/backtest_period.py",
+      "sha256": "38af13a09af48fca8ba8407da7135ef03fecfaa7db6e2b25bfc3be8b97db41a4"
+    },
+    {
+      "path": "ashare_lab/adapters/language/deepseek_portfolio_highlight.py",
+      "sha256": "d79f73bb3c0eb697b5d10374a312d1ff9fe050e0dc614874330b689ebab1957a"
+    },
+    {
+      "path": "ashare_lab/adapters/language/deepseek_web_research.py",
+      "sha256": "ae20cf224b7571f70eb7526f928785e694639b44e24ad76a2085f562a6a2b029"
+    },
+    {
+      "path": "ashare_lab/adapters/language/independent_web_research.py",
+      "sha256": "bac9263f406d49dfa0561a3c1b206cddd4d87966fe7636d36e236887ce3a9180"
+    },
+    {
+      "path": "ashare_lab/adapters/language/openai_compatible.py",
+      "sha256": "154c8ab8270f2cb9538eaaa4ef2a42f21d750363288bb40b7c805fd63f7f59a0"
+    },
+    {
+      "path": "ashare_lab/adapters/language/rule_based.py",
+      "sha256": "e963271409d87e8ce9e082725d470c5079fb1e235de2c4d73a1844c71ea48e2d"
+    },
+    {
+      "path": "ashare_lab/adapters/language/vibe_backtest_review.py",
+      "sha256": "ab91045608b5737183d276bbbfcced68ad2e039bcec1075d6fb7bbd7e0ffe6fd"
+    },
+    {
+      "path": "ashare_lab/adapters/language/vibe_candidates.py",
+      "sha256": "dd769dde528ef19de21c5f3a6bb16adb6d390d0f40152deeb65f4420f3fd2ad6"
+    },
+    {
+      "path": "ashare_lab/adapters/language/vibe_clarification.py",
+      "sha256": "48f047f138a655df8099891444e38c9f079362c5ef854e15199c48e3603c2822"
+    },
+    {
+      "path": "ashare_lab/adapters/language/vibe_ideas.py",
+      "sha256": "199be7b90b8caa7e7033297268c91c7dfeba9679f3fa4447be3c2e85a6f1e4f0"
+    },
+    {
+      "path": "ashare_lab/adapters/language/vibe_strategy_advice.py",
+      "sha256": "5ee6e013f3eca897a74dc5045634ae7cc238ad650c8f0b97c873e365be5613b9"
+    },
+    {
+      "path": "ashare_lab/adapters/language/vibe_strategy_editing.py",
+      "sha256": "01d04c4a37e8b1c30fc9d9945f437313ce16e705313de8c10e65593e813de0d6"
+    },
+    {
+      "path": "ashare_lab/adapters/language/volcengine_web_research.py",
+      "sha256": "0b479fdb96030a434ea5ef11fe7dc75e7376d167f4d9865c68e3f5fb655f2afc"
+    },
+    {
+      "path": "ashare_lab/adapters/legacy/__init__.py",
+      "sha256": "2a6906c0d836fdfff82e35d63927ae691b04e684ab7fc6972e05e5ced5d0cb73"
+    },
+    {
+      "path": "ashare_lab/adapters/legacy/signal_oracle.py",
+      "sha256": "5ad81a5b561eb056dfe5bce3c08085bd4ccd35152e371832955a6a0932ed4a7a"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/__init__.py",
+      "sha256": "9b4b41bd4c19c03eb69c720644935c7b307431e1b616f192c1c705c4c5965f8c"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/a_share_directory.py",
+      "sha256": "a476557c1831ce6e8db4c5d0b5c786b37a413a922c1117e50d85f62abe8c1ee4"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/baostock_daily.py",
+      "sha256": "0b0295119839cf0ba9329e96dc9ea7655b7ee6d6b35e9aef017d3bd42de80d48"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/baostock_reference.py",
+      "sha256": "b5c069f946aefe138aee512c049d40316cedf4ee9fb247fd79ce464d4c12b2fc"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/baostock_security_search.py",
+      "sha256": "c7d1d6ac8a4ba1c56514113c26bd3c4c440e8da79b9cc3c630b954b4dd4cad2b"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/bse_reference.py",
+      "sha256": "b22c1343a9188457ad278f752f87e7006aa2ba3ab31563c822348b2373363850"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/choice_minute.py",
+      "sha256": "516b053411a3366df8aa1ee6b1a66d96b927b9d137461715797e8c1e5c1657cd"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/choice_minute_snapshot.py",
+      "sha256": "5ea824755eecbabcbf686971bbc0daf81c1cc7628e4088019af65e68c09c0f9a"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/choice_security_search.py",
+      "sha256": "ddfd1a144f5069b6f948b30b9b596c7a2d1523bac692b2d8fba176cb3f7ccabf"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/choice_snapshot.py",
+      "sha256": "8f6c4a8c789f42588bd2c9ba49ca06d6c1aeb1b37ea63c171bb4470c85a5ec88"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/composite_snapshot.py",
+      "sha256": "dcdc5888bba04d8dbf72d49a10f88a7aeb1e0dc8bcba536d060f7c84d2a12b99"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/eastmoney_corporate_actions.py",
+      "sha256": "5c50b84762d6dab7380da3cfde42b32d5df4ff65f4676fcfa958cf058e2d1a6a"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/eastmoney_daily.py",
+      "sha256": "6756ff8854f7b1cb34ffd8a1525f25f19888dd92d0176681c87ee7ce51a8c7aa"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/eastmoney_instrument_search.py",
+      "sha256": "10ea6d5af33fbc296727db696e67d4ef927e484e918d1d109aed8b5d38445c53"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/eastmoney_security_search.py",
+      "sha256": "bc576238e07d2536ac85f291fcd76bd7173a9fbeec2a83036ef77639fa5c78a1"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/event_snapshot.py",
+      "sha256": "d049270d77f977760a94557dd593395bb13d2fd6c8be0f335f3131900a19f9a0"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/instrument_name_chain.py",
+      "sha256": "80216425a5c3f809cfe96cb0876937b4466a81de4383301126928277352b87b6"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/internal_demo_preparer.py",
+      "sha256": "c1a823609b537ae9d51bd38e1c3cbf456e5ff69f3a5edd822452cb5b7942503b"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/local_parquet.py",
+      "sha256": "62c20eb0925164723f8c224d402fe4c80d205c32cec14803857af89339abb05d"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/mx_daily_history.py",
+      "sha256": "9f4d86b9c870d9bc52e489bdd69d407821d82928202373fa5d3ee8865aec8930"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/mx_indicator_contract.py",
+      "sha256": "8dc98b4131a78819e5d05a1aaf0ca53c0ec9769591e5692f704854f6738c55da"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/mx_saas.py",
+      "sha256": "fb96883bdfea3bb0b9c48f490b318f54255d16df6472608386c326d0c8029bec"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/mx_session_reference.py",
+      "sha256": "9d0a0346b672d6b7b768f47fd9dad3928d9dfcfc1d55e519d7e5486805b7dc17"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/on_demand_snapshot.py",
+      "sha256": "d4a6eab945c4fac715ae521aec482b49fc22200de43210ca8e732af692ea87ed"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/parquet_sessions.py",
+      "sha256": "2ba1d4e17fcdd072496b52ae67ac36aa4dd9534588cb037b9927704b0b3ad322"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/provider_indicator_cache.py",
+      "sha256": "184c4fbbb1cb0e07ab0019a9350692fdbe7ba6e3e4ac7013e1d56d0a2bc18550"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/research_sessions.py",
+      "sha256": "e16bb9c5b7bdca086c30d1e2ba5387133f4d5baa8eb16d005e4d1065c2353768"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/snapshot_registry.py",
+      "sha256": "47e3762e1ff3cdef54d334024744f19d81486e529171ed2ca54a9099a4e50f38"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/tencent_etf_daily.py",
+      "sha256": "74887a99c09de66e73b6d35ec44344ed462fa8e43465cfbc79d6ce88b2c02ec6"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/tencent_stock_daily.py",
+      "sha256": "f503af0d477a24b67a9dc35427bfb92d89392ede9eb859be546e5ae345c9cabd"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/trusted_snapshots.py",
+      "sha256": "92c003a24699b025296ef5bc2fc54f899ab2f58f0f26315e380892e403d94567"
+    },
+    {
+      "path": "ashare_lab/adapters/market_data/vibe_mootdx.py",
+      "sha256": "9723451a8b21602d7c2bc8f7ff935b7bacf4063cf0d5b07e0936a153d0a53b0b"
+    },
+    {
+      "path": "ashare_lab/adapters/persistence/__init__.py",
+      "sha256": "0c44d111fa45ec3b7da282bc6026b809a2c132fe6e93d1bad601a2a6f34a7b27"
+    },
+    {
+      "path": "ashare_lab/adapters/persistence/backtest_runs.py",
+      "sha256": "b44ad151afde51b60c09cbec552ac1d0dff41b6b1aac94f3e0bdd0c312f0a2cd"
+    },
+    {
+      "path": "ashare_lab/adapters/persistence/immutability.py",
+      "sha256": "f454ab580935ac31113cfb04d58fb6c75e3be4bae5d06e25b56007eb0c635d01"
+    },
+    {
+      "path": "ashare_lab/adapters/persistence/strategy_v2_artifacts.py",
+      "sha256": "6bb9dea6c5378ce3f5dc2dbe46ca14424924466b37c87ef06a35cd00dee9f34d"
+    },
+    {
+      "path": "ashare_lab/adapters/signals/__init__.py",
+      "sha256": "17aa2310da0fc01abecf596c37b14d2c1b07e4b8f939d042140b24321b29248d"
+    },
+    {
+      "path": "ashare_lab/adapters/signals/moss_pandas_backend.py",
+      "sha256": "b6182937c257db9c25c227009c731979915f43cb707d06f683235fd74f2095cd"
+    },
+    {
+      "path": "ashare_lab/api/__init__.py",
+      "sha256": "7d462d5451846c6e1b540ac9225188fd7943bb0797b2ee3988b6f3e949949a50"
+    },
+    {
+      "path": "ashare_lab/api/app.py",
+      "sha256": "c47eb762a8926c0cbde9018f1093281a7546b47b4f14e8c3431dcb99d6cea9fd"
+    },
+    {
+      "path": "ashare_lab/api/backtest_review_schemas.py",
+      "sha256": "5c847b4971f6c57a630816b27949533e1e858e6081f281e6776118ce1b008bdf"
+    },
+    {
+      "path": "ashare_lab/api/backtest_schemas.py",
+      "sha256": "f5d9071c2a7441c240e070200d62f0ab3ed9187bb313b059d34e94e0f5764c12"
+    },
+    {
+      "path": "ashare_lab/api/container.py",
+      "sha256": "7161f34befaa4f64a25ec79ab3ec6a7bad243daf65ac5631ac28bab90ddeb581"
+    },
+    {
+      "path": "ashare_lab/api/dialogue_progress.py",
+      "sha256": "a606513b44e2bd2fbcc218c0beb10cbf46de2e76e91c90224fc563d9977a1a5e"
+    },
+    {
+      "path": "ashare_lab/api/errors.py",
+      "sha256": "e75a32b5ac73b5c07ef951b74f8b923b8a3360a896df3919e149fa4dacbd3db3"
+    },
+    {
+      "path": "ashare_lab/api/headers.py",
+      "sha256": "421c1e70ac49279bec99fee4592161f82115844f274b5634a1ab1138ee8ae06f"
+    },
+    {
+      "path": "ashare_lab/api/middleware.py",
+      "sha256": "a150fc2603d6828fe2b361db081b54b476569afae49281cf200355c25fcdff29"
+    },
+    {
+      "path": "ashare_lab/api/persistent_store.py",
+      "sha256": "4db9a6c84e67356088810be9b13c8b0718375dbb02731aa27eea516587d9c2fc"
+    },
+    {
+      "path": "ashare_lab/api/portfolio_review_schemas.py",
+      "sha256": "8dd15ec418ee3100c0ad3c7599b55cf66b97f3a759f3872c2f94efba71cdcab8"
+    },
+    {
+      "path": "ashare_lab/api/result_schemas.py",
+      "sha256": "467aa75ed79b1105b0aabe31ed1347f89e76fa1a94fd2632fada23655b9e3a89"
+    },
+    {
+      "path": "ashare_lab/api/routes/__init__.py",
+      "sha256": "bbf0d3b80ddbe870adb29cb78a46d56f302db504c73f0cdf1657f5b6668aaf71"
+    },
+    {
+      "path": "ashare_lab/api/routes/backtest_runs.py",
+      "sha256": "74f040dbdd9164969fc82a257477b5324bf24b2d2ec677cf5018b8f78093325a"
+    },
+    {
+      "path": "ashare_lab/api/routes/instruments.py",
+      "sha256": "4076a4c3dd946ee061ddafaa14e762131641b8999033aab179a3259fa1725172"
+    },
+    {
+      "path": "ashare_lab/api/routes/market_data.py",
+      "sha256": "33e25edd390f7b868cb36e206c6d7214909f4975e59dcbadfe38d022a0d5f7c9"
+    },
+    {
+      "path": "ashare_lab/api/routes/portfolio_reviews.py",
+      "sha256": "a70c7d1e947d3a3b41fc03be72b0f535709c14a210683d1a3bf29efd52b995ba"
+    },
+    {
+      "path": "ashare_lab/api/routes/strategy_drafts.py",
+      "sha256": "9721d81b2838985ef2a21f80ca07c8dcaa76ab4126607aa76d4a1505b8fc42aa"
+    },
+    {
+      "path": "ashare_lab/api/routes/strategy_v2.py",
+      "sha256": "a21a86022433b1ff9eb47a4c73e7229e57963f0e8e19ec68e92be8c212eb9f77"
+    },
+    {
+      "path": "ashare_lab/api/routes/system.py",
+      "sha256": "942298a4fbbd9229f1df71f422a52213ade3b4e14a0379dffdcb13d12040de57"
+    },
+    {
+      "path": "ashare_lab/api/schemas.py",
+      "sha256": "7314e1ccadb6247c60e1acc43c1ca06ef18976fe7f2ad448f26bb27b47708a13"
+    },
+    {
+      "path": "ashare_lab/api/skill_app.py",
+      "sha256": "15d7a817a6ef55506136f21989847dcf9d0db3c6f76087c55eaae4987a3d1216"
+    },
+    {
+      "path": "ashare_lab/api/store.py",
+      "sha256": "9c2945c13e886d722df52b64bd34216df95a4777467bf9245b82577a303455d7"
+    },
+    {
+      "path": "ashare_lab/api/v2_schemas.py",
+      "sha256": "ecca3ad94b24b7e27b27187f426d79c1aa9b64dcbf289a0b5479e43d00abd54f"
+    },
+    {
+      "path": "ashare_lab/api/web_hosting.py",
+      "sha256": "d806c2b751726a872e89705da5eeb7dbbe8ef00757195093637d553fe9f0721c"
+    },
+    {
+      "path": "ashare_lab/application/__init__.py",
+      "sha256": "0b9c73c76aa9ec174e0a296b1f4ffb40768fc7723441e1c110aa810925a5942a"
+    },
+    {
+      "path": "ashare_lab/application/async_backtest_submission.py",
+      "sha256": "d3338f750cdee4290dc3e34d6ddb7680a5eb98e42e762f64d17cfaae012813a4"
+    },
+    {
+      "path": "ashare_lab/application/backtest_submission.py",
+      "sha256": "5a19ff325ba948b712760b8f3473b97ed9fff22fa0e45c055836db1681de7f56"
+    },
+    {
+      "path": "ashare_lab/application/clarification_guidance.py",
+      "sha256": "b168f52d48138dfdfc32645fbbe1633d34d9a5992bbed707d8a0593346b2adb1"
+    },
+    {
+      "path": "ashare_lab/application/compile_strategy.py",
+      "sha256": "4eb1b904a7e21aa2bdc426c4c5a2b809ff01c8e2f4936f0c7673ebe3911ce091"
+    },
+    {
+      "path": "ashare_lab/application/corporate_action_timeline.py",
+      "sha256": "1fa8afbf57d3fb4f99066900d0b7d999de005f2ee3f7efc54c6ddf07f74e3938"
+    },
+    {
+      "path": "ashare_lab/application/daily_backtest.py",
+      "sha256": "9a071df809dfde0aa68644d81585adaf480e8e82b78fbf56b9f2958c3bf0c5a9"
+    },
+    {
+      "path": "ashare_lab/application/dialogue_state.py",
+      "sha256": "fc818af6f75ea677eda406ca8e7a27770ee153bebf89303e1d66343e57a0a539"
+    },
+    {
+      "path": "ashare_lab/application/dialogue_turn.py",
+      "sha256": "a6628c2ea735e1ed9c14f835b3cca24cf8932875cb59cdb15f5d61c75d552f07"
+    },
+    {
+      "path": "ashare_lab/application/execute_backtest.py",
+      "sha256": "9f94ab690ba398711b102d6a86ead63e6cc95d271776e331a7cf115ff6881243"
+    },
+    {
+      "path": "ashare_lab/application/execute_strategy_v2.py",
+      "sha256": "14a5247924a38b8cdd84f69ddac45dfba6a321b4551b2d0510bffd6047c5e4d7"
+    },
+    {
+      "path": "ashare_lab/application/funded_benchmark.py",
+      "sha256": "a98fdecdc52185663b415216b4f259b791e0925941fb5c8678ebff1466aa4b23"
+    },
+    {
+      "path": "ashare_lab/application/portfolio_review.py",
+      "sha256": "88269591e5657bdd2f29795cdc816528b0ac0b2e07211abcd4e344a01e7696b1"
+    },
+    {
+      "path": "ashare_lab/application/pre_open_sizing.py",
+      "sha256": "ee690ae5cdb4c4c48e340a9b73cfca24e06c995fd1904703bebd1825db7ab6e6"
+    },
+    {
+      "path": "ashare_lab/application/result_views.py",
+      "sha256": "9b8f0ca8ad961774374316dbb1c5c17a9609c56f231a70a130a1460ec4c1d127"
+    },
+    {
+      "path": "ashare_lab/application/robustness.py",
+      "sha256": "a6d7d496fc8b63bf7112d1efa8ed3f2d143c0a72dc7885c40cd1e7946c6b5d5e"
+    },
+    {
+      "path": "ashare_lab/application/skill_backtest.py",
+      "sha256": "062ad3e00297b90634ded48b6fc7ee6a10bd8e79cddc8c30060a7d44eb226c24"
+    },
+    {
+      "path": "ashare_lab/application/skill_backtest_service.py",
+      "sha256": "0c0eb3c0140442c34fdf343bc402e4f7b58e744f95e9d9fcfca48602ce7c82a7"
+    },
+    {
+      "path": "ashare_lab/application/strategy_v2_draft_issuer.py",
+      "sha256": "18b6d0e282ca28e59c78d47e154a2ebbb00e53b572ef4d2b2873a41615c95a08"
+    },
+    {
+      "path": "ashare_lab/application/strategy_v2_http.py",
+      "sha256": "b616ad282f16c65c6e2ae00119399355c9e5acbf58aeb6be3c315795da76404d"
+    },
+    {
+      "path": "ashare_lab/application/submission_gate_v2.py",
+      "sha256": "cc5afc0d2118cd551a438829f3e6f79a5d652cd9cf217f1edcb36aa55066eb91"
+    },
+    {
+      "path": "ashare_lab/application/technical_v2.py",
+      "sha256": "38516aef16c31c3ddbf20578aa5757dcb1abcd35f53ab9c8f54e715520f2d1c2"
+    },
+    {
+      "path": "ashare_lab/application/turn_intent.py",
+      "sha256": "822409a0926bfd85f8586e45ddbc19a22aff8f720e94e9a763e5b8bf92bff2a6"
+    },
+    {
+      "path": "ashare_lab/application/validation_receipts_v2.py",
+      "sha256": "cc256d76277acf06e79a6113a07444967a7b3fd050975b316393d914e9654920"
+    },
+    {
+      "path": "ashare_lab/bootstrap.py",
+      "sha256": "7d8c5db7996376dd47ccefcd303921d97093c5179e398d2b0d0140cf1d14ed15"
+    },
+    {
+      "path": "ashare_lab/domain/__init__.py",
+      "sha256": "6e4c6f1ec0560636dd39dce8575530aae89f99efcc6d6855851798f5f7c6fe5c"
+    },
+    {
+      "path": "ashare_lab/domain/analytics/__init__.py",
+      "sha256": "fef440e45ade50468e1a19160f53db7d95267b496b29c745de014b7a77a3bb18"
+    },
+    {
+      "path": "ashare_lab/domain/analytics/metrics.py",
+      "sha256": "e16a0b7bac21445dd4ef75cb625f149a3c53e35fdaaa4d49966d11e21e5c6477"
+    },
+    {
+      "path": "ashare_lab/domain/catalog/__init__.py",
+      "sha256": "4d3ad777279e7a1ca80a2701379dda0aa77e0af2edf570e8b8888f6436deb79f"
+    },
+    {
+      "path": "ashare_lab/domain/catalog/coverage_loader.py",
+      "sha256": "9c43298d3bf05fe17cffed56ed81b0ec3eb893555a035272f84526a38a02f73b"
+    },
+    {
+      "path": "ashare_lab/domain/catalog/coverage_models.py",
+      "sha256": "868802aea47e42fba9b53fcca86ee30d25faeceb80bf0e4a15b78d35d92963e6"
+    },
+    {
+      "path": "ashare_lab/domain/catalog/loader.py",
+      "sha256": "42baf50c56d05363aec754680f1908f0ca7aa8e5223dedf716e93f1b78cc51d7"
+    },
+    {
+      "path": "ashare_lab/domain/catalog/models.py",
+      "sha256": "463905b59c0f161fae7f8c9ef0d6ea280b64b159ce8357454dcaa13a8b79924f"
+    },
+    {
+      "path": "ashare_lab/domain/events/__init__.py",
+      "sha256": "85311685b606288f8896cc4ebbb272a57162f768792d61b17398faf3313ec1e3"
+    },
+    {
+      "path": "ashare_lab/domain/events/catalog.py",
+      "sha256": "883b6e04cd7673ac63d3d91daa23f4b919ac75a176f3d1d9b7ff24e7aa63cdeb"
+    },
+    {
+      "path": "ashare_lab/domain/events/document_metrics.py",
+      "sha256": "9a014df84ec4c432e5e905c622be1137fd13e5e0139846676f6828a26384fbf9"
+    },
+    {
+      "path": "ashare_lab/domain/events/fusion.py",
+      "sha256": "444738049756f4780071742637a331082bc9f6427a13c64fb7beb29d970fef07"
+    },
+    {
+      "path": "ashare_lab/domain/events/observations.py",
+      "sha256": "09d18499febab9698d5098dba610b3cce2ce1056376911e9e201d3ec86c17eaa"
+    },
+    {
+      "path": "ashare_lab/domain/events/release_scope.py",
+      "sha256": "748d9ea0f474ea8e96de10c7a4b699c936f837672ea0b2456faceab2ad504f83"
+    },
+    {
+      "path": "ashare_lab/domain/events/revisions.py",
+      "sha256": "23cd4df7c88677460fa446dc9c79d5aa09c01945e8f7e693c71b424645a496fd"
+    },
+    {
+      "path": "ashare_lab/domain/events/runtime.py",
+      "sha256": "25acf1c3ad5606c7d38c918d10746ae8fcd63fa374caf24db736176de9edd2ec"
+    },
+    {
+      "path": "ashare_lab/domain/execution/__init__.py",
+      "sha256": "5f651bae307f1aa39537ac33aa74b41cedd2054b8589e486d67f0976c3955d07"
+    },
+    {
+      "path": "ashare_lab/domain/execution/calendar.py",
+      "sha256": "95fbd48545af885fe46d0058f4f78328fbc0dfa2f393d97854ee38c44baa9b03"
+    },
+    {
+      "path": "ashare_lab/domain/execution/fees.py",
+      "sha256": "12a76e470ad3f3cf3bd4acdf105b4ce7f7143f1914da97aa53f173efe9a6557e"
+    },
+    {
+      "path": "ashare_lab/domain/execution/matching.py",
+      "sha256": "6c36363b9de6de46e12b00c2f1beb9c0331d20f25b55578f722a508026e7f132"
+    },
+    {
+      "path": "ashare_lab/domain/execution/rules.py",
+      "sha256": "498db1c98f256319bd3f06bf6be85164d4475dbf82c835ec2c22324da2de175a"
+    },
+    {
+      "path": "ashare_lab/domain/financials/__init__.py",
+      "sha256": "34533602ba70419c49a054a20fa56e82255e45956b3f82af3370d1bd21bcee63"
+    },
+    {
+      "path": "ashare_lab/domain/financials/models.py",
+      "sha256": "14bb64964d058e8aff266ef0f6f6e0418dba4d17e61a88314d96e9fe52c5cb51"
+    },
+    {
+      "path": "ashare_lab/domain/financials/publication.py",
+      "sha256": "8ae962655b84c1d610b8658fcee624dcb651b663c756549c9c65782f5cbff4d4"
+    },
+    {
+      "path": "ashare_lab/domain/instruments/__init__.py",
+      "sha256": "03c5ef5debc5d617c8e35d72f967a1e175adbded81fbd06e2a68297aeb2f6e44"
+    },
+    {
+      "path": "ashare_lab/domain/instruments/models.py",
+      "sha256": "f9ae7c75d484c97141240426a79da7c12df8659db7389d6ba30d004ed47ca4be"
+    },
+    {
+      "path": "ashare_lab/domain/instruments/resolver.py",
+      "sha256": "762e8c7b325fbcf255d06c4df8e605a4cb25d6d7d77ec09ee6b94e8df4950e82"
+    },
+    {
+      "path": "ashare_lab/domain/market_data/__init__.py",
+      "sha256": "9a82ced22230a33abe7112d5365746c6883963686c40dac2a35ea17096b32593"
+    },
+    {
+      "path": "ashare_lab/domain/market_data/instruments.py",
+      "sha256": "6630bc829933840a7ef5da48719fe359b208bd760bd63634f621b3edf8790d35"
+    },
+    {
+      "path": "ashare_lab/domain/market_data/models.py",
+      "sha256": "380733a5a4e367f4bf964f2189d078b31b7bc71e1e98daf991717dada9585b13"
+    },
+    {
+      "path": "ashare_lab/domain/orders/__init__.py",
+      "sha256": "8b2875b23b76b3ac0b5942cc956b51444fb0742de7ebf775660692a577de9bd3"
+    },
+    {
+      "path": "ashare_lab/domain/orders/exceptions.py",
+      "sha256": "60e87b8d9988629eea8a188dff030df6247a4be9d9c930cf2adb6d9faf07a3f4"
+    },
+    {
+      "path": "ashare_lab/domain/orders/models.py",
+      "sha256": "47257b59dfebda4912ad2544ce1b047bd17161a4ba62109d5c198ca5145dfeee"
+    },
+    {
+      "path": "ashare_lab/domain/orders/state_machine.py",
+      "sha256": "479751e133693ebbba9dfdd94d366644153dc835806c7b2dc34b7b308e6c31ed"
+    },
+    {
+      "path": "ashare_lab/domain/portfolio/__init__.py",
+      "sha256": "a8ed8aa5c027471c8f42c5bfc549ccbc38caac6af8fb43832a3bfdb9f85a244b"
+    },
+    {
+      "path": "ashare_lab/domain/portfolio/corporate_actions.py",
+      "sha256": "31729b5b0b3040234e4d48f8a86c04b20cce586e3f66d0485885e17998febbac"
+    },
+    {
+      "path": "ashare_lab/domain/portfolio/exceptions.py",
+      "sha256": "5b739aad746058e4477891b8f932d5f34dd1f1daf51cc8af5f6fcc2707e84596"
+    },
+    {
+      "path": "ashare_lab/domain/portfolio/journal.py",
+      "sha256": "fb831e9a9195b4b213ebf1b38105af01b253b14ee27198c21508d22bd42724b3"
+    },
+    {
+      "path": "ashare_lab/domain/portfolio/ledger.py",
+      "sha256": "4842199dadadcfd8bcd3382a70ef6a76b25bdf8325f6ef5014a219818ad36898"
+    },
+    {
+      "path": "ashare_lab/domain/portfolio/models.py",
+      "sha256": "9e905cdb8b0f9815a3f5c7f9275afbb41eca8ed4457245e2e2f5e116a8f4160d"
+    },
+    {
+      "path": "ashare_lab/domain/provenance/__init__.py",
+      "sha256": "298b9570c85c7fa3d133199898eb45e40a0e9680478cd1beb38738278def4cbc"
+    },
+    {
+      "path": "ashare_lab/domain/provenance/models.py",
+      "sha256": "f3e56c388d9fa1ac1f7c51356fd1f82e074577ead15a6805b79014d930327af1"
+    },
+    {
+      "path": "ashare_lab/domain/runs/__init__.py",
+      "sha256": "02cddbce5bb54982147e105cc4a5431744198c51758acc47fd481780fc6e2bc0"
+    },
+    {
+      "path": "ashare_lab/domain/runs/models.py",
+      "sha256": "3ff8d670a9bf007dc6948f0c6e5f406c36b66d54a19dda160272c46a866b0d0a"
+    },
+    {
+      "path": "ashare_lab/domain/runs/models_v2.py",
+      "sha256": "f795b744c00f95e1796d91e1320e78844b9e8ab268c02a604aaf9cbf424c7cd1"
+    },
+    {
+      "path": "ashare_lab/domain/shared/__init__.py",
+      "sha256": "2ea7ea199bcd1c5cf248255f9e5889cb537f5d69baeebc459c1e4a52641cf7ef"
+    },
+    {
+      "path": "ashare_lab/domain/shared/errors.py",
+      "sha256": "8c3571d0dc6f92a0bccb308dcce1b188534515beee528e2493291fdbc6dfd0e6"
+    },
+    {
+      "path": "ashare_lab/domain/shared/ids.py",
+      "sha256": "06d8d6f6848c7e233e28b7e8cd0398892a44a7f94d8735998664f848f97066ed"
+    },
+    {
+      "path": "ashare_lab/domain/shared/money.py",
+      "sha256": "9178e5d1f71d67c4f76caa76985ce3d4129896ebbf1207b2f42493fbcfabe224"
+    },
+    {
+      "path": "ashare_lab/domain/shared/quantity.py",
+      "sha256": "bfce4fa8c81ec6b92a5b04396e18fedf72c818fba98ee7ddcb2efbe002a4cd99"
+    },
+    {
+      "path": "ashare_lab/domain/shared/time.py",
+      "sha256": "a8d1f62b55ea3d544bfb40b1144fd3286eee8c52108196f859e27e9dfd864cec"
+    },
+    {
+      "path": "ashare_lab/domain/signals/__init__.py",
+      "sha256": "a0275080ee0fece77a0e14d7cf9ddedfd9efb7d8d785129751c0d7538e4c6fe0"
+    },
+    {
+      "path": "ashare_lab/domain/signals/comparators.py",
+      "sha256": "406ef6a86bce8c40846594d051c6f389da9ee40d29f7213062e2eb537d6d3028"
+    },
+    {
+      "path": "ashare_lab/domain/signals/indicators.py",
+      "sha256": "821346cc8b752e70cb7f02b1360c922faa6784ecff85b772e5bac73d8bde45bf"
+    },
+    {
+      "path": "ashare_lab/domain/signals/models.py",
+      "sha256": "a79ef8d302049a18ba593b1a3c8fc11959c7db5c4d658c1ffe60918861d62362"
+    },
+    {
+      "path": "ashare_lab/domain/signals/provider_catalog.py",
+      "sha256": "f7661999b318424099f64f338604bee7e9a4ac972ac48737a6a8170fc6c41ba9"
+    },
+    {
+      "path": "ashare_lab/domain/signals/provider_runtime.py",
+      "sha256": "4fdbbfe9a41af5cc5605322d5dd840474378c8c9eff88961429542acf9be3d89"
+    },
+    {
+      "path": "ashare_lab/domain/signals/runtime.py",
+      "sha256": "528336df24e310d553aa2cd9d2a2b3d7b8144bc19b3abda93eee796ae8caa2f9"
+    },
+    {
+      "path": "ashare_lab/domain/source_validation/__init__.py",
+      "sha256": "7a35710ec419c0d3a04eefc0fa9b9cb61c106a04f86b7f6ddf73dfa9995003af"
+    },
+    {
+      "path": "ashare_lab/domain/source_validation/baselines.py",
+      "sha256": "850d6f9f36a76622bf42fbd66c007b8b774daddd2075bbec1f1666e30173ecf5"
+    },
+    {
+      "path": "ashare_lab/domain/source_validation/models.py",
+      "sha256": "b27cdf9c0d15a733d84811f77b6dff04148f304eb36e242b52224109acef01a8"
+    },
+    {
+      "path": "ashare_lab/domain/source_validation/policy.py",
+      "sha256": "38b9742c45d62b05ea3566e1b3080321d45c4c2e1ad2659cf469e8bdbf3bf548"
+    },
+    {
+      "path": "ashare_lab/domain/strategy/__init__.py",
+      "sha256": "528c2bf6eae9296854f8e491e21de451c0641d571af822838660365ada83cf53"
+    },
+    {
+      "path": "ashare_lab/domain/strategy/canonical.py",
+      "sha256": "fad471f03f00ed2ed054a64e9d59d76cc53276ae39dcad2b32dc83d35b770d27"
+    },
+    {
+      "path": "ashare_lab/domain/strategy/models.py",
+      "sha256": "18191e87b6d71357e5f18cff9addfb2e8664502e29bf0f03f3f71dea7dceaedc"
+    },
+    {
+      "path": "ashare_lab/domain/strategy/models_v2.py",
+      "sha256": "49cc6723815eecc27b385b76e6dbc09d377b38eb222e464c21d27e5b17e22b8b"
+    },
+    {
+      "path": "ashare_lab/domain/strategy/validation.py",
+      "sha256": "79fbe583e0f202a511310586648f108c264a3692197e44b1fc391995233f7f8e"
+    },
+    {
+      "path": "ashare_lab/domain/strategy/validation_v2.py",
+      "sha256": "f47114d73e780e491f0deeb91daa35aef54eb712d2a08cbdf451afb4ca1eef22"
+    },
+    {
+      "path": "ashare_lab/domain/time/__init__.py",
+      "sha256": "72f0772efe172a8795cf1b1a67cce51930b5665c8b70f50617e4035a6cce4b0e"
+    },
+    {
+      "path": "ashare_lab/domain/time/availability.py",
+      "sha256": "8b0ee00a5cdc0002b0e7e4b5134c0edfb19ae1a29a5561c095b49ba948474bd8"
+    },
+    {
+      "path": "ashare_lab/main.py",
+      "sha256": "a689b623953aaf9c18c95023642fbd66c8b316da2f962591f5dcb75dbbbbf898"
+    },
+    {
+      "path": "ashare_lab/ports/__init__.py",
+      "sha256": "04225a0126fac0a22e98066892b3c41af1f4043408b9bf7778cda8a03ee83dcb"
+    },
+    {
+      "path": "ashare_lab/ports/backtest_review.py",
+      "sha256": "d401f5ae3582c0336572d877c31cd8cd7511b3907641e9d3a3963688af66a917"
+    },
+    {
+      "path": "ashare_lab/ports/backtest_runs.py",
+      "sha256": "a75d7b26c6e82b72861242041443818cf3f23380fc7c3945c700c86334ee57cc"
+    },
+    {
+      "path": "ashare_lab/ports/candidate_generation.py",
+      "sha256": "fca837bfd9ec38abee66e6b12517d4db16c711d7048a56fa2fc405790b0ead5d"
+    },
+    {
+      "path": "ashare_lab/ports/clarification_dialogue.py",
+      "sha256": "06d244040518277a5e4b340a46962e0cfdd0b71e77cee36d58e16b31363b6b41"
+    },
+    {
+      "path": "ashare_lab/ports/corporate_actions.py",
+      "sha256": "1757bf66468cb8f7184a96a6ffbb417b3f4dd3c7e905a656a5106db4434c4205"
+    },
+    {
+      "path": "ashare_lab/ports/current_fact_research.py",
+      "sha256": "dd7fc6697eb092f792e3e97165bd4d8659b6445f9d5f89946d3f5538f0ac71f4"
+    },
+    {
+      "path": "ashare_lab/ports/dialogue_progress.py",
+      "sha256": "d1cc8835026147963b462606847f752356ee2968aeb6bbb16bdaab12fc390dc6"
+    },
+    {
+      "path": "ashare_lab/ports/execution_settings.py",
+      "sha256": "afe81315bcb81715b874456b3fbb106dc2ef97d66022746ea00d008851c4c41f"
+    },
+    {
+      "path": "ashare_lab/ports/financial_data.py",
+      "sha256": "df49cadb9c90fb83129ef3a7557e9b602faf73b13d127a46bdf24b2b3bfd7e6c"
+    },
+    {
+      "path": "ashare_lab/ports/idea_routing.py",
+      "sha256": "36e59ab339952a08b0940c2bb2070e091f04be3c39cbbdc8577943f20b7b9745"
+    },
+    {
+      "path": "ashare_lab/ports/indicator_backend.py",
+      "sha256": "3ee75fefc22ea049dcb0f673a72103c46c8d1b1af8d17d3e6c1ffc26bd8e1b88"
+    },
+    {
+      "path": "ashare_lab/ports/instrument_resolution.py",
+      "sha256": "d199ae7fff9e9eb3d9694df129d1b7f3c73b16299b25050e50a664169bd1a0d1"
+    },
+    {
+      "path": "ashare_lab/ports/live_market_data.py",
+      "sha256": "e9a0883e661565f54171517d4e3bb880b41fd8493629aa4d0258eeba9af0675f"
+    },
+    {
+      "path": "ashare_lab/ports/market_data.py",
+      "sha256": "f1769a87bf9273097d38295ebbbf147bac8b51b8e57aaaad8ca6d59fbc3d9e88"
+    },
+    {
+      "path": "ashare_lab/ports/portfolio_highlight_narrative.py",
+      "sha256": "400d2a3df8a6384f17f2f5add16bf901a37a08459b8942c3ea8cb98fcc12167e"
+    },
+    {
+      "path": "ashare_lab/ports/provider_indicator_data.py",
+      "sha256": "ac0947b48d955b66642c94d690f1bd1c588d390fde59b089120b91c6f3cb7452"
+    },
+    {
+      "path": "ashare_lab/ports/request_context.py",
+      "sha256": "7503c939d3a399b217a672a3ce371ea05f2c2375dfcd2b555c7c7333421ce291"
+    },
+    {
+      "path": "ashare_lab/ports/session_reference.py",
+      "sha256": "eeee75fe06203c184b7bd579e9bbbdb049c8200eaed00311b0b593357d64d098"
+    },
+    {
+      "path": "ashare_lab/ports/strategy_advice.py",
+      "sha256": "d43f993e877532451ad27d7bbd79e22779ac5ddabc77c948b576847ebdaada01"
+    },
+    {
+      "path": "ashare_lab/ports/strategy_editing.py",
+      "sha256": "cef6ed231ee0f438ab04fad5f9b2cf04297fbdc50a90c8250e07dec2b8f050c0"
+    },
+    {
+      "path": "ashare_lab/ports/strategy_v2_artifacts.py",
+      "sha256": "a933ae32f5a98a67a1c7d2c69c8fa88696e7456a85277492352b91438aec73c3"
+    },
+    {
+      "path": "ashare_lab/ports/trusted_snapshots.py",
+      "sha256": "1003aedb4ad087de0603217737f9e83c5c4eabfa128e5effaf0097a419d66285"
+    },
+    {
+      "path": "ashare_lab/resources/a_share_directory.json",
+      "sha256": "b97a53df15fabe7d690e723b7ddd21fb23379906abeb4379c8f284a94cd34325"
+    },
+    {
+      "path": "ashare_lab/settings.py",
+      "sha256": "0a0feb2478fb7b68709e9fa2de496e670980b93a46ee95167284c0f0f9f7436f"
+    },
+    {
+      "path": "ashare_lab/worker/__init__.py",
+      "sha256": "011ce7272f64a047a2d37445e914d742f2cbdd0c989d19fa883783706fec456d"
+    },
+    {
+      "path": "ashare_lab/worker/tasks.py",
+      "sha256": "71b4396a329dfa38d2ccbf8974a8a0b37f45b3c2fe5f55c8b77756b9e5d4352e"
+    },
+    {
+      "path": "astock_backtest/__init__.py",
+      "sha256": "57762a69cb95ba4b61ed92399e99d77a6efc148a7e02c02839e0e4822b197470"
+    },
+    {
+      "path": "astock_backtest/config.py",
+      "sha256": "221200d6906108dd6b5c023a3cff64510afe596f9a5c11cf592d138899527ac6"
+    },
+    {
+      "path": "astock_backtest/data_loader.py",
+      "sha256": "6457d462474b143169f77a8f27e29ebcc2250982557d7165baa8faeeeb6d012b"
+    },
+    {
+      "path": "astock_backtest/holding_rules/__init__.py",
+      "sha256": "d96df00da698be405e91b3d38a793bc323dfd15fc1ec5d4646d2ebf680d34994"
+    },
+    {
+      "path": "astock_backtest/holding_rules/base.py",
+      "sha256": "feb6091e303e3b5bea6c905b83bb8acaae6268bf9b3cb0abbf86676909ea7379"
+    },
+    {
+      "path": "astock_backtest/holding_rules/fixed_signal.py",
+      "sha256": "1bc97178e2574fea9f2d48245d8da70bb157d8de739e73e92baeab10271e8d0b"
+    },
+    {
+      "path": "astock_backtest/holding_rules/price_based.py",
+      "sha256": "47f2c1c4e5572d90fa1fd393d68843b754f73e24db14ff11324ce8794857c2cf"
+    },
+    {
+      "path": "astock_backtest/holding_rules/signal_based.py",
+      "sha256": "1a2d1e06b6eb1b2f97771b87ca79dd3a514c0fb2e98f5e3bf5ef816c03470913"
+    },
+    {
+      "path": "astock_backtest/holding_rules/time_based.py",
+      "sha256": "89626b43db99209ef3af42911e5612f5fdd1806740487c74b02a93aad4f3cd11"
+    },
+    {
+      "path": "astock_backtest/holding_rules/time_unit.py",
+      "sha256": "c2533ce411e8210424d2ff4d3d7b38b47851924eb71cc51b4c56124056589f97"
+    },
+    {
+      "path": "astock_backtest/holding_rules/trailing_stop.py",
+      "sha256": "05257561c0db9fca34c79e2bb1a19757492226a899c6e445acb71c5ea34e3eec"
+    },
+    {
+      "path": "astock_backtest/models/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "astock_backtest/models/backtest.py",
+      "sha256": "e6cdd739a4a94d095a0dc72eae5d6299add293b8ccf30abfdddb567eeb708ed2"
+    },
+    {
+      "path": "astock_backtest/models/backtest_custom.py",
+      "sha256": "9448140b36d9fcf533b0b453e2fca61bc66d091d566d12d3d93bba0afb7f2d46"
+    },
+    {
+      "path": "astock_backtest/services/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "astock_backtest/services/backtest_custom_engine.py",
+      "sha256": "b855c5c27c2ddcc4fb912b22384d07d1f7018f7cee2a64bc6bb630f97665d7ff"
+    },
+    {
+      "path": "astock_backtest/services/backtest_engine.py",
+      "sha256": "48dd21d234c41d77765a0a225c68e00b29809c61dc23527e9c04b9ed2e4233c1"
+    },
+    {
+      "path": "astock_backtest/services/backtest_engine_numba.py",
+      "sha256": "8a2c9cd876879f66779930e12da87e4c8a23b2439d950caa9c5640eeba11a119"
+    },
+    {
+      "path": "astock_backtest/services/board_limits.py",
+      "sha256": "a32c493d92887ccbb2763f01fdfccb82e6638a7aac01b05a2f63987a57b0e7ef"
+    },
+    {
+      "path": "astock_backtest/services/grid_engine.py",
+      "sha256": "4e1dbbe72dfeeb9018164ddbc53c1a96529a439998a5da62a7b21b759daf9776"
+    },
+    {
+      "path": "astock_backtest/services/grid_engine_numba.py",
+      "sha256": "ddaa02c3bbe7b6ee92cc4946dda113bda6a83b82db35b8d70bad7b82d6f7de81"
+    },
+    {
+      "path": "astock_backtest/services/metrics.py",
+      "sha256": "44c46b21ffa33202685e8fe6a84a7fde8bc56465e99510cee3ed6b8f48a4cc3d"
+    },
+    {
+      "path": "astock_backtest/services/simulator.py",
+      "sha256": "14599c0d4f4d74f4d5d41621524219c3b160994d9833b814354ac2cacb302b6c"
+    },
+    {
+      "path": "astock_backtest/signal_atoms/__init__.py",
+      "sha256": "07a05338b545486f2a9a1b6771f75dab7f461b4bb727f7f5e1af73cc513c48e6"
+    },
+    {
+      "path": "astock_backtest/signal_atoms/base.py",
+      "sha256": "778c18f51ecee07b839c853306e3aa3adc6f7a59fbce25a3c8c5ca9382e11698"
+    },
+    {
+      "path": "astock_backtest/signal_atoms/fundamental.py",
+      "sha256": "61168c01aa300c4033d29b0ab1ba693ca9864c4c858781a2c180d64aea1b67b9"
+    },
+    {
+      "path": "astock_backtest/signal_atoms/price_action.py",
+      "sha256": "91309c3b373c6df4814b8de9d2dc4e3fe7923748dbf3b2b6ccb70c4bd821f554"
+    },
+    {
+      "path": "astock_backtest/signal_atoms/reverse_pairs.py",
+      "sha256": "057fbc765036bca49207032b03f3550f5b31c09bd2f25d7029007d0cadc3a06d"
+    },
+    {
+      "path": "astock_backtest/signal_atoms/technical.py",
+      "sha256": "82438efca94f68d8892907419d201b04153b4db5da67dd50f8fc24cb28cec1b6"
+    },
+    {
+      "path": "astock_backtest/signal_atoms/volume.py",
+      "sha256": "1dbc2ae48ef5375a28290796764099feba2c0274825e6f04e40fa043454d1c9a"
+    },
+    {
+      "path": "astock_backtest/strategies/__init__.py",
+      "sha256": "778ef6364f9f61b023dd5c8017d7d76532327c4ebc8eae08b457fc427695e397"
+    },
+    {
+      "path": "astock_backtest/strategies/always_hold.py",
+      "sha256": "86293f66aefddb68b9714af9d1a5b392fc37377b4ade4fb4ce80a05cf19b6d71"
+    },
+    {
+      "path": "astock_backtest/strategies/base.py",
+      "sha256": "0b79f8e46c878e7ab61150d2b96a337ea58a8c6a652ea5c1e8f47af05a95105d"
+    },
+    {
+      "path": "astock_backtest/strategies/bollinger.py",
+      "sha256": "b436529f63ba7513c59ddd8bf527ce48884d0753ef78d1677c9b721045489b7b"
+    },
+    {
+      "path": "astock_backtest/strategies/dual_confirm.py",
+      "sha256": "39140bec24cb0bf01f22e0784ba737daba004cd4881873e5af7a643265826d66"
+    },
+    {
+      "path": "astock_backtest/strategies/dual_ma.py",
+      "sha256": "f112e3900df07c250b9cf5024eedc9c784e789512bb7edf74359ac7060dd4955"
+    },
+    {
+      "path": "astock_backtest/strategies/kdj.py",
+      "sha256": "e59206262f0e0866606cbdd18fa6ea4f31eed1a4f0e391d46e48190c4ecc9fa9"
+    },
+    {
+      "path": "astock_backtest/strategies/limit_board.py",
+      "sha256": "685e9c974562bce153dd4a9300ddb9761d3859fb729ee25dbd5a469f61f24163"
+    },
+    {
+      "path": "astock_backtest/strategies/ma_stack.py",
+      "sha256": "9fdf340de02a09ba15d6fe5951cf4d01ed02ea1b42a37d982f700ba1a0c85b25"
+    },
+    {
+      "path": "astock_backtest/strategies/macd.py",
+      "sha256": "893060b9ddb3f4811c99d0df6a8ffe5fef3461ffe4383d1bff8085c5d9c9a161"
+    },
+    {
+      "path": "astock_backtest/strategies/mean_reversion.py",
+      "sha256": "725439b2dd31f99e4b92583a0ee4bc007d297bca1a6736eba054d5b1942bb8b4"
+    },
+    {
+      "path": "astock_backtest/strategies/n_day_high.py",
+      "sha256": "752e3c8c63360f9789d870a7454ae8e83c2e85c08273e40ac7b0ab6230a14f74"
+    },
+    {
+      "path": "astock_backtest/strategies/rsi.py",
+      "sha256": "66fcba23cc626dfc523d40ea62f65aa3ec876b061fa9575cf7c8609e6a437eaa"
+    },
+    {
+      "path": "astock_backtest/strategies/trend_oversold.py",
+      "sha256": "f5395913f8b607932aea65e89413903019f96891cfa4f9af97b101e18afcd2d8"
+    },
+    {
+      "path": "astock_backtest/strategies/volume_breakout.py",
+      "sha256": "f0090d24ca9929f7a72dba6e527512704552336361a4b71cd450fd7be0bfac84"
+    },
+    {
+      "path": "catalogs/__init__.py",
+      "sha256": "d7e5bb096fcbd2ea1ae606f6b6a5d51a2dc0af079afc457b952af9160c8c5178"
+    },
+    {
+      "path": "catalogs/coverage/cn_a.v1.catalog.json",
+      "sha256": "7273d29018fd738dd976b4b3c07c995f65433faf23603d0e0476c9c34bc757ce"
+    },
+    {
+      "path": "catalogs/signals/cn_a_technical.v1.manifest.json",
+      "sha256": "7561fec6c4a430ebee97bfcaaab1683c01ad8f8f4ab88731313910a0054ded4b"
+    },
+    {
+      "path": "catalogs/tools/__init__.py",
+      "sha256": "8a10e3898dc96cb34af14a1d832aa2d3175bbfffb3da027171ed09d43368575c"
+    },
+    {
+      "path": "catalogs/tools/build_coverage.py",
+      "sha256": "9871fc780d1e308454ccb24d5416020104a44eb1d3ddea69778896dd58ebda48"
+    },
+    {
+      "path": "contracts/__init__.py",
+      "sha256": "44a2188ce9340e33000f1407227a323a4601893d0e0979a2daa2fd28cf4af383"
+    },
+    {
+      "path": "contracts/catalog-coverage.v1.schema.json",
+      "sha256": "d92da186d28497c0d41157bcb5e74132a62981758d6fc228bcb9fd74c25e23d7"
+    },
+    {
+      "path": "contracts/examples/strategy.event-forecast-macd.daily.v1.json",
+      "sha256": "83cba597f384ac8c1af21cbe7c55d0125ae40b7ebb6745f32b5e9f819e7461ef"
+    },
+    {
+      "path": "contracts/examples/strategy.macd-volume.daily.v1.json",
+      "sha256": "e8c4000ef3e0c4842cb0e7d27e710e0d6108608f8d2d7eae13b8d2c7bc713551"
+    },
+    {
+      "path": "contracts/export_schemas.py",
+      "sha256": "74784699cd1005d235a38ed118d9e2587b9d6f9924eff0898920e96f0e9624fc"
+    },
+    {
+      "path": "contracts/indicator-catalog.v1.schema.json",
+      "sha256": "7edb6cf5f497e4f07b912b4d523b5d95c67565618109869c6d675db966dc75dd"
+    },
+    {
+      "path": "contracts/strategy.v1.schema.json",
+      "sha256": "c5950310fa8bf8dedba8bdf1c41e6ed119e4224aebc85388b6d909cf61c46880"
+    },
+    {
+      "path": "contracts/strategy.v2.schema.json",
+      "sha256": "bc2f1c85bc7ae2a0ab2392dc282ad42bf2a0a8af15832d7aebcd906c01214ba7"
+    },
+    {
+      "path": "deploy/private_preview/access.py",
+      "sha256": "ca5e8c62a83143b985aa0539792f9b768611158e49eb7cf5f283dbaf8966a8a0"
+    },
+    {
+      "path": "deploy/private_preview/dialogue_requests.py",
+      "sha256": "9255778df442b0a1b3982c03166b5c2025579ef8aec6c7911128a0c8eebd3865"
+    },
+    {
+      "path": "deploy/private_preview/entrypoint.py",
+      "sha256": "72725b6d8cc3ed1962265e4edbc7af2a5c6bfffbfeb84ccb0ba6e281713d2b23"
+    },
+    {
+      "path": "pyproject.toml",
+      "sha256": "6538ae9de57e0847f52e46902756da109338c4b53e0d373c18ffdc133b6d90f7"
+    },
+    {
+      "path": "scripts/prepare_private_preview_bundle.py",
+      "sha256": "635e8de0943b52ebe883e1468bd0fd62e71e66f715c7f22c4d15c507aad8fd94"
+    },
+    {
+      "path": "uv.lock",
+      "sha256": "4d130d2e65a1e5fbedb80cc7431a2e3d4ee49b1170664e31dc2ca6c92513e017"
+    },
+    {
+      "path": "web/dist/assets/index-5ZRbCNX2.css",
+      "sha256": "988ec4237c5c004bed6409066ab370da4d7703e94cef3a078b780ad62637e40e"
+    },
+    {
+      "path": "web/dist/assets/index-B2p7WQki.js",
+      "sha256": "b5e261c9c5293805765dc9d23718c056a15de4f51eac52a2769426c8898dbfcc"
+    },
+    {
+      "path": "web/dist/index.html",
+      "sha256": "244d8cfc7fab1eca36b617bd6ef178c287b873cf30e2734c7f15db72afb320d9"
+    }
+  ],
+  "digestDefinition": "sha256(UTF-8 compact JSON of files, keys ordered path then sha256)",
+  "sourcePathMappings": {
+    "Dockerfile": "deploy/private_preview/Dockerfile"
+  },
+  "manifestExcludedFromDigest": true,
+  "deploymentProfile": "private_skill_ephemeral",
+  "persistence": "ephemeral",
+  "restartRecoveryVerified": false,
+  "instrumentDirectory": {
+    "path": "ashare_lab/resources/a_share_directory.json",
+    "rowCount": 5567,
+    "markets": [
+      "BJ",
+      "SH",
+      "SZ"
+    ]
+  },
+  "webValidation": "static live-mode and no mock/local-service markers; not live acceptance"
+}
