@@ -1,6 +1,6 @@
 # B30：结果查询断线恢复与改策略执行接续
 
-状态：本地已实现；真实断线恢复及修改后自动创建回测通过。首次实际回测因 `skill_mx_connect_timeout` 失败，按原策略与参数进行一次本地API重试后 succeeded，已核对 summary／series／trades；不是首次无故障，也不是浏览器自动恢复了收益取数。公网仍为011，未部署本次改动。
+当前状态：已随[公网012发布并验收](release-public-012-20260906.md)。下文保留发布前本地证据：首次实际回测因 `skill_mx_connect_timeout` 失败，按原策略与参数进行一次本地API重试后 succeeded，已核对 summary／series／trades；不是首次无故障，也不是浏览器自动恢复了收益取数。
 
 ## 两个确定的缺陷
 
