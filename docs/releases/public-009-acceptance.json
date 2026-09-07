@@ -1,0 +1,213 @@
+{
+  "schemaVersion": "ashare-public-acceptance.v1",
+  "date": "2026-09-06",
+  "status": "PASSED_IN_CHANGED_SCOPE",
+  "origin": "https://ashare-strategy-preview-305722-11-1330091763.sh.run.tcloudbase.com/",
+  "version": "ashare-strategy-preview-009",
+  "taskId": 2090603,
+  "trafficPercent": 100,
+  "revision": "sha256:340b0196c1e64f33a72c03c427b8cc95a8ae9718bacba4816c14b3bc5cdf8ca7",
+  "runtimeCommit": "54dd9d2",
+  "access": "public_anonymous",
+  "persistence": "ephemeral",
+  "changedRuntimeFilesSince008": [
+    "ashare_lab/adapters/language/vibe_candidates.py"
+  ],
+  "tests": {
+    "newRegressionPassed": 17,
+    "nearestRegressionPassed": 214,
+    "baselineKnownFailuresDeselected": 3
+  },
+  "local": {
+    "exactPackage": true,
+    "realModel": true,
+    "draftId": "4a5e6017-7f48-47b1-8c11-fc299174a5d1",
+    "httpStatus": 201,
+    "status": "ready",
+    "seconds": 9.09,
+    "referenceSpans": 5,
+    "repair": false
+  },
+  "public": {
+    "input": "美的集团，14日RSI从30下方上穿30且当日成交额超过5亿元买入；14日RSI高于55、持仓亏损5%或持有满10个交易日卖出。",
+    "realBrowserViewport": {
+      "width": 390,
+      "height": 844
+    },
+    "trials": [
+      {
+        "draftId": "d2360508-12c1-48fd-8670-d690bf2fdbfc",
+        "httpStatus": 201,
+        "status": "ready",
+        "asyncHeader": "respond-async",
+        "strategyHash": "sha256:b6cb1a80bad637be9891adbebcdf0f0f275790b4eef0c69a0d146eb7986ac814",
+        "backtestPosts": 0
+      },
+      {
+        "draftId": "9dc57e69-71dd-43a4-97df-4a0447783143",
+        "httpStatus": 201,
+        "status": "ready",
+        "asyncHeader": "respond-async",
+        "strategyHash": "sha256:b6cb1a80bad637be9891adbebcdf0f0f275790b4eef0c69a0d146eb7986ac814",
+        "backtestPosts": 0
+      }
+    ],
+    "strategy": {
+      "schema_version": "strategy.v1",
+      "catalog": {
+        "catalog_id": "cn_a.signals",
+        "release_version": "2026.09.01"
+      },
+      "instrument": {
+        "market": "CN_A",
+        "symbol": "000333.SZ",
+        "position_mode": "long_only"
+      },
+      "entry": {
+        "type": "all",
+        "children": [
+          {
+            "type": "indicator_condition",
+            "indicator_id": "technical.rsi",
+            "definition_version": "1.0.0",
+            "params": {
+              "period": 14
+            },
+            "timeframe": "1d",
+            "evaluation_mode": "bar_close_confirmed",
+            "trigger": "crosses_above",
+            "value": 30
+          },
+          {
+            "type": "indicator_condition",
+            "indicator_id": "market.amount",
+            "definition_version": "1.0.0",
+            "params": {},
+            "timeframe": "1d",
+            "evaluation_mode": "bar_close_confirmed",
+            "trigger": "above",
+            "value": 500000000
+          }
+        ]
+      },
+      "exit": {
+        "op": "first_of",
+        "children": [
+          {
+            "type": "indicator_condition",
+            "indicator_id": "technical.rsi",
+            "definition_version": "1.0.0",
+            "params": {
+              "period": 14
+            },
+            "timeframe": "1d",
+            "evaluation_mode": "bar_close_confirmed",
+            "trigger": "above",
+            "value": 55
+          },
+          {
+            "type": "position_return_exit",
+            "trigger": "stop_loss",
+            "threshold_pct": 5,
+            "anchor": "first_entry_fill",
+            "observation": "back_adjusted_daily_close",
+            "evaluation_mode": "bar_close_confirmed",
+            "execution": "next_tradable_session_open"
+          },
+          {
+            "type": "holding_period_exit",
+            "sessions": 10,
+            "anchor": "first_entry_fill",
+            "count_mode": "subsequent_trading_sessions",
+            "execution": "target_session_open_proxy"
+          }
+        ]
+      },
+      "execution": {
+        "timezone": "Asia/Shanghai",
+        "entry_policy": "next_tradable_session_open",
+        "exit_policy": "next_tradable_session_open",
+        "data_capability": "daily_ohlcv",
+        "execution_resolution": "1d",
+        "evaluation_frequency": "1d_close",
+        "position_policy": "single_position_no_pyramiding",
+        "t_plus_one": true
+      },
+      "backtest": {
+        "start": "2025-09-06",
+        "end": "2026-09-06",
+        "initial_cash_cny": 1000000
+      }
+    },
+    "sourceSpans": [
+      {
+        "path": "/entry/0",
+        "start": 5,
+        "end": 33,
+        "text": "14日RSI从30下方上穿30且当日成交额超过5亿元买入"
+      },
+      {
+        "path": "/entry/1",
+        "start": 5,
+        "end": 33,
+        "text": "14日RSI从30下方上穿30且当日成交额超过5亿元买入"
+      },
+      {
+        "path": "/exit/0",
+        "start": 34,
+        "end": 63,
+        "text": "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+      },
+      {
+        "path": "/exit/1",
+        "start": 34,
+        "end": 63,
+        "text": "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+      },
+      {
+        "path": "/exit/2",
+        "start": 34,
+        "end": 63,
+        "text": "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+      },
+      {
+        "path": "/instrument/symbol",
+        "start": 0,
+        "end": 4,
+        "text": "美的集团"
+      }
+    ],
+    "visibleRelations": [
+      "全部满足才买入（且）",
+      "任一触发就卖出（或）"
+    ],
+    "renderedScreenshotInspected": true,
+    "editControlsEnabled": true,
+    "documentScrollWidth": 390,
+    "frontendSha256Checked": [
+      "web/dist/assets/index-5ZRbCNX2.css",
+      "web/dist/assets/index-B2p7WQki.js"
+    ]
+  },
+  "preserved": {
+    "environmentExceptRevision": true,
+    "extractFast": {
+      "model": "deepseek-v4-flash",
+      "thinking": "disabled"
+    },
+    "planDeep": {
+      "model": "deepseek-v4-pro",
+      "thinking": "enabled",
+      "effort": "high"
+    },
+    "publicReasoningExposure": true,
+    "frontendUnchangedSince008": true,
+    "priorReasoningEvidence": "public-008-acceptance.json"
+  },
+  "limits": [
+    "Draft parsing and editable review verified; no new backtest or report POST executed.",
+    "Two successful public trials do not guarantee all model outputs will succeed.",
+    "390x844 Chromium is not a physical WeChat device.",
+    "B35 name-code concatenation and report numeric validation remain open."
+  ]
+}
