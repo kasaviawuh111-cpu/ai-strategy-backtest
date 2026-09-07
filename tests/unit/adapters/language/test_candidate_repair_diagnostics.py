@@ -219,3 +219,26 @@ async def test_one_repair_gets_exact_count_hint_but_cannot_bypass_value_validati
         assert generated[0].unsupported_code == "candidate_provider_invalid_output"
         assert "amount_source_mismatch" in caplog.text
         assert "semantic_validation_failed" in gate_logs[-1] and "attempt=2" in gate_logs[-1]
+
+
+@pytest.mark.asyncio
+async def test_leaf_and_parameter_failure_logs_keep_request_and_attempt_without_source_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    invalid = _screenshot_payload()
+    cast(list[dict[str, object]], _candidate(invalid)["entry"])[0]["params"] = {"period": 13}
+    transport = _SequenceTransport((invalid, deepcopy(invalid)))
+    request_token = request_id.set("grounding-detail-correlation")
+    try:
+        generated = await _generator(transport, repair=True).generate(_request())
+    finally:
+        request_id.reset(request_token)
+
+    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+    assert len(transport.requests) == 2
+    for event in ("candidate_grounding_leaf_failed", "candidate_grounding_parameter_failed"):
+        detail_logs = [record.message for record in caplog.records if event in record.message]
+        assert detail_logs
+        assert all("request_id=grounding-detail-correlation" in line for line in detail_logs)
+        assert {line.rsplit("attempt=", 1)[-1] for line in detail_logs} == {"1", "2"}
+    assert SCREENSHOT_UTTERANCE not in caplog.text

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -58,6 +59,7 @@ from ashare_lab.ports.live_market_data import (
     LiveScreenedFinanceData,
     LiveScreenedFinanceDataResult,
 )
+from ashare_lab.ports.request_context import current_request_id
 from ashare_lab.ports.strategy_advice import (
     QueryDataReviewAdvisor,
     StockRecommendationAdvisor,
@@ -124,6 +126,7 @@ _FRESH_PARENT_TURN_INTENTS = frozenset(
 
 _IDEA_ROUTE_DIAGNOSTICS = {
     "idea_guidance_required",
+    "idea_guidance_execution_invalid",
     "entry_rule_not_recognized",
     "exit_rule_not_recognized",
     "strategy_rule_incomplete",
@@ -134,6 +137,7 @@ _IDEA_ROUTE_DIAGNOSTICS = {
     "ambiguous_cross_indicator",
     "data_query_only",
 }
+_LOGGER = logging.getLogger("uvicorn.error")
 
 
 @dataclass(slots=True)
@@ -2014,7 +2018,7 @@ def _to_response(
         )
         for item in outcome.candidate_grounding
     )
-    return StrategyDraftResponse(
+    response = StrategyDraftResponse(
         draft_id=stored.draft_id,
         revision=stored.revision,
         status=outcome.status,
@@ -2102,6 +2106,12 @@ def _to_response(
         data=data,
         created_at=stored.created_at,
     )
+    _LOGGER.info(
+        "strategy_draft_outcome request_id=%s draft_id=%s revision=%d status=%s diagnostic_code=%s",
+        current_request_id(), response.draft_id, response.revision, response.status.value,
+        response.diagnostic_code or "none",
+    )
+    return response
 
 
 def _to_idea_route_payload(idea_route: IdeaRoute) -> IdeaRoutePayload:

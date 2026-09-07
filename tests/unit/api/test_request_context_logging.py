@@ -95,6 +95,9 @@ async def test_async_polling_preserves_isolated_model_request_and_attempt_ids(
     assert [response.headers["X-Request-ID"] for response in completed] == [
         "request-a", "request-b", "request-c",
     ]
+    assert [response.headers["X-Backend-Request-ID"] for response in completed] == [
+        "request-a", "request-b", "request-c",
+    ]
     assert entered == [("request-a", 1), ("request-b", 2), ("request-c", 1)]
     for correlation, attempt in entered:
         model_lines = [
@@ -129,4 +132,5 @@ async def test_request_context_resets_after_errors_and_rejects_unsafe_header() -
         generated = unsafe.headers["X-Request-ID"]
         assert len(generated) == 32 and generated.isalnum()
         assert unsafe.json()["id"] == generated
+        assert unsafe.headers["X-Backend-Request-ID"] == generated
         assert current_request_id() == "-"

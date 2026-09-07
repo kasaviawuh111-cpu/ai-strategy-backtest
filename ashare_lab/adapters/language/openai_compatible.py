@@ -30,6 +30,16 @@ from .vibe_candidates import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_PAYLOAD_SIZE_FIELDS = (
+    "utterance", "previousResponse", "capabilityMatrix", "responseSchema",
+    "verifiedRows", "supplementalData", "dataSnapshot", "backtestResults", "recentTurns",
+)
+
+
+def _safe_request_purpose(name: str) -> str:
+    if len(name) <= 80 and name.isascii() and name.replace("_", "").isalnum():
+        return name
+    return "other"
 
 
 class CandidateProviderTransportError(CandidateTransportError):
@@ -293,6 +303,20 @@ class OpenAICompatibleCandidateTransport:
             ).encode("utf-8")
             request_size = len(request_bytes)
             if len(request_bytes) > self._max_request_bytes:
+                # Only fixed field names and byte counts; never log user/model/data content.
+                field_bytes = {
+                    key: len(json.dumps(
+                        user_payload[key], ensure_ascii=False, separators=(",", ":"),
+                    ).encode("utf-8"))
+                    for key in _PAYLOAD_SIZE_FIELDS if key in user_payload
+                }
+                _LOGGER.warning(
+                    "candidate_request_oversized request_id=%s attempt=%d purpose=%s "
+                    "request_bytes=%d max_request_bytes=%d payload_field_bytes=%s",
+                    current_request_id(), current_candidate_attempt(),
+                    _safe_request_purpose(request.response_schema_name), request_size,
+                    self._max_request_bytes, json.dumps(field_bytes, separators=(",", ":")),
+                )
                 raise CandidateProviderTransportError("candidate provider request is too large")
             async with httpx.AsyncClient(
                 timeout=self._timeout,
@@ -359,7 +383,7 @@ class OpenAICompatibleCandidateTransport:
             _LOGGER.warning(
                 "candidate_transport_ok request_id=%s attempt=%d "
                 "provider=%s model=%s status=%s elapsed_ms=%d "
-                "request_bytes=%d response_bytes=%d response_mode=%s thinking=%s",
+                "request_bytes=%d response_bytes=%d response_mode=%s thinking=%s purpose=%s",
                 current_request_id(),
                 current_candidate_attempt(),
                 self._identity.provider,
@@ -370,6 +394,7 @@ class OpenAICompatibleCandidateTransport:
                 response_size,
                 self._response_mode,
                 self._thinking,
+                _safe_request_purpose(request.response_schema_name),
             )
             emit_progress("validation", "模型已返回结果，正在校验结构与可执行条件。")
             return cast(dict[str, object], candidate_payload)
@@ -379,7 +404,8 @@ class OpenAICompatibleCandidateTransport:
             _LOGGER.warning(
                 "candidate_transport_failed request_id=%s attempt=%d "
                 "provider=%s model=%s status=%s elapsed_ms=%d "
-                "request_bytes=%d response_bytes=%d response_mode=%s thinking=%s reason=%s",
+                "request_bytes=%d response_bytes=%d response_mode=%s thinking=%s reason=%s "
+                "purpose=%s",
                 current_request_id(),
                 current_candidate_attempt(),
                 self._identity.provider,
@@ -391,6 +417,7 @@ class OpenAICompatibleCandidateTransport:
                 self._response_mode,
                 self._thinking,
                 failure.failure_kind if failure.is_classified else _transport_failure_reason(exc),
+                _safe_request_purpose(request.response_schema_name),
             )
             raise failure from None
         except (
@@ -418,7 +445,7 @@ class OpenAICompatibleCandidateTransport:
                 "candidate_transport_failed request_id=%s attempt=%d "
                 "provider=%s model=%s status=%s elapsed_ms=%d "
                 "request_bytes=%d response_bytes=%d response_mode=%s thinking=%s "
-                "reason=%s error_type=%s",
+                "reason=%s error_type=%s purpose=%s",
                 current_request_id(),
                 current_candidate_attempt(),
                 self._identity.provider,
@@ -431,6 +458,7 @@ class OpenAICompatibleCandidateTransport:
                 self._thinking,
                 failure_kind,
                 type(exc).__name__,
+                _safe_request_purpose(request.response_schema_name),
             )
             raise CandidateProviderTransportError(
                 "candidate provider response unavailable", timed_out=timed_out,

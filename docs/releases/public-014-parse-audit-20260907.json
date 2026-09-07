@@ -1,0 +1,928 @@
+{
+  "start": "2026-09-07 00:00:00",
+  "end": "2026-09-07 12:10:00",
+  "records": [
+    {
+      "time": "2026-09-07 07:19:24",
+      "version": "ashare-strategy-preview-008",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_text_mismatch",
+      "path": "/exit/0",
+      "capability": "technical.rsi",
+      "trigger": "above"
+    },
+    {
+      "time": "2026-09-07 07:19:24",
+      "version": "ashare-strategy-preview-008",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_text_mismatch",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 07:19:27",
+      "version": "ashare-strategy-preview-008",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_text_mismatch",
+      "path": "/exit/0",
+      "capability": "technical.rsi",
+      "trigger": "above"
+    },
+    {
+      "time": "2026-09-07 07:19:27",
+      "version": "ashare-strategy-preview-008",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_text_mismatch",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 07:19:27",
+      "version": "ashare-strategy-preview-008",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 08:22:34",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error;candidates:too_short"
+    },
+    {
+      "time": "2026-09-07 08:22:36",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error;candidates:too_short"
+    },
+    {
+      "time": "2026-09-07 08:22:36",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 08:26:00",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:26:03",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:26:03",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 08:26:12",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:26:14",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:26:14",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 08:26:30",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error;candidates:too_short"
+    },
+    {
+      "time": "2026-09-07 08:26:33",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error;candidates:too_short"
+    },
+    {
+      "time": "2026-09-07 08:26:33",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 08:28:16",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:28:18",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:28:18",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 08:28:39",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error;candidates:too_short"
+    },
+    {
+      "time": "2026-09-07 08:28:40",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error;candidates:too_short"
+    },
+    {
+      "time": "2026-09-07 08:28:40",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 08:32:06",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:32:08",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:32:08",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 08:33:37",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:56:58",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:57:00",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 08:57:00",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 09:03:41",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 09:03:43",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 09:03:43",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 09:15:30",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 09:15:32",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 09:15:32",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "time": "2026-09-07 09:25:21",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "cc550385-c615-4c9d-ae46-2c91ef9aff44",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 09:26:41",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "3e70d555-50aa-4843-be19-187a6203a5aa",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 09:33:25",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "bd41958a-7b54-4e47-a8cd-e522387cca9d",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 09:52:25",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "873e10ce-e6ea-4161-bed5-b28266c50780",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 10:12:47",
+      "version": "ashare-strategy-preview-011",
+      "event": "idea_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "attempt": "1"
+    },
+    {
+      "time": "2026-09-07 10:13:52",
+      "version": "ashare-strategy-preview-011",
+      "event": "idea_gate_rejected",
+      "reason": "catalog_invalid",
+      "issues": "missing_parameter at /conditions/1/params/consecutive_days: compiled DSL must contain every required parameter"
+    },
+    {
+      "time": "2026-09-07 10:20:12",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "71359c6a-9727-438d-ab68-201fc1f75707",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 10:20:15",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "71359c6a-9727-438d-ab68-201fc1f75707",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 10:20:15",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "71359c6a-9727-438d-ab68-201fc1f75707",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 10:46:03",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "43a5114f-2c5f-4815-84c6-4b87f7ae7c16",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 10:46:06",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "43a5114f-2c5f-4815-84c6-4b87f7ae7c16",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 10:46:06",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "43a5114f-2c5f-4815-84c6-4b87f7ae7c16",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 10:46:31",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "e9b6bd0e-ae61-4b43-9447-db08a0addb73",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 10:46:33",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "e9b6bd0e-ae61-4b43-9447-db08a0addb73",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 10:46:33",
+      "version": "ashare-strategy-preview-011",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "e9b6bd0e-ae61-4b43-9447-db08a0addb73",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 11:16:29",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "4e67947b-1945-42d8-84aa-4fa8f68721fa",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:17:00",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_mixes_actions",
+      "path": "/entry/0",
+      "capability": "technical.ma_cross",
+      "trigger": "golden_cross"
+    },
+    {
+      "time": "2026-09-07 11:17:00",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_mixes_actions",
+      "request_id": "59ba1075-ab8f-46f7-8f47-b9a9b0fd457b",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:17:02",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_mixes_actions",
+      "path": "/entry/0",
+      "capability": "technical.ma_cross",
+      "trigger": "golden_cross"
+    },
+    {
+      "time": "2026-09-07 11:17:02",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_mixes_actions",
+      "request_id": "59ba1075-ab8f-46f7-8f47-b9a9b0fd457b",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:17:02",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "59ba1075-ab8f-46f7-8f47-b9a9b0fd457b",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 11:17:19",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:17:19",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:17:19",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "parameter_evidence_missing",
+      "path": "/entry/0",
+      "capability": "technical.ma_cross",
+      "trigger": "golden_cross"
+    },
+    {
+      "time": "2026-09-07 11:17:19",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "parameter_evidence_missing",
+      "request_id": "898804d8-73e6-41d9-81d6-51f7a84c717d",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "_ParameterEvidenceError"
+    },
+    {
+      "time": "2026-09-07 11:17:23",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_capability_missing",
+      "path": "/exit/0",
+      "capability": "technical.ma_cross",
+      "trigger": "death_cross"
+    },
+    {
+      "time": "2026-09-07 11:17:23",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_capability_missing",
+      "request_id": "898804d8-73e6-41d9-81d6-51f7a84c717d",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:17:23",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "898804d8-73e6-41d9-81d6-51f7a84c717d",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 11:18:01",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "d3b57144-aa85-465b-a9e8-0687043b7c62",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:18:03",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "request_id": "ca13e4fc-7ec5-4ccf-b06b-8292d35165db",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:18:04",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/exit/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:18:04",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_capability_missing",
+      "path": "/entry/0",
+      "capability": "price.rolling_high",
+      "trigger": "new_high"
+    },
+    {
+      "time": "2026-09-07 11:18:04",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_capability_missing",
+      "request_id": "d3b57144-aa85-465b-a9e8-0687043b7c62",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:18:04",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "d3b57144-aa85-465b-a9e8-0687043b7c62",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 11:18:39",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_mixes_actions",
+      "path": "/entry/0",
+      "capability": "technical.ma_cross",
+      "trigger": "golden_cross"
+    },
+    {
+      "time": "2026-09-07 11:18:39",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_mixes_actions",
+      "request_id": "cf83e0d9-a38a-455c-8615-88e2cf326232",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:18:41",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_mixes_actions",
+      "path": "/entry/0",
+      "capability": "technical.ma_cross",
+      "trigger": "golden_cross"
+    },
+    {
+      "time": "2026-09-07 11:18:41",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_mixes_actions",
+      "request_id": "cf83e0d9-a38a-455c-8615-88e2cf326232",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:18:41",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "cf83e0d9-a38a-455c-8615-88e2cf326232",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 11:20:12",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:20:12",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:20:12",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "parameter_evidence_missing",
+      "path": "/entry/0",
+      "capability": "technical.ma_cross",
+      "trigger": "golden_cross"
+    },
+    {
+      "time": "2026-09-07 11:20:12",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "parameter_evidence_missing",
+      "request_id": "37bbc5ac-51a6-43e6-bc5f-2387ce6cf670",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "_ParameterEvidenceError"
+    },
+    {
+      "time": "2026-09-07 11:20:14",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_capability_missing",
+      "path": "/exit/0",
+      "capability": "technical.ma_cross",
+      "trigger": "death_cross"
+    },
+    {
+      "time": "2026-09-07 11:20:14",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_capability_missing",
+      "request_id": "37bbc5ac-51a6-43e6-bc5f-2387ce6cf670",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:20:14",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "37bbc5ac-51a6-43e6-bc5f-2387ce6cf670",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 11:21:28",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_transport_failed",
+      "reason": "request_too_large",
+      "request_id": "48d18784-f2a8-42cc-8a77-85a03618b7ad",
+      "attempt": "0",
+      "elapsed_ms": "1",
+      "request_bytes": "266332",
+      "response_bytes": "0",
+      "status": "None",
+      "model": "deepseek-v4-pro",
+      "provider": "deepseek",
+      "response_mode": "json_object",
+      "thinking": "enabled"
+    },
+    {
+      "time": "2026-09-07 11:21:29",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:21:29",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:21:29",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "parameter_evidence_missing",
+      "path": "/entry/0",
+      "capability": "technical.ma_cross",
+      "trigger": "golden_cross"
+    },
+    {
+      "time": "2026-09-07 11:21:29",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "parameter_evidence_missing",
+      "request_id": "9000bed1-cfce-4c4b-9bcd-4af81bca5ee5",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "_ParameterEvidenceError"
+    },
+    {
+      "time": "2026-09-07 11:21:31",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_capability_missing",
+      "path": "/exit/0",
+      "capability": "technical.ma_cross",
+      "trigger": "death_cross"
+    },
+    {
+      "time": "2026-09-07 11:21:31",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_capability_missing",
+      "request_id": "9000bed1-cfce-4c4b-9bcd-4af81bca5ee5",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:21:31",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "9000bed1-cfce-4c4b-9bcd-4af81bca5ee5",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 11:46:35",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:46:35",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:46:35",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "parameter_evidence_missing",
+      "path": "/entry/0",
+      "capability": "technical.ma_cross",
+      "trigger": "golden_cross"
+    },
+    {
+      "time": "2026-09-07 11:46:35",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "parameter_evidence_missing",
+      "request_id": "c62de840-0dc7-4ac7-937a-a1a65076e03a",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "_ParameterEvidenceError"
+    },
+    {
+      "time": "2026-09-07 11:46:37",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "span_capability_missing",
+      "path": "/exit/0",
+      "capability": "technical.ma_cross",
+      "trigger": "death_cross"
+    },
+    {
+      "time": "2026-09-07 11:46:37",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "span_capability_missing",
+      "request_id": "c62de840-0dc7-4ac7-937a-a1a65076e03a",
+      "attempt": "2",
+      "candidate_rank": "1",
+      "error_type": "ValueError"
+    },
+    {
+      "time": "2026-09-07 11:46:37",
+      "version": "ashare-strategy-preview-012",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed",
+      "request_id": "c62de840-0dc7-4ac7-937a-a1a65076e03a",
+      "attempt": "2"
+    },
+    {
+      "time": "2026-09-07 11:56:47",
+      "version": "ashare-strategy-preview-013",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:56:47",
+      "version": "ashare-strategy-preview-013",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/exit/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:56:47",
+      "version": "ashare-strategy-preview-013",
+      "event": "candidate_grounding_parameter_failed",
+      "detail": "lexical_evidence_missing",
+      "path": "/entry/0/params/price_field",
+      "value": "close"
+    },
+    {
+      "time": "2026-09-07 11:56:47",
+      "version": "ashare-strategy-preview-013",
+      "event": "candidate_grounding_leaf_failed",
+      "detail": "parameter_evidence_missing",
+      "path": "/entry/0",
+      "capability": "technical.ma_cross",
+      "trigger": "golden_cross"
+    },
+    {
+      "time": "2026-09-07 11:56:47",
+      "version": "ashare-strategy-preview-013",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "parameter_evidence_missing",
+      "request_id": "2e2a551c-a703-409f-84ac-789c3720855b",
+      "attempt": "1",
+      "candidate_rank": "1",
+      "error_type": "_ParameterEvidenceError"
+    }
+  ],
+  "source": "CloudBase tcbr.SearchClsLog; read-only, no logging service enablement",
+  "service": "ashare-strategy-preview",
+  "logTimeZone": "UTC+08:00",
+  "limitations": [
+    "Service-wide records include engineering probes; ownership cannot be assigned to the boss or coworkers.",
+    "Attempt rejections are not final request failures; HTTP201 alone cannot distinguish ready from unsupported.",
+    "Old per-leaf logs lack request_id; do not infer their request association from adjacency.",
+    "Source utterances and raw model payloads were not logged; cannot exactly reconstruct all historic inputs."
+  ],
+  "summary": [
+    "012: seven distinct final semantic_validation_failed request IDs; one request_too_large rejected locally before HTTP delivery.",
+    "013 through query end: one first-attempt parameter annotation rejection; no final semantic or transport rejection in retrieved window. Three real probes independently ready; not a traffic-wide success guarantee.",
+    "011: one idea Catalog rejection specifically missing /conditions/1/params/consecutive_days; its trigger is not available."
+  ]
+}

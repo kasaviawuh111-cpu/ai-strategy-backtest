@@ -1691,7 +1691,10 @@ def _normalize_transport_batch(
     Catalog default.  Both repairs below are derived from the exact utterance;
     no indicator, trigger, value, condition, or missing span is invented.
     A unique explicit cash literal can also anchor provenance when the model
-    has already returned that exact amount. No strategy value is invented.
+    has already returned that exact amount. The unused consecutive-days field
+    of single-session relative-volume triggers and wholly unspoken standard
+    MACD parameters may be filled from the Catalog. Explicit parameters,
+    trading thresholds, indicators and triggers are never replaced.
     Everything else continues through the existing fail-closed validators.
     """
 
@@ -1745,6 +1748,7 @@ def _normalize_transport_candidate(
         normalized = normalized.model_copy(update={"initial_cash_span": CandidateSourceSpan(
             start=cash.start, end=cash.end, text=request.utterance[cash.start:cash.end],
         )})
+    normalized = _normalize_bounded_catalog_defaults(normalized, matrix, request.utterance)
     try:
         _validate_candidate_against_matrix(normalized, matrix)
     except (TypeError, ValueError, ValidationError):
@@ -1865,6 +1869,93 @@ def _normalize_transport_candidate(
     return normalized.model_copy(update={"defaulted_fields": tuple(retained_defaults)})
 
 
+def _normalize_bounded_catalog_defaults(
+    candidate: BoundedCandidate,
+    matrix: CandidateCapabilityMatrix,
+    utterance: str,
+) -> BoundedCandidate:
+    """Repair allowlisted omissions without replacing explicit trading rules."""
+
+    defaults = list(candidate.defaulted_fields)
+    updates: dict[str, object] = {}
+    for side, leaves in (("entry", candidate.entry), ("exit", candidate.exit)):
+        normalized_leaves = list(leaves)
+        for index, leaf in enumerate(leaves):
+            if not isinstance(leaf, IndicatorCandidate):
+                continue
+            capability = matrix.resolve_indicator(leaf.indicator_id)
+            if capability is None:
+                continue
+            definitions = {item.name: item for item in capability.parameters}
+            if (leaf.indicator_id == "technical.macd"
+                    and _macd_parameters_are_unspoken(utterance, capability)):
+                params = dict(leaf.params)
+                for name in ("fast", "slow", "signal"):
+                    definition = definitions.get(name)
+                    if definition is None or not definition.required or definition.default is None:
+                        continue
+                    params.setdefault(name, definition.default)
+                    path = f"/{side}/{index}/params/{name}"
+                    if params[name] == definition.default and path not in defaults:
+                        defaults.append(path)
+                normalized_leaves[index] = leaf.model_copy(update={"params": params})
+            field: str | None = None
+            if (
+                leaf.indicator_id in {"technical.ma", "technical.ma_cross"}
+                and leaf.params.get("price_field") == "close"
+                and (definition := definitions.get("price_field")) is not None
+                and definition.default == "close"
+                and "price_field" not in _explicit_parameter_names(utterance, capability)
+                and not _has_alias(utterance, ("price_field",))
+                and not _rolling_high_price_fields(utterance)
+            ):
+                # The model already supplied close. Only annotate that the
+                # source did not request a different price field. Inspect the
+                # whole utterance, since a narrow quote may omit that request.
+                field = "price_field"
+            elif (
+                leaf.indicator_id == "volume.relative"
+                and leaf.trigger in {"gt_multiple", "gte_multiple", "lte_multiple"}
+                and "consecutive_days" not in leaf.params
+                and (definition := definitions.get("consecutive_days")) is not None
+                and definition.default is not None
+            ):
+                # These three single-session triggers never consume this
+                # shared Catalog field. Never fill it for consecutive triggers
+                # or overwrite an existing value, even an invalid one.
+                field = "consecutive_days"
+                normalized_leaves[index] = leaf.model_copy(update={
+                    "params": {**leaf.params, field: definition.default},
+                })
+            if field is not None:
+                path = f"/{side}/{index}/params/{field}"
+                if path not in defaults:
+                    defaults.append(path)
+        updates[side] = tuple(normalized_leaves)
+    updates["defaulted_fields"] = tuple(defaults)
+    return candidate.model_copy(update=updates)
+
+
+def _macd_parameters_are_unspoken(
+    utterance: str,
+    capability: IndicatorCandidateCapability,
+) -> bool:
+    """Do not turn malformed, partial or nonstandard parameter input into defaults."""
+
+    parameter_terms = (
+        "参数", "周期", "fast", "slow", "signal",
+        *_PARAMETER_ALIAS_OVERRIDES["fast"],
+        *_PARAMETER_ALIAS_OVERRIDES["slow"],
+        *_PARAMETER_ALIAS_OVERRIDES["signal"],
+    )
+    if _explicit_parameter_names(utterance, capability) or _has_alias(utterance, parameter_terms):
+        return False
+    return not any(
+        re.match(r"\s*(?:[（(\[【]|(?:[:：=,，/]\s*)?[-+]?\d)", utterance[match.end:])
+        for alias in capability.aliases_zh for match in _alias_occurrences(utterance, alias)
+    )
+
+
 def _normalize_exact_unique_span(
     span: CandidateSourceSpan,
     utterance: str,
@@ -1888,7 +1979,7 @@ def _normalize_leaf_source_span(
     utterance: str,
     matrix: CandidateCapabilityMatrix,
 ) -> CandidateSourceSpan:
-    """Expand a narrow exact quote only to its punctuation-delimited source clause.
+    """Repair exact quotes only along existing punctuation-delimited clauses.
 
     Some JSON providers quote only the action word even though the capability,
     trigger, and parameter are written immediately before it in the same
@@ -1898,6 +1989,7 @@ def _normalize_leaf_source_span(
     """
 
     defaults = set(candidate.defaulted_fields)
+    mixes_actions = False
     try:
         _validate_leaf_grounding(
             leaf,
@@ -1910,13 +2002,43 @@ def _normalize_leaf_source_span(
             defaults=defaults,
             consumed_defaults=set(),
         )
-    except (TypeError, ValueError, ValidationError):
-        pass
+    except (TypeError, ValueError, ValidationError) as exc:
+        mixes_actions = str(exc) == "candidate source span mixes entry and exit actions"
     else:
         return span
 
     if span.end > len(utterance) or utterance[span.start : span.end] != span.text:
         return span
+
+    if mixes_actions:
+        # A broad exact quote can cover both actions. Choose no condition or
+        # value: retain only a unique contained clause that passes every
+        # existing leaf-grounding check for this exact model-authored leaf.
+        matches: list[CandidateSourceSpan] = []
+        start = span.start
+        ends = [match.start() for match in _SOURCE_CLAUSE_BOUNDARY_RE.finditer(
+            utterance, span.start, span.end,
+        )] + [span.end]
+        for end in ends:
+            text = utterance[start:end]
+            trimmed = text.strip()
+            if trimmed:
+                clause_start = start + len(text) - len(text.lstrip())
+                clause = CandidateSourceSpan(
+                    start=clause_start, end=clause_start + len(trimmed), text=trimmed,
+                )
+                try:
+                    _validate_leaf_grounding(
+                        leaf, clause, candidate=candidate, side=side, index=index,
+                        utterance=utterance, matrix=matrix, defaults=defaults,
+                        consumed_defaults=set(),
+                    )
+                except (TypeError, ValueError, ValidationError):
+                    pass
+                else:
+                    matches.append(clause)
+            start = end + 1
+        return matches[0] if len(matches) == 1 else span
 
     preceding_boundaries = tuple(_SOURCE_CLAUSE_BOUNDARY_RE.finditer(utterance, 0, span.start))
     start = preceding_boundaries[-1].end() if preceding_boundaries else 0
@@ -2061,6 +2183,11 @@ def _validate_indicator_candidate(
         error = ValueError("candidate omitted a required indicator parameter")
         for definition in missing:
             parameter_path = f"{path}/params/{definition.name}"
+            _log_candidate_gate(
+                "candidate_catalog_parameter_missing path=%s capability=%s trigger=%s "
+                "detail=catalog_parameter_required",
+                parameter_path, capability.indicator_id, trigger.id,
+            )
             error.add_note(
                 f"{parameter_path}: 缺少 Catalog 必需参数（类型 {definition.value_type}）。"
                 + ("目录未提供默认值，必须由原文明确，不得猜测或标记为默认。"
@@ -2259,7 +2386,7 @@ def _log_leaf_grounding_failure(
     else:
         capability = leaf.kind
         trigger = getattr(leaf, "trigger", "none")
-    _LOGGER.warning(
+    _log_candidate_gate(
         "candidate_grounding_leaf_failed path=/%s/%d capability=%s trigger=%s detail=%s",
         side,
         index,
@@ -2426,7 +2553,7 @@ def _validate_leaf_grounding(
                     )
                 )
             ):
-                _LOGGER.warning(
+                _log_candidate_gate(
                     "candidate_grounding_parameter_failed path=/%s/%d/params/%s "
                     "detail=lexical_evidence_missing value=%s catalog_default=%s",
                     side,

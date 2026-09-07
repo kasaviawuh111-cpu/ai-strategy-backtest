@@ -222,7 +222,20 @@ async def test_reference_evidence_still_enforces_values_coverage_and_action_dire
         }
         candidate["entry_spans"] = [reference, reference]
     generated = await _generator(_FakeTransport(payload)).generate(_request())
-    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+    if mutation == "mixed_actions":
+        result = generated[0]
+        assert result.unsupported_code is None
+        assert len(result.entry) == 2 and len(result.exit) == 3
+        assert result.entry_join == "all" and result.exit_join == "any"
+        assert result.entry[0].value == 30 and result.entry[1].value == 500_000_000
+        assert dict(result.entry[0].params) == {"period": 14}
+        evidence = {item.path: item for item in result.grounding_evidence}
+        assert evidence["/entry/0"].text == evidence["/entry/1"].text == SCREENSHOT_ENTRY
+        for path in ("/entry/0", "/entry/1"):
+            span = evidence[path]
+            assert SCREENSHOT_UTTERANCE[span.start:span.end] == span.text
+    else:
+        assert generated[0].unsupported_code == "candidate_provider_invalid_output"
 
 
 @pytest.mark.asyncio

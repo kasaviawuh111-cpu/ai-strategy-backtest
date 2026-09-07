@@ -456,6 +456,7 @@ class StrategyDraftResponse(ApiModel):
             raise ValueError("idea guidance must require clarification")
         route_codes = {
             "idea_guidance_required",
+            "idea_guidance_execution_invalid",
             "entry_rule_not_recognized",
             "exit_rule_not_recognized",
             "strategy_rule_incomplete",

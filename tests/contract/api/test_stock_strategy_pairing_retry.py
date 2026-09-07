@@ -1,5 +1,6 @@
 """Controlled orchestration fixtures, excluded from real-input acceptance counts."""
 
+import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -20,7 +21,9 @@ from ashare_lab.api.routes.strategy_drafts import (
 from ashare_lab.api.store import StoredDraftRevision
 from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus, StrategyCompiler
 from ashare_lab.application.dialogue_state import DialogueState, VerifiedInstrumentMemory
+from ashare_lab.application.dialogue_turn import DialogueTurnOrchestrator
 from ashare_lab.domain.catalog import load_catalog_directory
+from ashare_lab.domain.strategy import IndicatorCondition
 from ashare_lab.ports.candidate_generation import (
     CandidateAst,
     CandidateGroundingEvidence,
@@ -30,7 +33,12 @@ from ashare_lab.ports.clarification_dialogue import (
     ClarificationDialogueAssessment,
     ClarificationDialogueRequest,
 )
-from ashare_lab.ports.idea_routing import IdeaAssetMapping, IdeaProposal, IdeaRoute
+from ashare_lab.ports.idea_routing import (
+    IdeaAssetMapping,
+    IdeaProposal,
+    IdeaRoute,
+    UnboundIdeaStrategy,
+)
 from ashare_lab.ports.live_market_data import (
     LiveFinanceDataResult,
     LiveMarketDataProvenance,
@@ -96,6 +104,33 @@ async def test_complete_rules_are_preserved_across_ranked_stock_choices(
     assert pending.selected_idea_proposal is not None
     template = pending.selected_idea_proposal.strategy_template
     assert template is not None
+    if with_template:
+        # Selecting a direction must not revoke "I will provide my own stock".
+        route = replace(_route(), proposals=tuple(
+            replace(item, strategy_template=template) for item in _route().proposals
+        ))
+        selected = await compiler.answer_clarification(
+            original_input=request,
+            prior_outcome=CompileOutcome(
+                status=CompileStatus.NEEDS_CLARIFICATION,
+                diagnostic_code="idea_guidance_required", idea_route=route,
+                instrument_suggestion_declined=True,
+            ),
+            answer=route.proposals[0].id,
+        )
+        assert selected.outcome.diagnostic_code == "instrument_required"
+        assert selected.outcome.instrument_suggestion_declined
+        skipped, suggested = await _offer_missing_instrument(
+            outcome=selected.outcome, compile_input=selected.compile_input, state=None,
+            # No provider attributes: any attempted recommendation would fail this test.
+            container=cast(ApiContainer, SimpleNamespace()),
+        )
+        assert skipped is selected.outcome and suggested is None
+        own_stock = compiler.bind_selected_idea(
+            replace(selected.compile_input, instrument_context="300059.SZ"), skipped,
+        )
+        assert own_stock is not None and own_stock.status is CompileStatus.READY
+        assert own_stock.instrument_suggestion_declined
     if not with_template:
         pending = replace(pending, selected_idea_proposal=None)
     offered, default_stock = await _offer_missing_instrument(
@@ -216,6 +251,84 @@ def _route() -> IdeaRoute:
             capability_ids=(), assumptions=(), confidence=1,
         ) for index in range(2)),
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_template_binding_response_preserves_options_and_can_recover(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    original = CompileInput(
+        utterance="收盘价上穿20日均线买入，收盘价下穿20日均线卖出，回测近一年",
+        as_of_date=date(2026, 9, 5),
+    )
+
+    class Generator:
+        calls = 0
+
+        async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]:
+            self.calls += 1
+            assert self.calls == 1, "A retained template must not be generated again"
+            return await RuleBasedCandidateGenerator().generate(request)
+
+    generator = Generator()
+    compiler = StrategyCompiler(
+        generator=generator, catalog=load_catalog_directory(Path(__file__).parents[3] / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+    )
+    initial = await compiler.compile(replace(original, instrument_context="300059.SZ"))
+    assert initial.strategy is not None
+    template = UnboundIdeaStrategy.model_validate(
+        initial.strategy.model_dump(exclude={"instrument", "schema_version"}),
+    )
+    assert isinstance(template.entry, IndicatorCondition)
+    invalid = template.model_copy(update={
+        "entry": template.entry.model_copy(update={"trigger": "golden_cross"}),
+    })
+    route = replace(
+        _route(),
+        asset_mapping=replace(_route().asset_mapping, rationale="先选策略，再确认回测股票。"),
+        proposals=(
+            replace(_route().proposals[0], id="idea_000000000000", strategy_template=invalid),
+            replace(_route().proposals[1], id="idea_000000000001", strategy_template=template),
+        ),
+    )
+    prior = CompileOutcome(
+        status=CompileStatus.NEEDS_CLARIFICATION, diagnostic_code="idea_guidance_required",
+        idea_route=route, run_requested=True, refresh_data=True,
+    )
+    request = replace(original, instrument_context="300059.SZ")
+    failed = compiler.bind_selected_idea(request, prior)
+    assert failed is not None
+    state = DialogueState.project(
+        draft_id=uuid4(), revision=2, compile_input=request, outcome=failed,
+        created_at=datetime.now(UTC), recent_turns=(),
+    )
+    with caplog.at_level(logging.INFO, logger="uvicorn.error"):
+        response = _to_response(state)
+        assert response.diagnostic_code == "idea_guidance_execution_invalid"
+        assert response.idea_route is not None and len(response.idea_route.proposals) == 2
+        assert not response.run_requested and not response.refresh_data
+        plan = await DialogueTurnOrchestrator(compiler).plan(
+            state=state, answer="idea_000000000001",
+        )
+        assert plan.clarification_turn is not None
+        turn = plan.clarification_turn
+        ready = _to_response(replace(
+            state, revision=3, compile_input=turn.compile_input, outcome=turn.outcome,
+        ))
+    assert ready.status is CompileStatus.READY
+    assert ready.strategy is not None and ready.strategy.instrument.symbol == "300059.SZ"
+    assert ready.strategy.entry == template.entry and ready.strategy.exit == template.exit
+    assert not ready.run_requested and not ready.refresh_data
+    messages = [record.message for record in caplog.records
+                if record.message.startswith("strategy_draft_outcome ")]
+    assert len(messages) == 2
+    assert (
+        "status=needs_clarification diagnostic_code=idea_guidance_execution_invalid" in messages[0]
+    )
+    assert "status=ready diagnostic_code=none" in messages[1]
+    assert all(original.utterance not in message for message in messages)
+    assert generator.calls == 1
 
 
 @pytest.mark.asyncio

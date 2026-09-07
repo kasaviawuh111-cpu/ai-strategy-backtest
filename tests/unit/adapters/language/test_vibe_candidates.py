@@ -1138,7 +1138,9 @@ async def test_common_json_object_semantic_deviations_fail_closed(
         )
     )
 
-    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+    assert generated[0].unsupported_code == (
+        None if deviation == "unclaimed_catalog_defaults" else "candidate_provider_invalid_output"
+    )
 
 
 @pytest.mark.asyncio
@@ -1594,7 +1596,7 @@ async def test_catalog_matrix_repair_reports_safe_reason_without_provider_conten
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_supplies_missing_parameter", [True, False])
-async def test_catalog_missing_volume_parameter_supplies_default_path_without_filling_strategy(
+async def test_missing_explicit_volume_baseline_requires_model_repair(
     model_supplies_missing_parameter: bool, caplog: pytest.LogCaptureFixture,
 ) -> None:
     entry = "当日成交量达到前20日均量1.5倍买入"
@@ -1615,8 +1617,9 @@ async def test_catalog_missing_volume_parameter_supplies_default_path_without_fi
         "defaulted_fields": ["/entry/0/params/consecutive_days", "/exit/0/params/price_field"],
     }]}
     incomplete = deepcopy(valid)
-    del incomplete["candidates"][0]["entry"][0]["params"]["consecutive_days"]
-    incomplete["candidates"][0]["defaulted_fields"] = ["/exit/0/params/price_field"]
+    # The source explicitly requires 20 baseline sessions. The transport
+    # normalizer must not fill this trading parameter, even from its default.
+    del incomplete["candidates"][0]["entry"][0]["params"]["baseline_period"]
     transport = _SequenceTransport((
         incomplete, valid if model_supplies_missing_parameter else incomplete,
     ))
@@ -1635,14 +1638,15 @@ async def test_catalog_missing_volume_parameter_supplies_default_path_without_fi
     assert correction is not None and correction["utterance"] == utterance
     feedback = str(correction["validationFeedback"])
     assert "candidate/1:catalog_parameter_required" in feedback
-    assert "/entry/0/params/consecutive_days" in feedback
-    assert "目录默认值为 3" in feedback and "defaulted_fields" in feedback
+    assert "/entry/0/params/baseline_period" in feedback
+    assert "目录默认值为 20" in feedback and "defaulted_fields" in feedback
     assert "原文已指定的参数必须忠实保留" in feedback
     assert "detail=catalog_parameter_required" in caplog.text
-    assert "consecutive_days" not in incomplete["candidates"][0]["entry"][0]["params"]
+    assert "baseline_period" not in incomplete["candidates"][0]["entry"][0]["params"]
     if model_supplies_missing_parameter:
         assert dict(generated[0].entry[0].params) == {"baseline_period": 20, "consecutive_days": 3}
         assert generated[0].entry[0].value == 1.5
+        assert "/entry/0/params/baseline_period" not in generated[0].defaulted_fields
 
 
 @pytest.mark.asyncio
@@ -2345,7 +2349,7 @@ async def test_short_trade_character_does_not_turn_nouns_or_references_into_orde
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_span", ["mixed_actions", "invented_action"])
-async def test_short_actions_do_not_allow_mixed_or_invented_source_spans(bad_span: str) -> None:
+async def test_short_actions_reduce_mixed_span_but_reject_invented_quote(bad_span: str) -> None:
     utterance = "MACD金叉买，MACD死叉卖"
     payload = _macd_batch(utterance=utterance)
     candidate = cast(dict[str, object], cast(list[object], payload["candidates"])[0])
@@ -2356,7 +2360,9 @@ async def test_short_actions_do_not_allow_mixed_or_invented_source_spans(bad_spa
     generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
         utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
     ))
-    assert generated[0].unsupported_code == "candidate_provider_invalid_output"
+    assert generated[0].unsupported_code == (
+        None if bad_span == "mixed_actions" else "candidate_provider_invalid_output"
+    )
 
 
 @pytest.mark.asyncio

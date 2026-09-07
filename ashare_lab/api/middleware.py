@@ -71,6 +71,9 @@ class RequestContextMiddleware:
                 status_code = int(message["status"])
                 headers = MutableHeaders(scope=message)
                 headers["X-Request-ID"] = correlation_id
+                # Gateways may replace their standard X-Request-ID. Keep the
+                # application log key independently, including async readback.
+                headers["X-Backend-Request-ID"] = correlation_id
             await send(message)
 
         try:

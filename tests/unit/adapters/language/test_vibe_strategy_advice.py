@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
+from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
+import httpx
 import pytest
 
+from ashare_lab.adapters.language.openai_compatible import (
+    CandidateProviderTransportError,
+    OpenAICompatibleCandidateTransport,
+)
 from ashare_lab.adapters.language.vibe_candidates import (
     CandidateProviderIdentityView,
     CandidateTransportError,
@@ -31,6 +39,21 @@ from ashare_lab.ports.strategy_advice import (
 )
 
 ROOT = Path(__file__).parents[4]
+
+
+def _decode_prompt_tables(value: object) -> object:
+    if isinstance(value, dict):
+        table = cast(dict[str, object], value)
+        if table.get("encoding") == "columnar.v1":
+            return [
+                dict(zip(cast(list[str], table["columns"]),
+                         map(_decode_prompt_tables, row), strict=True))
+                for row in cast(list[list[object]], table["rows"])
+            ]
+        return {key: _decode_prompt_tables(item) for key, item in table.items()}
+    if isinstance(value, list):
+        return [_decode_prompt_tables(item) for item in cast(list[object], value)]
+    return value
 
 
 class _Transport:
@@ -254,7 +277,7 @@ async def test_stock_ranking_is_model_selected_and_limited_to_verified_entities(
     assert request.response_schema_name == "verified_stock_recommendations"
     assert request.response_schema["additionalProperties"] is False
     assert request.user_payload is not None
-    assert request.user_payload["verifiedRows"] == list(screen.rows)
+    assert _decode_prompt_tables(request.user_payload["verifiedRows"]) == list(screen.rows)
     assert request.max_candidates == 3
     assert "用户已选策略时围绕该方向" in request.system_contract
     assert "均线上方不等于刚发生金叉" in request.system_contract
@@ -408,7 +431,7 @@ async def test_stock_strategy_pairing_uses_one_model_call_and_only_existing_iden
     assert request.response_schema_name == "verified_stock_strategy_pairing"
     assert request.response_schema["additionalProperties"] is False
     assert request.user_payload is not None
-    assert request.user_payload["verifiedRows"] == list(screen.rows)
+    assert _decode_prompt_tables(request.user_payload["verifiedRows"]) == list(screen.rows)
     assert request.user_payload["existingProposals"] == [
         {
             "id": proposal.id,
@@ -470,6 +493,91 @@ def _data_request_payload() -> dict[str, object]:
             "message": "我再补查一下成交额，继续比较这些方向。",
         },
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source", ["pairing_screen", "recommendation_screen", "pairing_supplement"],
+)
+async def test_model_factory_compacts_large_tables_losslessly_below_transport_limit(
+    source: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A synthetic wide provider table through real factories, not a public replay."""
+    answer: dict[str, object] = {"introduction": "先比较既有方案。", "pairs": [{
+        "proposal_id": "idea_fixture", "symbol": "300059.SZ", "reason": "观察成交特征。",
+    }], "data_request": None}
+    if source == "recommendation_screen":
+        answer = {"recommendations": [{"symbol": "300059.SZ", "reason": "观察成交特征。"}]}
+    advisor, capture, screen, proposals = _data_pairing_fixture(answer)
+    field_names = [f"第{index}项最近20交易日成交额（人民币元，后复权口径，日期2026-09-04）"
+                   for index in range(20)]
+    rows = [
+        {"代码": "300059", "名称": "东方财富", "日期": f"2026-09-{1 + row % 6:02d}",
+         **{key: row * 100 + column if (row + column) % 3 else None
+            for column, key in enumerate(field_names)}}
+        for row in range(150)
+    ]
+    supplement = LiveFinanceDataResult(
+        provider="fixture", query="fixture supplement", indicators="成交额",
+        tables=({"unit": "人民币元", "retrievedDate": "2026-09-04", "rows": rows,
+                 "otherTable": [{"日期": "2026-09-03"}, {"日期": None}, {}],
+                 "rawTable": "原始文字和引号\"\\\n保持不变"},), provenance=screen.provenance,
+    )
+    snapshots = deepcopy((rows, supplement.tables))
+    if source.endswith("screen"):
+        screen = replace(screen, rows=tuple(rows), columns=tuple(rows[0]))
+    if source == "recommendation_screen":
+        result = await advisor.recommend_stocks("完整保留原条件", screen)
+    else:
+        result = await advisor.pair_stock_strategies(
+            "完整保留原条件", screen, proposals, understanding="保留20日线买卖规则",
+            supplemental_results=(supplement,) if source == "pairing_supplement" else (),
+        )
+    assert result is not None and len(capture.requests) == 1
+    request = capture.requests[0]
+    assert request.user_payload is not None
+    original_payload = cast(dict[str, object], _decode_prompt_tables(request.user_payload))
+    assert original_payload["utterance" if source != "recommendation_screen" else "query"] == (
+        "完整保留原条件"
+    )
+    if source.endswith("screen"):
+        assert original_payload["verifiedRows"] == rows
+    else:
+        assert cast(list[dict[str, object]], original_payload["supplementalData"])[0]["tables"] == (
+            list(supplement.tables)
+        )
+    assert (rows, supplement.tables) == snapshots
+    assert "columnar.v1无损编码" in request.system_contract
+    sent: list[httpx.Request] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        sent.append(http_request)
+        event = {"choices": [{"delta": {"content": json.dumps(answer, ensure_ascii=False)},
+                              "finish_reason": "stop"}]}
+        return httpx.Response(
+            200, content=f"data: {json.dumps(event)}\n\ndata: [DONE]\n\n".encode(),
+            headers={"Content-Type": "text/event-stream"}, request=http_request,
+        )
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://fixture.invalid/chat/completions", provider="deepseek",
+        model="deepseek-v4-pro", prompt_version="fixture", schema_version="fixture",
+        thinking="enabled", reasoning_effort="high", response_mode="json_object",
+        transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(CandidateProviderTransportError, match="request is too large"):
+        await provider.generate_json(replace(request, user_payload=original_payload))
+    assert sent == []
+    assert await provider.generate_json(request) == answer
+    assert len(sent) == 1 and len(sent[0].content) < 256 * 1024
+    posted = json.loads(sent[0].content)
+    assert posted["thinking"] == {"type": "enabled"}
+    assert _decode_prompt_tables(json.loads(posted["messages"][1]["content"])) == {
+        **original_payload, "responseSchema": request.response_schema,
+    }
+    assert f"purpose={request.response_schema_name}" in caplog.text
+    assert "payload_field_bytes=" in caplog.text
+    assert "完整保留原条件" not in caplog.text
 
 
 @pytest.mark.asyncio

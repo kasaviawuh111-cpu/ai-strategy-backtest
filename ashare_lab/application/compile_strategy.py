@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from enum import StrEnum
 from itertools import pairwise
-from typing import Literal
+from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
 from ashare_lab.application.backtest_submission import resolve_execution_settings
@@ -40,6 +40,7 @@ from ashare_lab.domain.strategy import (
     HoldingPeriodExit,
     IndicatorCondition,
     Instrument,
+    NotCondition,
     PositionReturnExit,
     StrategyCatalogError,
     StrategySpec,
@@ -889,6 +890,8 @@ class StrategyCompiler:
         )
         if validated is None:
             return self._idea_guidance_unavailable(
+                failure=IdeaGenerationError("execution"),
+                prior_outcome=replace(prior_outcome, selected_idea_proposal=proposal),
                 candidate_grounding=prior_outcome.candidate_grounding,
                 candidate_provenance=candidate_provenance,
             )
@@ -903,6 +906,7 @@ class StrategyCompiler:
             candidate_provenance=candidate_provenance,
             candidate_grounding=prior_outcome.candidate_grounding,
             execution_settings=prior_outcome.execution_settings,
+            instrument_suggestion_declined=prior_outcome.instrument_suggestion_declined,
         )
 
     def rebind_current_strategy(
@@ -932,6 +936,11 @@ class StrategyCompiler:
         """Bind and validate one proposal without selecting or executing it."""
         if proposal.strategy_template is None:
             return None
+        proposal = replace(
+            proposal,
+            strategy_template=self._normalize_idea_rule_defaults(proposal.strategy_template),
+        )
+        assert proposal.strategy_template is not None
         try:
             instrument = normalize_a_share_instrument(symbol).value
             strategy = proposal.strategy_template.bind(instrument)
@@ -963,7 +972,9 @@ class StrategyCompiler:
                 if current is not None:
                     validated.append(current)
             if len(validated) < 2:
-                return self._idea_guidance_unavailable()
+                return self._idea_guidance_unavailable(
+                    failure=IdeaGenerationError("execution"), prior_outcome=prior_outcome,
+                )
             return replace(
                 prior_outcome,
                 clarification="股票已确认。你可以选一个策略方向回测，也可以继续调整规则。",
@@ -985,6 +996,7 @@ class StrategyCompiler:
         bound = self.bind_idea_proposal(request, proposal, request.instrument_context)
         if bound is None:
             return self._idea_guidance_unavailable(
+                failure=IdeaGenerationError("execution"), prior_outcome=prior_outcome,
                 candidate_provenance=prior_outcome.candidate_provenance,
             )
         return self._compile_selected_idea_strategy(
@@ -1144,6 +1156,15 @@ class StrategyCompiler:
                     prior_outcome=prior_outcome,
                     proposal=selected_proposal,
                 )
+            elif (selected_proposal.strategy_template is not None
+                    and merged_input.instrument_context is not None):
+                # A retained/detached template is still direct DSL even when
+                # the stock was confirmed before this option was selected.
+                recompiled = self.bind_selected_idea(
+                    merged_input,
+                    replace(prior_outcome, selected_idea_proposal=selected_proposal),
+                )
+                assert recompiled is not None
             elif merged_input.instrument_context is None:
                 # Selecting a model-authored direction does not supply the
                 # missing security. Preserve that exact direction for the next
@@ -1161,6 +1182,7 @@ class StrategyCompiler:
                     ),
                     candidate_grounding=prior_outcome.candidate_grounding,
                     execution_settings=prior_outcome.execution_settings,
+                    instrument_suggestion_declined=prior_outcome.instrument_suggestion_declined,
                 )
             else:
                 # Legacy/local proposal routes still use their existing
@@ -2144,6 +2166,28 @@ class StrategyCompiler:
             proposal.instrument_symbol is None and proposal.strategy is None
             for proposal in idea_route.proposals
         ):
+            # Provider templates are not executable yet, but their conditions
+            # must already pass the same Catalog gate as bound strategies.
+            # Legacy local routes without direct DSL still use the text compiler.
+            if any(item.strategy_template is not None for item in idea_route.proposals):
+                valid_templates: list[IdeaProposal] = []
+                for proposal in idea_route.proposals:
+                    template = proposal.strategy_template
+                    if template is None:
+                        continue
+                    template = self._normalize_idea_rule_defaults(template)
+                    capability_ids = self._validate_idea_rules(routed_request, template)
+                    if capability_ids is None:
+                        continue
+                    valid_templates.append(replace(
+                        proposal, strategy_template=template, capability_ids=capability_ids,
+                    ))
+                if len(valid_templates) < 2:
+                    return self._idea_guidance_unavailable(
+                        failure=IdeaGenerationError("execution"),
+                        candidate_grounding=viewpoint_grounding,
+                    )
+                idea_route = replace(idea_route, proposals=tuple(valid_templates))
             return CompileOutcome(
                 status=CompileStatus.NEEDS_CLARIFICATION,
                 clarification=idea_route.understanding,
@@ -2245,6 +2289,7 @@ class StrategyCompiler:
     def _idea_guidance_unavailable(
         *,
         failure: IdeaGenerationError | None = None,
+        prior_outcome: CompileOutcome | None = None,
         candidate_grounding: tuple[CandidateGroundingEvidence, ...] = (),
         candidate_provenance: CandidateProvenance | None = None,
     ) -> CompileOutcome:
@@ -2262,6 +2307,27 @@ class StrategyCompiler:
             else:
                 message = "模型已返回策略，但买卖条件或回测设置未通过执行校验；本次没有启动回测。"
                 diagnostic = "idea_guidance_execution_invalid"
+        if prior_outcome is not None:
+            return replace(
+                prior_outcome,
+                status=CompileStatus.NEEDS_CLARIFICATION,
+                strategy=None,
+                strategy_hash=None,
+                suggested_strategy=None,
+                suggested_strategy_hash=None,
+                suggested_strategy_choice_id=None,
+                suggested_strategy_note=None,
+                run_requested=False,
+                refresh_data=False,
+                pending_edit_run_requested=False,
+                pending_edit_refresh_data=False,
+                clarification=(
+                    "所选方案的买卖条件或回测设置未通过执行校验；"
+                    "已保留当前方案和股票选择，本次未启动回测。可以修改方案后再试。"
+                ),
+                diagnostic_code=diagnostic,
+                candidate_provenance=candidate_provenance or prior_outcome.candidate_provenance,
+            )
         return CompileOutcome(
             status=CompileStatus.NEEDS_CLARIFICATION,
             clarification=message,
@@ -2333,6 +2399,77 @@ class StrategyCompiler:
             strategy_hash=strategy_hash,
         )
 
+    def _normalize_idea_rule_defaults[T: (StrategySpec, UnboundIdeaStrategy)](
+        self, rules: T,
+    ) -> T:
+        """Fill only a Catalog field that the selected trigger never evaluates."""
+        definition = self._catalog.resolve_indicator("volume.relative")
+        parameter = next(
+            (item for item in definition.parameters if item.name == "consecutive_days"), None,
+        ) if definition is not None else None
+        if definition is None or parameter is None or parameter.default is None:
+            return rules
+
+        def normalize(condition: Condition) -> Condition:
+            if (isinstance(condition, IndicatorCondition)
+                    and condition.indicator_id == definition.id
+                    and condition.definition_version == definition.version
+                    and condition.trigger in {"gt_multiple", "gte_multiple", "lte_multiple"}
+                    and "consecutive_days" not in condition.params):
+                # The runtime reads consecutive_days only for consecutive_gte_multiple.
+                # This structural default does not add a multi-day trading condition.
+                return condition.model_copy(update={
+                    "params": {**condition.params, "consecutive_days": parameter.default},
+                })
+            if isinstance(condition, (AllCondition, AnyCondition)):
+                return condition.model_copy(update={
+                    "children": tuple(normalize(child) for child in condition.children),
+                })
+            if isinstance(condition, NotCondition):
+                return condition.model_copy(update={"child": normalize(condition.child)})
+            return condition
+
+        return rules.model_copy(update={
+            "entry": normalize(rules.entry),
+            "exit": rules.exit.model_copy(update={"children": tuple(
+                item if isinstance(
+                    item, (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit),
+                )
+                else normalize(item) for item in rules.exit.children
+            )}),
+        })
+
+    def _validate_idea_rules(
+        self, request: CompileInput, rules: StrategySpec | UnboundIdeaStrategy,
+    ) -> tuple[str, ...] | None:
+        # These existing visitors and the Catalog validator read only catalog,
+        # entry and exit. This read-only view does not invent an instrument or
+        # convert an unbound template into an executable StrategySpec.
+        rule_view = cast(StrategySpec, rules)
+        if (
+            rules.catalog.catalog_id != self._catalog_id
+            or rules.catalog.release_version != self._release_version
+            or rules.execution != DailyExecutionPolicy()
+            or rules.backtest.end > request.as_of_date
+            or strategy_requires_events(rule_view)
+            or strategy_requires_financials(rule_view)
+        ):
+            return None
+        try:
+            # The unbound model deliberately has no instrument; reuse the
+            # StrategySpec rule-only depth/size/data-declaration gate as well.
+            validate_bounds = cast(
+                Callable[[StrategySpec], StrategySpec], StrategySpec.expression_is_bounded,
+            )
+            validate_bounds(rule_view)
+            validate_strategy_against_catalog(rule_view, self._catalog)
+        except StrategyCatalogError as exc:
+            _LOGGER.warning("idea_gate_rejected reason=catalog_invalid issues=%s", str(exc))
+            return None
+        except ValueError:
+            return None
+        return _strategy_capability_ids(rule_view) or None
+
     def _validate_direct_idea_strategy(
         self,
         request: CompileInput,
@@ -2353,27 +2490,15 @@ class StrategyCompiler:
         if (
             strategy.instrument.symbol != expected_symbol
             or proposal_symbol != expected_symbol
-            or strategy.catalog.catalog_id != self._catalog_id
-            or strategy.catalog.release_version != self._release_version
-            or strategy.execution != DailyExecutionPolicy()
-            or strategy.backtest.end > request.as_of_date
-            or strategy_requires_events(strategy)
-            or strategy_requires_financials(strategy)
         ):
             return None
-        try:
-            validate_strategy_against_catalog(strategy, self._catalog)
-        except StrategyCatalogError as exc:
-            _LOGGER.warning("idea_gate_rejected reason=catalog_invalid issues=%s", str(exc))
+        if proposal.strategy_hash not in {None, canonical_hash(strategy)}:
             return None
-        except ValueError:
+        strategy = self._normalize_idea_rule_defaults(strategy)
+        capability_ids = self._validate_idea_rules(request, strategy)
+        if capability_ids is None:
             return None
         strategy_hash = canonical_hash(strategy)
-        if proposal.strategy_hash not in {None, strategy_hash}:
-            return None
-        capability_ids = _strategy_capability_ids(strategy)
-        if not capability_ids:
-            return None
         return _ValidatedIdeaProposal(
             proposal=replace(
                 proposal,

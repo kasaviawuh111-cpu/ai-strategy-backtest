@@ -28,6 +28,7 @@ from ashare_lab.application.turn_intent import TurnIntent, classify_clarificatio
 from ashare_lab.domain.catalog import load_catalog_directory, load_coverage_catalog_directory
 from ashare_lab.domain.financials.models import FinancialMetricId, FinancialUnit
 from ashare_lab.domain.strategy import (
+    AllCondition,
     BacktestConfig,
     CatalogRef,
     FinancialConditionV1,
@@ -35,6 +36,7 @@ from ashare_lab.domain.strategy import (
     IndicatorCondition,
     Instrument,
     StrategySpec,
+    canonical_hash,
 )
 from ashare_lab.ports.candidate_generation import (
     CandidateAst,
@@ -47,6 +49,7 @@ from ashare_lab.ports.clarification_dialogue import (
     ClarificationDialogueRequest,
     ClarificationDialogueTurn,
 )
+from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.idea_routing import (
     IdeaAssetMapping,
     IdeaGenerationError,
@@ -683,9 +686,11 @@ async def test_direct_idea_dsl_is_catalog_gated_and_selected_without_reparse() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("valid_catalog", [True, False])
+@pytest.mark.parametrize(
+    "invalid_rule", [None, "catalog", "indicator", "trigger", "period", "depth"],
+)
 async def test_unbound_template_binds_stock_without_reinterpreting_model_rules(
-    valid_catalog: bool,
+    invalid_rule: str | None,
 ) -> None:
     direct_route = _direct_idea_route()
     proposals = []
@@ -694,10 +699,26 @@ async def test_unbound_template_binds_stock_without_reinterpreting_model_rules(
         template = UnboundIdeaStrategy.model_validate(
             proposal.strategy.model_dump(exclude={"instrument", "schema_version"})
         )
-        if not valid_catalog:
+        if invalid_rule == "catalog":
             template = template.model_copy(update={"catalog": CatalogRef(
                 catalog_id="unknown.catalog", release_version="2026.09.01",
             )})
+        elif invalid_rule == "depth":
+            leaf = template.entry
+            deep = leaf
+            for _ in range(8):
+                deep = AllCondition(children=(leaf, deep))
+            template = template.model_copy(update={"entry": deep})
+        elif invalid_rule is not None:
+            assert isinstance(template.entry, IndicatorCondition)
+            change = {
+                "indicator": {"indicator_id": "technical.unknown_indicator"},
+                "trigger": {"trigger": "golden_cross"},
+                "period": {"params": {"period": 0, "price_field": "close"}},
+            }[invalid_rule]
+            template = template.model_copy(update={
+                "entry": template.entry.model_copy(update=change),
+            })
         proposals.append(replace(
             proposal, instrument_symbol=None, strategy=None, strategy_template=template,
         ))
@@ -712,7 +733,16 @@ async def test_unbound_template_binds_stock_without_reinterpreting_model_rules(
     )
     original = CompileInput(utterance="低买高卖", as_of_date=date(2026, 9, 4))
     guidance = await compiler.compile(original)
+    if invalid_rule is not None:
+        assert guidance.status is CompileStatus.NEEDS_CLARIFICATION
+        assert guidance.diagnostic_code == "idea_guidance_execution_invalid"
+        assert guidance.idea_route is None
+        assert guidance.strategy is None
+        assert [item.utterance for item in generator.requests] == [original.utterance]
+        return
     assert guidance.idea_route is not None
+    assert all(item.capability_ids == ("technical.ma",)
+               for item in guidance.idea_route.proposals)
     selected = await compiler.answer_clarification(
         original_input=original, prior_outcome=guidance, answer="1",
     )
@@ -728,10 +758,6 @@ async def test_unbound_template_binds_stock_without_reinterpreting_model_rules(
     # Identity preflight may inspect the original request; the model's direct
     # DSL must never be converted back to natural language and reinterpreted.
     assert [item.utterance for item in generator.requests] == [original.utterance]
-    if not valid_catalog:
-        assert outcome.status is not CompileStatus.READY
-        assert outcome.strategy is None
-        return
     assert outcome.status is CompileStatus.READY
     assert outcome.strategy is not None
     assert outcome.strategy.instrument.symbol == "600519.SH"
@@ -742,6 +768,191 @@ async def test_unbound_template_binds_stock_without_reinterpreting_model_rules(
     assert outcome.strategy.backtest == template.backtest
     assert outcome.strategy.execution == template.execution
     assert outcome.candidate_provenance == selected.outcome.candidate_provenance
+
+
+@pytest.mark.asyncio
+async def test_unbound_idea_gate_keeps_valid_templates_without_changing_their_rules() -> None:
+    route = _direct_idea_route()
+    proposals = []
+    for index, proposal in enumerate(route.proposals):
+        assert proposal.strategy is not None
+        template = UnboundIdeaStrategy.model_validate(
+            proposal.strategy.model_dump(exclude={"instrument", "schema_version"}),
+        )
+        if index == 0:
+            assert isinstance(template.entry, IndicatorCondition)
+            template = template.model_copy(update={
+                "entry": template.entry.model_copy(update={"trigger": "golden_cross"}),
+            })
+        proposals.append(replace(
+            proposal, instrument_symbol=None, strategy=None, strategy_template=template,
+        ))
+    route = replace(
+        route, asset_mapping=_idea_route(instrument_symbol=None).asset_mapping,
+        proposals=tuple(proposals),
+    )
+    compiler = _compiler(
+        generator=_RecordingRuleBasedGenerator(), idea_router=_RecordingIdeaRouter(route),
+    )
+    outcome = await compiler.compile(
+        CompileInput(utterance="低买高卖", as_of_date=date(2026, 9, 4)),
+    )
+    assert outcome.diagnostic_code == "idea_guidance_required"
+    assert outcome.idea_route is not None
+    assert [item.id for item in outcome.idea_route.proposals] == [
+        item.id for item in proposals[1:]
+    ]
+    assert [item.strategy_template for item in outcome.idea_route.proposals] == [
+        item.strategy_template for item in proposals[1:]
+    ]
+    assert all(item.instrument_symbol is None and item.strategy is None
+               for item in outcome.idea_route.proposals)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_selected", [True, False])
+async def test_stored_idea_binding_failure_preserves_choice_and_stock(
+    already_selected: bool,
+) -> None:
+    """Old stored templates can fail binding without becoming a new model request."""
+    route = _direct_idea_route()
+    proposals = []
+    for index, proposal in enumerate(route.proposals):
+        assert proposal.strategy is not None
+        template = UnboundIdeaStrategy.model_validate(
+            proposal.strategy.model_dump(exclude={"instrument", "schema_version"}),
+        )
+        assert isinstance(template.entry, IndicatorCondition)
+        if index < 2:
+            template = template.model_copy(update={
+                "entry": template.entry.model_copy(update={"trigger": "golden_cross"}),
+            })
+        proposals.append(replace(
+            proposal, instrument_symbol=None, strategy=None, strategy_template=template,
+        ))
+    route = replace(
+        route, asset_mapping=_idea_route(instrument_symbol=None).asset_mapping,
+        proposals=tuple(proposals),
+    )
+    prior = CompileOutcome(
+        status=CompileStatus.NEEDS_CLARIFICATION,
+        diagnostic_code="instrument_required" if already_selected else "idea_guidance_required",
+        selected_idea_proposal=proposals[0] if already_selected else None,
+        idea_route=None if already_selected else route,
+        execution_settings=ExecutionSettingsPatch(slippage_bps=12),
+        run_requested=True,
+        refresh_data=True,
+        pending_edit_run_requested=True,
+        pending_edit_refresh_data=True,
+    )
+    original = CompileInput(utterance="低买高卖", as_of_date=date(2026, 9, 4))
+    state = DialogueState.project(
+        draft_id=uuid4(), revision=2, compile_input=original,
+        outcome=prior, created_at=datetime(2026, 9, 4, tzinfo=UTC), recent_turns=(),
+    )
+    generator = _RecordingRuleBasedGenerator()
+    compiler = _compiler(generator=generator, idea_router=_RecordingIdeaRouter(None))
+    for _ in range(2):
+        plan = await DialogueTurnOrchestrator(compiler).plan(state=state, answer="300059")
+        assert plan.clarification_turn is not None
+        turn = plan.clarification_turn
+        assert turn.outcome.diagnostic_code == "idea_guidance_execution_invalid"
+        assert turn.outcome.status is CompileStatus.NEEDS_CLARIFICATION
+        assert turn.outcome.strategy is None
+        assert turn.outcome.selected_idea_proposal == prior.selected_idea_proposal
+        assert turn.outcome.idea_route == prior.idea_route
+        assert turn.outcome.execution_settings == prior.execution_settings
+        assert not turn.outcome.run_requested
+        assert not turn.outcome.refresh_data
+        assert not turn.outcome.pending_edit_run_requested
+        assert not turn.outcome.pending_edit_refresh_data
+        assert turn.compile_input.instrument_context == "300059.SZ"
+        assert "已保留" in (turn.outcome.clarification or "")
+        state = replace(state, compile_input=turn.compile_input, outcome=turn.outcome)
+    if not already_selected:
+        # One retained option is valid: selecting it must bind its exact DSL,
+        # even though the previous group binding had fewer than two valid choices.
+        recovered = await DialogueTurnOrchestrator(compiler).plan(
+            state=state, answer=proposals[-1].id,
+        )
+        assert recovered.clarification_turn is not None
+        result = recovered.clarification_turn.outcome
+        assert result.status is CompileStatus.READY
+        assert result.strategy is not None
+        assert result.strategy.instrument.symbol == "300059.SZ"
+        assert result.strategy.entry == proposals[-1].strategy_template.entry
+        assert result.strategy.exit == proposals[-1].strategy_template.exit
+        assert not result.run_requested
+        assert not result.refresh_data
+    assert generator.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize(("trigger", "supplied_days", "valid"), [
+    ("gt_multiple", None, True),
+    ("gte_multiple", None, True),
+    ("lte_multiple", None, True),
+    ("consecutive_gte_multiple", None, False),
+    ("gt_multiple", 7, True),
+    ("consecutive_gte_multiple", 7, True),
+    ("gte_multiple", 0, False),
+])
+async def test_direct_ideas_fill_only_inactive_relative_volume_days(
+    bound: bool, trigger: str, supplied_days: int | None, valid: bool,
+) -> None:
+    params = {"baseline_period": 20}
+    if supplied_days is not None:
+        params["consecutive_days"] = supplied_days
+    volume = IndicatorCondition(
+        indicator_id="volume.relative", definition_version="1.0.0",
+        params=params, trigger=trigger, value=1.5,
+    )
+    route = _direct_idea_route()
+    proposals = []
+    for proposal in route.proposals:
+        assert proposal.strategy is not None
+        spec = proposal.strategy.model_copy(update={
+            "entry": AllCondition(children=(proposal.strategy.entry, volume)),
+        })
+        proposals.append(replace(
+            proposal, instrument_symbol="300059.SZ" if bound else None,
+            strategy=spec if bound else None,
+            strategy_hash=canonical_hash(spec) if bound else None,
+            strategy_template=UnboundIdeaStrategy.model_validate(
+                spec.model_dump(exclude={"instrument", "schema_version"}),
+            ),
+        ))
+    route = replace(route, proposals=tuple(proposals))
+    compiler = _compiler(
+        generator=_RecordingRuleBasedGenerator(), idea_router=_RecordingIdeaRouter(route),
+    )
+    request = CompileInput(
+        utterance="低买高卖", instrument_context="300059.SZ" if bound else None,
+        as_of_date=date(2026, 9, 4),
+    )
+    outcome = await compiler.compile(request)
+    assert volume.params == params  # Normalization never mutates the provider payload.
+    if not valid:
+        assert outcome.diagnostic_code == "idea_guidance_execution_invalid"
+        assert outcome.idea_route is None
+        return
+    assert outcome.idea_route is not None
+    expected_days = 3 if supplied_days is None else supplied_days
+    choice = outcome.idea_route.proposals[0]
+    rules = choice.strategy if bound else choice.strategy_template
+    assert rules is not None and isinstance(rules.entry, AllCondition)
+    assert rules.entry.children[1].params == {**params, "consecutive_days": expected_days}
+    assert rules.entry.children[1].trigger == trigger
+    if not bound:
+        ready = compiler.bind_selected_idea(
+            replace(request, instrument_context="300059.SZ"),
+            replace(outcome, selected_idea_proposal=choice),
+        )
+        assert ready is not None and ready.strategy is not None
+        assert ready.strategy.entry == rules.entry
+    else:
+        assert choice.strategy_hash == canonical_hash(rules)
 
 
 def _paired_template_route(compiler: StrategyCompiler) -> IdeaRoute:
