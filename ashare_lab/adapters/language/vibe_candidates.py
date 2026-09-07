@@ -1049,6 +1049,8 @@ class VibeBoundedCandidateGenerator:
                 "价格穿越均线使用 technical.ma；两条不同周期均线交叉使用 technical.ma_cross，"
                 "例如5日均线上穿20日均线是 fast_period=5、slow_period=20、golden_cross，"
                 "不能改成价格上穿20日线，也不能省略原话给出的周期；"
+                "同句接着说下穿20日均线卖出且未换主语时，仍指前面的5日均线下穿20日均线，"
+                "卖出也使用 technical.ma_cross，引用只取卖出分句；显式改说收盘价时才换主语。"
                 "只支持日线收盘确认、AND/OR 条件组合和按 A 股交易日计数的固定持有期；"
                 "止盈、止损和跟踪回撤只有在原话明确给出类型与百分比时才能使用；"
                 "entry_spans/exit_spans 必须逐叶引用 sourceFragments 中的原文编号，"
@@ -1816,8 +1818,12 @@ def _normalize_transport_candidate(
         capability = matrix.resolve_indicator(leaf.indicator_id)
         name = match.group("name")
         value = leaf.params.get(name)
+        parameter_text = (
+            _ma_subject_context(spans[index].text, request.utterance, matrix)
+            if side == "exit" else spans[index].text
+        )
         explicit = capability is not None and (
-            name in _explicit_parameter_names(spans[index].text, capability)
+            name in _explicit_parameter_names(parameter_text, capability)
             or (
                 leaf.indicator_id == "price.rolling_high"
                 and name == "price_field"
@@ -1825,7 +1831,7 @@ def _normalize_transport_candidate(
             )
             or (
                 value is not None
-                and _special_parameter_evidence(leaf, spans[index].text, name, value)
+                and _special_parameter_evidence(leaf, parameter_text, name, value)
             )
         )
         if not explicit:
@@ -2311,11 +2317,17 @@ def _validate_leaf_grounding(
     if isinstance(leaf, IndicatorCandidate):
         capability = matrix.resolve_indicator(leaf.indicator_id)
         assert capability is not None
+        # Resolve a demonstrably omitted MA subject in the validation view only.
+        # Provenance remains the exact user quote; neither the candidate nor the
+        # source span is rewritten. Coverage below uses the same source reading.
+        indicator_text = (
+            _ma_subject_context(span.text, utterance, matrix) if side == "exit" else span.text
+        )
         competing_aliases = tuple(
             (item.indicator_id, item.aliases_zh) for item in matrix.indicators
         )
         selected_alias_is_grounded = _selected_alias_is_grounded(
-            span.text,
+            indicator_text,
             selected_id=capability.indicator_id,
             selected_aliases=capability.aliases_zh,
             competing_aliases=competing_aliases,
@@ -2331,7 +2343,7 @@ def _validate_leaf_grounding(
         if not (
             selected_alias_is_grounded
             or contextual_reference_is_grounded
-            or _special_indicator_evidence(leaf, span.text)
+            or _special_indicator_evidence(leaf, indicator_text)
         ):
             raise ValueError("candidate source span does not name the selected capability")
         trigger = next(item for item in capability.triggers if item.id == leaf.trigger)
@@ -2361,7 +2373,8 @@ def _validate_leaf_grounding(
                 and re.search(r"上穿|下穿|突破|跌破", span.text)):
             raise ValueError("price crossing cannot ground a static comparison trigger")
         pair = (
-            _ma_cross_source_pair(span.text) if leaf.indicator_id == "technical.ma_cross" else None
+            _ma_cross_source_pair(indicator_text)
+            if leaf.indicator_id == "technical.ma_cross" else None
         )
         if pair is not None:
             left, direction, right = pair
@@ -2383,11 +2396,11 @@ def _validate_leaf_grounding(
         )
         if not (
             _has_alias(span.text, trigger.aliases_zh)
-            or _special_trigger_evidence(leaf, span.text)
+            or _special_trigger_evidence(leaf, indicator_text)
             or contextual_trigger_reference_is_grounded
         ):
             raise ValueError("candidate source span does not name the selected trigger")
-        explicit_parameters = _explicit_parameter_names(span.text, capability)
+        explicit_parameters = _explicit_parameter_names(indicator_text, capability)
         for parameter in capability.parameters:
             value = leaf.params.get(parameter.name)
             if value is None:
@@ -2400,8 +2413,8 @@ def _validate_leaf_grounding(
                     raise ValueError("explicit indicator parameter cannot be replaced by a default")
                 consumed_defaults.add(path)
             elif not (
-                _parameter_evidence(span.text, capability, parameter.name, value)
-                or _special_parameter_evidence(leaf, span.text, parameter.name, value)
+                _parameter_evidence(indicator_text, capability, parameter.name, value)
+                or _special_parameter_evidence(leaf, indicator_text, parameter.name, value)
                 or (
                     (contextual_reference_is_grounded or contextual_trigger_reference_is_grounded)
                     and _paired_indicator_parameter_is_grounded(
@@ -2652,6 +2665,34 @@ def _ma_cross_source_pair(text: str) -> tuple[int, str, int] | None:
     return int(match[1]), match[2], int(match[3])
 
 
+def _ma_subject_context(
+    text: str, utterance: str, matrix: CandidateCapabilityMatrix,
+) -> str:
+    """In a paired MA sentence, inherit only the uniquely stated left subject.
+
+    ``5日均线上穿20日均线买入,下穿20日均线卖出`` retains MA5 as
+    its subject, not the stock price. An explicit subject, multiple possible
+    entry conditions or a repeated/non-exact source quote cannot borrow one.
+    The resulting text is a validation view, never stored as user evidence.
+    """
+    if re.match(r"\s*(上穿|下穿)\s*[1-9]\d*\s*日(?:均线|线)", text) is None:
+        return text
+    starts = tuple(match.start() for match in re.finditer(re.escape(text), utterance))
+    if len(starts) != 1:
+        return text
+    entries = _source_action_fragments(utterance[:starts[0]], side="entry", matrix=matrix)
+    if len(entries) != 1 or len(_split_condition_fragments(entries[0])) != 1:
+        return text
+    pair = _ma_cross_source_pair(entries[0])
+    if pair is None:
+        return text
+    # Require one explicit pair, not two possible MA subjects hidden in a clause.
+    periods = re.findall(r"[1-9]\d*\s*日(?:均线|线)", entries[0])
+    if len(periods) != 2:
+        return text
+    return f"{pair[0]}日均线{text.lstrip()}"
+
+
 def _special_indicator_evidence(leaf: IndicatorCandidate, text: str) -> bool:
     if leaf.indicator_id == "technical.ma_cross":
         return _ma_cross_source_pair(text) is not None
@@ -2780,7 +2821,13 @@ def _validate_explicit_leaf_coverage(
         side=side,
         matrix=matrix,
     ):
-        for condition_fragment in _split_condition_fragments(action_fragment):
+        # Resolve before splitting: a subject stated in this exit clause
+        # (收盘价高于30元且下穿20日均线) overrides the paired entry subject.
+        capability_text = (
+            _ma_subject_context(action_fragment, utterance, matrix)
+            if side == "exit" else action_fragment
+        )
+        for condition_fragment in _split_condition_fragments(capability_text):
             source.update(_named_capability_keys(condition_fragment, matrix))
             if side == "exit":
                 source.update(_named_position_exit_keys(condition_fragment))

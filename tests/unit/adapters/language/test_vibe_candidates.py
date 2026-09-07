@@ -1281,6 +1281,77 @@ async def test_model_keeps_full_catalog_and_exact_ma_pair_grounding(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first", "second", "exit_text", "exit_indicator", "exit_trigger", "exit_fast", "valid"),
+    [
+        (5, 20, "下穿20日均线时卖出", "technical.ma_cross", "death_cross", 5, True),
+        (20, 5, "下穿5日均线时卖出", "technical.ma_cross", "golden_cross", 5, True),
+        (5, 20, "下穿20日均线时卖出", "technical.ma_cross", "golden_cross", 5, False),
+        (5, 20, "下穿20日均线时卖出", "technical.ma_cross", "death_cross", 10, False),
+        (5, 20, "下穿20日均线时卖出", "technical.ma", "price_crosses_below", 5, False),
+        (5, 20, "收盘价下穿20日均线时卖出", "technical.ma", "price_crosses_below", 5, True),
+        (5, 20, "收盘价下穿20日均线时卖出", "technical.ma_cross", "death_cross", 5, False),
+        (5, 20, "10日均线下穿20日均线时卖出", "technical.ma_cross", "death_cross", 10, True),
+    ],
+)
+async def test_ma_exit_inherits_only_unambiguous_source_subject(
+    first: int, second: int, exit_text: str, exit_indicator: str,
+    exit_trigger: str, exit_fast: int, valid: bool,
+) -> None:
+    entry_text = f"贵州茅台{first}日均线上穿{second}日均线时买入"
+    utterance = f"{entry_text}，{exit_text}"
+    entry_params = {"fast_period": min(first, second), "slow_period": max(first, second),
+                    "price_field": "close"}
+    exit_params = ({"period": 20, "price_field": "close"}
+                   if exit_indicator == "technical.ma" else
+                   {"fast_period": exit_fast, "slow_period": 20, "price_field": "close"})
+    defaults = ["/entry/0/params/price_field"]
+    if "收盘价" not in exit_text:
+        defaults.append("/exit/0/params/price_field")
+    transport = _FakeTransport({"candidates": [{
+        "entry": [_indicator_payload("technical.ma_cross", "golden_cross"
+                                     if first < second else "death_cross", entry_params)],
+        "exit": [_indicator_payload(exit_indicator, exit_trigger, exit_params)],
+        "entry_spans": [_source_span(utterance, entry_text)],
+        "exit_spans": [_source_span(utterance, exit_text)],
+        "confidence": 0.95, "defaulted_fields": defaults,
+    }]})
+    generated = await _bounded(transport).generate(CompileInput(
+        utterance=utterance, instrument_context="600519.SH", as_of_date=date(2026, 9, 6),
+    ))
+    assert (generated[0].unsupported_code is None) is valid
+    if valid:
+        evidence = {item.path: item for item in generated[0].grounding_evidence}
+        assert evidence["/exit/0"].text == exit_text
+        assert generated[0].exit[0].indicator_id == exit_indicator
+
+
+@pytest.mark.asyncio
+async def test_explicit_exit_price_subject_overrides_entry_ma_subject_in_compound_clause() -> None:
+    entry_text = "贵州茅台5日均线上穿20日均线时买入"
+    exit_text = "收盘价高于30元且下穿20日均线时卖出"
+    utterance = f"{entry_text}，{exit_text}"
+    transport = _FakeTransport({"candidates": [{
+        "entry": [_indicator_payload("technical.ma_cross", "golden_cross", {
+            "fast_period": 5, "slow_period": 20, "price_field": "close",
+        })],
+        "exit": [_indicator_payload("price.close", "above", {}, value=30),
+                 _indicator_payload("technical.ma", "price_crosses_below", {
+                     "period": 20, "price_field": "close",
+                 })],
+        "entry_spans": [_source_span(utterance, entry_text)],
+        "exit_spans": [_source_span(utterance, exit_text)] * 2,
+        "exit_join": "all", "confidence": 0.95,
+        "defaulted_fields": ["/entry/0/params/price_field"],
+    }]})
+    generated = await _bounded(transport).generate(CompileInput(
+        utterance=utterance, instrument_context="600519.SH", as_of_date=date(2026, 9, 6),
+    ))
+    assert generated[0].unsupported_code is None
+    assert generated[0].exit[1].indicator_id == "technical.ma"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("window", ["20日", "前20日", "近20日"])
 async def test_rolling_high_close_subject_is_not_an_extra_price_condition(window: str) -> None:
     entry_text = f"东方财富收盘价创{window}新高买入"

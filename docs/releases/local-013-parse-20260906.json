@@ -1,0 +1,263 @@
+{
+  "scope": "local_real_production_factory",
+  "testedRuntimeRevision": "sha256:52ec14c6b9b1f24c7c2bebce6055be90b64052ca73523472acce0ba8a28d76a1",
+  "finalRuntimeRevision": "sha256:b7f31aba1861c42b25b37b987453cc8fb807c86ad81875d869a9be6ca0824638",
+  "postTestChange": "One docstring comma changed for RUF002; computed prior runtime hash exactly equals tested hash. No executable change.",
+  "tests": {
+    "passed": 185,
+    "excludedBaselineFailure": "test_bounded_provider_exit_and_cannot_be_rewritten_as_first_of fails equally with HEAD source loaded; existing ALL support changed old expectation.",
+    "lint": "passed",
+    "newGroundingCases": 9
+  },
+  "cases": [
+    {
+      "input": "贵州茅台5日均线上穿20日均线时买入，下穿20日均线时卖出",
+      "http": 201,
+      "status": "ready",
+      "requestId": "2a640e1445ca428281258b30c100f3eb",
+      "strategy": {
+        "schema_version": "strategy.v1",
+        "catalog": {
+          "catalog_id": "cn_a.signals",
+          "release_version": "2026.09.01"
+        },
+        "instrument": {
+          "market": "CN_A",
+          "symbol": "600519.SH",
+          "position_mode": "long_only"
+        },
+        "entry": {
+          "type": "indicator_condition",
+          "indicator_id": "technical.ma_cross",
+          "definition_version": "1.0.0",
+          "params": {
+            "fast_period": 5,
+            "price_field": "close",
+            "slow_period": 20
+          },
+          "timeframe": "1d",
+          "evaluation_mode": "bar_close_confirmed",
+          "trigger": "golden_cross",
+          "value": null
+        },
+        "exit": {
+          "op": "first_of",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "technical.ma_cross",
+              "definition_version": "1.0.0",
+              "params": {
+                "fast_period": 5,
+                "price_field": "close",
+                "slow_period": 20
+              },
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "death_cross",
+              "value": null
+            }
+          ]
+        },
+        "execution": {
+          "timezone": "Asia/Shanghai",
+          "entry_policy": "next_tradable_session_open",
+          "exit_policy": "next_tradable_session_open",
+          "data_capability": "daily_ohlcv",
+          "execution_resolution": "1d",
+          "evaluation_frequency": "1d_close",
+          "position_policy": "single_position_no_pyramiding",
+          "t_plus_one": true
+        },
+        "backtest": {
+          "start": "2025-09-06",
+          "end": "2026-09-06",
+          "initial_cash_cny": 1000000
+        }
+      },
+      "rawEvidence": "/private/tmp/ashare-public-013-validation.Pbry2i/local-ma-acceptance.json",
+      "rawSha256": "9b11498d3d255fd2e812eeb6144dfe8f2534dc4f93fa1effa0dcdf570335e0d5"
+    },
+    {
+      "input": "美的集团，14日RSI从30下方上穿30且当日成交额超过5亿元买入；14日RSI高于55、持仓亏损5%或持有满10个交易日卖出。",
+      "http": 201,
+      "status": "ready",
+      "requestId": "29cdbd53e34c493784d9efc96969feff",
+      "strategy": {
+        "schema_version": "strategy.v1",
+        "catalog": {
+          "catalog_id": "cn_a.signals",
+          "release_version": "2026.09.01"
+        },
+        "instrument": {
+          "market": "CN_A",
+          "symbol": "000333.SZ",
+          "position_mode": "long_only"
+        },
+        "entry": {
+          "type": "all",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "technical.rsi",
+              "definition_version": "1.0.0",
+              "params": {
+                "period": 14
+              },
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "crosses_above",
+              "value": 30.0
+            },
+            {
+              "type": "indicator_condition",
+              "indicator_id": "market.amount",
+              "definition_version": "1.0.0",
+              "params": {},
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "above",
+              "value": 500000000.0
+            }
+          ]
+        },
+        "exit": {
+          "op": "first_of",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "technical.rsi",
+              "definition_version": "1.0.0",
+              "params": {
+                "period": 14
+              },
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "above",
+              "value": 55.0
+            },
+            {
+              "type": "position_return_exit",
+              "trigger": "stop_loss",
+              "threshold_pct": 5.0,
+              "anchor": "first_entry_fill",
+              "observation": "back_adjusted_daily_close",
+              "evaluation_mode": "bar_close_confirmed",
+              "execution": "next_tradable_session_open"
+            },
+            {
+              "type": "holding_period_exit",
+              "sessions": 10,
+              "anchor": "first_entry_fill",
+              "count_mode": "subsequent_trading_sessions",
+              "execution": "target_session_open_proxy"
+            }
+          ]
+        },
+        "execution": {
+          "timezone": "Asia/Shanghai",
+          "entry_policy": "next_tradable_session_open",
+          "exit_policy": "next_tradable_session_open",
+          "data_capability": "daily_ohlcv",
+          "execution_resolution": "1d",
+          "evaluation_frequency": "1d_close",
+          "position_policy": "single_position_no_pyramiding",
+          "t_plus_one": true
+        },
+        "backtest": {
+          "start": "2025-09-06",
+          "end": "2026-09-06",
+          "initial_cash_cny": 1000000
+        }
+      },
+      "rawEvidence": "/private/tmp/ashare-public-013-validation.Pbry2i/local-midea/midea-rsi.json",
+      "rawSha256": "d51084a79960cd08ae286fe56a8fcd4637f24c7c82b6e1ffea3fd1ac3c19609a"
+    },
+    {
+      "input": "平安银行收盘价低于10元买入，高于12元卖出",
+      "http": 201,
+      "status": "ready",
+      "requestId": "a3d5c0fc236340848000bac139454a5f",
+      "strategy": {
+        "schema_version": "strategy.v1",
+        "catalog": {
+          "catalog_id": "cn_a.signals",
+          "release_version": "2026.09.01"
+        },
+        "instrument": {
+          "market": "CN_A",
+          "symbol": "000001.SZ",
+          "position_mode": "long_only"
+        },
+        "entry": {
+          "type": "indicator_condition",
+          "indicator_id": "price.close",
+          "definition_version": "1.0.0",
+          "params": {},
+          "timeframe": "1d",
+          "evaluation_mode": "bar_close_confirmed",
+          "trigger": "below",
+          "value": 10.0
+        },
+        "exit": {
+          "op": "first_of",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "price.close",
+              "definition_version": "1.0.0",
+              "params": {},
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "above",
+              "value": 12.0
+            }
+          ]
+        },
+        "execution": {
+          "timezone": "Asia/Shanghai",
+          "entry_policy": "next_tradable_session_open",
+          "exit_policy": "next_tradable_session_open",
+          "data_capability": "daily_ohlcv",
+          "execution_resolution": "1d",
+          "evaluation_frequency": "1d_close",
+          "position_policy": "single_position_no_pyramiding",
+          "t_plus_one": true
+        },
+        "backtest": {
+          "start": "2025-09-06",
+          "end": "2026-09-06",
+          "initial_cash_cny": 1000000
+        }
+      },
+      "rawEvidence": "/private/tmp/ashare-public-013-validation.Pbry2i/local-price/price.json",
+      "rawSha256": "3f035400e2f842713da25b71431103bf1dd76bbc4bde0afc4159d3df5c5b2b17"
+    }
+  ],
+  "backtest": {
+    "state": "succeeded",
+    "run": {
+      "id": "run:5e7fe62e349e407fb8d52ae9a3b3ae81",
+      "state": "succeeded",
+      "progress": 100,
+      "progressLabel": "回测完成，可请求 AI 分析与优化",
+      "createdAt": "2026-09-07T03:41:33.512407Z",
+      "updatedAt": "2026-09-07T03:41:46.221450Z",
+      "fingerprint": "sha256:dfce7de638f675d751c4a71419d4a57ce2d238c098224ff63887be906130464c",
+      "error": null,
+      "resultAvailable": true,
+      "resultHash": "sha256:2fa55dac60b62b73d74ec342be848a4a791bb01609c992ebc4b98bbf078b50ed"
+    },
+    "artifactHttp": {
+      "summary": 200,
+      "series": 200,
+      "trades": 200
+    },
+    "seriesPoints": 242,
+    "tradeActivities": 42,
+    "dataQuality": null,
+    "reasoningObserved": true,
+    "harnessBoundary": "Interrupted after successful run: first script skipped list-shaped series/trades; separate read-only GETs verified all three. No resubmission."
+  },
+  "publicAcceptance": false
+}
