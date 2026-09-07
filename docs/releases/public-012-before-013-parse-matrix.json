@@ -1,0 +1,44 @@
+[
+  {
+    "case": "maotai_ma",
+    "input": "贵州茅台5日均线上穿20日均线时买入，下穿20日均线时卖出",
+    "observation": "OBSERVED",
+    "http": 201,
+    "status": "unsupported",
+    "diagnostic_code": "candidate_provider_invalid_output",
+    "candidate_rejections": [],
+    "requestId": "aece2705-6a05-43ec-912f-5f8039f26386",
+    "postCount": 1,
+    "networkFailures": 1,
+    "error": null,
+    "evidence": "/private/tmp/public-parse-matrix-window.ItZE02/maotai_ma/flow.json"
+  },
+  {
+    "case": "midea_rsi",
+    "input": "美的集团，14日RSI从30下方上穿30且当日成交额超过5亿元买入；14日RSI高于55、持仓亏损5%或持有满10个交易日卖出。",
+    "observation": "OBSERVED",
+    "http": 201,
+    "status": "ready",
+    "diagnostic_code": null,
+    "candidate_rejections": [],
+    "requestId": "87dc79f8-5a92-412d-b10b-25999d969b15",
+    "postCount": 1,
+    "networkFailures": 0,
+    "error": null,
+    "evidence": "/private/tmp/public-parse-matrix-window.ItZE02/midea_rsi/flow.json"
+  },
+  {
+    "case": "pingan_price",
+    "input": "平安银行收盘价低于10元买入，高于12元卖出。",
+    "observation": "OBSERVED",
+    "http": 201,
+    "status": "ready",
+    "diagnostic_code": null,
+    "candidate_rejections": [],
+    "requestId": "de37d780-530f-4fd5-bd69-c45775094aa4",
+    "postCount": 1,
+    "networkFailures": 0,
+    "error": null,
+    "evidence": "/private/tmp/public-parse-matrix-window.ItZE02/pingan_price/flow.json"
+  }
+]

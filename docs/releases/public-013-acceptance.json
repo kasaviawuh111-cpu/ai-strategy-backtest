@@ -1,20 +1,12 @@
 {
-  "scope": "local_real_production_factory",
-  "testedRuntimeRevision": "sha256:52ec14c6b9b1f24c7c2bebce6055be90b64052ca73523472acce0ba8a28d76a1",
-  "finalRuntimeRevision": "sha256:b7f31aba1861c42b25b37b987453cc8fb807c86ad81875d869a9be6ca0824638",
-  "postTestChange": "One docstring comma changed for RUF002; computed prior runtime hash exactly equals tested hash. No executable change.",
-  "tests": {
-    "passed": 185,
-    "excludedBaselineFailure": "test_bounded_provider_exit_and_cannot_be_rewritten_as_first_of fails equally with HEAD source loaded; existing ALL support changed old expectation.",
-    "lint": "passed",
-    "newGroundingCases": 9
-  },
+  "revision": "sha256:7d0a7b1da51aea86f4e5b857cc8fbeb2cc42fd1f82def540c55199afdc558353",
   "cases": [
     {
       "input": "贵州茅台5日均线上穿20日均线时买入，下穿20日均线时卖出",
       "http": 201,
       "status": "ready",
-      "requestId": "2a640e1445ca428281258b30c100f3eb",
+      "requestId": "f429cfd3-b755-40a4-b38b-a16b8f2d829c",
+      "draftId": "204df892-f29f-4e4b-b161-fd901187a3d6",
       "strategy": {
         "schema_version": "strategy.v1",
         "catalog": {
@@ -75,14 +67,16 @@
           "initial_cash_cny": 1000000
         }
       },
-      "rawEvidence": "/private/tmp/ashare-public-013-validation.Pbry2i/local-ma-acceptance.json",
-      "rawSha256": "9b11498d3d255fd2e812eeb6144dfe8f2534dc4f93fa1effa0dcdf570335e0d5"
+      "postCount": 1,
+      "rawEvidence": "/private/tmp/ashare-public-013-validation.Pbry2i/public-inputs/ma-pair.json",
+      "rawSha256": "26884991902112b40f80498a93646c7c72b7f6174dc63961ad14d6c11f3e9b4a"
     },
     {
       "input": "美的集团，14日RSI从30下方上穿30且当日成交额超过5亿元买入；14日RSI高于55、持仓亏损5%或持有满10个交易日卖出。",
       "http": 201,
       "status": "ready",
-      "requestId": "29cdbd53e34c493784d9efc96969feff",
+      "requestId": "c209cd8d-117f-4228-b19f-93189ab324ca",
+      "draftId": "2df2f016-aa61-4501-89fe-cc5a90ad349a",
       "strategy": {
         "schema_version": "strategy.v1",
         "catalog": {
@@ -170,14 +164,16 @@
           "initial_cash_cny": 1000000
         }
       },
-      "rawEvidence": "/private/tmp/ashare-public-013-validation.Pbry2i/local-midea/midea-rsi.json",
-      "rawSha256": "d51084a79960cd08ae286fe56a8fcd4637f24c7c82b6e1ffea3fd1ac3c19609a"
+      "postCount": 1,
+      "rawEvidence": "/private/tmp/ashare-public-013-validation.Pbry2i/public-inputs/midea-rsi.json",
+      "rawSha256": "e148fc3b1f5e9c54f4401d4ef6d7ec3fccba353ea03de3ebd3a0b3c7e737ef5e"
     },
     {
       "input": "平安银行收盘价低于10元买入，高于12元卖出",
       "http": 201,
       "status": "ready",
-      "requestId": "a3d5c0fc236340848000bac139454a5f",
+      "requestId": "f479e58c-ac5a-4db1-9681-57fb23a0a726",
+      "draftId": "a4996614-03cb-4c3a-8c40-1d676e3c8ea2",
       "strategy": {
         "schema_version": "strategy.v1",
         "catalog": {
@@ -230,23 +226,23 @@
           "initial_cash_cny": 1000000
         }
       },
-      "rawEvidence": "/private/tmp/ashare-public-013-validation.Pbry2i/local-price/price.json",
-      "rawSha256": "3f035400e2f842713da25b71431103bf1dd76bbc4bde0afc4159d3df5c5b2b17"
+      "postCount": 1,
+      "rawEvidence": "/private/tmp/ashare-public-013-validation.Pbry2i/public-inputs/price.json",
+      "rawSha256": "c4b531f1c31431a8adcf2c71b01304d4107efa8f66a9db7bfa9dc51f343edad6"
     }
   ],
   "backtest": {
-    "state": "succeeded",
     "run": {
-      "id": "run:5e7fe62e349e407fb8d52ae9a3b3ae81",
+      "id": "run:7fb7f3076d644e02aff42d10169db5d1",
       "state": "succeeded",
       "progress": 100,
       "progressLabel": "回测完成，可请求 AI 分析与优化",
-      "createdAt": "2026-09-07T03:41:33.512407Z",
-      "updatedAt": "2026-09-07T03:41:46.221450Z",
-      "fingerprint": "sha256:dfce7de638f675d751c4a71419d4a57ce2d238c098224ff63887be906130464c",
+      "createdAt": "2026-09-07T03:56:56.255908Z",
+      "updatedAt": "2026-09-07T03:57:13.017323Z",
+      "fingerprint": "sha256:c1258baf27eeb2d5aea27e5ac43e97522b7c3c06a504b06c628385797b086b61",
       "error": null,
       "resultAvailable": true,
-      "resultHash": "sha256:2fa55dac60b62b73d74ec342be848a4a791bb01609c992ebc4b98bbf078b50ed"
+      "resultHash": "sha256:d5dd05cb8e031506074760d99cd1bf77c43466a301b152b8bce141411bb01bd7"
     },
     "artifactHttp": {
       "summary": 200,
@@ -257,17 +253,62 @@
     "tradeActivities": 42,
     "dataProvenance": {
       "provider": "eastmoney_mx_finance_data",
+      "instrumentId": "600519.SH",
       "priceBasis": "provider_back_adjusted",
-      "historyRows": 366,
+      "retrievedAt": "2026-09-07T03:57:07.455797Z",
       "historyStart": "2025-03-10",
       "historyEnd": "2026-09-04",
-      "historyCacheStatus": "disk",
-      "indicatorCacheStatuses": ["live"],
-      "maPeriods": [5, 20],
-      "indicatorParameters": "AdjustFlag=2,period=1"
+      "historyRows": 366,
+      "indicatorSeries": 1,
+      "indicatorPoints": 366,
+      "historyCacheStatus": "live",
+      "indicatorCacheStatuses": [
+        "live"
+      ],
+      "indicatorFieldEvidence": [
+        {
+          "indicatorId": "technical.ma_cross",
+          "fieldName": "5日MA简单移动平均",
+          "sourceFieldName": "5日MA简单移动平均",
+          "sourceFieldCode": "MAJDYDPJ_100000000017455",
+          "sourceParameters": "N=5,period=1,AdjustFlag=2,NewOldType=0",
+          "unit": null,
+          "sourceUnit": null
+        },
+        {
+          "indicatorId": "technical.ma_cross",
+          "fieldName": "20日MA简单移动平均",
+          "sourceFieldName": "20日MA简单移动平均",
+          "sourceFieldCode": "MAJDYDPJ20_100000000017455",
+          "sourceParameters": "N=20,period=1,AdjustFlag=2,NewOldType=0",
+          "unit": null,
+          "sourceUnit": null
+        }
+      ],
+      "derivedIndicatorEvidence": [],
+      "queries": [
+        "证券代码等于600519.SH；获取证券代码、证券简称、是否上市、证券类型、交易市场",
+        "查询A股600519.SH的首发上市日、股票简称、是否上市",
+        "查询600519.SH 2025-03-10至2026-09-06每个交易日的前收盘价、交易状态、是否ST",
+        "查询600519.SH 2025-03-10至2026-09-06每个交易日的涨停价、跌停价",
+        "查询600519.SH2025-03-10至2026-09-06每个交易日数据；获取不复权开盘价、不复权最高价、不复权最低价、不复权收盘价、成交量、成交额",
+        "查询600519.SH2025-03-10至2026-09-06每个交易日数据；获取后复权开盘价、后复权最高价、后复权最低价、后复权收盘价",
+        "查询600519.SH在2025-03-10至2026-09-06每个交易日的后复权5日MA简单移动平均（N=5,AdjustFlag=2,period=1）和20日MA简单移动平均（N=20,AdjustFlag=2,period=1）。复权参数AdjustFlag必须为2，不能用1或3。"
+      ]
     },
-    "reasoningObserved": true,
-    "harnessBoundary": "Interrupted after successful run: first script skipped list-shaped series/trades; separate read-only GETs verified all three. No resubmission."
+    "sameInputLocalPublicMetricsMatch": {
+      "totalReturn": -0.09875704433098531,
+      "benchmarkReturn": -0.06705998210718975,
+      "maxDrawdown": -0.17242796675822478,
+      "tradeCount": 7,
+      "winRate": 0.14285714285714285
+    },
+    "mobileReportScreenshotInspected": true
   },
-  "publicAcceptance": false
+  "reasoningBoundary": "Frontend byte-identical and cloud model config unchanged from012; local actual reasoning observed. Public013 browser closed before review reasoning arrived, so not a fresh reasoning-display acceptance.",
+  "limitations": [
+    "Three real fresh sessions are not an overall failure-rate estimate.",
+    "No mobile WeChat device test.",
+    "Older multi-turn binding failures remain a separate patch."
+  ]
 }
