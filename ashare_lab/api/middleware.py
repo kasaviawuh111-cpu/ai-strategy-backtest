@@ -13,6 +13,8 @@ from starlette.datastructures import MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from ashare_lab.ports.request_context import request_id
+
 from .schemas import ErrorBody, ErrorEnvelope
 
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
@@ -59,6 +61,7 @@ class RequestContextMiddleware:
         )
         state = scope.setdefault("state", {})
         state["request_id"] = correlation_id
+        request_token = request_id.set(correlation_id)
         started_at = perf_counter()
         status_code = 500
 
@@ -109,6 +112,7 @@ class RequestContextMiddleware:
 
             await self._app(scope, bounded_receive, send_with_request_id)
         finally:
+            request_id.reset(request_token)
             duration_ms = (perf_counter() - started_at) * 1000
             _ACCESS_LOG.info(
                 "http_request_completed request_id=%s method=%s path=%s status=%d duration_ms=%.3f",

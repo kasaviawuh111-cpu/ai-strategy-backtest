@@ -1,0 +1,177 @@
+{
+  "start": "2026-09-07 08:19:00",
+  "end": "2026-09-07 08:38:00",
+  "query": "\"candidate_gate_rejected\" OR \"candidate_transport_failed\" OR \"dialogue_reply_rejected\"",
+  "requestIds": [
+    "df0e1925-9515-4c8d-b50e-e49194162768"
+  ],
+  "total": 22,
+  "listOver": true,
+  "rows": [
+    {
+      "timestamp": "2026-09-07 08:22:34",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error"
+    },
+    {
+      "timestamp": "2026-09-07 08:22:36",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error"
+    },
+    {
+      "timestamp": "2026-09-07 08:22:36",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "timestamp": "2026-09-07 08:26:00",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "error_type": "ValueError",
+      "candidate_rank": "1"
+    },
+    {
+      "timestamp": "2026-09-07 08:26:03",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "error_type": "ValueError",
+      "candidate_rank": "1"
+    },
+    {
+      "timestamp": "2026-09-07 08:26:03",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "timestamp": "2026-09-07 08:26:12",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "error_type": "ValueError",
+      "candidate_rank": "1"
+    },
+    {
+      "timestamp": "2026-09-07 08:26:14",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "error_type": "ValueError",
+      "candidate_rank": "1"
+    },
+    {
+      "timestamp": "2026-09-07 08:26:14",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "timestamp": "2026-09-07 08:26:30",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error"
+    },
+    {
+      "timestamp": "2026-09-07 08:26:33",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error"
+    },
+    {
+      "timestamp": "2026-09-07 08:26:33",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "timestamp": "2026-09-07 08:28:16",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "error_type": "ValueError",
+      "candidate_rank": "1"
+    },
+    {
+      "timestamp": "2026-09-07 08:28:18",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "error_type": "ValueError",
+      "candidate_rank": "1"
+    },
+    {
+      "timestamp": "2026-09-07 08:28:18",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "timestamp": "2026-09-07 08:28:39",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error"
+    },
+    {
+      "timestamp": "2026-09-07 08:28:40",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "provider_schema_invalid",
+      "detail": "schema_invalid:candidates/0:value_error"
+    },
+    {
+      "timestamp": "2026-09-07 08:28:40",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "timestamp": "2026-09-07 08:32:06",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "error_type": "ValueError",
+      "candidate_rank": "1"
+    },
+    {
+      "timestamp": "2026-09-07 08:32:08",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "source_grounding_validation_failed",
+      "detail": "unclassified_validation_error",
+      "error_type": "ValueError",
+      "candidate_rank": "1"
+    },
+    {
+      "timestamp": "2026-09-07 08:32:08",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "semantic_validation_failed"
+    },
+    {
+      "timestamp": "2026-09-07 08:33:37",
+      "version": "ashare-strategy-preview-009",
+      "event": "candidate_gate_rejected",
+      "reason": "catalog_matrix_validation_failed",
+      "detail": "catalog_parameter_required",
+      "error_type": "ValueError",
+      "candidate_rank": "1"
+    }
+  ]
+}

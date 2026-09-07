@@ -19,6 +19,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from ashare_lab.ports.dialogue_progress import emit_model_reasoning, emit_progress
+from ashare_lab.ports.request_context import current_candidate_attempt, current_request_id
 
 from .vibe_candidates import (
     CandidateFailureKind,
@@ -356,8 +357,11 @@ class OpenAICompatibleCandidateTransport:
                     "candidate provider response is not a JSON object"
                 )
             _LOGGER.warning(
-                "candidate_transport_ok provider=%s model=%s status=%s elapsed_ms=%d "
+                "candidate_transport_ok request_id=%s attempt=%d "
+                "provider=%s model=%s status=%s elapsed_ms=%d "
                 "request_bytes=%d response_bytes=%d response_mode=%s thinking=%s",
+                current_request_id(),
+                current_candidate_attempt(),
                 self._identity.provider,
                 self._identity.model,
                 response_status,
@@ -373,8 +377,11 @@ class OpenAICompatibleCandidateTransport:
             failure = _classified_transport_failure(exc, response_status)
             emit_progress("failed", "模型调用未完成，正在返回错误说明。")
             _LOGGER.warning(
-                "candidate_transport_failed provider=%s model=%s status=%s elapsed_ms=%d "
+                "candidate_transport_failed request_id=%s attempt=%d "
+                "provider=%s model=%s status=%s elapsed_ms=%d "
                 "request_bytes=%d response_bytes=%d response_mode=%s thinking=%s reason=%s",
+                current_request_id(),
+                current_candidate_attempt(),
                 self._identity.provider,
                 self._identity.model,
                 response_status,
@@ -408,9 +415,12 @@ class OpenAICompatibleCandidateTransport:
                 else "模型响应未通过检查，正在返回错误说明。",
             )
             _LOGGER.warning(
-                "candidate_transport_failed provider=%s model=%s status=%s elapsed_ms=%d "
+                "candidate_transport_failed request_id=%s attempt=%d "
+                "provider=%s model=%s status=%s elapsed_ms=%d "
                 "request_bytes=%d response_bytes=%d response_mode=%s thinking=%s "
                 "reason=%s error_type=%s",
+                current_request_id(),
+                current_candidate_attempt(),
                 self._identity.provider,
                 self._identity.model,
                 response_status,

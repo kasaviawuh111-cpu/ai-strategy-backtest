@@ -1,0 +1,652 @@
+{
+  "date": "2026-09-06",
+  "scope": "Local isolated production assembly; real provider; actual homepage button clicks; not deployed and no backtest started",
+  "entryPoint": "homepage_chip_click",
+  "viewport": {
+    "width": 390,
+    "height": 844,
+    "isMobile": true,
+    "hasTouch": true
+  },
+  "baseline": {
+    "codeRevision": "sha256:340b0196c1e64f33a72c03c427b8cc95a8ae9718bacba4816c14b3bc5cdf8ca7",
+    "source": "published-009-bundle",
+    "trials": [
+      {
+        "case": "maotai",
+        "repeat": 1,
+        "request": {
+          "utterance": "贵州茅台，收盘价创前20日新高且成交量超过前20日均量1.5倍买入；从持仓后最高收盘价回撤8%或持有满40个交易日卖出。",
+          "instrument_context": "600519.SH",
+          "as_of_date": "2026-09-06"
+        },
+        "initialHttp": 202,
+        "finalHttp": 201,
+        "outcome": "unsupported",
+        "diagnostic": "candidate_provider_invalid_output",
+        "seconds": 20.85,
+        "backtestPosts": 0,
+        "draftId": "ea2ce139-36f7-4d5d-8fcd-5870be68ece2",
+        "strategyHash": null,
+        "strategy": null,
+        "grounding": null,
+        "model": null
+      },
+      {
+        "case": "midea",
+        "repeat": 1,
+        "request": {
+          "utterance": "美的集团，14日RSI从30下方上穿30且当日成交额超过5亿元买入；14日RSI高于55、持仓亏损5%或持有满10个交易日卖出。",
+          "instrument_context": "000333.SZ",
+          "as_of_date": "2026-09-06"
+        },
+        "initialHttp": 202,
+        "finalHttp": 201,
+        "outcome": "unsupported",
+        "diagnostic": "candidate_provider_invalid_output",
+        "seconds": 21.85,
+        "backtestPosts": 0,
+        "draftId": "8db904cd-741a-4182-b221-01e67946e602",
+        "strategyHash": null,
+        "strategy": null,
+        "grounding": null,
+        "model": null
+      }
+    ],
+    "observedInternalGuards": {
+      "maotai": "a stock name cannot authorize a model-invented security code",
+      "midea": "entry source spans must match entry leaves one-for-one"
+    }
+  },
+  "fixed": {
+    "source": "working-tree after ce23467",
+    "runtimeFilesSha256": {
+      "ashare_lab/adapters/language/vibe_candidates.py": "dd769dde528ef19de21c5f3a6bb16adb6d390d0f40152deeb65f4420f3fd2ad6",
+      "ashare_lab/adapters/language/openai_compatible.py": "154c8ab8270f2cb9538eaaa4ef2a42f21d750363288bb40b7c805fd63f7f59a0",
+      "ashare_lab/api/middleware.py": "a150fc2603d6828fe2b361db081b54b476569afae49281cf200355c25fcdff29",
+      "ashare_lab/ports/request_context.py": "7503c939d3a399b217a672a3ce371ea05f2c2375dfcd2b555c7c7333421ce291"
+    },
+    "trials": [
+      {
+        "case": "maotai",
+        "repeat": 1,
+        "request": {
+          "utterance": "贵州茅台，收盘价创前20日新高且成交量超过前20日均量1.5倍买入；从持仓后最高收盘价回撤8%或持有满40个交易日卖出。",
+          "instrument_context": "600519.SH",
+          "as_of_date": "2026-09-06"
+        },
+        "initialHttp": 202,
+        "finalHttp": 201,
+        "outcome": "ready",
+        "diagnostic": null,
+        "seconds": 27.47,
+        "backtestPosts": 0,
+        "draftId": "01377ebe-4bb0-4e16-9658-6c33add51e3e",
+        "strategyHash": "sha256:bc16df5a134903491a792691e0a68670b3613760fd2b303074c511261b7d7945",
+        "strategy": {
+          "schema_version": "strategy.v1",
+          "catalog": {
+            "catalog_id": "cn_a.signals",
+            "release_version": "2026.09.01"
+          },
+          "instrument": {
+            "market": "CN_A",
+            "symbol": "600519.SH",
+            "position_mode": "long_only"
+          },
+          "entry": {
+            "type": "all",
+            "children": [
+              {
+                "type": "indicator_condition",
+                "indicator_id": "price.rolling_high",
+                "definition_version": "1.0.0",
+                "params": {
+                  "period": 20,
+                  "price_field": "close"
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "new_high",
+                "value": null
+              },
+              {
+                "type": "indicator_condition",
+                "indicator_id": "volume.relative",
+                "definition_version": "1.0.0",
+                "params": {
+                  "baseline_period": 20,
+                  "consecutive_days": 3
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "gt_multiple",
+                "value": 1.5
+              }
+            ]
+          },
+          "exit": {
+            "op": "first_of",
+            "children": [
+              {
+                "type": "trailing_drawdown_exit",
+                "threshold_pct": 8,
+                "anchor": "first_entry_fill",
+                "peak_basis": "back_adjusted_daily_close",
+                "evaluation_mode": "bar_close_confirmed",
+                "execution": "next_tradable_session_open"
+              },
+              {
+                "type": "holding_period_exit",
+                "sessions": 40,
+                "anchor": "first_entry_fill",
+                "count_mode": "subsequent_trading_sessions",
+                "execution": "target_session_open_proxy"
+              }
+            ]
+          },
+          "execution": {
+            "timezone": "Asia/Shanghai",
+            "entry_policy": "next_tradable_session_open",
+            "exit_policy": "next_tradable_session_open",
+            "data_capability": "daily_ohlcv",
+            "execution_resolution": "1d",
+            "evaluation_frequency": "1d_close",
+            "position_policy": "single_position_no_pyramiding",
+            "t_plus_one": true
+          },
+          "backtest": {
+            "start": "2025-09-06",
+            "end": "2026-09-06",
+            "initial_cash_cny": 1000000
+          }
+        },
+        "grounding": {
+          "matched_spans": [
+            "收盘价创前20日新高且成交量超过前20日均量1.5倍买入",
+            "收盘价创前20日新高且成交量超过前20日均量1.5倍买入",
+            "从持仓后最高收盘价回撤8%或持有满40个交易日卖出",
+            "从持仓后最高收盘价回撤8%或持有满40个交易日卖出",
+            "贵州茅台"
+          ],
+          "spans": [
+            {
+              "path": "/entry/0",
+              "start": 5,
+              "end": 33,
+              "text": "收盘价创前20日新高且成交量超过前20日均量1.5倍买入"
+            },
+            {
+              "path": "/entry/1",
+              "start": 5,
+              "end": 33,
+              "text": "收盘价创前20日新高且成交量超过前20日均量1.5倍买入"
+            },
+            {
+              "path": "/exit/0",
+              "start": 34,
+              "end": 59,
+              "text": "从持仓后最高收盘价回撤8%或持有满40个交易日卖出"
+            },
+            {
+              "path": "/exit/1",
+              "start": 34,
+              "end": 59,
+              "text": "从持仓后最高收盘价回撤8%或持有满40个交易日卖出"
+            },
+            {
+              "path": "/instrument/symbol",
+              "start": 0,
+              "end": 4,
+              "text": "贵州茅台"
+            }
+          ]
+        },
+        "model": "deepseek-v4-flash"
+      },
+      {
+        "case": "midea",
+        "repeat": 1,
+        "request": {
+          "utterance": "美的集团，14日RSI从30下方上穿30且当日成交额超过5亿元买入；14日RSI高于55、持仓亏损5%或持有满10个交易日卖出。",
+          "instrument_context": "000333.SZ",
+          "as_of_date": "2026-09-06"
+        },
+        "initialHttp": 202,
+        "finalHttp": 201,
+        "outcome": "ready",
+        "diagnostic": null,
+        "seconds": 37.41,
+        "backtestPosts": 0,
+        "draftId": "8eaa1e9c-473b-4cad-bf8a-7471b49179e1",
+        "strategyHash": "sha256:b6cb1a80bad637be9891adbebcdf0f0f275790b4eef0c69a0d146eb7986ac814",
+        "strategy": {
+          "schema_version": "strategy.v1",
+          "catalog": {
+            "catalog_id": "cn_a.signals",
+            "release_version": "2026.09.01"
+          },
+          "instrument": {
+            "market": "CN_A",
+            "symbol": "000333.SZ",
+            "position_mode": "long_only"
+          },
+          "entry": {
+            "type": "all",
+            "children": [
+              {
+                "type": "indicator_condition",
+                "indicator_id": "technical.rsi",
+                "definition_version": "1.0.0",
+                "params": {
+                  "period": 14
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "crosses_above",
+                "value": 30
+              },
+              {
+                "type": "indicator_condition",
+                "indicator_id": "market.amount",
+                "definition_version": "1.0.0",
+                "params": {},
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "above",
+                "value": 500000000
+              }
+            ]
+          },
+          "exit": {
+            "op": "first_of",
+            "children": [
+              {
+                "type": "indicator_condition",
+                "indicator_id": "technical.rsi",
+                "definition_version": "1.0.0",
+                "params": {
+                  "period": 14
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "above",
+                "value": 55
+              },
+              {
+                "type": "position_return_exit",
+                "trigger": "stop_loss",
+                "threshold_pct": 5,
+                "anchor": "first_entry_fill",
+                "observation": "back_adjusted_daily_close",
+                "evaluation_mode": "bar_close_confirmed",
+                "execution": "next_tradable_session_open"
+              },
+              {
+                "type": "holding_period_exit",
+                "sessions": 10,
+                "anchor": "first_entry_fill",
+                "count_mode": "subsequent_trading_sessions",
+                "execution": "target_session_open_proxy"
+              }
+            ]
+          },
+          "execution": {
+            "timezone": "Asia/Shanghai",
+            "entry_policy": "next_tradable_session_open",
+            "exit_policy": "next_tradable_session_open",
+            "data_capability": "daily_ohlcv",
+            "execution_resolution": "1d",
+            "evaluation_frequency": "1d_close",
+            "position_policy": "single_position_no_pyramiding",
+            "t_plus_one": true
+          },
+          "backtest": {
+            "start": "2025-09-06",
+            "end": "2026-09-06",
+            "initial_cash_cny": 1000000
+          }
+        },
+        "grounding": {
+          "matched_spans": [
+            "14日RSI从30下方上穿30且当日成交额超过5亿元买入",
+            "14日RSI从30下方上穿30且当日成交额超过5亿元买入",
+            "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出",
+            "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出",
+            "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出",
+            "美的集团"
+          ],
+          "spans": [
+            {
+              "path": "/entry/0",
+              "start": 5,
+              "end": 33,
+              "text": "14日RSI从30下方上穿30且当日成交额超过5亿元买入"
+            },
+            {
+              "path": "/entry/1",
+              "start": 5,
+              "end": 33,
+              "text": "14日RSI从30下方上穿30且当日成交额超过5亿元买入"
+            },
+            {
+              "path": "/exit/0",
+              "start": 34,
+              "end": 63,
+              "text": "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+            },
+            {
+              "path": "/exit/1",
+              "start": 34,
+              "end": 63,
+              "text": "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+            },
+            {
+              "path": "/exit/2",
+              "start": 34,
+              "end": 63,
+              "text": "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+            },
+            {
+              "path": "/instrument/symbol",
+              "start": 0,
+              "end": 4,
+              "text": "美的集团"
+            }
+          ]
+        },
+        "model": "deepseek-v4-flash"
+      },
+      {
+        "case": "maotai",
+        "repeat": 2,
+        "request": {
+          "utterance": "贵州茅台，收盘价创前20日新高且成交量超过前20日均量1.5倍买入；从持仓后最高收盘价回撤8%或持有满40个交易日卖出。",
+          "instrument_context": "600519.SH",
+          "as_of_date": "2026-09-06"
+        },
+        "initialHttp": 202,
+        "finalHttp": 201,
+        "outcome": "ready",
+        "diagnostic": null,
+        "seconds": 25.36,
+        "backtestPosts": 0,
+        "draftId": "1d43d7cf-23ec-47c4-a33b-1dc750be025b",
+        "strategyHash": "sha256:bc16df5a134903491a792691e0a68670b3613760fd2b303074c511261b7d7945",
+        "strategy": {
+          "schema_version": "strategy.v1",
+          "catalog": {
+            "catalog_id": "cn_a.signals",
+            "release_version": "2026.09.01"
+          },
+          "instrument": {
+            "market": "CN_A",
+            "symbol": "600519.SH",
+            "position_mode": "long_only"
+          },
+          "entry": {
+            "type": "all",
+            "children": [
+              {
+                "type": "indicator_condition",
+                "indicator_id": "price.rolling_high",
+                "definition_version": "1.0.0",
+                "params": {
+                  "period": 20,
+                  "price_field": "close"
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "new_high",
+                "value": null
+              },
+              {
+                "type": "indicator_condition",
+                "indicator_id": "volume.relative",
+                "definition_version": "1.0.0",
+                "params": {
+                  "baseline_period": 20,
+                  "consecutive_days": 3
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "gt_multiple",
+                "value": 1.5
+              }
+            ]
+          },
+          "exit": {
+            "op": "first_of",
+            "children": [
+              {
+                "type": "trailing_drawdown_exit",
+                "threshold_pct": 8,
+                "anchor": "first_entry_fill",
+                "peak_basis": "back_adjusted_daily_close",
+                "evaluation_mode": "bar_close_confirmed",
+                "execution": "next_tradable_session_open"
+              },
+              {
+                "type": "holding_period_exit",
+                "sessions": 40,
+                "anchor": "first_entry_fill",
+                "count_mode": "subsequent_trading_sessions",
+                "execution": "target_session_open_proxy"
+              }
+            ]
+          },
+          "execution": {
+            "timezone": "Asia/Shanghai",
+            "entry_policy": "next_tradable_session_open",
+            "exit_policy": "next_tradable_session_open",
+            "data_capability": "daily_ohlcv",
+            "execution_resolution": "1d",
+            "evaluation_frequency": "1d_close",
+            "position_policy": "single_position_no_pyramiding",
+            "t_plus_one": true
+          },
+          "backtest": {
+            "start": "2025-09-06",
+            "end": "2026-09-06",
+            "initial_cash_cny": 1000000
+          }
+        },
+        "grounding": {
+          "matched_spans": [
+            "收盘价创前20日新高且成交量超过前20日均量1.5倍买入",
+            "收盘价创前20日新高且成交量超过前20日均量1.5倍买入",
+            "从持仓后最高收盘价回撤8%或持有满40个交易日卖出",
+            "从持仓后最高收盘价回撤8%或持有满40个交易日卖出",
+            "贵州茅台"
+          ],
+          "spans": [
+            {
+              "path": "/entry/0",
+              "start": 5,
+              "end": 33,
+              "text": "收盘价创前20日新高且成交量超过前20日均量1.5倍买入"
+            },
+            {
+              "path": "/entry/1",
+              "start": 5,
+              "end": 33,
+              "text": "收盘价创前20日新高且成交量超过前20日均量1.5倍买入"
+            },
+            {
+              "path": "/exit/0",
+              "start": 34,
+              "end": 59,
+              "text": "从持仓后最高收盘价回撤8%或持有满40个交易日卖出"
+            },
+            {
+              "path": "/exit/1",
+              "start": 34,
+              "end": 59,
+              "text": "从持仓后最高收盘价回撤8%或持有满40个交易日卖出"
+            },
+            {
+              "path": "/instrument/symbol",
+              "start": 0,
+              "end": 4,
+              "text": "贵州茅台"
+            }
+          ]
+        },
+        "model": "deepseek-v4-flash"
+      },
+      {
+        "case": "midea",
+        "repeat": 2,
+        "request": {
+          "utterance": "美的集团，14日RSI从30下方上穿30且当日成交额超过5亿元买入；14日RSI高于55、持仓亏损5%或持有满10个交易日卖出。",
+          "instrument_context": "000333.SZ",
+          "as_of_date": "2026-09-06"
+        },
+        "initialHttp": 202,
+        "finalHttp": 201,
+        "outcome": "ready",
+        "diagnostic": null,
+        "seconds": 20.26,
+        "backtestPosts": 0,
+        "draftId": "fee90b05-9593-4897-95d2-e25f5c0f13d0",
+        "strategyHash": "sha256:b6cb1a80bad637be9891adbebcdf0f0f275790b4eef0c69a0d146eb7986ac814",
+        "strategy": {
+          "schema_version": "strategy.v1",
+          "catalog": {
+            "catalog_id": "cn_a.signals",
+            "release_version": "2026.09.01"
+          },
+          "instrument": {
+            "market": "CN_A",
+            "symbol": "000333.SZ",
+            "position_mode": "long_only"
+          },
+          "entry": {
+            "type": "all",
+            "children": [
+              {
+                "type": "indicator_condition",
+                "indicator_id": "technical.rsi",
+                "definition_version": "1.0.0",
+                "params": {
+                  "period": 14
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "crosses_above",
+                "value": 30
+              },
+              {
+                "type": "indicator_condition",
+                "indicator_id": "market.amount",
+                "definition_version": "1.0.0",
+                "params": {},
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "above",
+                "value": 500000000
+              }
+            ]
+          },
+          "exit": {
+            "op": "first_of",
+            "children": [
+              {
+                "type": "indicator_condition",
+                "indicator_id": "technical.rsi",
+                "definition_version": "1.0.0",
+                "params": {
+                  "period": 14
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "above",
+                "value": 55
+              },
+              {
+                "type": "position_return_exit",
+                "trigger": "stop_loss",
+                "threshold_pct": 5,
+                "anchor": "first_entry_fill",
+                "observation": "back_adjusted_daily_close",
+                "evaluation_mode": "bar_close_confirmed",
+                "execution": "next_tradable_session_open"
+              },
+              {
+                "type": "holding_period_exit",
+                "sessions": 10,
+                "anchor": "first_entry_fill",
+                "count_mode": "subsequent_trading_sessions",
+                "execution": "target_session_open_proxy"
+              }
+            ]
+          },
+          "execution": {
+            "timezone": "Asia/Shanghai",
+            "entry_policy": "next_tradable_session_open",
+            "exit_policy": "next_tradable_session_open",
+            "data_capability": "daily_ohlcv",
+            "execution_resolution": "1d",
+            "evaluation_frequency": "1d_close",
+            "position_policy": "single_position_no_pyramiding",
+            "t_plus_one": true
+          },
+          "backtest": {
+            "start": "2025-09-06",
+            "end": "2026-09-06",
+            "initial_cash_cny": 1000000
+          }
+        },
+        "grounding": {
+          "matched_spans": [
+            "14日RSI从30下方上穿30且当日成交额超过5亿元买入",
+            "14日RSI从30下方上穿30且当日成交额超过5亿元买入",
+            "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出",
+            "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出",
+            "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出",
+            "美的集团"
+          ],
+          "spans": [
+            {
+              "path": "/entry/0",
+              "start": 5,
+              "end": 33,
+              "text": "14日RSI从30下方上穿30且当日成交额超过5亿元买入"
+            },
+            {
+              "path": "/entry/1",
+              "start": 5,
+              "end": 33,
+              "text": "14日RSI从30下方上穿30且当日成交额超过5亿元买入"
+            },
+            {
+              "path": "/exit/0",
+              "start": 34,
+              "end": 63,
+              "text": "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+            },
+            {
+              "path": "/exit/1",
+              "start": 34,
+              "end": 63,
+              "text": "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+            },
+            {
+              "path": "/exit/2",
+              "start": 34,
+              "end": 63,
+              "text": "14日RSI高于55、持仓亏损5%或持有满10个交易日卖出"
+            },
+            {
+              "path": "/instrument/symbol",
+              "start": 0,
+              "end": 4,
+              "text": "美的集团"
+            }
+          ]
+        },
+        "model": "deepseek-v4-flash"
+      }
+    ]
+  }
+}
