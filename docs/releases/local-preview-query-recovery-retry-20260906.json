@@ -1,0 +1,56 @@
+{
+  "originalRunId": "run:7ac2bb7a896649ebad05953739975c96",
+  "maximumManualRetryCount": 1,
+  "submittedManualRetryCount": 1,
+  "sameOriginalPayload": true,
+  "payloadSha256": "e689a0ea5e6e584e6f7d84cf45196a6a428290ebffb24ca28d8a297d7700dfac",
+  "originalStatus": {
+    "id": "run:7ac2bb7a896649ebad05953739975c96",
+    "state": "failed",
+    "progress": 10,
+    "progressLabel": "连接东方财富查数 Skill超时，本次取数未完成，可以重试。",
+    "createdAt": "2026-09-07T02:17:54.933337Z",
+    "updatedAt": "2026-09-07T02:19:11.956604Z",
+    "fingerprint": "sha256:85559dd8cbc575856e13028a71217235206df51a79b1e33dbe75b4baabf7cfc4",
+    "error": "skill_mx_connect_timeout",
+    "resultAvailable": false,
+    "resultHash": null
+  },
+  "createStatus": 202,
+  "retryRunId": "run:5d479e9346304a5d883315ef90cd9349",
+  "terminal": {
+    "id": "run:5d479e9346304a5d883315ef90cd9349",
+    "state": "succeeded",
+    "progress": 100,
+    "progressLabel": "回测完成，可请求 AI 分析与优化",
+    "createdAt": "2026-09-07T02:23:41.303964Z",
+    "updatedAt": "2026-09-07T02:24:43.626339Z",
+    "fingerprint": "sha256:f67cc2da7913d04391452621ef848abccf7a517b7da54693b682f00baad903e2",
+    "error": null,
+    "resultAvailable": true,
+    "resultHash": "sha256:734c10e9b134c00d7ddc7cae17c5b2b6ce2e89da83edb298bde629b90e3d5a7f"
+  },
+  "status": "succeeded",
+  "verification": {
+    "checks": {
+      "stateSucceeded": true,
+      "exactOriginalPayload": true,
+      "exactOriginalStoredStrategy": true,
+      "exactOriginalStoredConfig": true,
+      "strategyHashMatchesReadyDraft": true,
+      "bundleHashPolicy": true,
+      "resultHashVerified": true,
+      "summaryReadbackMatchesStored": true,
+      "seriesReadbackMatchesStored": true,
+      "tradesReadbackMatchesStored": true,
+      "allArtifactHttp200": true
+    },
+    "allPassed": true,
+    "strategyHash": "sha256:d8aa3b6226b0876d09205eadd583a72f2a3e15e980b194f7c3e8de128b3043d7",
+    "resultHash": "sha256:734c10e9b134c00d7ddc7cae17c5b2b6ce2e89da83edb298bde629b90e3d5a7f",
+    "seriesPoints": 242,
+    "tradeActivityItems": 9,
+    "closedTradeCount": 1,
+    "note": "Dedicated local production-factory service with real upstream data; not public deployment evidence."
+  }
+}

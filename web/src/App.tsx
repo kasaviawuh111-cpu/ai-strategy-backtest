@@ -14,7 +14,7 @@ import {
 } from './components/primitives'
 import { ChainScreen, ExecutionDetailsScreen, ExecutionEntry, ParamsScreen, ReportBody } from './screens'
 import { apiMode, backtestApi, instrumentApi, strategyApi, systemApi } from './shared/api/client'
-import type { DialogueProgressEvent, DialogueProgressObserver } from './shared/api/client'
+import type { DialogueProgressEvent, DialogueProgressObserver, PreviewPollRecovery } from './shared/api/client'
 import { fromBacktestOptimizationCandidate, toLiveBacktestBody, toLiveRevisionBody } from './shared/api/contract'
 import { ApiError } from './shared/api/types'
 import type {
@@ -757,6 +757,7 @@ export default function App({
   /** 详情区显示哪一次回测：默认当前这次，左栏点历史时切过去。 */
   const [detailJourneyId, setDetailJourneyId] = useState<string>()
   const [dialogueProgress, setDialogueProgress] = useState<readonly DialogueProgressEvent[]>([])
+  const [dialogueRecovery, setDialogueRecovery] = useState<PreviewPollRecovery | null>(null)
   const dialogueProgressAbortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const workspaceRef = useRef<HTMLDivElement>(null)
@@ -771,10 +772,14 @@ export default function App({
     const controller = new AbortController()
     dialogueProgressAbortRef.current = controller
     setDialogueProgress([])
+    setDialogueRecovery(null)
     return {
       signal: controller.signal,
       onProgress: (events) => {
         if (!controller.signal.aborted) setDialogueProgress(events.slice(-12))
+      },
+      onRecovery: (state) => {
+        if (!controller.signal.aborted) setDialogueRecovery(state)
       },
     }
   }
@@ -799,7 +804,7 @@ export default function App({
 
   const compileMutation = useMutation({
     mutationFn: ({ text, instrumentOverride, parentDraftId, editCurrentStrategy, executionContext,
-      relatedRunIds, relatedReview, relatedReviews }: {
+      relatedRunIds, relatedReview, relatedReviews, dialogueProgress: observer }: {
       text: string
       instrumentOverride?: ApiInstrument
       parentDraftId?: string
@@ -808,6 +813,7 @@ export default function App({
       relatedRunIds?: string[]
       relatedReview?: CompileRequest['relatedReview']
       relatedReviews?: CompileRequest['relatedReviews']
+      dialogueProgress: DialogueProgressObserver
     }) => {
       const request = {
         ...compileRequestFor({ text, instrumentOverride }),
@@ -816,13 +822,15 @@ export default function App({
         relatedRunIds,
         relatedReview,
         relatedReviews,
-        dialogueProgress: beginDialogueProgress(),
+        dialogueProgress: observer,
       }
       return parentDraftId
         ? strategyApi.compile(request, parentDraftId)
         : strategyApi.compile(request)
     },
     onSuccess: (outcome, variables) => {
+      if (variables.dialogueProgress.signal?.aborted) return
+      setDialogueRecovery(null)
       // Even a rerun chip may need clarification or a user-requested pause.
       // Only the resolved server turn can authorize the new calculation.
       rerunAfterEdit.current = outcome.status === 'compiled' && outcome.runRequested === true
@@ -882,6 +890,8 @@ export default function App({
       }
     },
     onError: (error, variables) => {
+      if (variables.dialogueProgress.signal?.aborted) return
+      setDialogueRecovery(null)
       if (isReviewContextError(error) && variables.relatedReview) {
         setReviewContextError({ runId: variables.relatedReview.runId, message: errorMessage(error) })
       }
@@ -891,11 +901,13 @@ export default function App({
   })
 
   const answerMutation = useMutation({
-    mutationFn: ({ answer, target, pendingClarification, relatedRunIds, relatedReview, relatedReviews }: {
+    mutationFn: ({ answer, target, pendingClarification, relatedRunIds, relatedReview, relatedReviews,
+      dialogueProgress: observer }: {
       answer: string
       inputText: string
       target: ClarificationTarget
       pendingClarification: Clarification
+      dialogueProgress: DialogueProgressObserver
       relatedRunIds?: string[]
       relatedReview?: CompileRequest['relatedReview']
       relatedReviews?: CompileRequest['relatedReviews']
@@ -909,9 +921,11 @@ export default function App({
       relatedReviews,
       originalRequest: target.originalRequest,
       clarification: pendingClarification,
-      dialogueProgress: beginDialogueProgress(),
+      dialogueProgress: observer,
     }),
     onSuccess: (turn, variables) => {
+      if (variables.dialogueProgress.signal?.aborted) return
+      setDialogueRecovery(null)
       // A clarification can confirm the pending run or explicitly cancel it.
       // Use the resolved turn's intent, never an earlier slot's run flag.
       rerunAfterEdit.current = turn.outcome.status === 'compiled'
@@ -985,6 +999,8 @@ export default function App({
       window.setTimeout(() => inputRef.current?.focus(), 0)
     },
     onError: (error, variables) => {
+      if (variables.dialogueProgress.signal?.aborted) return
+      setDialogueRecovery(null)
       // A failed second-turn request must not leave the previous turn's cards
       // visible underneath a new error message. They belong to an older turn
       // and make a transport failure look like a fresh model recommendation.
@@ -1083,6 +1099,7 @@ export default function App({
   const [reviewProgress, setReviewProgress] = useState<{
     runId: string; events: readonly DialogueProgressEvent[]
   }>()
+  const [reviewRecovery, setReviewRecovery] = useState<{ runId: string; state: PreviewPollRecovery | null }>()
   const reviewProgressAbortRef = useRef<AbortController | null>(null)
   useEffect(() => () => reviewProgressAbortRef.current?.abort(), [])
   const reviewMutation = useMutation({
@@ -1091,10 +1108,14 @@ export default function App({
       const controller = new AbortController()
       reviewProgressAbortRef.current = controller
       setReviewProgress({ runId: source.id, events: [] })
+      setReviewRecovery(undefined)
       return backtestApi.review(source.id, {
         signal: controller.signal,
         onProgress: (events) => {
           if (!controller.signal.aborted) setReviewProgress({ runId: source.id, events })
+        },
+        onRecovery: (state) => {
+          if (!controller.signal.aborted) setReviewRecovery({ runId: source.id, state })
         },
       }, conversationReferences(source))
     },
@@ -1283,6 +1304,10 @@ export default function App({
   }
 
   const resetForEdit = () => {
+    dialogueProgressAbortRef.current?.abort()
+    dialogueProgressAbortRef.current = null
+    setDialogueProgress([])
+    setDialogueRecovery(null)
     rerunAfterEdit.current = false
     refreshEditedRun.current = false
     setStrategySlots(undefined)
@@ -1369,6 +1394,7 @@ export default function App({
       setStack([])
       startMutation.reset()
       answerMutation.mutate({
+        dialogueProgress: beginDialogueProgress(),
         answer: options.proposalId ?? normalized,
         inputText: normalized,
         target: clarificationTarget,
@@ -1399,6 +1425,7 @@ export default function App({
     startMutation.reset()
     optimizationMutation.reset()
     compileMutation.mutate({
+      dialogueProgress: beginDialogueProgress(),
       text: normalized,
       instrumentOverride: options.instrumentOverride,
       parentDraftId: conversationTailDraftId,
@@ -1869,6 +1896,7 @@ export default function App({
                   <ThinkingStream
                     status={pendingStrategyDirection ? '正在准备组合' : '正在理解你的想法'}
                     summary={pendingProcessingEvents}
+                    recovery={dialogueRecovery}
                   />
                 </Turn>
               ) : null}
@@ -1879,13 +1907,14 @@ export default function App({
                   <ThinkingStream
                     status={pendingStrategyDirection ? '正在准备组合' : '正在理解你的想法'}
                     summary={pendingProcessingEvents}
+                    recovery={dialogueRecovery}
                   />
                 </Turn>
               ) : null}
 
               {clarificationPrompt && !compileMutation.isPending && !answerMutation.isPending ? (
                 <Turn>
-                  <ModelReasoning events={dialogueProgress} />
+                  <ModelReasoning events={dialogueProgress} failed={clarificationRequestFailed} />
                   <Say>{clarificationPrompt}</Say>
                   {!clarificationRequestFailed && clarification?.backtestReview ? (() => {
                     const review = clarification.backtestReview
@@ -2076,7 +2105,7 @@ export default function App({
                 <Turn><FailureCard state={failure} onAction={handleFailureAction} /></Turn>
               ) : null}
 
-              {compileRecovery ? <Turn><Say>{compileRecovery}</Say></Turn> : null}
+              {compileRecovery ? <Turn><ModelReasoning events={dialogueProgress} failed /><Say>{compileRecovery}</Say></Turn> : null}
             </div>
           </div>
 
@@ -2173,6 +2202,7 @@ export default function App({
                       )}
                       progress={reviewProgress?.runId === detailSnapshot.id
                         ? reviewProgress.events : undefined}
+                      recovery={reviewRecovery?.runId === detailSnapshot.id ? reviewRecovery.state : undefined}
                       isLoading={detailReviewIsActive && reviewMutation.isPending}
                       error={detailReviewIsActive && reviewMutation.isError
                         ? errorMessage(reviewMutation.error)

@@ -66,9 +66,17 @@ export type DialogueProgressEvent = {
   reasoningTruncated?: boolean
 }
 
+export type PreviewPollRecovery = {
+  status: 'retrying' | 'paused'
+  message: string
+  attempt: number
+  resume?: () => void
+}
+
 export type DialogueProgressObserver = {
   signal?: AbortSignal
   onProgress: (events: readonly DialogueProgressEvent[]) => void
+  onRecovery?: (state: PreviewPollRecovery | null) => void
 }
 
 type ProgressAware<T> = T & { dialogueProgress?: DialogueProgressObserver }
@@ -95,10 +103,141 @@ const requestFailure = (error: unknown, timeoutMs: number | null): ApiError => {
   })
 }
 
+const abortReason = (signal?: AbortSignal | null): unknown =>
+  signal?.reason ?? new DOMException('Aborted', 'AbortError')
+
+// AbortController works in older mobile webviews without AbortSignal.any/timeout.
+const withRequestSignal = async <T>(
+  signal: AbortSignal | null | undefined,
+  timeoutMs: number | null,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> => {
+  const controller = new AbortController()
+  const abort = () => controller.abort(abortReason(signal))
+  if (signal?.aborted) abort()
+  else signal?.addEventListener('abort', abort, { once: true })
+  const timer = timeoutMs === null ? undefined : window.setTimeout(() => {
+    controller.abort(new DOMException('Request timed out', 'TimeoutError'))
+  }, timeoutMs)
+  try {
+    if (controller.signal.aborted) throw abortReason(controller.signal)
+    return await operation(controller.signal)
+  } finally {
+    window.clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
+  }
+}
+
+const waitForPreviewPoll = (milliseconds: number, signal?: AbortSignal | null): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const timer = window.setTimeout(done, milliseconds)
+    function cleanup() { window.clearTimeout(timer); signal?.removeEventListener('abort', abort) }
+    function done() { cleanup(); resolve() }
+    function abort() { cleanup(); reject(abortReason(signal)) }
+    if (signal?.aborted) abort()
+    else signal?.addEventListener('abort', abort, { once: true })
+  })
+
+const notifyRecovery = (
+  observer: DialogueProgressObserver | undefined, state: PreviewPollRecovery | null,
+) => {
+  try { observer?.onRecovery?.(state) } catch { /* UI must not discard an accepted request. */ }
+}
+
+const pausePreviewPoll = (
+  observer: DialogueProgressObserver, attempt: number, signal?: AbortSignal | null,
+): Promise<void> => new Promise((resolve, reject) => {
+  let settled = false
+  function cleanup() {
+    window.removeEventListener('online', resume)
+    signal?.removeEventListener('abort', abort)
+  }
+  function resume() {
+    if (settled) return
+    settled = true
+    cleanup()
+    notifyRecovery(observer, { status: 'retrying', attempt: 0,
+      message: '正在重新连接，继续查询本次结果，不会重复提交。' })
+    resolve()
+  }
+  function abort() {
+    if (settled) return
+    settled = true
+    cleanup()
+    reject(abortReason(signal))
+  }
+  if (signal?.aborted) { abort(); return }
+  window.addEventListener('online', resume)
+  signal?.addEventListener('abort', abort, { once: true })
+  notifyRecovery(observer, { status: 'paused', attempt, resume,
+    message: '暂时无法取得结果，后台任务可能仍在处理。恢复连接后会继续，也可以点击继续查询；不会重复提交。' })
+})
+
+const transientPreviewStatuses = new Set([408, 429, 502, 503, 504])
+const isBusinessProblem = (response: Response, payload: unknown): boolean => {
+  if (response.headers.get('Content-Type')?.includes('application/problem+json')) return true
+  if (!payload || typeof payload !== 'object') return false
+  const value = payload as Record<string, unknown>
+  return typeof value.code === 'string' || typeof value.detail === 'string'
+    || (value.error !== undefined && value.error !== null)
+}
+
+const pollPreviewResult = async (
+  location: string, signal?: AbortSignal | null, observer?: DialogueProgressObserver,
+): Promise<{ response: Response; payload: unknown }> => {
+  let retries = 0
+  let delay = 1_000
+  try {
+    for (;;) {
+      await waitForPreviewPoll(delay, signal)
+      try {
+        const result = await withRequestSignal(signal, REQUEST_TIMEOUT_MS, async (pollSignal) => {
+          const response = await fetch(`${baseUrl}${location}`, {
+            headers: { Accept: 'application/json, application/problem+json' },
+            signal: pollSignal, redirect: 'error',
+          })
+          // A retained GET result can safely be re-read after a truncated body.
+          const payload: unknown = response.ok ? await response.json()
+            : await response.json().catch(() => undefined)
+          if (transientPreviewStatuses.has(response.status) && !isBusinessProblem(response, payload)) {
+            throw new Error('Transient preview query response')
+          }
+          return { response, payload }
+        })
+        notifyRecovery(observer, null)
+        retries = 0
+        delay = 1_000
+        if (result.response.status !== 202 || result.response.headers.get('X-Preview-Pending') !== '1') {
+          return result
+        }
+      } catch {
+        if (signal?.aborted) throw abortReason(signal)
+        if (retries < 3) {
+          delay = 1_000 * 2 ** retries
+          retries += 1
+          notifyRecovery(observer, { status: 'retrying', attempt: retries,
+            message: `结果查询暂时中断，正在恢复连接（${retries}/3）；不会重复提交。` })
+        } else if (observer?.onRecovery) {
+          await pausePreviewPoll(observer, retries, signal)
+          retries = 0
+          delay = 0
+        } else {
+          throw new ApiError({ type: 'about:blank', title: '结果查询中断', status: 0,
+            detail: '多次查询仍未取得结果，后台可能仍在处理；本次未重复提交。',
+            code: 'preview_poll_interrupted' })
+        }
+      }
+    }
+  } finally {
+    notifyRecovery(observer, null)
+  }
+}
+
 const request = async <T>(
   path: string,
   init?: RequestInit,
   timeoutMs: number | null = REQUEST_TIMEOUT_MS,
+  observer?: DialogueProgressObserver,
 ): Promise<T> => {
   const headers = new Headers(init?.headers)
   headers.set('Accept', 'application/json, application/problem+json')
@@ -108,76 +247,63 @@ const request = async <T>(
     headers.set('X-Preview-Client-ID', previewClient())
   }
 
-  let response: Response
-  try {
-    response = await fetch(`${baseUrl}${path}`, {
-      ...init,
-      headers,
-      signal: init?.signal ?? (timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs)),
-    })
-  } catch (error) {
-    if (error instanceof ApiError) throw error
-    throw requestFailure(error, timeoutMs)
-  }
-
-  if (import.meta.env.VITE_PRIVATE_PREVIEW === 'true'
-      && response.status === 202 && response.headers.get('X-Preview-Pending') === '1') {
-    const location = response.headers.get('Location') ?? ''
-    if (!/^\/api\/v1\/preview-requests\/[0-9a-f-]{36}$/.test(location)) {
-      throw new ApiError({ type: 'about:blank', title: '请求状态异常', status: 502,
-        detail: '服务未返回有效的分析查询地址。', code: 'preview_invalid_location' })
+  const signal = init?.signal ?? observer?.signal
+  // Keep cancellation attached until the response body has been consumed, not
+  // only until fetch resolves its headers. A progress body's stream can stall.
+  return withRequestSignal(signal, timeoutMs, async (requestSignal) => {
+    let response: Response
+    let responsePayload: unknown
+    let hasResponsePayload = false
+    try {
+      response = await fetch(`${baseUrl}${path}`, { ...init, headers, signal: requestSignal })
+    } catch (error) {
+      if (signal?.aborted) throw abortReason(signal)
+      if (error instanceof ApiError) throw error
+      throw requestFailure(requestSignal.aborted ? abortReason(requestSignal) : error, timeoutMs)
     }
-    while (response.status === 202 && response.headers.get('X-Preview-Pending') === '1') {
-      await new Promise<void>((resolve, reject) => {
-        const timer = window.setTimeout(done, 1_000)
-        const signal = init?.signal
-        function done() { signal?.removeEventListener('abort', abort); resolve() }
-        function abort() {
-          window.clearTimeout(timer)
-          signal?.removeEventListener('abort', abort)
-          reject(signal?.reason)
-        }
-        if (signal?.aborted) abort()
-        else signal?.addEventListener('abort', abort, { once: true })
-      })
-      try {
-        const signals = [AbortSignal.timeout(REQUEST_TIMEOUT_MS)]
-        if (init?.signal) signals.push(init.signal)
-        response = await fetch(`${baseUrl}${location}`, {
-          headers: { Accept: 'application/json, application/problem+json' },
-          signal: AbortSignal.any(signals), redirect: 'error',
-        })
-      } catch {
-        throw new ApiError({ type: 'about:blank', title: '结果查询中断', status: 0,
-          detail: '结果查询暂时中断，后台可能仍在处理。请先不要重复提交。',
-          code: 'preview_poll_interrupted' })
+
+    if (import.meta.env.VITE_PRIVATE_PREVIEW === 'true'
+        && response.status === 202 && response.headers.get('X-Preview-Pending') === '1') {
+      const location = response.headers.get('Location') ?? ''
+      if (!/^\/api\/v1\/preview-requests\/[0-9a-f-]{36}$/.test(location)) {
+        throw new ApiError({ type: 'about:blank', title: '请求状态异常', status: 502,
+          detail: '服务未返回有效的分析查询地址。', code: 'preview_invalid_location' })
       }
+      const result = await pollPreviewResult(location, requestSignal, observer)
+      response = result.response
+      responsePayload = result.payload
+      hasResponsePayload = true
     }
-  }
 
-  if (!response.ok) {
-    const fallback: ApiProblem = {
-      type: 'about:blank',
-      title: '请求失败',
-      status: response.status,
-      detail: `服务返回 ${response.status}，请稍后重试。`,
+    if (!response.ok) {
+      const fallback: ApiProblem = {
+        type: 'about:blank',
+        title: '请求失败',
+        status: response.status,
+        detail: `服务返回 ${response.status}，请稍后重试。`,
+      }
+      const payload: unknown = hasResponsePayload ? responsePayload : await response.json().catch(() => {
+        if (requestSignal.aborted) throw abortReason(requestSignal)
+        return fallback
+      })
+      const problem = normalizeProblem(payload, fallback, response.status)
+      throw new ApiError(problem)
     }
-    const payload: unknown = await response.json().catch(() => fallback)
-    const problem = normalizeProblem(payload, fallback, response.status)
-    throw new ApiError(problem)
-  }
 
-  try {
-    return await response.json() as T
-  } catch {
-    throw new ApiError({
-      type: 'about:blank',
-      title: '接口响应格式错误',
-      status: response.status,
-      detail: '回测服务没有返回有效 JSON，请检查 API 网关或服务版本。',
-      code: 'api_invalid_json',
-    })
-  }
+    try {
+      if (hasResponsePayload) return responsePayload as T
+      return await response.json() as T
+    } catch {
+      if (requestSignal.aborted) throw abortReason(requestSignal)
+      throw new ApiError({
+        type: 'about:blank',
+        title: '接口响应格式错误',
+        status: response.status,
+        detail: '回测服务没有返回有效 JSON，请检查 API 网关或服务版本。',
+        code: 'api_invalid_json',
+      })
+    }
+  })
 }
 
 const delayUntilNextProgressPoll = (signal: AbortSignal): Promise<void> => new Promise((resolve) => {
@@ -288,13 +414,31 @@ const withDialogueProgress = async <T>(
   const polling = new AbortController()
   const stopPolling = () => polling.abort()
   observer.signal?.addEventListener('abort', stopPolling, { once: true })
-  const poll = pollDialogueProgress(progressId, observer, polling.signal)
+  let latestEvents: readonly DialogueProgressEvent[] = []
+  const trackedObserver = { ...observer, onProgress: (events: readonly DialogueProgressEvent[]) => {
+    latestEvents = events
+    observer.onProgress(events)
+  } }
+  const poll = pollDialogueProgress(progressId, trackedObserver, polling.signal)
+  let failed = false
   try {
     return await operation(progressId)
+  } catch (error) {
+    failed = true
+    throw error
   } finally {
     stopPolling()
     const finished = await poll
-    if (!finished) await readFinalDialogueProgress(progressId, observer)
+    if (!finished) await readFinalDialogueProgress(progressId, trackedObserver)
+    if (failed && !observer.signal?.aborted && latestEvents.at(-1)?.stage !== 'failed') {
+      try {
+        observer.onProgress([...latestEvents.slice(-(DIALOGUE_PROGRESS_LIMIT - 1)), {
+          stage: 'failed', message: '本轮请求未完成，请查看错误说明。',
+          elapsedMs: latestEvents.at(-1)?.elapsedMs ?? 0,
+        }])
+      } catch { /* Rendering cannot replace the original request failure. */ }
+    }
+    notifyRecovery(observer, null)
     observer.signal?.removeEventListener('abort', stopPolling)
   }
 }
@@ -503,9 +647,10 @@ export const strategyApi = {
         request<LiveDraftResponse>('/api/v1/strategy-drafts', {
           method: 'POST',
           headers,
+          signal: input.dialogueProgress?.signal,
           body: JSON.stringify(toLiveCompileBody(parentDraftId
             ? input : { ...input, executionSettings: undefined })),
-        }, DIALOGUE_TIMEOUT_MS),
+        }, DIALOGUE_TIMEOUT_MS, input.dialogueProgress),
         // Metadata improves labels, but it is not a prerequisite for understanding
         // or producing the server-owned StrategySpec. The page performs a separate
         // capability check before it allows a run to start.
@@ -537,13 +682,14 @@ export const strategyApi = {
         request<LiveClarificationAnswerResponse>(
           `/api/v1/strategy-drafts/${encodeURIComponent(input.draftId)}`
           + `/revisions/${input.revision}/clarification-answers`,
-          { method: 'POST', headers, body: JSON.stringify({
+          { method: 'POST', headers, signal: input.dialogueProgress?.signal, body: JSON.stringify({
             answer: input.answer,
             ...(input.executionSettings !== undefined
               ? { execution_settings: toLiveExecutionSettings(input.executionSettings) } : {}),
             ...toLiveBacktestReferences(input),
           }) },
           DIALOGUE_TIMEOUT_MS,
+          input.dialogueProgress,
         ),
         systemApi.capabilities().catch(() => undefined),
       ])
@@ -616,8 +762,10 @@ export const backtestApi = {
     return withDialogueProgress(observer, (progressId) => request<BacktestReviewResponse>(
       `/api/v1/backtest-runs/${encodeURIComponent(runId)}/review`,
       { method: 'POST', headers: progressId ? { 'X-Dialogue-Progress-ID': progressId } : undefined,
+        signal: observer?.signal,
         ...(body && Object.keys(body).length ? { body: JSON.stringify(body) } : {}) },
       BACKTEST_REVIEW_TIMEOUT_MS,
+      observer,
     ))
   },
 

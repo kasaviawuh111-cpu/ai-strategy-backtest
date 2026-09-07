@@ -63,6 +63,117 @@ afterEach(() => {
 })
 
 describe('formal main.tsx App journey', () => {
+  it.each(['compile', 'answer'] as const)(
+    'preview recovery resumes the same %s promise without another model submission', async (path) => {
+      enableImmediateMockWaitForTests()
+      const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+        instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+      if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+      let observer: DialogueProgressObserver | undefined
+      let finish: (() => void) | undefined
+      const compile = vi.spyOn(strategyApi, 'compile')
+      const answer = vi.spyOn(strategyApi, 'answerClarification')
+      if (path === 'compile') {
+        compile.mockImplementationOnce(input => new Promise(resolve => {
+          observer = input.dialogueProgress
+          finish = () => resolve(fixture)
+        }))
+      } else {
+        compile.mockResolvedValueOnce({
+          status: 'needs_clarification', draftId: 'poll-recovery-draft', revision: 1,
+          assistantMessage: '补充卖出条件后继续。',
+          clarification: { id: 'exit_required', question: '补充卖出条件后继续。', reason: '', choices: [] },
+        })
+        answer.mockImplementationOnce(input => new Promise(resolve => {
+          observer = input.dialogueProgress
+          finish = () => resolve({ replyKind: 'accepted', assistantMessage: '策略已准备好。',
+            suggestions: [], outcome: fixture })
+        }))
+      }
+      const user = userEvent.setup()
+      const { container } = renderApp()
+      fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      if (path === 'answer') {
+        await screen.findByText('补充卖出条件后继续。')
+        fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '跌破20日线卖出' } })
+        await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      }
+      await waitFor(() => expect(observer?.onRecovery).toBeTypeOf('function'))
+      const resume = vi.fn(() => {
+        observer?.onRecovery?.(null)
+        finish?.()
+      })
+      act(() => observer?.onRecovery?.({ status: 'retrying', attempt: 1,
+        message: '查询中断，正在恢复原请求。' }))
+      expect(screen.getByText('查询中断，正在恢复原请求。')).toBeVisible()
+      expect(screen.queryByText('已完成')).not.toBeInTheDocument()
+      act(() => observer?.onRecovery?.({ status: 'paused', attempt: 3,
+        message: '查询已暂停，可以继续查询同一结果。', resume }))
+      expect(screen.getByRole('button', { name: '继续查询结果' })).toBeVisible()
+      expect(screen.getByLabelText('交易规则')).toBeDisabled()
+      await user.click(screen.getByText('处理过程'))
+      expect(container.querySelector('details.model-reasoning')).not.toHaveAttribute('open')
+      await user.click(screen.getByRole('button', { name: '继续查询结果' }))
+      expect(await screen.findByText('预览策略')).toBeVisible()
+      expect(screen.queryByRole('button', { name: '继续查询结果' })).not.toBeInTheDocument()
+      expect(resume).toHaveBeenCalledTimes(1)
+      expect(compile).toHaveBeenCalledTimes(1)
+      expect(answer).toHaveBeenCalledTimes(path === 'answer' ? 1 : 0)
+    },
+  )
+
+  it('preview recovery ignores old observers after conversation reset and aborts on unmount', async () => {
+    enableImmediateMockWaitForTests()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    const observers: DialogueProgressObserver[] = []
+    let finishSecond: (() => void) | undefined
+    const compile = vi.spyOn(strategyApi, 'compile')
+      .mockImplementationOnce(async input => {
+        if (input.dialogueProgress) observers.push(input.dialogueProgress)
+        return fixture
+      })
+      .mockImplementationOnce(input => new Promise(resolve => {
+        if (input.dialogueProgress) observers.push(input.dialogueProgress)
+        finishSecond = () => resolve(fixture)
+      }))
+    const user = userEvent.setup()
+    const view = renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await screen.findByText('预览策略')
+    await user.click(screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true }))
+    expect(observers[0]?.signal?.aborted).toBe(true)
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: MOVING_AVERAGE_EXAMPLE } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await waitFor(() => expect(observers).toHaveLength(2))
+    act(() => observers[1]?.onRecovery?.({ status: 'paused', attempt: 3,
+      message: '新会话等待恢复。', resume: vi.fn() }))
+    act(() => {
+      observers[0]?.onProgress([{ stage: 'model', message: '旧会话迟到内容', elapsedMs: 99 }])
+      observers[0]?.onRecovery?.({ status: 'paused', attempt: 3,
+        message: '旧会话恢复提示', resume: vi.fn() })
+      observers[0]?.onRecovery?.(null)
+    })
+    expect(screen.getByText('新会话等待恢复。')).toBeVisible()
+    expect(screen.queryByText('旧会话迟到内容')).not.toBeInTheDocument()
+    expect(screen.queryByText('旧会话恢复提示')).not.toBeInTheDocument()
+    view.unmount()
+    expect(observers[1]?.signal?.aborted).toBe(true)
+    renderApp()
+    await act(async () => {
+      observers[1]?.onRecovery?.({ status: 'paused', attempt: 3,
+        message: '卸载后的恢复提示', resume: vi.fn() })
+      finishSecond?.()
+    })
+    expect(screen.queryByText('预览策略')).not.toBeInTheDocument()
+    expect(screen.queryByText('卸载后的恢复提示')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('交易规则')).toHaveValue('')
+    expect(compile).toHaveBeenCalledTimes(2)
+  })
+
   it('B28 saves only the selected stock while preserving current edits and the completed report', async () => {
     // Component wiring fixtures; provider and live backtest acceptance are separate.
     settleMockRunOnFirstPoll()

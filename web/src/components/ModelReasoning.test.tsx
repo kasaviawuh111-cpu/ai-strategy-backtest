@@ -1,8 +1,42 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ModelReasoning } from './ModelReasoning'
 
 describe('provider reasoning display', () => {
+  it('preview recovery stays truthful and keeps resume available when collapsed', async () => {
+    const resume = vi.fn()
+    const retrying = {
+      status: 'retrying' as const, attempt: 1,
+      message: '结果查询暂时中断，正在恢复连接；不会重复提交。',
+    }
+    const paused = {
+      status: 'paused' as const, attempt: 3,
+      message: '暂时无法取得结果，后台任务可能仍在处理。', resume,
+    }
+    const { container, rerender } = render(<ModelReasoning events={[]} active recovery={retrying} />)
+    expect(screen.getByText(retrying.message)).toBeVisible()
+    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent('正在重新连接')
+    expect(screen.queryByText('已完成')).not.toBeInTheDocument()
+    expect(screen.queryByText('正在分析')).not.toBeInTheDocument()
+    expect(container.querySelector('.dots')).toBeNull()
+
+    rerender(<ModelReasoning events={[]} active recovery={paused} />)
+    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent('等待恢复连接')
+    expect(container.querySelector('.dots')).toBeNull()
+    fireEvent.click(screen.getByText('处理过程'))
+    await waitFor(() => expect(container.querySelector('details')).not.toHaveAttribute('open'))
+    expect(screen.getByRole('button', { name: '继续查询结果' })).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '继续查询结果' }))
+    expect(resume).toHaveBeenCalledTimes(1)
+
+    rerender(<ModelReasoning events={[{
+      stage: 'model', message: '已收到的阶段文字', elapsedMs: 10,
+    }]} failed />)
+    expect(screen.getByText('未完成')).toBeVisible()
+    expect(screen.queryByText('已完成')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '继续查询结果' })).not.toBeInTheDocument()
+  })
+
   it('updates received text in place, keeps user collapse, and escapes markup', () => {
     const { rerender, container } = render(<ModelReasoning events={[]} active />)
     expect(container.querySelector('details')).toHaveAttribute('open')

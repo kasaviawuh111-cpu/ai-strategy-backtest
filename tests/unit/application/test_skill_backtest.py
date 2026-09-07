@@ -25,7 +25,11 @@ from ashare_lab.adapters.market_data.mx_saas import (
     MxSaasProviderUnavailableError,
 )
 from ashare_lab.adapters.persistence.backtest_runs import InMemoryBacktestRunStore
-from ashare_lab.application.backtest_submission import BacktestRunConfig
+from ashare_lab.api.result_schemas import BacktestResultBundle
+from ashare_lab.application.backtest_submission import (
+    BacktestRunConfig,
+    _effective_warmup_calendar_days,
+)
 from ashare_lab.application.skill_backtest import run_skill_backtest
 from ashare_lab.application.skill_backtest_service import (
     SkillBacktestService,
@@ -44,6 +48,7 @@ from ashare_lab.domain.strategy import (
     Instrument,
     StrategySpec,
 )
+from ashare_lab.ports.backtest_runs import BacktestJobState
 from ashare_lab.ports.provider_indicator_data import HistoricalIndicatorData
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -407,6 +412,91 @@ def test_skill_derived_ma20_cross_uses_exact_window() -> None:
     assert timeline[-1] is not None and timeline[-1].triggered
     assert timeline[-1].left_value == Decimal("9")
     assert timeline[-1].right_value == Decimal("10")
+
+
+def _macd_condition(trigger: str) -> IndicatorCondition:
+    return IndicatorCondition(
+        indicator_id="technical.macd", definition_version="1.0.0",
+        params={"fast": 12, "slow": 26, "signal": 9}, trigger=trigger,
+    )
+
+
+@pytest.mark.parametrize(("trigger", "cross_index"), [("golden_cross", 35), ("death_cross", 36)])
+def test_skill_derived_macd_cross_is_causal_and_skips_suspended_sessions(
+    trigger: str, cross_index: int,
+) -> None:
+    # A constant warmup makes the first nonzero DIF/DEA independently calculable.
+    rows = tuple(_row(START + timedelta(days=i), raw_open="10") for i in range(34))
+    rows += (
+        _row(START + timedelta(days=34), raw_open="999", status=TradingStatus.SUSPENDED),
+        _row(START + timedelta(days=35), raw_open="12"),
+        _row(START + timedelta(days=36), raw_open="6"),
+    )
+    condition = _macd_condition(trigger)
+    timeline = _skill_derived_timeline(condition, _history(rows))
+    assert timeline[:35] == (None,) * 35
+    assert [index for index, fact in enumerate(timeline) if fact and fact.triggered] == [
+        cross_index,
+    ]
+    rise = timeline[35]
+    assert rise is not None
+    assert rise.left_value is not None and rise.right_value is not None
+    assert abs(rise.left_value - Decimal(56) / Decimal(351)) < Decimal("1e-25")
+    assert abs(rise.right_value - rise.left_value / 5) < Decimal("1e-25")
+    assert rise.evidence[0].validation_status == "local_formula_on_provider_ohlcv"
+    future = _row(START + timedelta(days=37), raw_open="999")
+    assert _skill_derived_timeline(condition, _history((*rows, future)))[:-1] == timeline
+    assert _skill_derived_timeline(condition, _history(rows[:-1])) == timeline[:-1]
+
+
+def test_skill_macd_runs_without_provider_indicator_fields_and_reports_its_formula(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = tuple(_row(START + timedelta(days=i), raw_open="10") for i in range(34)) + tuple(
+        _row(START + timedelta(days=i), raw_open=price)
+        for i, price in enumerate(("12", "12", "6", "6"), start=34)
+    )
+    strategy = _strategy((rows[0].session_date, rows[-1].session_date)).model_copy(update={
+        "entry": _macd_condition("golden_cross"),
+        "exit": FirstOfExit(children=(_macd_condition("death_cross"),)),
+    })
+    load = AsyncMock(return_value=_history(rows))
+    query = AsyncMock(side_effect=AssertionError("MACD must not query provider indicator fields"))
+    service = SkillBacktestService(
+        history=cast(MxDailyHistoryClient, SimpleNamespace(load=load)),
+        indicators=cast(HistoricalIndicatorData, SimpleNamespace(query_indicator_history=query)),
+        store=InMemoryBacktestRunStore(),
+    )
+    monkeypatch.setattr(service.queue, "enqueue", lambda _run_id: "manual-test")
+    try:
+        config = _config(run_robustness=False)
+        assert _effective_warmup_calendar_days(strategy, config) == 180
+        assert _effective_warmup_calendar_days(
+            strategy, replace(config, warmup_calendar_days=0),
+        ) == 70  # ceil((26 + 9) * 8 / 5) + 14 calendar days, even without configured warmup.
+        created = service.submit(strategy, config)
+        record = service.execute(created.record.run_id)
+        assert record.state is BacktestJobState.SUCCEEDED, record.progress_label
+        assert record.result_json is not None
+        bundle = BacktestResultBundle.model_validate_json(record.result_json)
+        source = bundle.summary.data_provenance
+        assert source is not None
+        assert source.provider == MX_DAILY_HISTORY_PROVIDER
+        assert source.price_basis == "provider_back_adjusted"
+        assert source.indicator_series == 0 and not source.indicator_field_evidence
+        assert len(source.derived_indicator_evidence) == 2
+        for evidence in source.derived_indicator_evidence:
+            assert evidence["indicatorId"] == "technical.macd"
+            assert evidence["source"] == "local_formula_on_eastmoney_skill_ohlcv"
+            assert evidence["sessionPolicy"] == "positive_volume_sessions_including_current"
+            assert "first_value_seeded_ema" in evidence["warmupPolicy"]
+            assert "DIF=EMA" in evidence["formula"] and "DEA=EMA(DIF,signal)" in evidence["formula"]
+        assert any("不是 Skill 直接提供的成品指标" in text for text in bundle.summary.warnings)
+        assert any("递推初值" in text for text in bundle.summary.warnings)
+        assert load.await_args.kwargs["start"] == strategy.backtest.start - timedelta(days=180)
+        query.assert_not_awaited()
+    finally:
+        service.shutdown()
 
 
 def _config(**overrides: object) -> BacktestRunConfig:

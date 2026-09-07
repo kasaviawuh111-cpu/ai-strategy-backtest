@@ -104,6 +104,11 @@ _PROFILE = "eastmoney_skill_research.v1"
 # Keep the provider contract strict; do not use this as a generic fallback.
 SKILL_DERIVED_INDICATORS = {
     "technical.ma": "N个有效交易日价格的简单均值（含当日）；穿越比较前后两日价格与均线",
+    "technical.macd": (
+        "DIF=EMA(后复权收盘价,fast)-EMA(后复权收盘价,slow)；"
+        "DEA=EMA(DIF,signal)，柱值=2×(DIF-DEA)；"
+        "EMA以首个有效值为初值、alpha=2/(周期+1)，含当日递推；金叉/死叉比较相邻有效日DIF与DEA"
+    ),
     "price.rolling_high": "当前价格 > 前N个有效交易日最高价格（不含当日）",
     "volume.relative": "当日成交量 / 前N个有效交易日平均成交量（不含当日）",
 }
@@ -720,9 +725,14 @@ def _result_bundle(
             "volumeBasis": "provider_unadjusted_shares",
             "sessionPolicy": (
                 "positive_volume_sessions_including_current"
-                if leaf.indicator_id == "technical.ma"
+                if leaf.indicator_id in {"technical.ma", "technical.macd"}
                 else "positive_volume_sessions_excluding_current"
             ),
+            **({"warmupPolicy": (
+                "first_value_seeded_ema_over_available_positive_volume_history; "
+                "values_after_slow_plus_signal_minus_one_sessions; "
+                "cross_after_slow_plus_signal_sessions"
+            )} if leaf.indicator_id == "technical.macd" else {}),
         }
         for condition in (strategy.entry, _exit_condition(strategy))
         if condition is not None
@@ -731,8 +741,16 @@ def _result_bundle(
     ]
     if derived:
         warnings.append(
-            "新高、相对成交量及单均线由现有引擎按策略周期计算，原始日线来自东方财富查数 Skill；"
-            "新高与量能基准不含当日，均线含当日，均跳过零成交量日；不是 Skill 直接提供的成品指标。"
+            "本次派生指标由现有引擎按策略周期计算，原始日线来自东方财富查数 Skill；"
+            "新高与量能基准不含当日，均线与MACD含当日，均跳过零成交量日；"
+            "不是 Skill 直接提供的成品指标。"
+        )
+    if any(item["indicatorId"] == "technical.macd" for item in derived):
+        warnings.append(
+            "MACD以本次取得历史中的首个有效值初始化EMA，逐日递推；"
+            "累计slow+signal-1个有效交易日后提供数值，再多一个有效日才判断交叉。"
+            "预热按策略周期向前取数，但节假日、停牌或上市时间可能缩短有效历史；"
+            "预热不足时不生成信号，递推初值仍可能影响早期数值，不保证与其他终端逐点一致。"
         )
     if metrics.trade_count < 30:
         warnings.append("完整交易不足30次，不能据此断言策略有效；优化后仍需样本外检验。")

@@ -5,6 +5,7 @@ import type {
   StrategySpec,
 } from './types'
 import type { LiveDraftResponse } from './contract'
+import type { DialogueProgressObserver, PreviewPollRecovery } from './client'
 
 const clarifiedRequest: CompileRequest = {
   utterance: '东方财富 MACD 金叉买入，死叉卖出',
@@ -152,6 +153,157 @@ describe('live strategy client', () => {
       problem: expect.objectContaining({ code: 'preview_invalid_location' }),
     })
     expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  describe('accepted preview request recovery', () => {
+    const location = '/api/v1/preview-requests/12345678-1234-1234-1234-123456789abc'
+    const ready = () => new Response(JSON.stringify(readyResponse()), { status: 201 })
+    const begin = async (
+      poll: (attempt: number, signal: AbortSignal) => Promise<Response>,
+      recover = true,
+    ) => {
+      vi.useFakeTimers()
+      vi.stubEnv('VITE_PRIVATE_PREVIEW', 'true')
+      vi.stubEnv('VITE_USE_MOCK', 'false')
+      const controller = new AbortController()
+      const onRecovery = vi.fn<(state: PreviewPollRecovery | null) => void>()
+      const onProgress = vi.fn<DialogueProgressObserver['onProgress']>()
+      let queries = 0
+      const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const path = String(input)
+        if (path === '/api/v1/capabilities') return new Response(JSON.stringify(capabilities()))
+        if (path.startsWith('/api/v1/dialogue-progress/')) return new Response(JSON.stringify({
+          finished: false, events: [{ stage: 'model', message: '模型正在分析', elapsed_ms: 1_000,
+            reasoning: '真实返回的说明，不应因连接恢复而丢失。' }],
+        }))
+        if (path === '/api/v1/strategy-drafts') return new Response('{}', {
+          status: 202, headers: { Location: location, 'X-Preview-Pending': '1' },
+        })
+        expect(path).toBe(location)
+        expect(init?.method).toBeUndefined()
+        expect(init?.redirect).toBe('error')
+        return poll(++queries, init!.signal as AbortSignal)
+      })
+      vi.stubGlobal('fetch', fetcher)
+      const { strategyApi } = await import('./client')
+      const result = strategyApi.compile({ ...clarifiedRequest, dialogueProgress: {
+        signal: controller.signal, onProgress, ...(recover ? { onRecovery } : {}),
+      } })
+      const expectOnePost = () => expect(fetcher.mock.calls.filter(([, init]) =>
+        init?.method === 'POST')).toHaveLength(1)
+      return { result, onRecovery, onProgress, controller, queries: () => queries, expectOnePost }
+    }
+    afterEach(() => { vi.useRealTimers() })
+
+    it('recovers a single failed GET without requiring AbortSignal.any or timeout', async () => {
+      vi.spyOn(AbortSignal, 'any').mockImplementation(() => { throw new Error('unsupported') })
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => { throw new Error('unsupported') })
+      const state = await begin(async attempt => {
+        if (attempt === 1) throw new TypeError('Failed to fetch')
+        return ready()
+      })
+      const result = expect(state.result).resolves.toMatchObject({ status: 'compiled' })
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(state.onRecovery).toHaveBeenLastCalledWith(expect.objectContaining({
+        status: 'retrying', attempt: 1,
+      }))
+      await vi.advanceTimersByTimeAsync(1_000)
+      await result
+      expect(state.queries()).toBe(2)
+      state.expectOnePost()
+      expect(state.onRecovery).toHaveBeenLastCalledWith(null)
+    })
+
+    it.each(['manual', 'online'])('keeps the original result pending until %s recovery', async mode => {
+      const state = await begin(async attempt => {
+        if (attempt <= 4) throw new TypeError('offline')
+        return ready()
+      })
+      let finished = false
+      const result = state.result.then(value => { finished = true; return value })
+      await vi.advanceTimersByTimeAsync(8_000)
+      expect(finished).toBe(false)
+      expect(state.queries()).toBe(4)
+      const paused = state.onRecovery.mock.calls.at(-1)?.[0]
+      expect(paused).toMatchObject({ status: 'paused', attempt: 3, resume: expect.any(Function) })
+      expect(state.onRecovery.mock.calls.map(([entry]) => entry?.attempt)).toEqual([1, 2, 3, 3])
+      if (mode === 'manual') paused?.resume?.()
+      else window.dispatchEvent(new Event('online'))
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(result).resolves.toMatchObject({ status: 'compiled' })
+      paused?.resume?.() // A stale button must not start another query.
+      window.dispatchEvent(new Event('online'))
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(state.queries()).toBe(5)
+      state.expectOnePost()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it.each(['retrying', 'paused'])('aborts %s recovery and cleans up its resume listener', async mode => {
+      const state = await begin(async () => { throw new TypeError('offline') })
+      const rejected = expect(state.result).rejects.toMatchObject({ name: 'AbortError' })
+      await vi.advanceTimersByTimeAsync(mode === 'paused' ? 8_000 : 1_000)
+      const resume = state.onRecovery.mock.calls.at(-1)?.[0]?.resume
+      const before = state.queries()
+      state.controller.abort()
+      await rejected
+      resume?.()
+      window.dispatchEvent(new Event('online'))
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(state.queries()).toBe(before)
+      expect(state.onRecovery).toHaveBeenLastCalledWith(null)
+      expect(vi.getTimerCount()).toBe(0)
+      state.expectOnePost()
+    })
+
+    it('retries a bounded GET timeout while retaining the original accepted task', async () => {
+      const state = await begin(async (attempt, signal) => {
+        if (attempt > 1) return ready()
+        return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason)))
+      })
+      const result = expect(state.result).resolves.toMatchObject({ status: 'compiled' })
+      await vi.advanceTimersByTimeAsync(21_000)
+      expect(state.onRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'retrying' }))
+      await vi.advanceTimersByTimeAsync(1_000)
+      await result
+      expect(state.queries()).toBe(2)
+      state.expectOnePost()
+    })
+
+    it.each([408, 429, 502, 503, 504, 'broken-body'] as const)('retries transient %s results', async status => {
+      const state = await begin(async attempt => attempt > 1 ? ready()
+        : new Response('<html>gateway unavailable</html>', { status: status === 'broken-body' ? 201 : status }))
+      const result = expect(state.result).resolves.toMatchObject({ status: 'compiled' })
+      await vi.advanceTimersByTimeAsync(2_000)
+      await result
+      expect(state.queries()).toBe(2)
+      state.expectOnePost()
+    })
+
+    it.each([404, 410, 422, 503, 504])('does not retry terminal HTTP %s business errors', async status => {
+      const state = await begin(async () => new Response(JSON.stringify({
+        code: 'terminal_fixture', detail: '后台已明确结束这次请求',
+      }), { status }))
+      const result = expect(state.result).rejects.toMatchObject({ problem: { status, code: 'terminal_fixture' } })
+      await vi.advanceTimersByTimeAsync(1_000)
+      await result
+      expect(state.queries()).toBe(1)
+      expect(state.onRecovery.mock.calls.some(([entry]) => entry?.status === 'retrying')).toBe(false)
+      const events = state.onProgress.mock.calls.at(-1)?.[0]
+      expect(events?.at(-1)?.stage).toBe('failed')
+      expect(events?.[0]?.reasoning).toBe('真实返回的说明，不应因连接恢复而丢失。')
+      state.expectOnePost()
+    })
+
+    it('fails after three automatic retries when no recovery UI was supplied', async () => {
+      const state = await begin(async () => { throw new TypeError('offline') }, false)
+      const result = expect(state.result).rejects.toMatchObject({ problem: { code: 'preview_poll_interrupted' } })
+      await vi.advanceTimersByTimeAsync(8_000)
+      await result
+      expect(state.queries()).toBe(4)
+      state.expectOnePost()
+      expect(vi.getTimerCount()).toBe(0)
+    })
   })
 
   afterEach(() => {
@@ -336,7 +488,7 @@ describe('live strategy client', () => {
         : expect(state.compile).resolves.toBeDefined()
       state.releaseDraft()
       await result
-      expect(state.onProgress).toHaveBeenCalledTimes(1)
+      expect(state.onProgress).toHaveBeenCalledTimes(failDraft ? 2 : 1)
       expect(state.reads()).toBe(2)
     })
 
@@ -361,6 +513,32 @@ describe('live strategy client', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+
+    it.each(['deadline', 'cancel'])('cancels a stalled final response body on %s after headers arrive', async mode => {
+      const controller = new AbortController()
+      let finalSignal: AbortSignal | undefined
+      let finalResponse: Response | undefined
+      const state = await begin(async signal => {
+        finalSignal = signal
+        finalResponse = new Response(new ReadableStream({ start(stream) {
+          signal.addEventListener('abort', () => stream.error(signal.reason), { once: true })
+        } }), { headers: { 'Content-Type': 'application/json' } })
+        return finalResponse
+      }, controller.signal)
+      vi.useFakeTimers()
+      try {
+        state.releaseDraft()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(finalResponse?.bodyUsed).toBe(true)
+        expect(finalSignal?.aborted).toBe(false)
+        if (mode === 'cancel') controller.abort()
+        else await vi.advanceTimersByTimeAsync(1_000)
+        await expect(state.compile).resolves.toBeDefined()
+        expect(finalSignal?.aborted).toBe(true)
+        expect(state.onProgress).toHaveBeenCalledTimes(1)
+        expect(vi.getTimerCount()).toBe(0)
+      } finally { vi.useRealTimers() }
     })
 
     it('skips the final GET when the observer was cancelled for another turn', async () => {
@@ -410,7 +588,7 @@ describe('live strategy client', () => {
         triggers: ['published'],
       }],
     })
-    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    const timeoutSpy = vi.spyOn(window, 'setTimeout')
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       void _init
       const path = String(input)
@@ -433,18 +611,18 @@ describe('live strategy client', () => {
       utterance: '东方财富年报发布后买入，MACD 死叉卖出',
     })
     if (compiled.status !== 'compiled') throw new Error('expected compiled StrategySpec')
-    expect(timeoutSpy).not.toHaveBeenCalledWith(3_600_000)
+    expect(timeoutSpy).not.toHaveBeenCalledWith(expect.any(Function), 3_600_000)
     const draftCall = fetchMock.mock.calls.find(([path]) => path === '/api/v1/strategy-drafts')
-    expect((draftCall?.[1] as RequestInit | undefined)?.signal).toBeUndefined()
+    expect((draftCall?.[1] as RequestInit | undefined)?.signal?.aborted).toBe(false)
 
     await backtestApi.create(compiled.draft)
 
-    expect(timeoutSpy).toHaveBeenLastCalledWith(300_000)
+    expect(timeoutSpy).toHaveBeenLastCalledWith(expect.any(Function), 300_000)
   })
 
   it('submits a reviewed server-compiled strategy directly as a fresh run', async () => {
     vi.stubEnv('VITE_USE_MOCK', 'false')
-    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    const timeoutSpy = vi.spyOn(window, 'setTimeout')
     const supported = capabilities({
       event_backtest_available: true,
       event_availability_scope: 'pinned_snapshot',
@@ -590,7 +768,7 @@ describe('live strategy client', () => {
     const runIndex = fetchMock.mock.calls.findIndex(([path]) => path === '/api/v1/backtest-runs')
     expect(saveIndex).toBeGreaterThan(-1)
     expect(saveIndex).toBeLessThan(runIndex)
-    expect(timeoutSpy).toHaveBeenCalledWith(300_000)
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 300_000)
   })
 
   it('posts bounded report and exposed review references without browser metrics', async () => {

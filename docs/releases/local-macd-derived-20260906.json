@@ -1,0 +1,42 @@
+{
+  "scope": "local_real_production_factory_not_public",
+  "origin": "https://127.0.0.1:8129",
+  "input": "东方财富 macd 金叉买 死叉卖",
+  "revision": "sha256:d927fbcaa266190fe50e412293300d1ce9d8894a40cf0ecabda26b505fb4ebbd",
+  "draftHttp": 201,
+  "draftStatus": "ready",
+  "instrument": "300059.SZ",
+  "indicator": "technical.macd",
+  "parameters": {"fast": 12, "slow": 26, "signal": 9},
+  "entryTrigger": "golden_cross",
+  "exitTrigger": "death_cross",
+  "runId": "run:fc75aa5a1fbb4a899b1001d4c0d597a2",
+  "state": "succeeded",
+  "createdAt": "2026-09-07T02:49:31.114152Z",
+  "completedAt": "2026-09-07T02:50:04.163842Z",
+  "returnedResultHash": "sha256:515a2a0c80301d85ca956c7dd32e7bbb0c88f5074036383ea9075b0882d6e00b",
+  "artifactReadbackHttp": {"summary": 200, "series": 200, "trades": 200},
+  "history": {
+    "provider": "eastmoney_mx_finance_data",
+    "cacheStatus": "live",
+    "start": "2025-03-10",
+    "end": "2026-09-04",
+    "rows": 366,
+    "priceBasis": "provider_back_adjusted"
+  },
+  "indicatorSource": "local_formula_on_eastmoney_skill_ohlcv",
+  "providerIndicatorSeries": 0,
+  "backtestSessions": 241,
+  "seriesPoints": 242,
+  "tradeActivityItems": 43,
+  "closedTradeCount": 7,
+  "validation": {
+    "browserStartEnabled": true,
+    "legacyMacdGateMessageAbsent": true,
+    "realBacktestSucceeded": true,
+    "summarySeriesTradesReadBack": true,
+    "mobileReportScreenshotInspected": true,
+    "publicDeploymentVerified": false,
+    "vendorFinishedMacdFieldVerified": false
+  }
+}

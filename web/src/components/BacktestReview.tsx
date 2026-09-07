@@ -1,10 +1,11 @@
 import type { BacktestOptimizationCandidate, BacktestReviewResponse } from '../shared/api/types'
-import type { DialogueProgressEvent } from '../shared/api/client'
+import type { DialogueProgressEvent, PreviewPollRecovery } from '../shared/api/client'
 import { ModelReasoning } from './ModelReasoning'
 
 type BacktestReviewProps = {
   review?: BacktestReviewResponse
   progress?: readonly DialogueProgressEvent[]
+  recovery?: PreviewPollRecovery | null
   describeCandidate?: (candidate: BacktestOptimizationCandidate) => string
   isLoading?: boolean
   error?: string
@@ -25,7 +26,7 @@ const shortSentence = (text: string): string => {
 }
 
 export function BacktestReview({
-  review, progress = [], describeCandidate, isLoading = false, error,
+  review, progress = [], recovery, describeCandidate, isLoading = false, error,
   onRequest, onRunCandidate, onChangeInstrument, onChangeRules, runningCandidateId, runError,
   candidateActionsDisabled = false,
 }: BacktestReviewProps) {
@@ -40,14 +41,14 @@ export function BacktestReview({
           </button>
         ) : null}
       </div>
-      {!review && !error ? (
+      {!review && !error && !recovery ? (
         <p className="backtest-review__status" role="status">
           {isLoading
             ? '我正在分析这次回测，并准备优化建议。你可以先试试下面的问题。'
             : '回测已完成，可以开始 AI 分析，也可以先调整条件或换只股票继续。'}
         </p>
       ) : null}
-      <ModelReasoning events={progress} active={isLoading} />
+      <ModelReasoning events={progress} active={isLoading} failed={Boolean(error)} recovery={recovery} />
       {error ? (
         <div className="backtest-review__error" role="alert">
           <p>{error}</p>

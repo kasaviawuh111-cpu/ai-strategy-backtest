@@ -139,6 +139,9 @@ button,input,select{font:inherit}
 .model-reasoning__body .model-reasoning__hint{color:var(--ink-3);margin-bottom:8px;font-size:12px}
 .model-reasoning summary:focus-visible,.model-reasoning__body:focus-visible{outline:2px solid var(--ink-3);outline-offset:3px}
 .thinking-action{margin-left:auto;flex:0 0 auto}
+.query-recovery{width:100%;color:var(--ink-2);font-size:14px;line-height:1.75;overflow-wrap:anywhere}
+.query-recovery p{margin:0 0 8px}
+.query-recovery .chip{min-height:44px}
 .thinking-cancel{border:0;background:none;padding:2px 0;color:var(--ink-3);font-size:12px;line-height:18px;cursor:pointer}
 .thinking-cancel:hover{color:var(--ink-1)}
 .thinking-cancel:disabled{color:var(--ink-4);cursor:default}

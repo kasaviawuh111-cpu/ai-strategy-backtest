@@ -1709,9 +1709,11 @@ async def test_unsupported_identity_preflight_is_narrow_and_does_not_requery_kno
     (True, True, True, True),
     (True, True, False, False),
     (True, False, True, False),
-    (False, True, True, False),
+    (False, True, True, True),
+    (False, True, False, False),
+    (False, False, False, False),
 ])
-async def test_editor_refresh_flag_requires_a_report_and_explicit_rerun(
+async def test_editor_run_intent_does_not_require_a_report_and_refresh_requires_rerun(
     compiler: StrategyCompiler, disposition: Literal["apply", "change_instrument"],
     has_reports: bool, run_requested: bool, refresh_data: bool, expected: bool,
     monkeypatch: pytest.MonkeyPatch,
@@ -1741,12 +1743,13 @@ async def test_editor_refresh_flag_requires_a_report_and_explicit_rerun(
 
     turn = await compiler.edit_current_strategy(
         original_input=original, prior_outcome=prior,
-        answer="换成300033.SZ" if disposition == "change_instrument" else "本金改为50万",
+        answer=("换成300033.SZ" if disposition == "change_instrument" else "本金改为50万")
+        + ("，按新条件重新回测" if run_requested else "，先不回测"),
         backtest_results=({"runId": "stored-run"},) if has_reports else (),
     )
 
     assert turn is not None and turn.outcome.status is CompileStatus.READY
-    assert turn.outcome.run_requested is bool(has_reports and run_requested)
+    assert turn.outcome.run_requested is run_requested
     assert turn.outcome.refresh_data is expected
 
 

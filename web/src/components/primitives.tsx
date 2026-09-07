@@ -143,18 +143,19 @@ export const DayDivider = ({ children }: { children: ReactNode }) => (
  * One process disclosure replaces repeated task, status and reasoning headings.
  */
 export function ThinkingStream(
-  { status = '处理中', label = '处理进度', action, summary = [] }:
+  { status = '处理中', label = '处理进度', action, summary = [], recovery }:
   {
     status?: ReactNode;
     label?: string;
     action?: ReactNode;
     summary?: readonly DialogueProgressEvent[];
+    recovery?: import('../shared/api/client').PreviewPollRecovery | null;
   },
 ) {
   return (
     <div className="thinking-stream" aria-label={label}>
       <ModelReasoning events={summary} active
-        fallbackStatus={status} progressLabel={label} />
+        fallbackStatus={status} progressLabel={label} recovery={recovery} />
       {action ? <div className="thinking-action" aria-label={typeof status === 'string' ? status : undefined}>{action}</div> : null}
     </div>
   );

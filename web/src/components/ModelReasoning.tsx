@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import type { DialogueProgressEvent } from '../shared/api/client'
+import type { DialogueProgressEvent, PreviewPollRecovery } from '../shared/api/client'
 
 const stageLabels: Record<string, string> = {
   received: '正在理解你的想法', model: '正在分析', model_reasoning: '正在分析',
@@ -12,9 +12,12 @@ const stageLabels: Record<string, string> = {
 }
 
 /** A single optional process disclosure; never invent missing provider text. */
-export function ModelReasoning({ events, active = false, fallbackStatus, progressLabel = '处理进度' }: {
+export function ModelReasoning({ events, active = false, failed = false, recovery,
+  fallbackStatus, progressLabel = '处理进度' }: {
   events: readonly DialogueProgressEvent[]
   active?: boolean
+  failed?: boolean
+  recovery?: PreviewPollRecovery | null
   fallbackStatus?: ReactNode
   progressLabel?: string
 }) {
@@ -28,12 +31,12 @@ export function ModelReasoning({ events, active = false, fallbackStatus, progres
   const hasText = Boolean(latest?.reasoning?.trim())
   const text = content.map(event => event.reasoning?.trim() || event.message.trim()
     || stageLabels[event.stage] || '').join('\n\n')
-  const waitingInBody = active && !hasText && open
-  const status = active
+  const waitingInBody = active && !recovery && !hasText && open
+  const status = recovery ? (recovery.status === 'paused' ? '等待恢复连接' : '正在重新连接') : active
     ? (latest ? (hasText ? stageLabels[latest.stage] ?? latest.message
       : latest.message.trim() || stageLabels[latest.stage]) : undefined)
       || fallbackStatus || '正在理解你的想法'
-    : latest?.stage === 'failed' ? '未完成' : '已完成'
+    : failed || latest?.stage === 'failed' ? '未完成' : '已完成'
   useLayoutEffect(() => {
     if (previousActive.current !== active) {
       setOpen(active)
@@ -46,8 +49,9 @@ export function ModelReasoning({ events, active = false, fallbackStatus, progres
       body.current.scrollTop = body.current.scrollHeight
     }
   }, [text, open])
-  if (!active && !events.length) return null
+  if (!active && !events.length && !recovery) return null
   return (
+    <>
     <details className="model-reasoning" open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary><span>处理过程</span><span role={active && !waitingInBody ? 'status' : undefined}
@@ -55,7 +59,7 @@ export function ModelReasoning({ events, active = false, fallbackStatus, progres
         aria-live={active && !waitingInBody ? 'polite' : undefined}>
           {waitingInBody ? null : status}
         </span></summary>
-      {(active && open) || content.length ? <div className="model-reasoning__body" ref={body} tabIndex={0}
+      {(active && open && !recovery) || content.length ? <div className="model-reasoning__body" ref={body} tabIndex={0}
         aria-label="处理过程内容"
         onScroll={(event) => {
           const box = event.currentTarget
@@ -76,9 +80,16 @@ export function ModelReasoning({ events, active = false, fallbackStatus, progres
         }) : <p role={waitingInBody ? 'status' : undefined}
           aria-label={waitingInBody ? progressLabel : undefined}
           aria-live={waitingInBody ? 'polite' : undefined}>
-          {status}{active ? <span className="dots" aria-hidden="true"><i /><i /><i /></span> : null}
+          {status}{waitingInBody ? <span className="dots" aria-hidden="true"><i /><i /><i /></span> : null}
         </p>}
       </div> : null}
     </details>
+    {recovery ? <div className="query-recovery">
+      <p role="status" aria-live="polite">{recovery.message}</p>
+      {recovery.status === 'paused' && recovery.resume
+        ? <button type="button" className="chip" onClick={recovery.resume}>继续查询结果</button>
+        : null}
+    </div> : null}
+    </>
   )
 }

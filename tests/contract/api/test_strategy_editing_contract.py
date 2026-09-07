@@ -613,17 +613,71 @@ def test_result_discussion_loads_reports_preserves_strategy_and_accepts_the_next
             "answer": "只改卖出的周期为10，再跑一次" if rerun else "只改卖出的周期为10",
             "related_run_ids": [run_id] if attach_report else [],
         }).json()["draft"]
-        if same_rules and not (rerun and attach_report):
+        if same_rules and not rerun:
             assert edited["status"] == "needs_clarification"
             assert edited["strategy"] is None and not edited.get("run_requested", False)
             return
         assert edited["status"] == "ready"
-        assert edited.get("run_requested", False) is (rerun and attach_report)
+        assert edited.get("run_requested", False) is rerun
         assert edited["strategy"]["entry"] == initial["strategy"]["entry"]
         assert edited["strategy"]["exit"]["children"][0]["params"]["period"] == (
             20 if same_rules else 10
         )
         assert provider.calls == []
+
+
+@pytest.mark.parametrize(("disposition", "same_rules", "run_requested"), [
+    ("apply", False, True), ("apply", False, False),
+    ("apply", True, True), ("apply", True, False),
+    ("change_instrument", False, True), ("change_instrument", False, False),
+])
+def test_fresh_draft_edit_keeps_explicit_run_intent_without_historical_reports(
+    disposition: str, same_rules: bool, run_requested: bool,
+) -> None:
+    class Editor(_Editor):
+        async def edit(self, request: StrategyEditRequest) -> StrategyEditResult:
+            result = await super().edit(request)
+            assert not request.backtest_results
+            if disposition == "change_instrument":
+                return replace(result, disposition="change_instrument", strategy=None,
+                               instrument_refs=("300033.SZ",), run_requested=run_requested)
+            return replace(result, strategy=request.strategy if same_rules else result.strategy,
+                           run_requested=run_requested)
+
+    editor, provider = Editor(), _UnexpectedLiveData()
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(), catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01", strategy_editor=editor,
+        backtest_anchor_date=date(2026, 9, 5),
+    )
+    with TestClient(create_app(compiler=compiler, live_market_data=provider,
+                              live_finance_data=provider)) as client:
+        initial = client.post("/api/v1/strategy-drafts", json={
+            "utterance": "上穿20日均线买入，下穿20日均线卖出，回测近1年",
+            "instrument_context": "300059.SZ", "as_of_date": "2026-09-05",
+        }).json()
+        assert initial["status"] == "ready" and not initial.get("run_requested", False)
+        edit_text = "换成300033.SZ" if disposition == "change_instrument" else (
+            "卖出周期保持20日" if same_rules else "卖出周期改为10日"
+        )
+        response = client.post("/api/v1/strategy-drafts", headers={
+            "X-Conversation-Parent-Draft-ID": initial["draft_id"],
+        }, json={
+            "utterance": edit_text + ("，按新条件重新回测" if run_requested else "，先不回测"),
+            "edit_current_strategy": True, "as_of_date": "2026-09-05",
+        })
+        assert response.status_code == 201, response.text
+        edited = response.json()
+        assert edited.get("run_requested", False) is run_requested
+        if same_rules and not run_requested:
+            assert edited["status"] == "needs_clarification" and edited["strategy"] is None
+        else:
+            assert edited["status"] == "ready" and edited["is_strategy_edit"]
+            assert edited["strategy"]["entry"] == initial["strategy"]["entry"]
+            assert edited["strategy"]["instrument"]["symbol"] == (
+                "300033.SZ" if disposition == "change_instrument" else "300059.SZ"
+            )
+        assert len(editor.requests) == 1 and not provider.calls
 
 
 @pytest.mark.parametrize("run_state", [None, BacktestJobState.RUNNING_REPORT])

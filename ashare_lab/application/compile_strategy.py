@@ -567,9 +567,9 @@ class StrategyCompiler:
                         execution_settings=current_settings.merged(
                             prior_outcome.pending_execution_settings,
                         ).merged(result.execution_settings),
-                        run_requested=bool(backtest_results and result.run_requested),
+                        run_requested=result.run_requested,
                         refresh_data=bool(
-                            backtest_results and result.run_requested and result.refresh_data
+                            result.run_requested and result.refresh_data
                         ),
                         candidate_grounding=(CandidateGroundingEvidence(
                             path="/instrument/symbol", start=answer.index(refs[0]),
@@ -647,8 +647,7 @@ class StrategyCompiler:
                          else current_settings)
         unchanged_edit = (strategy is not None and strategy == base
                           and next_settings == current_settings
-                          and not (backtest_results and result is not None
-                                   and result.run_requested))
+                          and not (result is not None and result.run_requested))
         if unchanged_edit and classify_clarification_turn(answer) is TurnIntent.NEW_STRATEGY:
             message = await self.compose_dialogue_response(
                 answer=answer, question="",
@@ -689,11 +688,10 @@ class StrategyCompiler:
                 execution_settings=next_settings,
                 provenance=(FieldProvenance(path="/", source="bounded_provider/strategy_edit"),),
                 run_requested=bool(
-                    backtest_results and result is not None and result.run_requested
+                    result is not None and result.run_requested
                 ),
                 refresh_data=bool(
-                    backtest_results and result is not None
-                    and result.run_requested and result.refresh_data
+                    result is not None and result.run_requested and result.refresh_data
                 ),
             )
             emit_progress("strategy_ready", "修改后的策略已通过 Catalog 与回测边界校验。")

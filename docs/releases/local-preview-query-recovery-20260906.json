@@ -1,0 +1,197 @@
+{
+  "source": {
+    "persistence": "ephemeral",
+    "revision": "sha256:c5299bff5b4adf23f4bbecc2dfe84a62011c1d149c2f00653f7687ac0a9df38a"
+  },
+  "baseline_hash": "sha256:bc16df5a134903491a792691e0a68670b3613760fd2b303074c511261b7d7945",
+  "edited_hash": "sha256:d8aa3b6226b0876d09205eadd583a72f2a3e15e980b194f7c3e8de128b3043d7",
+  "baseline_entry": {
+    "type": "all",
+    "children": [
+      {
+        "type": "indicator_condition",
+        "indicator_id": "price.rolling_high",
+        "definition_version": "1.0.0",
+        "params": {
+          "period": 20,
+          "price_field": "close"
+        },
+        "timeframe": "1d",
+        "evaluation_mode": "bar_close_confirmed",
+        "trigger": "new_high",
+        "value": null
+      },
+      {
+        "type": "indicator_condition",
+        "indicator_id": "volume.relative",
+        "definition_version": "1.0.0",
+        "params": {
+          "baseline_period": 20,
+          "consecutive_days": 3
+        },
+        "timeframe": "1d",
+        "evaluation_mode": "bar_close_confirmed",
+        "trigger": "gt_multiple",
+        "value": 1.5
+      }
+    ]
+  },
+  "edited_entry": {
+    "type": "all",
+    "children": [
+      {
+        "type": "indicator_condition",
+        "indicator_id": "price.rolling_high",
+        "definition_version": "1.0.0",
+        "params": {
+          "period": 20,
+          "price_field": "close"
+        },
+        "timeframe": "1d",
+        "evaluation_mode": "bar_close_confirmed",
+        "trigger": "new_high",
+        "value": null
+      },
+      {
+        "type": "indicator_condition",
+        "indicator_id": "volume.relative",
+        "definition_version": "1.0.0",
+        "params": {
+          "baseline_period": 15,
+          "consecutive_days": 1
+        },
+        "timeframe": "1d",
+        "evaluation_mode": "bar_close_confirmed",
+        "trigger": "gt_multiple",
+        "value": 1.5
+      }
+    ]
+  },
+  "instrument_unchanged": true,
+  "exit_unchanged": true,
+  "backtest_unchanged": true,
+  "settings_unchanged": true,
+  "run_requested": true,
+  "injected_disconnects": 4,
+  "recovery_location": "https://127.0.0.1:8129/api/v1/preview-requests/a13a2696-ed3c-47f5-be32-6921eb8cc081",
+  "edit_post_count": 1,
+  "backtest_posts": [
+    {
+      "url": "https://127.0.0.1:8129/api/v1/backtest-runs",
+      "body": {
+        "strategy": {
+          "schema_version": "strategy.v1",
+          "catalog": {
+            "catalog_id": "cn_a.signals",
+            "release_version": "2026.09.01"
+          },
+          "instrument": {
+            "market": "CN_A",
+            "symbol": "600519.SH",
+            "position_mode": "long_only"
+          },
+          "entry": {
+            "type": "all",
+            "children": [
+              {
+                "type": "indicator_condition",
+                "indicator_id": "price.rolling_high",
+                "definition_version": "1.0.0",
+                "params": {
+                  "period": 20,
+                  "price_field": "close"
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "new_high",
+                "value": null
+              },
+              {
+                "type": "indicator_condition",
+                "indicator_id": "volume.relative",
+                "definition_version": "1.0.0",
+                "params": {
+                  "baseline_period": 15,
+                  "consecutive_days": 1
+                },
+                "timeframe": "1d",
+                "evaluation_mode": "bar_close_confirmed",
+                "trigger": "gt_multiple",
+                "value": 1.5
+              }
+            ]
+          },
+          "exit": {
+            "op": "first_of",
+            "children": [
+              {
+                "type": "trailing_drawdown_exit",
+                "threshold_pct": 8,
+                "anchor": "first_entry_fill",
+                "peak_basis": "back_adjusted_daily_close",
+                "evaluation_mode": "bar_close_confirmed",
+                "execution": "next_tradable_session_open"
+              },
+              {
+                "type": "holding_period_exit",
+                "sessions": 40,
+                "anchor": "first_entry_fill",
+                "count_mode": "subsequent_trading_sessions",
+                "execution": "target_session_open_proxy"
+              }
+            ]
+          },
+          "execution": {
+            "timezone": "Asia/Shanghai",
+            "entry_policy": "next_tradable_session_open",
+            "exit_policy": "next_tradable_session_open",
+            "data_capability": "daily_ohlcv",
+            "execution_resolution": "1d",
+            "evaluation_frequency": "1d_close",
+            "position_policy": "single_position_no_pyramiding",
+            "t_plus_one": true
+          },
+          "backtest": {
+            "start": "2025-09-06",
+            "end": "2026-09-06",
+            "initial_cash_cny": 1000000
+          }
+        },
+        "config": {
+          "capacityMode": "point_in_time_volume",
+          "participationRate": 0.05,
+          "slippageBps": 5,
+          "allocationRatio": 1,
+          "limitHandling": "wait_for_unlock",
+          "commissionRate": 0.0003,
+          "minimumCommissionCny": 5,
+          "retryUnfilledExits": true,
+          "maxExitAttempts": 20,
+          "warmupCalendarDays": 180,
+          "settlementExtensionDays": 14,
+          "runRobustness": true
+        }
+      },
+      "parent": null,
+      "prefer": "respond-async"
+    }
+  ],
+  "mobile_button": {
+    "x": 16,
+    "y": 513.5,
+    "width": 116,
+    "height": 44
+  },
+  "terminal": {
+    "id": "run:7ac2bb7a896649ebad05953739975c96",
+    "state": "failed",
+    "progress": 10,
+    "progressLabel": "连接东方财富查数 Skill超时，本次取数未完成，可以重试。",
+    "createdAt": "2026-09-07T02:17:54.933337Z",
+    "updatedAt": "2026-09-07T02:19:11.956604Z",
+    "fingerprint": "sha256:85559dd8cbc575856e13028a71217235206df51a79b1e33dbe75b4baabf7cfc4",
+    "error": "skill_mx_connect_timeout",
+    "resultAvailable": false,
+    "resultHash": null
+  }
+}

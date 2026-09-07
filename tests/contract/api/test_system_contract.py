@@ -2,22 +2,54 @@
 # pyright: reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
 
+from ashare_lab.adapters.market_data.mx_daily_history import MxDailyHistoryClient
+from ashare_lab.adapters.market_data.mx_indicator_contract import (
+    UnsupportedSkillIndicatorError,
+    build_indicator_contract,
+)
+from ashare_lab.adapters.persistence.backtest_runs import InMemoryBacktestRunStore
 from ashare_lab.api import create_app
+from ashare_lab.application.skill_backtest_service import SkillBacktestService
 from ashare_lab.domain.catalog import (
     load_catalog_directory,
     load_coverage_catalog_directory,
 )
 from ashare_lab.domain.events import EXECUTABLE_EVENT_DEFINITIONS
 from ashare_lab.domain.signals.runtime import SignalRuntimeError
+from ashare_lab.ports.provider_indicator_data import HistoricalIndicatorData
 
 from .backtest_fakes import FakeRunStore, FakeSubmitter
 
 ROOT = Path(__file__).parents[3]
+
+
+def test_skill_capabilities_enable_local_macd_without_relaxing_provider_field_contract() -> None:
+    store = InMemoryBacktestRunStore()
+    service = SkillBacktestService(
+        history=cast(MxDailyHistoryClient, object()),
+        indicators=cast(HistoricalIndicatorData, object()), store=store,
+    )
+    try:
+        with TestClient(create_app(backtest_submission=service, run_store=store)) as client:
+            response = client.get("/api/v1/capabilities")
+        assert response.status_code == 200
+        payload = response.json()
+        indicators = {item["indicator_id"]: item for item in payload["indicators"]}
+        assert payload["backtest_execution_available"]
+        assert indicators["technical.macd"]["status"] == "stable"
+        assert "尚未通过验证" not in indicators["technical.macd"]["description"]
+        assert indicators["technical.bollinger"]["status"] == "unavailable"
+        # Capabilities describe the executable local formula, not a newly verified
+        # provider MACD field. Its independent strict contract still rejects use.
+        with pytest.raises(UnsupportedSkillIndicatorError, match="后复权"):
+            build_indicator_contract("technical.macd", "MACD(12,26,9)", ("DIF值", "DEA值"))
+    finally:
+        service.shutdown()
 
 
 def test_health_echoes_safe_request_id(client: TestClient) -> None:
