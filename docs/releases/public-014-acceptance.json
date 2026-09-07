@@ -1,0 +1,451 @@
+{
+  "version": "ashare-strategy-preview-014",
+  "revision": "sha256:d64e21e1f5895e980c8397be1d96e9c3be13ae9e0b1e5dee44ecd3b0ad08eee3",
+  "sourceCommit": "b1c6909113d7aaf24d42900ae39dd6dc6cf1b74a",
+  "origin": "https://ashare-strategy-preview-305722-11-1330091763.sh.run.tcloudbase.com",
+  "cases": [
+    {
+      "case": "ma-pair",
+      "input": "贵州茅台5日均线上穿20日均线时买入，下穿20日均线时卖出",
+      "http": 201,
+      "status": "ready",
+      "backendRequestId": "2533aea6-72d4-439d-bd9e-3bc9a99e22fb",
+      "edgeRequestId": "bc807c21-edf5-41d4-bba0-1b3a6514b324",
+      "strategy": {
+        "schema_version": "strategy.v1",
+        "catalog": {
+          "catalog_id": "cn_a.signals",
+          "release_version": "2026.09.01"
+        },
+        "instrument": {
+          "market": "CN_A",
+          "symbol": "600519.SH",
+          "position_mode": "long_only"
+        },
+        "entry": {
+          "type": "indicator_condition",
+          "indicator_id": "technical.ma_cross",
+          "definition_version": "1.0.0",
+          "params": {
+            "fast_period": 5,
+            "price_field": "close",
+            "slow_period": 20
+          },
+          "timeframe": "1d",
+          "evaluation_mode": "bar_close_confirmed",
+          "trigger": "golden_cross",
+          "value": null
+        },
+        "exit": {
+          "op": "first_of",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "technical.ma_cross",
+              "definition_version": "1.0.0",
+              "params": {
+                "fast_period": 5,
+                "price_field": "close",
+                "slow_period": 20
+              },
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "death_cross",
+              "value": null
+            }
+          ]
+        },
+        "execution": {
+          "timezone": "Asia/Shanghai",
+          "entry_policy": "next_tradable_session_open",
+          "exit_policy": "next_tradable_session_open",
+          "data_capability": "daily_ohlcv",
+          "execution_resolution": "1d",
+          "evaluation_frequency": "1d_close",
+          "position_policy": "single_position_no_pyramiding",
+          "t_plus_one": true
+        },
+        "backtest": {
+          "start": "2025-09-06",
+          "end": "2026-09-06",
+          "initial_cash_cny": 1000000
+        }
+      },
+      "evidence": {
+        "path": "/private/tmp/ashare-public-014-validation.4Omr2H/public-inputs/ma-pair.json",
+        "sha256": "e894cae57d129dbaae2ab37d0947beeb2a7077c793fbf765fab8e7af02d3335a"
+      }
+    },
+    {
+      "case": "midea-rsi",
+      "input": "美的集团，14日RSI从30下方上穿30且当日成交额超过5亿元买入；14日RSI高于55、持仓亏损5%或持有满10个交易日卖出。",
+      "http": 201,
+      "status": "ready",
+      "backendRequestId": "cc1c286d-b603-4341-a67a-f4c7ac91d503",
+      "edgeRequestId": "265759fa-fd30-4d44-9c58-839ce910bffd",
+      "strategy": {
+        "schema_version": "strategy.v1",
+        "catalog": {
+          "catalog_id": "cn_a.signals",
+          "release_version": "2026.09.01"
+        },
+        "instrument": {
+          "market": "CN_A",
+          "symbol": "000333.SZ",
+          "position_mode": "long_only"
+        },
+        "entry": {
+          "type": "all",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "technical.rsi",
+              "definition_version": "1.0.0",
+              "params": {
+                "period": 14
+              },
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "crosses_above",
+              "value": 30.0
+            },
+            {
+              "type": "indicator_condition",
+              "indicator_id": "market.amount",
+              "definition_version": "1.0.0",
+              "params": {},
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "above",
+              "value": 500000000.0
+            }
+          ]
+        },
+        "exit": {
+          "op": "first_of",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "technical.rsi",
+              "definition_version": "1.0.0",
+              "params": {
+                "period": 14
+              },
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "above",
+              "value": 55.0
+            },
+            {
+              "type": "position_return_exit",
+              "trigger": "stop_loss",
+              "threshold_pct": 5.0,
+              "anchor": "first_entry_fill",
+              "observation": "back_adjusted_daily_close",
+              "evaluation_mode": "bar_close_confirmed",
+              "execution": "next_tradable_session_open"
+            },
+            {
+              "type": "holding_period_exit",
+              "sessions": 10,
+              "anchor": "first_entry_fill",
+              "count_mode": "subsequent_trading_sessions",
+              "execution": "target_session_open_proxy"
+            }
+          ]
+        },
+        "execution": {
+          "timezone": "Asia/Shanghai",
+          "entry_policy": "next_tradable_session_open",
+          "exit_policy": "next_tradable_session_open",
+          "data_capability": "daily_ohlcv",
+          "execution_resolution": "1d",
+          "evaluation_frequency": "1d_close",
+          "position_policy": "single_position_no_pyramiding",
+          "t_plus_one": true
+        },
+        "backtest": {
+          "start": "2025-09-06",
+          "end": "2026-09-06",
+          "initial_cash_cny": 1000000
+        }
+      },
+      "evidence": {
+        "path": "/private/tmp/ashare-public-014-validation.4Omr2H/public-inputs/midea-rsi.json",
+        "sha256": "5c205af5e354df46362ef739c7d99253054fa149b5e885e96072b94a68ea09ca"
+      }
+    },
+    {
+      "case": "volume",
+      "input": "东方财富，收盘价创前20日新高且成交量超过前15日均量1.5倍买入；持仓亏损5%或持有满10个交易日卖出。",
+      "http": 201,
+      "status": "ready",
+      "backendRequestId": "73f90c3a-1def-4473-9feb-892bf4e86ee0",
+      "edgeRequestId": "b86df4b1-b26f-408c-8dfa-8799c88bfd68",
+      "strategy": {
+        "schema_version": "strategy.v1",
+        "catalog": {
+          "catalog_id": "cn_a.signals",
+          "release_version": "2026.09.01"
+        },
+        "instrument": {
+          "market": "CN_A",
+          "symbol": "300059.SZ",
+          "position_mode": "long_only"
+        },
+        "entry": {
+          "type": "all",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "price.rolling_high",
+              "definition_version": "1.0.0",
+              "params": {
+                "period": 20,
+                "price_field": "close"
+              },
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "new_high",
+              "value": null
+            },
+            {
+              "type": "indicator_condition",
+              "indicator_id": "volume.relative",
+              "definition_version": "1.0.0",
+              "params": {
+                "baseline_period": 15,
+                "consecutive_days": 3
+              },
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "gt_multiple",
+              "value": 1.5
+            }
+          ]
+        },
+        "exit": {
+          "op": "first_of",
+          "children": [
+            {
+              "type": "position_return_exit",
+              "trigger": "stop_loss",
+              "threshold_pct": 5.0,
+              "anchor": "first_entry_fill",
+              "observation": "back_adjusted_daily_close",
+              "evaluation_mode": "bar_close_confirmed",
+              "execution": "next_tradable_session_open"
+            },
+            {
+              "type": "holding_period_exit",
+              "sessions": 10,
+              "anchor": "first_entry_fill",
+              "count_mode": "subsequent_trading_sessions",
+              "execution": "target_session_open_proxy"
+            }
+          ]
+        },
+        "execution": {
+          "timezone": "Asia/Shanghai",
+          "entry_policy": "next_tradable_session_open",
+          "exit_policy": "next_tradable_session_open",
+          "data_capability": "daily_ohlcv",
+          "execution_resolution": "1d",
+          "evaluation_frequency": "1d_close",
+          "position_policy": "single_position_no_pyramiding",
+          "t_plus_one": true
+        },
+        "backtest": {
+          "start": "2025-09-06",
+          "end": "2026-09-06",
+          "initial_cash_cny": 1000000
+        }
+      },
+      "evidence": {
+        "path": "/private/tmp/ashare-public-014-validation.4Omr2H/public-inputs/volume.json",
+        "sha256": "93394cb9b94edcc70789e07ecbd26c85cef458bdf6aa6fdb02e9d65db7d38384"
+      }
+    },
+    {
+      "case": "macd",
+      "input": "东方财富 macd 金叉买 死叉卖",
+      "http": 201,
+      "status": "ready",
+      "backendRequestId": "f4dd4567-3b46-4a28-b0ba-9478e17c42f8",
+      "edgeRequestId": "118bd79a-d52c-4749-960a-73bd52efe353",
+      "strategy": {
+        "schema_version": "strategy.v1",
+        "catalog": {
+          "catalog_id": "cn_a.signals",
+          "release_version": "2026.09.01"
+        },
+        "instrument": {
+          "market": "CN_A",
+          "symbol": "300059.SZ",
+          "position_mode": "long_only"
+        },
+        "entry": {
+          "type": "indicator_condition",
+          "indicator_id": "technical.macd",
+          "definition_version": "1.0.0",
+          "params": {
+            "fast": 12,
+            "signal": 9,
+            "slow": 26
+          },
+          "timeframe": "1d",
+          "evaluation_mode": "bar_close_confirmed",
+          "trigger": "golden_cross",
+          "value": null
+        },
+        "exit": {
+          "op": "first_of",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "technical.macd",
+              "definition_version": "1.0.0",
+              "params": {
+                "fast": 12,
+                "signal": 9,
+                "slow": 26
+              },
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "death_cross",
+              "value": null
+            }
+          ]
+        },
+        "execution": {
+          "timezone": "Asia/Shanghai",
+          "entry_policy": "next_tradable_session_open",
+          "exit_policy": "next_tradable_session_open",
+          "data_capability": "daily_ohlcv",
+          "execution_resolution": "1d",
+          "evaluation_frequency": "1d_close",
+          "position_policy": "single_position_no_pyramiding",
+          "t_plus_one": true
+        },
+        "backtest": {
+          "start": "2025-09-06",
+          "end": "2026-09-06",
+          "initial_cash_cny": 1000000
+        }
+      },
+      "evidence": {
+        "path": "/private/tmp/ashare-public-014-validation.4Omr2H/public-inputs/macd.json",
+        "sha256": "bcd899e9dc13affd6bc60a37d8209c1bd618bd12ff5d09aad08678e4061ea33e"
+      }
+    },
+    {
+      "case": "price",
+      "input": "平安银行收盘价低于10元买入，高于12元卖出",
+      "http": 201,
+      "status": "ready",
+      "backendRequestId": "f90e1fc6-6130-421d-a3f8-03940ba7a7a8",
+      "edgeRequestId": "6203075a-37ec-419b-b66d-da6d8f194c47",
+      "strategy": {
+        "schema_version": "strategy.v1",
+        "catalog": {
+          "catalog_id": "cn_a.signals",
+          "release_version": "2026.09.01"
+        },
+        "instrument": {
+          "market": "CN_A",
+          "symbol": "000001.SZ",
+          "position_mode": "long_only"
+        },
+        "entry": {
+          "type": "indicator_condition",
+          "indicator_id": "price.close",
+          "definition_version": "1.0.0",
+          "params": {},
+          "timeframe": "1d",
+          "evaluation_mode": "bar_close_confirmed",
+          "trigger": "below",
+          "value": 10.0
+        },
+        "exit": {
+          "op": "first_of",
+          "children": [
+            {
+              "type": "indicator_condition",
+              "indicator_id": "price.close",
+              "definition_version": "1.0.0",
+              "params": {},
+              "timeframe": "1d",
+              "evaluation_mode": "bar_close_confirmed",
+              "trigger": "above",
+              "value": 12.0
+            }
+          ]
+        },
+        "execution": {
+          "timezone": "Asia/Shanghai",
+          "entry_policy": "next_tradable_session_open",
+          "exit_policy": "next_tradable_session_open",
+          "data_capability": "daily_ohlcv",
+          "execution_resolution": "1d",
+          "evaluation_frequency": "1d_close",
+          "position_policy": "single_position_no_pyramiding",
+          "t_plus_one": true
+        },
+        "backtest": {
+          "start": "2025-09-06",
+          "end": "2026-09-06",
+          "initial_cash_cny": 1000000
+        }
+      },
+      "evidence": {
+        "path": "/private/tmp/ashare-public-014-validation.4Omr2H/public-inputs/price.json",
+        "sha256": "e8c8a4f570d765571db39d52f42e37660fc004dc63ed158555829b114dcff54e"
+      }
+    }
+  ],
+  "ideaJourney": {
+    "status": "PASS",
+    "turns": [
+      {
+        "input": "给我三个完整的均线趋势买卖方案。先不要推荐股票，我自己提供股票。",
+        "http": 201,
+        "status": "needs_clarification",
+        "diagnosticCode": "idea_guidance_required",
+        "backendRequestId": "f46e7ee8-f0da-4f3f-8efa-36fac04aeaf2"
+      },
+      {
+        "input": "选择：双均线金叉死叉趋势（5/20）",
+        "http": 200,
+        "status": "needs_clarification",
+        "diagnosticCode": "instrument_required",
+        "backendRequestId": "3e4d5e85-4410-4a6c-b3d5-e80862dfaa82"
+      },
+      {
+        "input": "用东方财富（300059.SZ）",
+        "http": 200,
+        "status": "ready",
+        "diagnosticCode": null,
+        "backendRequestId": "a92d68ba-535a-48a7-bc99-01bb2280ae80"
+      }
+    ],
+    "stockRecommendationDeclinedPreserved": true,
+    "reasoningObserved": true,
+    "backtestState": "succeeded",
+    "runId": "run:95e59cfc6e734b29a165276343f7e3f6",
+    "artifactHttp": {
+      "summary": 200,
+      "series": 200,
+      "trades": 200
+    },
+    "reportVisible": true,
+    "evidence": {
+      "path": "/private/tmp/ashare-public-014-validation.4Omr2H/public-idea/evidence.json",
+      "sha256": "5e60f67ea514bdee0735154fe49c5bf600b77a5988724b8a18d4a9c8270c9126"
+    }
+  },
+  "boundaries": [
+    "Five fresh compile cases and one complete live journey, not a global failure-rate estimate.",
+    "Exact stored proposal template equality checked locally; no production database access used.",
+    "No reasoning text, user secrets or provider data tables copied into this sanitized artifact."
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "taskId": 2092281,
+  "requestId": "ddaf53f9-c763-4068-a380-db51d29ec677",
+  "revision": "sha256:d64e21e1f5895e980c8397be1d96e9c3be13ae9e0b1e5dee44ecd3b0ad08eee3",
+  "previousRevision": "sha256:7d0a7b1da51aea86f4e5b857cc8fbeb2cc42fd1f82def540c55199afdc558353",
+  "preservedEnvironmentExceptRevision": true,
+  "changed": [
+    "ashare_lab/adapters/language/openai_compatible.py",
+    "ashare_lab/adapters/language/vibe_candidates.py",
+    "ashare_lab/adapters/language/vibe_strategy_advice.py",
+    "ashare_lab/api/middleware.py",
+    "ashare_lab/api/routes/strategy_drafts.py",
+    "ashare_lab/api/schemas.py",
+    "ashare_lab/application/compile_strategy.py"
+  ],
+  "origin": "https://ashare-strategy-preview-305722-11-1330091763.sh.run.tcloudbase.com",
+  "isolatedHttpConnection": true,
+  "sourceCommit": "b1c6909113d7aaf24d42900ae39dd6dc6cf1b74a",
+  "previousTask": 2091956,
+  "status": {
+    "taskId": 2092281,
+    "task": "finished",
+    "steps": [
+      {
+        "name": "CreateVersion",
+        "status": "finished"
+      },
+      {
+        "name": "RunPipeline",
+        "status": "notInvolve"
+      },
+      {
+        "name": "GrayRelease",
+        "status": "notInvolve"
+      },
+      {
+        "name": "ReleaseVersion",
+        "status": "finished"
+      }
+    ],
+    "online": [
+      {
+        "name": "ashare-strategy-preview-014",
+        "flow": "100"
+      }
+    ],
+    "revision": "sha256:d64e21e1f5895e980c8397be1d96e9c3be13ae9e0b1e5dee44ecd3b0ad08eee3",
+    "access": "public",
+    "credentialsConfigured": false,
+    "models": {
+      "CANDIDATE_PROVIDER_MODEL": "deepseek-v4-flash",
+      "CANDIDATE_PROVIDER_THINKING": "disabled",
+      "PLAN_DEEP_PROVIDER_MODEL": "deepseek-v4-pro",
+      "PLAN_DEEP_PROVIDER_THINKING": "enabled",
+      "PLAN_DEEP_PROVIDER_REASONING_EFFORT": "high"
+    }
+  }
+}
