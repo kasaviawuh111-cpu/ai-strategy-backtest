@@ -22,6 +22,12 @@ from ashare_lab.adapters.language.executable_semantic_projection import project_
 
 _LOGGER = logging.getLogger(__name__)
 
+TABLE_ENCODING_CONTRACT = (
+    "表格可能使用columnar.v1无损编码：每个编码对象自己的columns是原始列名，"
+    "其rows中每行的值按该对象的columns顺序对应，不能套用外层或其他表的列顺序。"
+    "编码保留全部行、列、null、单位和日期，不是抽样或摘要；各原表仍独立，不能跨表按行号合并。"
+)
+
 PRICE_REFERENCE_DISPLAY_GUIDANCE = (
     _GRID_TRIGGER_EXECUTION_GUIDANCE +
     "参考价必须按规则种类核对：rebound从启用后追踪低点反弹，pullback从追踪高点回落；"
@@ -94,6 +100,7 @@ async def review_display_semantics(
         capability_matrix={}, max_candidates=1,
         system_contract=(
             "你是展示回复的独立语义审核器，不生成回复，不修改策略，不执行操作。"
+            f"{TABLE_ENCODING_CONTRACT}"
             f"{PRICE_REFERENCE_DISPLAY_GUIDANCE}{POSITION_SIZING_DISPLAY_GUIDANCE}"
             "按完整语义理解否定、同义表达和上下文，不能按某个词出现就判错。"
             "responseScope是工程限定的本次回复范围；reply是待审核的最终整批展示内容。"

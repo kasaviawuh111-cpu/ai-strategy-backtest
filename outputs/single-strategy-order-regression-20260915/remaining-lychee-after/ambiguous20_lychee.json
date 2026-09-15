@@ -1,0 +1,25 @@
+{
+  "case": "ambiguous20_lychee",
+  "utterance": "我想吃荔枝，给我交易灵感",
+  "http": 503,
+  "status": null,
+  "diagnostic": null,
+  "expected_kind": null,
+  "actual_kind": null,
+  "elapsed_seconds": 101.11,
+  "response": {
+    "error": {
+      "code": "candidate_provider_insufficient_balance",
+      "message": "DeepSeek 账户余额不足，本次模型请求未完成，请检查服务端账户余额。",
+      "details": [
+        {
+          "location": "model_provider.http_status",
+          "message": "402",
+          "type": "upstream_http_status"
+        }
+      ]
+    },
+    "request_id": "1167e77ec5684783b733c261604f16a9"
+  },
+  "selection_http": null
+}

@@ -590,6 +590,15 @@ async def test_pairing_reason_repair_reuses_data_and_requires_new_review(monkeyp
     assert transport.requests[0].user_payload["verifiedRows"] == transport.requests[1].user_payload["verifiedRows"]
     assert transport.requests[1].user_payload["remainingDataRounds"] == 0
     assert "修正说明" in transport.requests[1].user_payload["dataFeedback"][-1]
+    assert "previousPairing" not in transport.requests[0].user_payload
+    previous = transport.requests[1].user_payload["previousPairing"]
+    assert previous["pairs"] == [{
+        "proposal_id": "idea_fixture", "symbol": "300059.SZ", "reason": "受控数据说明",
+    }]
+    assert previous["data_request"] is None
+    assert "指标筛选写已返回的指标" in transport.requests[1].user_payload["dataFeedback"][-1]
+    assert "未通过审核的旧回复，不是事实来源" in transport.requests[1].system_contract
+    assert "不能承诺确认后就能看回测" in transport.requests[1].user_payload["dataFeedback"][-1]
 
 
 @pytest.mark.asyncio

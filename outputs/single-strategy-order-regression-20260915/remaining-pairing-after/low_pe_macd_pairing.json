@@ -1,0 +1,734 @@
+{
+  "case": "low_pe_macd_pairing",
+  "utterance": "帮我选低市盈率股票，金叉买死叉卖",
+  "http": 201,
+  "status": "ready",
+  "diagnostic": null,
+  "expected_kind": null,
+  "actual_kind": null,
+  "elapsed_seconds": 132.21,
+  "response": {
+    "execution_assessment": {
+      "status": "research_degraded",
+      "message": "按日线收盘确认信号，下一交易日开盘起模拟委托；启动回测时确认数据与执行能力，实际口径以报告为准。",
+      "missing": [],
+      "interpreted_strategy": null,
+      "strategy_hash": null
+    },
+    "draft_id": "f8f7a767-1072-48bf-b988-5c3606f3beeb",
+    "revision": 1,
+    "status": "ready",
+    "execution_settings": {
+      "slippage_bps": "5",
+      "slippage_cny": null,
+      "commission_rate": "0.00025",
+      "minimum_commission_cny": "5",
+      "participation_rate": "0.05",
+      "allocation_ratio": "1",
+      "limit_handling": "wait_for_unlock",
+      "capacity_mode": "point_in_time_volume",
+      "retry_unfilled_exits": true,
+      "max_exit_attempts": 20,
+      "warmup_calendar_days": 180,
+      "settlement_extension_days": 14,
+      "run_robustness": true
+    },
+    "strategy": {
+      "schema_version": "strategy.v1",
+      "catalog": {
+        "catalog_id": "cn_a.signals",
+        "release_version": "2026.09.01"
+      },
+      "instrument": {
+        "market": "CN_A",
+        "symbol": "000807.SZ",
+        "position_mode": "long_only"
+      },
+      "entry": {
+        "type": "all",
+        "children": [
+          {
+            "type": "indicator_condition",
+            "indicator_id": "provider.numeric",
+            "definition_version": "1.0.0",
+            "params": {
+              "metric_query": "市盈率TTM",
+              "unit": "倍"
+            },
+            "timeframe": "1d",
+            "evaluation_mode": "bar_close_confirmed",
+            "trigger": "below",
+            "value": 15.0
+          },
+          {
+            "type": "indicator_condition",
+            "indicator_id": "technical.macd",
+            "definition_version": "1.0.0",
+            "params": {
+              "fast": 12,
+              "slow": 26,
+              "signal": 9
+            },
+            "timeframe": "1d",
+            "evaluation_mode": "bar_close_confirmed",
+            "trigger": "golden_cross",
+            "value": null
+          }
+        ]
+      },
+      "exit": {
+        "op": "first_of",
+        "children": [
+          {
+            "type": "indicator_condition",
+            "indicator_id": "technical.macd",
+            "definition_version": "1.0.0",
+            "params": {
+              "fast": 12,
+              "slow": 26,
+              "signal": 9
+            },
+            "timeframe": "1d",
+            "evaluation_mode": "bar_close_confirmed",
+            "trigger": "death_cross",
+            "value": null
+          }
+        ]
+      },
+      "execution": {
+        "timezone": "Asia/Shanghai",
+        "entry_policy": "next_tradable_session_open",
+        "exit_policy": "next_tradable_session_open",
+        "data_capability": "daily_ohlcv",
+        "execution_resolution": "1d",
+        "evaluation_frequency": "1d_close",
+        "position_policy": "accumulate_on_new_entry_signal",
+        "t_plus_one": true
+      },
+      "backtest": {
+        "start": "2025-09-11",
+        "end": "2026-09-11",
+        "initial_cash_cny": 1000000
+      }
+    },
+    "strategy_hash": "sha256:fc6524421383a4bb2330aeb1413000dc876141415ee7ba9b6092e05edb78462a",
+    "clarification": null,
+    "diagnostic_code": null,
+    "instrument_suggestion": null,
+    "verified_instrument": {
+      "symbol": "000807.SZ",
+      "name": "云铝股份",
+      "source": "confirmed_stock_strategy_pair",
+      "retrieved_at": "2026-09-15T14:17:31.205888Z",
+      "evidence": "用户选择组合：低PE+MACD金叉买、死叉卖（PE阈值15）；当时的匹配依据：市盈率TTM 8.55倍，低于15倍阈值；成交额11.95亿、换手1.28%，低PE样本有足够成交观察MACD买卖信号。"
+    },
+    "provenance": [
+      {
+        "path": "/",
+        "source": "bounded_provider/validated_strategy"
+      }
+    ],
+    "candidate_provenance": {
+      "source": "bounded_provider",
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "prompt_version": "idea-route.prompt.v27",
+      "schema_version": "idea-route-provider.v6",
+      "capability_projection_version": "candidate-capabilities.v1",
+      "capability_projection_hash": "sha256:8b0409750cbab73473320e11ecb31b52a1da7356d631d207a4ebc5b698b26a67",
+      "upstream_pattern_commit": "1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7",
+      "candidate_rank": 1
+    },
+    "candidate_grounding": null,
+    "candidate_rejections": [],
+    "candidate_alternatives": [],
+    "idea_route": null,
+    "suggested_strategy": null,
+    "suggested_strategy_hash": null,
+    "suggested_strategy_choice_id": null,
+    "suggested_strategy_note": null,
+    "created_at": "2026-09-15T14:17:35.818054Z"
+  },
+  "selection_http": 200,
+  "initial_response": {
+    "draft_id": "5154bf03-b167-48dc-9de3-40e30b1b3c6d",
+    "revision": 1,
+    "status": "needs_clarification",
+    "execution_settings": {
+      "slippage_bps": "5",
+      "slippage_cny": null,
+      "commission_rate": "0.00025",
+      "minimum_commission_cny": "5",
+      "participation_rate": "0.05",
+      "allocation_ratio": "1",
+      "limit_handling": "wait_for_unlock",
+      "capacity_mode": "point_in_time_volume",
+      "retry_unfilled_exits": true,
+      "max_exit_attempts": 20,
+      "warmup_calendar_days": 180,
+      "settlement_extension_days": 14,
+      "run_robustness": true
+    },
+    "strategy": null,
+    "strategy_hash": null,
+    "clarification": "你想从低市盈率里找标的，再用金叉买、死叉卖，我按返回里的估值和成交筛了筛。挑出3只分别对应PE低于15、20、25的三档MACD方案，你可以先看看是否合意；选定后我们再检查历史数据和执行条件，尝试回测。",
+    "diagnostic_code": "idea_guidance_required",
+    "instrument_suggestion": null,
+    "provenance": [],
+    "candidate_provenance": null,
+    "candidate_grounding": null,
+    "candidate_rejections": [],
+    "candidate_alternatives": [],
+    "idea_route": {
+      "schema_version": "idea-route.v1",
+      "understanding": "你想从低市盈率里找标的，再用金叉买、死叉卖，我按返回里的估值和成交筛了筛。挑出3只分别对应PE低于15、20、25的三档MACD方案，你可以先看看是否合意；选定后我们再检查历史数据和执行条件，尝试回测。",
+      "hypothesis": "低市盈率股票在MACD金叉后入场、死叉后离场，可能捕捉估值修复叠加趋势启动的行情；但低PE不等于低估，需回测验证。",
+      "asset_mapping": {
+        "instrument_symbol": null,
+        "relation": "unbound",
+        "rationale": "可以使用东方财富选股 Skill 筛选的候选，也可以用自己的股票；确认股票和方向后再回测。",
+        "evidence_status": "instrument_required"
+      },
+      "proposals": [
+        {
+          "strategy": {
+            "schema_version": "strategy.v1",
+            "catalog": {
+              "catalog_id": "cn_a.signals",
+              "release_version": "2026.09.01"
+            },
+            "instrument": {
+              "market": "CN_A",
+              "symbol": "000807.SZ",
+              "position_mode": "long_only"
+            },
+            "entry": {
+              "type": "all",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "provider.numeric",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "metric_query": "市盈率TTM",
+                    "unit": "倍"
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "below",
+                  "value": 15.0
+                },
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "golden_cross",
+                  "value": null
+                }
+              ]
+            },
+            "exit": {
+              "op": "first_of",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "death_cross",
+                  "value": null
+                }
+              ]
+            },
+            "execution": {
+              "timezone": "Asia/Shanghai",
+              "entry_policy": "next_tradable_session_open",
+              "exit_policy": "next_tradable_session_open",
+              "data_capability": "daily_ohlcv",
+              "execution_resolution": "1d",
+              "evaluation_frequency": "1d_close",
+              "position_policy": "accumulate_on_new_entry_signal",
+              "t_plus_one": true
+            },
+            "backtest": {
+              "start": "2025-09-11",
+              "end": "2026-09-11",
+              "initial_cash_cny": 1000000
+            }
+          },
+          "strategy_template": {
+            "catalog": {
+              "catalog_id": "cn_a.signals",
+              "release_version": "2026.09.01"
+            },
+            "entry": {
+              "type": "all",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "provider.numeric",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "metric_query": "市盈率TTM",
+                    "unit": "倍"
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "below",
+                  "value": 15.0
+                },
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "golden_cross",
+                  "value": null
+                }
+              ]
+            },
+            "exit": {
+              "op": "first_of",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "death_cross",
+                  "value": null
+                }
+              ]
+            },
+            "trading_plan": null,
+            "independent_plans": null,
+            "execution": {
+              "timezone": "Asia/Shanghai",
+              "entry_policy": "next_tradable_session_open",
+              "exit_policy": "next_tradable_session_open",
+              "data_capability": "daily_ohlcv",
+              "execution_resolution": "1d",
+              "evaluation_frequency": "1d_close",
+              "position_policy": "accumulate_on_new_entry_signal",
+              "t_plus_one": true
+            },
+            "backtest": {
+              "start": "2025-09-11",
+              "end": "2026-09-11",
+              "initial_cash_cny": 1000000
+            }
+          },
+          "grid_plan": null,
+          "id": "idea_d43b8fa034e3",
+          "title": "低PE+MACD金叉买、死叉卖（PE阈值15）",
+          "hypothesis": "把估值门槛收紧到市盈率TTM低于15，观察更严格筛选下MACD趋势跟随的表现差异。",
+          "entry_summary": "市盈率TTM低于15（模型建议阈值）且MACD（12,26,9）金叉时买入。",
+          "exit_summary": "MACD（12,26,9）死叉时卖出。",
+          "suggested_utterance": "帮我选市盈率TTM低于15的股票，MACD金叉时买入，MACD死叉时卖出，近1年回测，本金100万元。",
+          "capability_ids": [
+            "provider.numeric",
+            "technical.macd"
+          ],
+          "assumptions": [
+            "这是模型生成的待验证假设，不证明原观点与股价存在因果关系。",
+            "用户未指定的周期、阈值、触发方向或退出细节属于模型建议，可以修改；不是用户给定条件。",
+            "候选只做多；观察周期和委托生效时点以各方案实际规则为准，数据与执行能力另行核对。"
+          ],
+          "confidence": 0.75,
+          "instrument_symbol": "000807.SZ",
+          "instrument_name": "云铝股份",
+          "pairing_reason": "市盈率TTM 8.55倍，低于15倍阈值；成交额11.95亿、换手1.28%，低PE样本有足够成交观察MACD买卖信号。"
+        },
+        {
+          "strategy": {
+            "schema_version": "strategy.v1",
+            "catalog": {
+              "catalog_id": "cn_a.signals",
+              "release_version": "2026.09.01"
+            },
+            "instrument": {
+              "market": "CN_A",
+              "symbol": "688155.SH",
+              "position_mode": "long_only"
+            },
+            "entry": {
+              "type": "all",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "provider.numeric",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "metric_query": "市盈率TTM",
+                    "unit": "倍"
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "below",
+                  "value": 20.0
+                },
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "golden_cross",
+                  "value": null
+                }
+              ]
+            },
+            "exit": {
+              "op": "first_of",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "death_cross",
+                  "value": null
+                }
+              ]
+            },
+            "execution": {
+              "timezone": "Asia/Shanghai",
+              "entry_policy": "next_tradable_session_open",
+              "exit_policy": "next_tradable_session_open",
+              "data_capability": "daily_ohlcv",
+              "execution_resolution": "1d",
+              "evaluation_frequency": "1d_close",
+              "position_policy": "accumulate_on_new_entry_signal",
+              "t_plus_one": true
+            },
+            "backtest": {
+              "start": "2025-09-11",
+              "end": "2026-09-11",
+              "initial_cash_cny": 1000000
+            }
+          },
+          "strategy_template": {
+            "catalog": {
+              "catalog_id": "cn_a.signals",
+              "release_version": "2026.09.01"
+            },
+            "entry": {
+              "type": "all",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "provider.numeric",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "metric_query": "市盈率TTM",
+                    "unit": "倍"
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "below",
+                  "value": 20.0
+                },
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "golden_cross",
+                  "value": null
+                }
+              ]
+            },
+            "exit": {
+              "op": "first_of",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "death_cross",
+                  "value": null
+                }
+              ]
+            },
+            "trading_plan": null,
+            "independent_plans": null,
+            "execution": {
+              "timezone": "Asia/Shanghai",
+              "entry_policy": "next_tradable_session_open",
+              "exit_policy": "next_tradable_session_open",
+              "data_capability": "daily_ohlcv",
+              "execution_resolution": "1d",
+              "evaluation_frequency": "1d_close",
+              "position_policy": "accumulate_on_new_entry_signal",
+              "t_plus_one": true
+            },
+            "backtest": {
+              "start": "2025-09-11",
+              "end": "2026-09-11",
+              "initial_cash_cny": 1000000
+            }
+          },
+          "grid_plan": null,
+          "id": "idea_27c601a5109b",
+          "title": "低PE选股+MACD金叉买死叉卖",
+          "hypothesis": "以市盈率TTM低于20作为估值筛选，配合MACD金叉入场、死叉离场，检验低估值标的的趋势跟随效果。",
+          "entry_summary": "市盈率TTM低于20（模型建议阈值）且MACD（12,26,9）金叉时买入。",
+          "exit_summary": "MACD（12,26,9）死叉时卖出。",
+          "suggested_utterance": "帮我选市盈率TTM低于20的股票，MACD金叉时买入，MACD死叉时卖出，近1年回测，本金100万元。",
+          "capability_ids": [
+            "provider.numeric",
+            "technical.macd"
+          ],
+          "assumptions": [
+            "这是模型生成的待验证假设，不证明原观点与股价存在因果关系。",
+            "用户未指定的周期、阈值、触发方向或退出细节属于模型建议，可以修改；不是用户给定条件。",
+            "候选只做多；观察周期和委托生效时点以各方案实际规则为准，数据与执行能力另行核对。"
+          ],
+          "confidence": 0.75,
+          "instrument_symbol": "688155.SH",
+          "instrument_name": "先惠技术",
+          "pairing_reason": "市盈率TTM 17.06倍，落在20倍阈值内；成交额3.82亿、换手5.52%，较活跃成交便于检验金叉买、死叉卖触发。"
+        },
+        {
+          "strategy": {
+            "schema_version": "strategy.v1",
+            "catalog": {
+              "catalog_id": "cn_a.signals",
+              "release_version": "2026.09.01"
+            },
+            "instrument": {
+              "market": "CN_A",
+              "symbol": "002155.SZ",
+              "position_mode": "long_only"
+            },
+            "entry": {
+              "type": "all",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "provider.numeric",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "metric_query": "市盈率TTM",
+                    "unit": "倍"
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "below",
+                  "value": 25.0
+                },
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "golden_cross",
+                  "value": null
+                }
+              ]
+            },
+            "exit": {
+              "op": "first_of",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "death_cross",
+                  "value": null
+                }
+              ]
+            },
+            "execution": {
+              "timezone": "Asia/Shanghai",
+              "entry_policy": "next_tradable_session_open",
+              "exit_policy": "next_tradable_session_open",
+              "data_capability": "daily_ohlcv",
+              "execution_resolution": "1d",
+              "evaluation_frequency": "1d_close",
+              "position_policy": "accumulate_on_new_entry_signal",
+              "t_plus_one": true
+            },
+            "backtest": {
+              "start": "2025-09-11",
+              "end": "2026-09-11",
+              "initial_cash_cny": 1000000
+            }
+          },
+          "strategy_template": {
+            "catalog": {
+              "catalog_id": "cn_a.signals",
+              "release_version": "2026.09.01"
+            },
+            "entry": {
+              "type": "all",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "provider.numeric",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "metric_query": "市盈率TTM",
+                    "unit": "倍"
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "below",
+                  "value": 25.0
+                },
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "golden_cross",
+                  "value": null
+                }
+              ]
+            },
+            "exit": {
+              "op": "first_of",
+              "children": [
+                {
+                  "type": "indicator_condition",
+                  "indicator_id": "technical.macd",
+                  "definition_version": "1.0.0",
+                  "params": {
+                    "fast": 12,
+                    "slow": 26,
+                    "signal": 9
+                  },
+                  "timeframe": "1d",
+                  "evaluation_mode": "bar_close_confirmed",
+                  "trigger": "death_cross",
+                  "value": null
+                }
+              ]
+            },
+            "trading_plan": null,
+            "independent_plans": null,
+            "execution": {
+              "timezone": "Asia/Shanghai",
+              "entry_policy": "next_tradable_session_open",
+              "exit_policy": "next_tradable_session_open",
+              "data_capability": "daily_ohlcv",
+              "execution_resolution": "1d",
+              "evaluation_frequency": "1d_close",
+              "position_policy": "accumulate_on_new_entry_signal",
+              "t_plus_one": true
+            },
+            "backtest": {
+              "start": "2025-09-11",
+              "end": "2026-09-11",
+              "initial_cash_cny": 1000000
+            }
+          },
+          "grid_plan": null,
+          "id": "idea_2c5cce0cc62f",
+          "title": "低PE+MACD金叉买、死叉卖（PE低于25）",
+          "hypothesis": "放宽估值门槛到市盈率TTM低于25，观察更多标的进入后MACD趋势跟随的样本变化。",
+          "entry_summary": "市盈率TTM低于25（模型建议阈值）且MACD（12,26,9）金叉时买入。",
+          "exit_summary": "MACD（12,26,9）死叉时卖出。",
+          "suggested_utterance": "帮我选市盈率TTM低于25的股票，MACD金叉时买入，MACD死叉时卖出，近1年回测，本金100万元。",
+          "capability_ids": [
+            "provider.numeric",
+            "technical.macd"
+          ],
+          "assumptions": [
+            "这是模型生成的待验证假设，不证明原观点与股价存在因果关系。",
+            "用户未指定的周期、阈值、触发方向或退出细节属于模型建议，可以修改；不是用户给定条件。",
+            "候选只做多；观察周期和委托生效时点以各方案实际规则为准，数据与执行能力另行核对。"
+          ],
+          "confidence": 0.75,
+          "instrument_symbol": "002155.SZ",
+          "instrument_name": "湖南黄金",
+          "pairing_reason": "市盈率TTM 23.20倍，低于25倍阈值；成交额12.58亿、换手3.01%，成交活跃适合观察低PE叠加MACD择时。"
+        }
+      ],
+      "provenance": {
+        "source": "bounded_provider",
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "prompt_version": "idea-route.prompt.v27",
+        "schema_version": "idea-route-provider.v6",
+        "capability_projection_version": "candidate-capabilities.v1",
+        "capability_projection_hash": "sha256:8b0409750cbab73473320e11ecb31b52a1da7356d631d207a4ebc5b698b26a67",
+        "upstream_pattern_commit": "1ee7df16af6eed8831014fa16ec0a9cb2d35f4e7"
+      },
+      "research": null
+    },
+    "suggested_strategy": null,
+    "suggested_strategy_hash": null,
+    "suggested_strategy_choice_id": null,
+    "suggested_strategy_note": null,
+    "created_at": "2026-09-15T14:17:31.193079Z"
+  }
+}
