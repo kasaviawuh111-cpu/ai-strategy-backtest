@@ -1,0 +1,61 @@
+{
+  "runId": "run:6c30bf56155e422db01d44acc073779b",
+  "totalReturn": -0.29533641,
+  "benchmarkReturn": -0.07001737,
+  "benchmarkComparisonStatus": "comparable",
+  "annualizedReturn": -0.2948257264247146,
+  "maxDrawdown": -0.4038660997506191,
+  "sharpeRatio": -1.1817297979183103,
+  "winRate": 0.25,
+  "tradeCount": 8,
+  "initialCashCny": 1000000.0,
+  "finalEquityCny": 704663.59,
+  "interpretation": "策略期内亏损，未跑赢同资金同规则买入持有；最大回撤约 40.4%。",
+  "dataRange": {
+    "start": "2025-09-11",
+    "end": "2026-09-11",
+    "sessions": 243
+  },
+  "warnings": [
+    "日线回测只能证明价格区间和成交量，不能证明涨跌停队列中的实际排队位置。",
+    "开盘价代理成交容量使用上一交易日已完成成交量乘参与率，未读取当日收盘后成交量。",
+    "日线事件预留 1 秒处理时间；09:15 前就绪才允许使用当日已发布开盘价代理，成交时间仅按 09:30 可证明边界记录，不代表真实 09:30 或 09:25 成交，订单当日有效。",
+    "公司行动按已固定账本政策处理：cn.a_share.timeline_entitlement_receivable_settlement.date_only_cash_after_close_conservative.v2。",
+    "现金分红按税前金额入账，尚未模拟个人投资者按持股期限差异化补税；含分红的结果不能用于判断个人税后收益。",
+    "配股默认不追加外部资金并放弃认购；该决定会写入公司行动审计轨迹。",
+    "同期持有为同初始资金、同交易与公司行动规则的资金账户。",
+    "完整交易不足 30 次，胜率、夏普等统计结论不稳健。",
+    "本地股份账本接线：仓位风控使用原始价格及来源除权因子重算锚点；未完成真实供应商与前端验收。"
+  ],
+  "runEvidence": {
+    "strategyHash": "sha256:4aa38f37bbb1e97cfbbac42363e56ccacc10fc0acda5cc0be67528828f5d3e18",
+    "catalogHash": "sha256:010ee4fa55c2d6209b4794dc3ac36fa906b2d90c2cb1804b326573ec416985d7",
+    "dataSnapshotId": "mx-share:c5c7994bfdfae7b1812ba341f21e34c375146ad4fe3d7b690fdb08c2205c678c",
+    "dataSnapshotChecksum": "sha256:c5c7994bfdfae7b1812ba341f21e34c375146ad4fe3d7b690fdb08c2205c678c",
+    "dataSchemaVersion": "mx-share-input.v1",
+    "producerSnapshotSchemaVersion": null,
+    "producerSnapshotId": null,
+    "codeRevision": "sha256:e342c7d1493b9aa1bf1bf9f6e6566f257743e11e44bb5db173fa3277809e1090",
+    "engineVersion": "2.0.0a0",
+    "executionAssumptions": {
+      "allocation_ratio": "1",
+      "benchmark_policy": "funded_buy_and_hold.same_execution_ledger.v1",
+      "capacity_mode": "point_in_time_volume",
+      "corporate_action_policy": "cn.a_share.timeline_entitlement_receivable_settlement.date_only_cash_after_close_conservative.v2",
+      "dividend_tax_policy": "gross_research_no_withholding.v1",
+      "edge_entry_validity_sessions": "1",
+      "entry_signal_validity_policy": "cn.a_share.daily.entry_signal_validity.edge_event_state.composite_fail_closed.default_one_attempt.persistent_account_exits.explicit_new_entry_occurrences.v5",
+      "event_entry_validity_sessions": "1",
+      "limit_handling": "wait_for_unlock",
+      "max_exit_attempts": "20",
+      "opening_auction_policy": "cn.a_share.daily.published_open_proxy.latency_1s.cutoff_0915.recorded_0930.not_exact.day_order.v2",
+      "participation_rate": "0.05",
+      "retry_unfilled_exits": "True",
+      "rights_issue_policy": "decline_no_external_cash.v1",
+      "slippage_bps": "5",
+      "slippage_cny": "0",
+      "state_entry_validity_sessions": "1"
+    }
+  },
+  "dataProvenance": null
+}

@@ -1,0 +1,12 @@
+{
+  "id": "run:6c30bf56155e422db01d44acc073779b",
+  "state": "succeeded",
+  "progress": 100,
+  "progressLabel": "股份账本回测完成",
+  "createdAt": "2026-09-15T14:01:41.166355Z",
+  "updatedAt": "2026-09-15T14:01:48.671531Z",
+  "fingerprint": "sha256:704619ff7e0e15b1f659e5d05b1ae8b25f011824f91a3d484687c6d649e0791a",
+  "error": null,
+  "resultAvailable": true,
+  "resultHash": "sha256:ea3b7e376d6e46680f6f3913eb06e55a400ae5b17383146039f24fa03286b0f3"
+}

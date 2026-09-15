@@ -1,0 +1,20 @@
+{
+  "meta": {
+    "persistence": "ephemeral",
+    "revision": "sha256:e342c7d1493b9aa1bf1bf9f6e6566f257743e11e44bb5db173fa3277809e1090"
+  },
+  "ready": {
+    "status": "ready",
+    "checks": {
+      "analysis_model_configured": "ok",
+      "eastmoney_skill_configured": "ok",
+      "strategy_model_configured": "ok",
+      "web_research_configured": "ok"
+    }
+  },
+  "matchingAssets": [
+    "/assets/index-CIb6GHmJ.js",
+    "/assets/index-DIxZD4Xe.css",
+    "/"
+  ]
+}

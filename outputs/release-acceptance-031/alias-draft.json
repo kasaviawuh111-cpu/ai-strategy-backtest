@@ -1,0 +1,197 @@
+{
+  "initial_http": 202,
+  "initial_seconds": 0.03,
+  "http": 201,
+  "body": {
+    "execution_assessment": {
+      "status": "research_degraded",
+      "message": "按日线收盘确认信号，下一交易日开盘起模拟委托；启动回测时确认数据与执行能力，实际口径以报告为准。",
+      "missing": [],
+      "interpreted_strategy": null,
+      "strategy_hash": null
+    },
+    "draft_id": "0be3804d-96c9-4edb-8904-d93caf2283fa",
+    "revision": 1,
+    "status": "ready",
+    "execution_settings": {
+      "slippage_bps": "5",
+      "slippage_cny": null,
+      "commission_rate": "0.00025",
+      "minimum_commission_cny": "5",
+      "participation_rate": "0.05",
+      "allocation_ratio": "1",
+      "limit_handling": "wait_for_unlock",
+      "capacity_mode": "point_in_time_volume",
+      "retry_unfilled_exits": true,
+      "max_exit_attempts": 20,
+      "warmup_calendar_days": 180,
+      "settlement_extension_days": 14,
+      "run_robustness": true
+    },
+    "strategy": {
+      "schema_version": "strategy.v1",
+      "catalog": {
+        "catalog_id": "cn_a.signals",
+        "release_version": "2026.09.01"
+      },
+      "instrument": {
+        "market": "CN_A",
+        "symbol": "300059.SZ",
+        "position_mode": "long_only"
+      },
+      "entry": {
+        "type": "indicator_condition",
+        "indicator_id": "technical.macd",
+        "definition_version": "1.0.0",
+        "params": {
+          "fast": 12,
+          "signal": 9,
+          "slow": 26
+        },
+        "timeframe": "1d",
+        "evaluation_mode": "bar_close_confirmed",
+        "trigger": "golden_cross",
+        "value": null
+      },
+      "exit": {
+        "op": "first_of",
+        "children": [
+          {
+            "type": "indicator_condition",
+            "indicator_id": "technical.macd",
+            "definition_version": "1.0.0",
+            "params": {
+              "fast": 12,
+              "signal": 9,
+              "slow": 26
+            },
+            "timeframe": "1d",
+            "evaluation_mode": "bar_close_confirmed",
+            "trigger": "death_cross",
+            "value": null
+          }
+        ]
+      },
+      "execution": {
+        "timezone": "Asia/Shanghai",
+        "entry_policy": "next_tradable_session_open",
+        "exit_policy": "next_tradable_session_open",
+        "data_capability": "daily_ohlcv",
+        "execution_resolution": "1d",
+        "evaluation_frequency": "1d_close",
+        "position_policy": "accumulate_on_new_entry_signal",
+        "t_plus_one": true
+      },
+      "backtest": {
+        "start": "2025-09-11",
+        "end": "2026-09-11",
+        "initial_cash_cny": 1000000
+      }
+    },
+    "strategy_hash": "sha256:777b1ad5939cade38c2c55730f349f7a446359908feb8de05c3e178e43c4867f",
+    "clarification": null,
+    "diagnostic_code": null,
+    "instrument_suggestion": null,
+    "verified_instrument": {
+      "symbol": "300059.SZ",
+      "name": "东方财富",
+      "source": "eastmoney_mx_finance_data",
+      "retrieved_at": "2026-09-15T14:01:22.536789Z",
+      "evidence": "查询A股300059.SZ的证券代码和股票简称；已核对返回证券代码与名称"
+    },
+    "provenance": [
+      {
+        "path": "/backtest/end",
+        "source": "data_snapshot/end"
+      },
+      {
+        "path": "/backtest/initial_cash_cny",
+        "source": "default/initial_cash"
+      },
+      {
+        "path": "/backtest/start",
+        "source": "default/lookback_years"
+      },
+      {
+        "path": "/entry/0/params/fast",
+        "source": "default/catalog_policy"
+      },
+      {
+        "path": "/entry/0/params/signal",
+        "source": "default/catalog_policy"
+      },
+      {
+        "path": "/entry/0/params/slow",
+        "source": "default/catalog_policy"
+      },
+      {
+        "path": "/exit/0/params/fast",
+        "source": "default/catalog_policy"
+      },
+      {
+        "path": "/exit/0/params/signal",
+        "source": "default/catalog_policy"
+      },
+      {
+        "path": "/exit/0/params/slow",
+        "source": "default/catalog_policy"
+      },
+      {
+        "path": "/instrument/symbol",
+        "source": "utterance_or_stock_context"
+      }
+    ],
+    "candidate_provenance": {
+      "source": "bounded_provider",
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "prompt_version": "ashare-lab.bounded-candidate.prompt.v1",
+      "schema_version": "ashare-lab.bounded-candidate.schema.v1",
+      "capability_projection_version": "candidate-capabilities.v1",
+      "capability_projection_hash": "sha256:e096fee3905dc327ec251e2256243a7698b0dc915c169707b26d6270da48eb1b",
+      "upstream_pattern_commit": "e90b6c6cd9fea23067a85667e7fbf74f9d73ea48",
+      "candidate_rank": 1
+    },
+    "candidate_grounding": {
+      "matched_spans": [
+        "东财金叉买",
+        "死叉卖",
+        "东财"
+      ],
+      "spans": [
+        {
+          "path": "/entry/0",
+          "start": 0,
+          "end": 5,
+          "text": "东财金叉买"
+        },
+        {
+          "path": "/exit/0",
+          "start": 6,
+          "end": 9,
+          "text": "死叉卖"
+        },
+        {
+          "path": "/instrument/symbol",
+          "start": 0,
+          "end": 2,
+          "text": "东财"
+        }
+      ]
+    },
+    "candidate_rejections": [],
+    "candidate_alternatives": [
+      {
+        "candidate_rank": 1,
+        "strategy_hash": "sha256:777b1ad5939cade38c2c55730f349f7a446359908feb8de05c3e178e43c4867f"
+      }
+    ],
+    "idea_route": null,
+    "suggested_strategy": null,
+    "suggested_strategy_hash": null,
+    "suggested_strategy_choice_id": null,
+    "suggested_strategy_note": null,
+    "assistant_message": "买卖规则已准备好，可以核对；本次尚未执行回测。",
+    "created_at": "2026-09-15T14:01:21.224750Z"
+  }
+}

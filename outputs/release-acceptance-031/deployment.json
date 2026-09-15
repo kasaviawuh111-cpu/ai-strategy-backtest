@@ -1,0 +1,20 @@
+{
+  "checkedAt": "2026-09-15T14:05:53Z",
+  "environment": "test-d6gwxiamcd87743af",
+  "service": "ashare-strategy-preview",
+  "version": "ashare-strategy-preview-031",
+  "flowRatio": 100,
+  "revision": "sha256:e342c7d1493b9aa1bf1bf9f6e6566f257743e11e44bb5db173fa3277809e1090",
+  "taskId": 2159476,
+  "buildId": 2604803519,
+  "stageRequestId": "7fb973a7-f446-4b16-b6ab-fccf0c39bdd1",
+  "promoteRequestId": "9f328421-5a8e-4937-9ec9-18b6f10dcf55",
+  "minuteEnabled": true,
+  "minuteMount": "/data/stock_1min",
+  "minuteMountReadOnly": true,
+  "model": "deepseek-v4-flash",
+  "timeoutFallback": "deepseek-v4-pro",
+  "webResearch": "tencent_web_search",
+  "persistence": "ephemeral",
+  "frontendAssetsMatchedLocalBundle": true
+}

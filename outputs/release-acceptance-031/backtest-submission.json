@@ -1,0 +1,18 @@
+{
+  "initial_http": 202,
+  "initial_seconds": 0.06,
+  "http": 202,
+  "body": {
+    "id": "run:6c30bf56155e422db01d44acc073779b",
+    "state": "queued",
+    "progress": 0,
+    "progressLabel": "已排队，等待东方财富 Skill 取数",
+    "createdAt": "2026-09-15T14:01:41.166355Z",
+    "updatedAt": "2026-09-15T14:01:41.166355Z",
+    "fingerprint": "sha256:704619ff7e0e15b1f659e5d05b1ae8b25f011824f91a3d484687c6d649e0791a",
+    "error": null,
+    "resultAvailable": false,
+    "resultHash": null,
+    "replayed": false
+  }
+}
