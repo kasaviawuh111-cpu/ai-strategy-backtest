@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from ashare_lab.adapters.language import RuleBasedCandidateGenerator
+from ashare_lab.adapters.language.vibe_candidates import CandidateTransportError
 from ashare_lab.adapters.language.vibe_strategy_editing import VibeStrategyEditor
 from ashare_lab.api import backtest_review_schemas, create_app
 from ashare_lab.api.container import ApiContainer
@@ -41,6 +42,7 @@ from ashare_lab.domain.strategy import (
 from ashare_lab.ports.backtest_review import (
     BacktestModelReview,
     BacktestOptimizationCandidate,
+    BacktestReviewContentError,
     BacktestReviewRequest,
 )
 from ashare_lab.ports.backtest_runs import BacktestJobState
@@ -553,6 +555,45 @@ def test_review_requires_configured_model_and_completed_verified_result() -> Non
     assert running.json()["error"]["code"] == "backtest_result_not_ready"
     assert no_model.status_code == 503
     assert no_model.json()["error"]["code"] == "backtest_review_model_unavailable"
+
+
+@pytest.mark.parametrize(("failure", "status", "code"), [
+    (BacktestReviewContentError("invalid model content"), 502, "backtest_review_content_invalid"),
+    (CandidateTransportError("connection failed", failure_kind="connection_failed"),
+     502, "candidate_provider_connection_failed"),
+    (CandidateTransportError("response timed out", failure_kind="timeout"),
+     504, "candidate_provider_timeout"),
+])
+def test_failed_review_preserves_completed_run_and_verified_results(
+    failure: Exception, status: int, code: str,
+) -> None:
+    class FailingAdvisor:
+        async def review(self, request: BacktestReviewRequest) -> BacktestModelReview:
+            raise failure
+
+    store = FakeRunStore()
+    run_id = "run:review:failure"
+    record = make_record(
+        run_id, state=BacktestJobState.SUCCEEDED,
+        strategy_json=canonical_json(_one_year_strategy()),
+        result_json=result_bundle_json(run_id),
+    )
+    store.seed(record)
+    app = create_app(
+        backtest_submission=FakeSubmitter(store), run_store=store,
+        backtest_review_advisor=FailingAdvisor(),
+    )
+    with TestClient(app) as client:
+        before = client.get(f"/api/v1/backtest-runs/{run_id}/summary")
+        response = client.post(f"/api/v1/backtest-runs/{run_id}/review")
+        after = client.get(f"/api/v1/backtest-runs/{run_id}/summary")
+        assert response.status_code == status, response.text
+        assert response.json()["error"]["code"] == code
+        assert before.status_code == after.status_code == 200
+        assert before.json() == after.json()
+        assert list(store.records.values()) == [record]
+        if isinstance(failure, BacktestReviewContentError):
+            assert "无需重新回测" in response.json()["error"]["message"]
 
 
 @pytest.mark.parametrize("violation", ["cash", "date", "catalog", "duplicate", "other_dimension"])

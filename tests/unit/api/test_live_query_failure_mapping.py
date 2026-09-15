@@ -58,6 +58,8 @@ SCREEN_QUERY = "A股近一年涨幅前5只股票"
 
 
 ERROR_CASES = (
+    (MxSaasProviderDataError("real-time market-data provider SQL execution failed", attempts=3),
+     "invalid_response", 502, "服务暂时不稳定"),
     (MxSaasProviderAuthError(SECRET_SENTINEL), "authentication_failed", 503, "授权失败"),
     (MxSaasProviderUnavailableError(SECRET_SENTINEL, reason="read_timeout"),
      "read_timeout", 504, "等待响应超时"),
@@ -166,7 +168,8 @@ async def test_new_query_draft_reports_diagnostic_without_rewriting_stored_outco
         body=StrategyDraftRequest(utterance=query, as_of_date=date(2026, 9, 6)),
         response=Response(), container=container,
     )
-    assert result.diagnostic_code == f"live_market_data_{suffix}"
+    assert result.query_diagnostic_code == f"live_market_data_{suffix}"
+    assert result.diagnostic_code == "data_query_only"
     assert fragment in result.assistant_message
     assert SECRET_SENTINEL not in result.assistant_message
     assert result.data is None
@@ -210,7 +213,7 @@ async def test_refetch_timeout_preserves_first_table_and_pending_strategy() -> N
         draft_id=state.draft_id, answer=SCREEN_QUERY, state=state,
         response=Response(), container=container,
     )
-    assert response.draft.diagnostic_code == "live_market_data_read_timeout"
+    assert response.query_diagnostic_code == "live_market_data_read_timeout"
     assert response.draft.strategy == before.strategy
     assert response.draft.strategy_hash == before.strategy_hash
     assert response.draft.revision == state.revision
@@ -238,12 +241,13 @@ async def test_classified_model_review_failure_keeps_data_and_strategy(query: st
         draft_id=state.draft_id, answer=query, state=state,
         response=Response(), container=container,
     )
-    assert response.draft.diagnostic_code == "candidate_provider_rate_limited"
+    assert response.query_diagnostic_code is None
     assert response.draft.strategy == state.outcome.strategy
     assert response.draft.strategy_hash == state.outcome.strategy_hash
     assert response.data is not None
-    assert "模型服务请求频率受限" in response.assistant_message
-    assert "查询结果与刚才的策略已保留" in response.assistant_message
+    assert "数据已返回" in response.assistant_message
+    assert "服务不可用" not in response.assistant_message
+    assert "满足本次" not in response.assistant_message
     assert SECRET_SENTINEL not in response.assistant_message
 
 
@@ -252,18 +256,19 @@ class _AdviceFailedModel:
         return QueryDataReview(True, ("fixture",), None, "fixture success")
 
     async def advise(self, request: object) -> None:
-        raise CandidateTransportError(SECRET_SENTINEL, failure_kind="timeout")
+        raise AssertionError("a successful lookup must not call strategy advice")
 
 
 @pytest.mark.asyncio
-async def test_classified_model_answer_failure_keeps_verified_finance_table() -> None:
+async def test_successful_lookup_does_not_depend_on_strategy_advice() -> None:
     container = replace(_container(_Provider(None)), strategy_advisor=_AdviceFailedModel())
     state = await _stored_strategy(container)
     response = await _answer_live_data_query(
         draft_id=state.draft_id, answer=QUERY, state=state,
         response=Response(), container=container,
     )
-    assert response.draft.diagnostic_code == "candidate_provider_timeout"
+    assert response.query_diagnostic_code is None
+    assert response.assistant_message == "fixture success"
     assert response.data.finance.tables[0]["rawTable"]["data"] == [["东方财富", 35.2]]
     assert response.draft.strategy == state.outcome.strategy
     assert response.draft.run_requested == state.outcome.run_requested
@@ -285,7 +290,7 @@ async def test_classified_model_composed_answer_failure_keeps_screen_and_finance
         draft_id=state.draft_id, answer=SCREEN_QUERY + "，获取近10年的归母净利润", state=state,
         response=Response(), container=container,
     )
-    assert response.draft.diagnostic_code == "candidate_provider_service_unavailable"
+    assert response.query_diagnostic_code == "candidate_provider_service_unavailable"
     assert response.data.screened_finance.screen.rows
     assert response.data.screened_finance.batches[0].tables
     assert response.draft.strategy == state.outcome.strategy

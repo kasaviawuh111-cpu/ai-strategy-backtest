@@ -1,6 +1,7 @@
 import type { BacktestMetrics } from './types'
+import { percentMagnitude } from './shared/percent'
 
-const absolutePercent = (value: number) => `${Math.abs(value).toFixed(2)}%`
+const absolutePercent = (value: number) => `${percentMagnitude(value)}%`
 
 const performancePhrase = (label: string, value: number | null) => {
   if (value == null) return `${label}收益未记录`
@@ -18,12 +19,16 @@ export function numericResultConclusion(metrics: BacktestMetrics) {
   const strategy = performancePhrase('策略', metrics.total)
   const benchmark = performancePhrase('同样的钱买入后一直持有', metrics.bench)
   const conclude = (body: string) =>
-    `${body}${metrics.trips === 0 ? '；完整买卖 0 回合' : ''}。`
+    `${body}${metrics.trips === 0 ? metrics.tradeCountSemantics === 'closed_position_cycles'
+      ? metrics.benchmarkComparisonStatus === 'comparable'
+        ? '；已有买入，尚未全部卖出' : '；尚未发生全部卖出'
+      : '；完整买卖 0 回合' : ''}。`
 
   if (metrics.benchmarkComparisonStatus === 'strategy_entry_not_filled') {
+    if (metrics.executionNote) return `${strategy}，本次没有已成交买入，无法比较超额收益。`
     return conclude(
       `${strategy}，本次没有已成交买入，无法比较超额收益${metrics.bench == null ? '' : `（${benchmark}，仅作参考）`}`,
-    )
+    ).replace('；尚未发生全部卖出', '')
   }
   if (metrics.benchmarkComparisonStatus === 'benchmark_entry_not_filled') {
     return conclude(`${strategy}，买入持有基准未按同一成交规则成交，无法比较超额收益`)
@@ -46,6 +51,6 @@ export function numericResultConclusion(metrics: BacktestMetrics) {
   }
 
   return conclude(
-    `${strategy}，${benchmark}，${comparison} ${Math.abs(metrics.excess).toFixed(2)} 个百分点`,
+    `${strategy}，${benchmark}，复合相对${comparison.replace('相对', '')} ${absolutePercent(metrics.excess)}`,
   )
 }

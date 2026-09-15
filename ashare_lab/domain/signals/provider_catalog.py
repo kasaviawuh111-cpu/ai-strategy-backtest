@@ -458,13 +458,14 @@ def _rolling_high(condition: IndicatorCondition) -> ProviderIndicatorBinding:
         raise ProviderCatalogError(
             f"unsupported provider rolling-high trigger {condition.trigger!r}"
         )
-    _int_param(condition, "period")
-    field = "近期创阶段新高"
+    period = _int_param(condition, "period")
+    price = _price_field(condition)
+    highest = f"前{period}日最高{price}"
     return _binding(
         condition,
-        provider_name=field,
-        values=(field,),
-        comparisons=(ProviderComparisonBinding(field, Comparator.GTE, _constant("1")),),
+        provider_name=f"当日{price}与{highest}",
+        values=(price, highest),
+        comparisons=(ProviderComparisonBinding(price, Comparator.GT, _field(highest)),),
     )
 
 
@@ -513,8 +514,17 @@ def _volume(condition: IndicatorCondition) -> ProviderIndicatorBinding:
     )
 
 
+def _relative_volume_operands(
+    condition: IndicatorCondition, comparator: Comparator, multiple: object,
+) -> tuple[str, ProviderComparisonBinding]:
+    period = _int_param(condition, "baseline_period")
+    average = f"前{period}日平均成交量"
+    return average, ProviderComparisonBinding(
+        "成交量", comparator, _field(average, multiplier=_number(multiple, "volume multiple")),
+    )
+
+
 def _relative_volume(condition: IndicatorCondition) -> ProviderIndicatorBinding:
-    _int_param(condition, "baseline_period")
     comparators = {
         "gt_multiple": Comparator.GT,
         "gte_multiple": Comparator.GTE,
@@ -532,11 +542,12 @@ def _relative_volume(condition: IndicatorCondition) -> ProviderIndicatorBinding:
         if condition.trigger == "consecutive_gte_multiple"
         else 1
     )
+    average, comparison = _relative_volume_operands(condition, comparator, condition.value)
     return _binding(
         condition,
-        provider_name="量比",
-        values=("量比",),
-        comparisons=(ProviderComparisonBinding("量比", comparator, _condition_value()),),
+        provider_name=f"当日成交量与{average}",
+        values=("成交量", average),
+        comparisons=(comparison,),
         consecutive_sessions=consecutive,
     )
 
@@ -546,15 +557,17 @@ def _volume_price_confirmation(condition: IndicatorCondition) -> ProviderIndicat
         raise ProviderCatalogError(
             f"unsupported provider volume-price trigger {condition.trigger!r}"
         )
-    period = _int_param(condition, "baseline_period")
+    average, volume_comparison = _relative_volume_operands(
+        condition, Comparator.GTE, _param(condition, "volume_multiple"),
+    )
     return_comparator = Comparator.GTE if condition.trigger == "surge_up" else Comparator.LTE
     return_multiplier = Decimal("1") if condition.trigger == "surge_up" else Decimal("-1")
     return _binding(
         condition,
-        provider_name=f"{period}日相对成交量与当日涨跌幅",
-        values=("相对成交量", "当日涨跌幅"),
+        provider_name=f"当日成交量与{average}及当日涨跌幅",
+        values=("成交量", average, "当日涨跌幅"),
         comparisons=(
-            ProviderComparisonBinding("相对成交量", Comparator.GTE, _parameter("volume_multiple")),
+            volume_comparison,
             ProviderComparisonBinding(
                 "当日涨跌幅",
                 return_comparator,

@@ -112,6 +112,69 @@ const readyResponse = (strategy: StrategySpec = eventStrategy): LiveDraftRespons
 })
 
 describe('live strategy client', () => {
+  it.each(['unavailable', 'wrong-stock', 'invalid-field', 'unknown-unit', 'valid']) (
+    'filters metric search evidence before offering it: %s', async state => {
+      vi.stubEnv('VITE_USE_MOCK', 'false')
+      const payload = {
+        instrument_id: state === 'wrong-stock' ? '600519.SH' : '002558.SZ',
+        instrument_verified: true, status: state === 'unavailable' ? 'unavailable' : 'discovered',
+        candidate_table_indices: [0], tables: [{ table_index: 0, instrument_verified: true,
+          issues: [], fields: [{ return_name: '换手率', display_name: '换手率',
+            unit: state === 'unknown-unit' ? null : '%', values: ['1', '2'],
+            issues: state === 'invalid-field' ? ['field_length_mismatch'] : [] }] }],
+      }
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), {status: 200})))
+      const { metricApi } = await import('./client')
+      const result = await metricApi.discover({instrument_id:'002558.SZ', metric_query:'换手率',
+        start:'2025-09-08', end:'2026-09-08'})
+      expect(result).toHaveLength(state === 'valid' ? 1 : 0)
+    },
+  )
+  it('prepares the complete run payload without creating a run or a draft revision', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    const { fromLiveDraftResponse, toLiveBacktestBody } = await import('./contract')
+    const compiled = fromLiveDraftResponse(readyResponse(), clarifiedRequest)
+    if (compiled.status !== 'compiled') throw new Error('expected compiled StrategySpec')
+    const timeout = vi.spyOn(window, 'setTimeout')
+    const fetcher = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () =>
+      new Response(JSON.stringify({ ready: true }), { status: 200 }))
+    vi.stubGlobal('fetch', fetcher)
+    const { backtestApi } = await import('./client')
+    const controller = new AbortController()
+    await expect(backtestApi.prepare(compiled.draft, controller.signal)).resolves.toEqual({ ready: true })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(fetcher.mock.calls[0]?.[0]).toBe('/api/v1/backtest-runs/prepare')
+    const init = fetcher.mock.calls[0]?.[1]
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(String(init?.body))).toEqual(toLiveBacktestBody(compiled.draft))
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+    expect(timeout).toHaveBeenCalledWith(expect.any(Function), 300_000)
+  })
+
+  it('preserves concrete preparation errors returned through preview polling', async () => {
+    vi.useFakeTimers()
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    vi.stubEnv('VITE_PRIVATE_PREVIEW', 'true')
+    const { fromLiveDraftResponse } = await import('./contract')
+    const compiled = fromLiveDraftResponse(readyResponse(), clarifiedRequest)
+    if (compiled.status !== 'compiled') throw new Error('expected compiled StrategySpec')
+    const location = '/api/v1/preview-requests/12345678-1234-1234-1234-123456789abc'
+    const detail = '回测起点早于股票上市日 2026-07-27，请调整回测区间。'
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => String(input) === location
+      ? new Response(JSON.stringify({ title: '区间不可用', detail,
+        code: 'skill_history_before_listing', status: 422 }), { status: 422,
+        headers: { 'Content-Type': 'application/problem+json' } })
+      : new Response('{}', { status: 202, headers: { Location: location, 'X-Preview-Pending': '1' } }))
+    vi.stubGlobal('fetch', fetcher)
+    const { backtestApi } = await import('./client')
+    const result = expect(backtestApi.prepare(compiled.draft)).rejects.toMatchObject({
+      problem: expect.objectContaining({ code: 'skill_history_before_listing', detail }),
+    })
+    await vi.advanceTimersByTimeAsync(1_000)
+    await result
+    expect(fetcher.mock.calls.map(([path]) => path)).toEqual(['/api/v1/backtest-runs/prepare', location])
+  })
+
   it('polls preview model requests without resubmitting the original POST', async () => {
     vi.stubEnv('VITE_PRIVATE_PREVIEW', 'true')
     vi.stubEnv('VITE_USE_MOCK', 'false')
@@ -135,6 +198,35 @@ describe('live strategy client', () => {
     await strategyApi.compile(clarifiedRequest)
     expect(fetcher.mock.calls.filter(([url]) => String(url) === '/api/v1/strategy-drafts')).toHaveLength(1)
     expect(fetcher.mock.calls.filter(([url]) => String(url) === location)).toHaveLength(1)
+  })
+
+  it('retries an idempotent dialogue POST after a transient socket failure', async () => {
+    vi.useFakeTimers()
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    let draftAttempts = 0
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/capabilities') return new Response(JSON.stringify(capabilities()))
+      if (path.startsWith('/api/v1/dialogue-progress/')) {
+        return new Response(JSON.stringify({ finished: true, events: [] }))
+      }
+      if (path === '/api/v1/strategy-drafts') {
+        draftAttempts += 1
+        expect(new Headers(init?.headers).get('Idempotency-Key')).toMatch(/^draft:/)
+        if (draftAttempts === 1) throw new TypeError('socket closed during reload')
+        return new Response(JSON.stringify(readyResponse()), { status: 201 })
+      }
+      throw new Error(`unexpected fetch: ${path}`)
+    })
+    vi.stubGlobal('fetch', fetcher)
+
+    const { strategyApi } = await import('./client')
+    const compile = strategyApi.compile({ ...clarifiedRequest, dialogueProgress: {
+      onProgress: vi.fn(),
+    } })
+    await vi.advanceTimersByTimeAsync(250)
+    await expect(compile).resolves.toMatchObject({ status: 'compiled' })
+    expect(draftAttempts).toBe(2)
   })
 
   it('rejects an external preview poll address without following it', async () => {
@@ -205,7 +297,7 @@ describe('live strategy client', () => {
       const result = expect(state.result).resolves.toMatchObject({ status: 'compiled' })
       await vi.advanceTimersByTimeAsync(1_000)
       expect(state.onRecovery).toHaveBeenLastCalledWith(expect.objectContaining({
-        status: 'retrying', attempt: 1,
+        status: 'retrying', attempt: 1, message: expect.stringContaining('结果查询连接暂时中断'),
       }))
       await vi.advanceTimersByTimeAsync(1_000)
       await result
@@ -263,11 +355,30 @@ describe('live strategy client', () => {
       })
       const result = expect(state.result).resolves.toMatchObject({ status: 'compiled' })
       await vi.advanceTimersByTimeAsync(21_000)
-      expect(state.onRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'retrying' }))
+      expect(state.onRecovery).toHaveBeenLastCalledWith(expect.objectContaining({
+        status: 'retrying', message: expect.stringContaining('结果查询响应超时'),
+      }))
       await vi.advanceTimersByTimeAsync(1_000)
       await result
       expect(state.queries()).toBe(2)
       state.expectOnePost()
+    })
+
+    it('preserves the HTTP reason while paused and resumes the same accepted request', async () => {
+      const state = await begin(async attempt => attempt > 4 ? ready()
+        : new Response('<html>gateway unavailable</html>', { status: 503 }))
+      await vi.advanceTimersByTimeAsync(8_000)
+      const paused = state.onRecovery.mock.calls.at(-1)?.[0]
+      expect(paused).toMatchObject({ status: 'paused', attempt: 3,
+        message: expect.stringContaining('HTTP 503'), resume: expect.any(Function) })
+      expect(paused?.message).not.toContain('连接')
+      expect(state.queries()).toBe(4)
+      paused?.resume?.()
+      await vi.advanceTimersByTimeAsync(0)
+      await expect(state.result).resolves.toMatchObject({ status: 'compiled' })
+      expect(state.queries()).toBe(5)
+      state.expectOnePost()
+      expect(vi.getTimerCount()).toBe(0)
     })
 
     it.each([408, 429, 502, 503, 504, 'broken-body'] as const)('retries transient %s results', async status => {
@@ -278,6 +389,10 @@ describe('live strategy client', () => {
       await result
       expect(state.queries()).toBe(2)
       state.expectOnePost()
+      const retryMessage = state.onRecovery.mock.calls.find(([entry]) => entry?.status === 'retrying')?.[0]?.message
+      expect(retryMessage).toContain(status === 'broken-body' ? '格式无效' : `HTTP ${status}`)
+      if (status === 429) expect(retryMessage).toContain('频率受限')
+      expect(retryMessage).not.toContain('连接')
     })
 
     it.each([404, 410, 422, 503, 504])('does not retry terminal HTTP %s business errors', async status => {
@@ -307,6 +422,7 @@ describe('live strategy client', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllEnvs()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
@@ -383,6 +499,7 @@ describe('live strategy client', () => {
       }
       if (path === '/api/v1/strategy-drafts') {
         compileProgressHeader = new Headers(init?.headers).get('X-Dialogue-Progress-ID')
+        expect(new Headers(init?.headers).get('Idempotency-Key')).toBe(`draft:${progressId}`)
         await draftGate
         return { ok: true, status: 201, json: async () => readyResponse() }
       }
@@ -403,6 +520,10 @@ describe('live strategy client', () => {
     await compile
 
     expect(compileProgressHeader).toBe(progressId)
+    const requestedPaths = fetchMock.mock.calls.map(([url]) => String(url))
+    expect(requestedPaths.indexOf('/api/v1/strategy-drafts')).toBeLessThan(
+      requestedPaths.indexOf(`/api/v1/dialogue-progress/${progressId}`),
+    )
     expect(updates[0]).toHaveLength(12)
     expect(updates[0]?.map((event) => event.stage)).toEqual(
       Array.from({ length: 12 }, (_, index) => `stage-${index + 4}`),
@@ -1186,7 +1307,7 @@ describe('live strategy client', () => {
     await expect(systemApi.capabilities()).rejects.toMatchObject({
       problem: expect.objectContaining({
         code: 'api_network_unavailable',
-        detail: expect.stringContaining('没有连上回测服务'),
+        detail: expect.stringContaining('网络异常'),
       }),
     })
   })
@@ -1204,5 +1325,22 @@ describe('live strategy client', () => {
     await expect(systemApi.capabilities()).rejects.toMatchObject({
       problem: expect.objectContaining({ code: 'api_invalid_json' }),
     })
+  })
+
+  it('preserves well-formed backend failure locations without accepting malformed details', async () => {
+    vi.stubEnv('VITE_USE_MOCK', 'false')
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 422,
+      json: async () => ({ error: { code: 'skill_indicator_history_not_ready', message: '未准备好',
+        details: [null, { message: 42 }, {
+          location: '/exit/children/1', message: '缺少有效历史值', type: 'backtest_condition_unavailable',
+        }],
+      }, request_id: 'safe-request' }),
+    })))
+    const { systemApi } = await import('./client')
+    await expect(systemApi.capabilities()).rejects.toMatchObject({ problem: {
+      code: 'skill_indicator_history_not_ready', requestId: 'safe-request',
+      details: [{ location: '/exit/children/1', message: '缺少有效历史值', type: 'backtest_condition_unavailable' }],
+    } })
   })
 })

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
+from dataclasses import replace
 from datetime import date
 
+import httpcore
 import httpx
 import pytest
 from pydantic import SecretStr
@@ -12,6 +15,7 @@ from ashare_lab.adapters.language.openai_compatible import (
     CandidateProviderTransportError,
     DisabledCandidateJsonTransport,
     OpenAICompatibleCandidateTransport,
+    _parse_candidate_json,
 )
 from ashare_lab.adapters.language.vibe_candidates import (
     CandidateFailureKind,
@@ -65,7 +69,70 @@ def _request() -> CandidateTransportRequest:
     )
 
 
+@pytest.mark.parametrize("content", [
+    '{"candidates":[]}',
+    '  {"candidates":[]}\n',
+    '```json\n{"candidates":[]}\n```',
+    '```\n{"candidates":[]}\n```',
+])
+def test_candidate_json_accepts_only_plain_or_single_fenced_object(content: str) -> None:
+    assert _parse_candidate_json(content) == {"candidates": []}
+
+
+@pytest.mark.parametrize("content", [
+    '结果如下：{"candidates":[]}',
+    '```json\n{"candidates":[]}\n``` trailing',
+])
+def test_candidate_json_rejects_prose_and_trailing_material(content: str) -> None:
+    with pytest.raises(json.JSONDecodeError):
+        _parse_candidate_json(content)
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("schema", "response_only", "connect"), [
+    ("ashare_clarification_dialogue", True, 20.0),
+    ("ashare_clarification_dialogue", False, 10.0),
+    ("ashare_bounded_strategy_candidates", True, 10.0),
+])
+async def test_response_only_connect_budget_preserves_active_read_timeout_and_no_deadline(
+    schema: str, response_only: bool, connect: float, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    deadlines: list[float | None] = []
+    original_timeout = asyncio.timeout
+
+    def record_timeout(delay: float | None) -> asyncio.Timeout:
+        deadlines.append(delay)
+        return original_timeout(delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _sse_response(request, {"candidates": []})
+
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://gateway.example.test/v1/chat/completions",
+        provider="deepseek", model="fixture", prompt_version="v1", schema_version="v1",
+        timeout_seconds=300.0, transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(asyncio, "timeout", record_timeout)
+    await provider.startup()
+    try:
+        await provider.generate_json(replace(
+            _request(), response_schema_name=schema, user_payload={"responseOnly": response_only},
+        ))
+        await provider.generate_json(_request())
+    finally:
+        await provider.aclose()
+    ordinary = requests[1].extensions["timeout"]
+    assert ordinary == {"connect": 10.0, "read": 300.0, "write": 30.0, "pool": 10.0}
+    assert requests[0].extensions["timeout"] == {**ordinary, "connect": connect}
+    assert deadlines.count(None) == 2  # no whole-generation deadline
+    assert all(delay is None or 0 < delay <= 300 for delay in deadlines)
+    assert any(delay is not None for delay in deadlines)  # per-delta inactivity budget
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
 @pytest.mark.parametrize(("status", "kind", "api_status"), [
     (401, "authentication_failed", 503), (403, "permission_denied", 503),
     (402, "insufficient_balance", 503), (429, "rate_limited", 429),
@@ -73,7 +140,7 @@ def _request() -> CandidateTransportRequest:
 ])
 async def test_known_http_failure_is_classified_once_without_body_or_secret(
     status: int, kind: CandidateFailureKind, api_status: int,
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, managed: bool,
 ) -> None:
     calls = 0
     private = "private-body-key-reasoning-must-not-leak"
@@ -88,8 +155,13 @@ async def test_known_http_failure_is_classified_once_without_body_or_secret(
         model="fixture", prompt_version="v1", schema_version="v1",
         api_key=SecretStr(private), transport=httpx.MockTransport(handler),
     )
-    with pytest.raises(CandidateProviderTransportError) as caught:
-        await provider.generate_json(_request())
+    if managed:
+        await provider.startup()
+    try:
+        with pytest.raises(CandidateProviderTransportError) as caught:
+            await provider.generate_json(_request())
+    finally:
+        await provider.aclose()
     error = caught.value
     assert calls == 1
     assert error.is_classified and error.failure_kind == kind
@@ -121,6 +193,7 @@ async def test_gateway_402_does_not_claim_deepseek_balance(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("managed", [False, True])
 @pytest.mark.parametrize(("fault", "kind"), [
     ("timeout", "timeout"), ("connection", "connection_failed"),
     ("invalid_json", "invalid_response"), ("missing_choices", "invalid_response"),
@@ -128,7 +201,7 @@ async def test_gateway_402_does_not_claim_deepseek_balance(
     ("unfinished_stream", "incomplete_response"),
 ])
 async def test_transport_fault_keeps_safe_classification(
-    fault: str, kind: CandidateFailureKind, caplog: pytest.LogCaptureFixture,
+    fault: str, kind: CandidateFailureKind, caplog: pytest.LogCaptureFixture, managed: bool,
 ) -> None:
     calls = 0
     private = "private-upstream-error-must-not-leak"
@@ -154,8 +227,13 @@ async def test_transport_fault_keeps_safe_classification(
         model="fixture", prompt_version="v1", schema_version="v1",
         transport=httpx.MockTransport(handler),
     )
-    with pytest.raises(CandidateProviderTransportError) as caught:
-        await provider.generate_json(_request())
+    if managed:
+        await provider.startup()
+    try:
+        with pytest.raises(CandidateProviderTransportError) as caught:
+            await provider.generate_json(_request())
+    finally:
+        await provider.aclose()
     assert calls == 1 and caught.value.failure_kind == kind
     assert caught.value.http_status == (None if fault in {"timeout", "connection"} else 200)
     assert caught.value.timed_out is (fault == "timeout")
@@ -261,7 +339,193 @@ async def test_default_client_enables_connection_only_retry(
         model="fixture-model", prompt_version="prompt.v1", schema_version="schema.v1",
     )
     await provider.generate_json(_request())
-    assert options == [{"retries": 1, "trust_env": False}]
+    assert len(options) == 1
+    assert options[0]["retries"] == 2 and options[0]["trust_env"] is False
+    assert options[0]["limits"] == httpx.Limits(keepalive_expiry=30.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["tcp", "tls"])
+@pytest.mark.parametrize("failures", [2, 3])
+@pytest.mark.parametrize("broken_progress", [False, True])
+async def test_real_connect_retries_three_attempts_before_sending_once(
+    phase: str, failures: int, broken_progress: bool,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Exercise the installed httpx/httpcore retry and trace implementation,
+    # replacing only the socket backend. No network or model call is made.
+    body = json.dumps(_completion({"candidates": []})).encode()
+    wire = b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+    attempts = 0
+    writes: list[bytes] = []
+    progress: list[tuple[str, str]] = []
+
+    class Stream(httpcore.AsyncMockStream):
+        async def start_tls(
+            self, ssl_context: ssl.SSLContext, server_hostname: str | None = None,
+            timeout: float | None = None,
+        ) -> httpcore.AsyncMockStream:
+            if phase == "tls" and attempts <= failures:
+                raise httpcore.ConnectError("private-provider-error")
+            return self
+
+        async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+            writes.append(buffer)
+
+    class Backend(httpcore.AsyncMockBackend):
+        async def connect_tcp(self, **kwargs: object) -> Stream:
+            nonlocal attempts
+            attempts += 1
+            if phase == "tcp" and attempts <= failures:
+                raise httpcore.ConnectTimeout("private-provider-error")
+            return Stream([wire])
+
+    original_transport = httpx.AsyncHTTPTransport
+
+    def transport_factory(**kwargs: object) -> httpx.AsyncHTTPTransport:
+        transport = original_transport(**kwargs)  # type: ignore[arg-type]
+        transport._pool._network_backend = Backend([])
+        return transport
+
+    def sink(stage: str, message: str) -> None:
+        progress.append((stage, message))
+        if broken_progress and stage == "model_retry":
+            raise RuntimeError("private-progress-error")
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", transport_factory)
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://private.example.test/private-route", provider="fixture-gateway",
+        model="fixture", prompt_version="v1", schema_version="v1",
+        api_key=SecretStr("private-key"), timeout_seconds=300.0,
+    )
+    token = progress_sink.set(sink)
+    try:
+        if failures == 2:
+            assert await provider.generate_json(_request()) == {"candidates": []}
+        else:
+            with pytest.raises(CandidateProviderTransportError) as caught:
+                await provider.generate_json(_request())
+            assert caught.value.failure_kind == (
+                "timeout" if phase == "tcp" else "connection_failed"
+            )
+    finally:
+        progress_sink.reset(token)
+    assert attempts == 3
+    assert sum(part.startswith(b"POST ") for part in writes) == (1 if failures == 2 else 0)
+    assert [message for stage, message in progress if stage == "model_retry"] == [
+        "模型连接暂时未建立，正在自动重连（第 2/3 次）。",
+        "模型连接暂时未建立，正在自动重连（第 3/3 次）。",
+    ]
+    assert "private-" not in repr(progress) + caplog.text
+    assert "private.example.test" not in repr(progress) + caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", [
+    "http401", "http503", "invalid_json", "partial_read", "partial_write",
+])
+async def test_real_connect_retry_never_replays_http_or_partly_sent_or_received_request(
+    fault: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = (b"bad-json" if fault == "invalid_json" else
+            json.dumps(_completion({"candidates": []})).encode())
+    status = fault[4:] if fault.startswith("http") else "200"
+    head = (f"HTTP/1.1 {status} Response\r\nContent-Length: {len(body)}\r\n\r\n").encode()
+    attempts = 0
+    writes: list[bytes] = []
+    progress: list[tuple[str, str]] = []
+
+    class Stream(httpcore.AsyncMockStream):
+        async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+            if fault == "partial_write":
+                raise httpcore.ReadError("connection lost after partial send")
+            if fault == "partial_read" and not self._buffer:
+                raise httpcore.ReadError("stream interrupted after partial body")
+            return await super().read(max_bytes, timeout)
+
+        async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+            writes.append(buffer)
+            if fault == "partial_write":
+                raise httpcore.WriteError("write interrupted after sending headers")
+
+    class Backend(httpcore.AsyncMockBackend):
+        async def connect_tcp(self, **kwargs: object) -> Stream:
+            nonlocal attempts
+            attempts += 1
+            return Stream([head + (body[:5] if fault == "partial_read" else body)])
+
+    original_transport = httpx.AsyncHTTPTransport
+
+    def transport_factory(**kwargs: object) -> httpx.AsyncHTTPTransport:
+        transport = original_transport(**kwargs)  # type: ignore[arg-type]
+        transport._pool._network_backend = Backend([])
+        return transport
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", transport_factory)
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://gateway.example.test/model", provider="fixture-gateway",
+        model="fixture", prompt_version="v1", schema_version="v1",
+    )
+    token = progress_sink.set(lambda stage, message: progress.append((stage, message)))
+    try:
+        with pytest.raises(CandidateProviderTransportError):
+            await provider.generate_json(_request())
+    finally:
+        progress_sink.reset(token)
+    assert attempts == 1
+    assert sum(part.startswith(b"POST ") for part in writes) == 1
+    assert not any(stage == "model_retry" for stage, _ in progress)
+
+
+@pytest.mark.asyncio
+async def test_managed_client_reuses_main_loop_pool_and_isolates_worker_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pools = []
+
+    class Pool(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.loop = asyncio.get_running_loop()
+            self.requests = 0
+            self.closes = 0
+
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            assert asyncio.get_running_loop() is self.loop
+            assert self.closes == 0
+            self.requests += 1
+            return _sse_response(request, {"candidates": []})
+
+        async def aclose(self) -> None:
+            assert asyncio.get_running_loop() is self.loop
+            self.closes += 1
+
+    def transport_factory(**kwargs: object) -> Pool:
+        pool = Pool()
+        pools.append(pool)
+        return pool
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", transport_factory)
+    provider = OpenAICompatibleCandidateTransport(
+        endpoint="https://api.deepseek.com/chat/completions", provider="deepseek",
+        model="fixture", prompt_version="v1", schema_version="v1",
+    )
+    await provider.startup()
+    await provider.startup()
+    assert len(pools) == 1 and pools[0].requests == 0  # Startup is not a model call.
+    try:
+        await provider.generate_json(_request())
+        await provider.generate_json(_request())
+        assert len(pools) == 1 and pools[0].requests == 2 and pools[0].closes == 0
+        await asyncio.to_thread(lambda: asyncio.run(provider.generate_json(_request())))
+        assert len(pools) == 2 and pools[1].requests == 1 and pools[1].closes == 1
+        assert pools[1].loop is not pools[0].loop
+        await provider.generate_json(_request())
+        assert pools[0].requests == 3 and pools[0].closes == 0
+    finally:
+        await provider.aclose()
+    assert pools[0].closes == 1
+    await provider.aclose()
+    assert pools[0].closes == 1
 
 
 @pytest.mark.asyncio
@@ -325,7 +589,7 @@ async def test_transport_posts_strict_json_schema_without_leaking_secret() -> No
         httpx.Response(200, content=b"not-json"),
         httpx.Response(
             200,
-            json={"choices": [{"message": {"content": "```json\n{}\n```"}}]},
+            json={"choices": [{"message": {"content": "结果如下：{}"}}]},
         ),
     ],
 )
@@ -573,6 +837,25 @@ async def test_deepseek_enabled_thinking_uses_supported_effort_without_sampling_
     assert body["reasoning_effort"] == reasoning_effort
     assert "temperature" not in body
     assert "top_p" not in body
+
+
+@pytest.mark.asyncio
+async def test_deepseek_heartbeats_do_not_keep_request_alive_forever() -> None:
+    from ashare_lab.adapters.language.openai_compatible import _read_deepseek_stream
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"},
+        stream=_DelayedStream((b": keepalive\n\n",) * 10, delay_seconds=0.02))
+    with pytest.raises(TimeoutError, match="no semantic progress"):
+        await _read_deepseek_stream(response, max_bytes=4096, progress_timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_deepseek_progress_deadline_does_not_wait_for_next_wire_chunk() -> None:
+    from ashare_lab.adapters.language.openai_compatible import _read_deepseek_stream
+    stream = _DelayedStream((b": keepalive\n\n",), delay_seconds=0.5)
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+    with pytest.raises(TimeoutError, match="no semantic progress"):
+        await _read_deepseek_stream(response, max_bytes=4096, progress_timeout=0.02)
+    assert stream.yielded == 0  # timer cancels waiting before any chunk arrives
 
 
 @pytest.mark.asyncio

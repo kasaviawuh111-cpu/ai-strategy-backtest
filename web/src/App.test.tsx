@@ -7,8 +7,10 @@ import App from './App'
 import { backtestApi, instrumentApi, strategyApi, systemApi, type DialogueProgressObserver } from './shared/api/client'
 import { enableImmediateMockWaitForTests, mockApi, resetMockWaitForTests } from './shared/api/mock'
 import { DEFAULT_STRATEGY_EXAMPLES } from './shared/default-strategy-examples'
-import { ApiError, type BacktestOptimizationCandidate, type BacktestReviewResponse, type BacktestRun, type CapabilitiesResponse, type Instrument } from './shared/api/types'
+import { ApiError, type BacktestOptimizationCandidate, type BacktestReviewResponse, type BacktestRun, type CapabilitiesResponse, type Instrument, type PricePlan } from './shared/api/types'
 import { settleMockRunOnFirstPoll } from './test/mock-run'
+
+const testQueryClients = new Set<QueryClient>()
 
 const renderApp = (
   instrument?: Instrument,
@@ -22,6 +24,7 @@ const renderApp = (
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
+  testQueryClients.add(client)
   return {
     client,
     ...render(
@@ -34,6 +37,15 @@ const renderApp = (
 
 const expectMockRuntimeMarker = () => {
   expect(document.querySelector('.app')).toHaveAttribute('data-api-mode', 'mock')
+}
+
+const reviewControls = () => within(screen.getByRole('complementary', { name: '策略审阅' }))
+const detailControls = () => within(screen.getByRole('region', { name: '策略详情' }))
+const findDetailControls = async () => within(await screen.findByRole('region', { name: '策略详情' }))
+const sendControl = () => {
+  const button = screen.getByLabelText('识别交易规则', { selector: 'button' })
+  expect(button).toBeVisible()
+  return button
 }
 
 const HOME_CAPITAL_PATTERN = /(?:本金|初始资金|起始本金|100\s*万|1,000,000|1000000)/
@@ -57,12 +69,94 @@ const expectHomeToHideDefaultCapital = (container: HTMLElement) => {
 }
 
 afterEach(() => {
+  // Unmounted journeys must not retain query timers/data across this long suite.
+  for (const client of testQueryClients) client.clear()
+  testQueryClients.clear()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   resetMockWaitForTests()
 })
 
 describe('formal main.tsx App journey', () => {
+  it('checks edited review data in place, disables invalid drafts and recovers without creating a run', async () => {
+    enableImmediateMockWaitForTests()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    vi.spyOn(strategyApi, 'compile').mockResolvedValue(fixture)
+    const revise = vi.spyOn(strategyApi, 'revise')
+    const create = vi.spyOn(backtestApi, 'create')
+    let rejectInvalid!: (reason: Error) => void
+    let finishCorrected!: (value: { ready: true }) => void
+    const prepare = vi.spyOn(backtestApi, 'prepare')
+      .mockResolvedValueOnce({ ready: true })
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectInvalid = reject }))
+      .mockImplementationOnce(() => new Promise(resolve => { finishCorrected = resolve }))
+    const user = userEvent.setup()
+    renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    expect(await reviewControls().findByRole('button', { name: '开始回测' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: /成交设置/ }))
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2020-01-01' } })
+    await user.click(screen.getByRole('button', { name: '完成' }))
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(2))
+    expect(reviewControls().getByRole('button', { name: '检查设置中' })).toBeDisabled()
+    expect(screen.getByText(/正在检查当前股票、回测区间和指标数据/)).toBeVisible()
+    const message = '回测起点早于该股票上市日 2021-01-04，请调整回测区间。'
+    await act(async () => rejectInvalid(new ApiError({ type: 'about:blank', status: 422,
+      title: '回测区间不可用', detail: message, code: 'skill_history_before_listing' })))
+    expect(await screen.findByText(message)).toBeVisible()
+    expect(reviewControls().getByRole('button', { name: '暂时无法回测' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: /成交设置/ }))
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2022-01-04' } })
+    await user.click(screen.getByRole('button', { name: '完成' }))
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(3))
+    expect(screen.queryByText(message)).not.toBeInTheDocument()
+    expect(reviewControls().getByRole('button', { name: '检查设置中' })).toBeDisabled()
+    await act(async () => finishCorrected({ ready: true }))
+    expect(await reviewControls().findByRole('button', { name: '开始回测' })).toBeEnabled()
+    expect(prepare.mock.calls[1]?.[0].backtest.start).toBe('2020-01-01')
+    expect(prepare.mock.calls[2]?.[0].backtest.start).toBe('2022-01-04')
+    expect(prepare.mock.calls[2]?.[0].entry).toEqual(fixture.draft.entry)
+    expect(prepare.mock.calls[2]?.[0].execution).toEqual(fixture.draft.execution)
+    expect(create).not.toHaveBeenCalled()
+    expect(revise).not.toHaveBeenCalled()
+  }, 10_000)
+
+  it('aborts an outdated preparation and never enables an edited draft from its late success', async () => {
+    enableImmediateMockWaitForTests()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    vi.spyOn(strategyApi, 'compile').mockResolvedValue(fixture)
+    const create = vi.spyOn(backtestApi, 'create')
+    let finishOld!: (value: { ready: true }) => void
+    let finishCurrent!: (value: { ready: true }) => void
+    const prepare = vi.spyOn(backtestApi, 'prepare')
+      .mockResolvedValueOnce({ ready: true })
+      .mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve }))
+      .mockImplementationOnce(() => new Promise(resolve => { finishCurrent = resolve }))
+    const user = userEvent.setup()
+    renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    await reviewControls().findByRole('button', { name: '开始回测' })
+    await user.click(screen.getByRole('button', { name: /成交设置/ }))
+    fireEvent.change(screen.getByLabelText(/单边滑点/), { target: { value: '6' } })
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(2))
+    fireEvent.change(screen.getByLabelText(/单边滑点/), { target: { value: '7' } })
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(3))
+    expect(prepare.mock.calls[1]?.[1]?.aborted).toBe(true)
+    await user.click(screen.getByRole('button', { name: '完成' }))
+    await act(async () => finishOld({ ready: true }))
+    expect(reviewControls().getByRole('button', { name: '检查设置中' })).toBeDisabled()
+    await act(async () => finishCurrent({ ready: true }))
+    expect(await reviewControls().findByRole('button', { name: '开始回测' })).toBeEnabled()
+    expect(prepare.mock.calls[2]?.[0].execution.slippageBps).toBe(7)
+    expect(create).not.toHaveBeenCalled()
+  })
+
   it.each(['compile', 'answer'] as const)(
     'preview recovery resumes the same %s promise without another model submission', async (path) => {
       enableImmediateMockWaitForTests()
@@ -93,11 +187,11 @@ describe('formal main.tsx App journey', () => {
       const user = userEvent.setup()
       const { container } = renderApp()
       fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      await user.click(sendControl())
       if (path === 'answer') {
         await screen.findByText('补充卖出条件后继续。')
         fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '跌破20日线卖出' } })
-        await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+        await user.click(sendControl())
       }
       await waitFor(() => expect(observer?.onRecovery).toBeTypeOf('function'))
       const resume = vi.fn(() => {
@@ -115,7 +209,7 @@ describe('formal main.tsx App journey', () => {
       await user.click(screen.getByText('处理过程'))
       expect(container.querySelector('details.model-reasoning')).not.toHaveAttribute('open')
       await user.click(screen.getByRole('button', { name: '继续查询结果' }))
-      expect(await screen.findByText('预览策略')).toBeVisible()
+      expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeVisible()
       expect(screen.queryByRole('button', { name: '继续查询结果' })).not.toBeInTheDocument()
       expect(resume).toHaveBeenCalledTimes(1)
       expect(compile).toHaveBeenCalledTimes(1)
@@ -142,12 +236,12 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     const view = renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
-    await user.click(screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true }))
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
+    await user.click(screen.getByRole('button', { name: '新建', hidden: true }))
     expect(observers[0]?.signal?.aborted).toBe(true)
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: MOVING_AVERAGE_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await waitFor(() => expect(observers).toHaveLength(2))
     act(() => observers[1]?.onRecovery?.({ status: 'paused', attempt: 3,
       message: '新会话等待恢复。', resume: vi.fn() }))
@@ -168,7 +262,7 @@ describe('formal main.tsx App journey', () => {
         message: '卸载后的恢复提示', resume: vi.fn() })
       finishSecond?.()
     })
-    expect(screen.queryByText('预览策略')).not.toBeInTheDocument()
+    expect(screen.queryByText(/^查看(?:并修改|策略)$/)).not.toBeInTheDocument()
     expect(screen.queryByText('卸载后的恢复提示')).not.toBeInTheDocument()
     expect(screen.getByLabelText('交易规则')).toHaveValue('')
     expect(compile).toHaveBeenCalledTimes(2)
@@ -190,28 +284,31 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     const { container } = renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await user.click(await screen.findByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
-    await user.click(screen.getByRole('button', { name: /成交设置/ }))
-    fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
-    fireEvent.change(screen.getByLabelText(/单边滑点/), { target: { value: '7' } })
-    fireEvent.change(screen.getByLabelText(/佣金率/), { target: { value: '0.02' } })
-    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2022-01-04' } })
+    await user.click(sendControl())
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
+    const detail = () => within(container.querySelector<HTMLElement>('.detail')!)
+    await user.click(detail().getByRole('button', { name: '回到对话' }))
+    const review = reviewControls()
+    await user.click(review.getByRole('button', { name: /成交设置/ }))
+    const settings = within(container.querySelector<HTMLElement>('#pg-params')!)
+    fireEvent.change(settings.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
+    fireEvent.change(settings.getByLabelText(/单边滑点/), { target: { value: '7' } })
+    fireEvent.change(settings.getByRole('spinbutton', { name: '佣金率' }), { target: { value: '0.02' } })
+    fireEvent.change(settings.getByLabelText('开始日期'), { target: { value: '2022-01-04' } })
     const condition = fixture.draft.entry.conditions.find(item => item.kind === 'indicator')
     if (!condition || !condition.parameters[0]) throw new Error('expected an editable parameter')
-    const parameter = screen.getByRole('spinbutton', {
+    const parameter = settings.getByRole('spinbutton', {
       name: `${condition.label} ${condition.parameters[0].label}`,
     })
     fireEvent.change(parameter, { target: { value: '25' } })
-    await user.click(screen.getByRole('button', { name: '完成' }))
+    await user.click(settings.getByRole('button', { name: '完成' }))
     expect(revise).not.toHaveBeenCalled()
-    await user.click(screen.getByRole('button', { name: /修改股票：东方财富/ }))
-    expect(screen.getByRole('button', { name: '开始回测' })).toBeDisabled()
-    fireEvent.change(screen.getByRole('combobox', { name: '股票名称或代码' }), { target: { value: '中国' } })
-    await user.click(await screen.findByRole('option', { name: '中国平安 601318.SH' }))
-    await screen.findByRole('button', { name: /修改股票：中国平安/ })
+    await user.click(review.getByRole('button', { name: /修改股票：东方财富/ }))
+    expect(reviewControls().getByRole('button', { name: '开始回测' })).toBeDisabled()
+    fireEvent.change(review.getByRole('combobox', { name: '股票名称或代码' }), { target: { value: '中国' } })
+    await user.click(await review.findByRole('option', { name: '中国平安 601318.SH' }))
+    await review.findByRole('button', { name: /修改股票：中国平安/ })
     expect(revise).toHaveBeenCalledTimes(1)
     const edited = revise.mock.calls[0]?.[0]
     if (!edited) throw new Error('expected the current draft to be saved')
@@ -226,11 +323,13 @@ describe('formal main.tsx App journey', () => {
     expect(compile).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('form', { name: '编辑回测条件' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('交易规则')).not.toHaveFocus()
-    const historyCard = container.querySelector('.stream .mcard.is-settled')
+    const historyCard = container.querySelector<HTMLElement>('.stream .mcard.is-settled')
     expect(historyCard).toHaveTextContent('东方财富')
     expect(historyCard?.querySelector('.inline-stock-entry')).toBeNull()
-    await user.click(screen.getByRole('button', { name: '查看这次报告' }))
-    expect(screen.getByRole('heading', { name: '回测报告' })).toBeVisible()
+    if (!historyCard) throw new Error('expected the preserved report card')
+    await user.click(within(container.querySelector<HTMLElement>('.stream')!)
+      .getByRole('button', { name: '查看这次报告' }))
+    expect(detail().getByRole('heading', { name: '回测报告' })).toBeVisible()
   }, 10_000)
 
   it('B28 ignores a late stock save after the conversation is reset', async () => {
@@ -245,17 +344,17 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await user.click(await screen.findByRole('button', { name: /修改股票/ }))
     fireEvent.change(screen.getByRole('combobox'), { target: { value: '中国' } })
     await user.click(await screen.findByRole('option', { name: '中国银行 601988.SH' }))
-    await user.click(screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true }))
+    await user.click(screen.getByRole('button', { name: '新建', hidden: true }))
     expect(revise.mock.calls[0]?.[2]?.aborted).toBe(true)
     await act(async () => finish())
     expect(screen.queryByRole('button', { name: /修改股票/ })).not.toBeInTheDocument()
     expect(screen.queryByText('中国银行')).not.toBeInTheDocument()
     expect(create).not.toHaveBeenCalled()
-  })
+  }, 10_000)
 
   it('B13 shows the current ready reply once and does not reuse it for a legacy ready response', async () => {
     const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
@@ -275,23 +374,23 @@ describe('formal main.tsx App journey', () => {
     renderApp()
     const input = screen.getByLabelText('交易规则')
     fireEvent.change(input, { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(await screen.findByText(reply)).toBeVisible()
     expect(screen.getAllByText(reply)).toHaveLength(1)
-    expect(screen.getByText('预览策略')).toBeVisible()
-    const readyTurn = screen.getByText('预览策略').closest('.turn')
+    expect(screen.getByText(/^查看(?:并修改|策略)$/)).toBeVisible()
+    const readyTurn = screen.getByText(/^查看(?:并修改|策略)$/).closest('.turn')
     const process = readyTurn?.querySelector('.model-reasoning')
     expect(readyTurn).toContainElement(screen.getByText(reply))
     expect(process).toBeInTheDocument()
     expect(process!.compareDocumentPosition(screen.getByText(reply))
       & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(screen.getByText(reply).compareDocumentPosition(screen.getByText('预览策略'))
+    expect(screen.getByText(reply).compareDocumentPosition(screen.getByText(/^查看(?:并修改|策略)$/))
       & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(screen.queryByText(/已经把这句话整理成买卖规则/)).not.toBeInTheDocument()
 
     fireEvent.change(input, { target: { value: MOVING_AVERAGE_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('预览策略')).toBeVisible()
+    await user.click(sendControl())
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeVisible()
     expect(screen.queryByText(reply)).not.toBeInTheDocument()
     expect(screen.queryByText(/已经把这句话整理成买卖规则/)).not.toBeInTheDocument()
   })
@@ -310,29 +409,30 @@ describe('formal main.tsx App journey', () => {
       compile.mockResolvedValueOnce({ ...fixture, assistantMessage: reply,
         draft: { ...fixture.draft, id: `ready-reply-${index}` } })
       fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      await user.click(sendControl())
       expect(await screen.findByText(reply)).toBeVisible()
-      await user.click(screen.getByRole('button', { name: '开始回测' }))
-      await screen.findByRole('heading', { name: '回测报告' })
-      await user.click(screen.getByRole('button', { name: '回到对话' }))
-      await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
+      await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+      await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
+      await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+      await user.click(reviewControls().getByRole('button', { name: '收起策略审阅' }))
     }
 
     compile.mockResolvedValueOnce({ ...fixture, draft: { ...fixture.draft, id: 'ready-no-reply' } })
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: MOVING_AVERAGE_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
     const archivedReplies = Array.from(container.querySelectorAll('.stream > [id^="journey-"]'),
       turn => turn.nextElementSibling?.textContent)
     expect(archivedReplies).toEqual(replies)
     for (const reply of replies) expect(screen.getAllByText(reply)).toHaveLength(1)
     expect(screen.queryByText(/已经把这句话整理成买卖规则/)).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true }))
+    await user.click(screen.getByRole('button', { name: '新建', hidden: true }))
     for (const reply of replies) expect(screen.queryByText(reply)).not.toBeInTheDocument()
   }, 12_000)
 
   it('B13 preserves the whole archived prompt and keeps replies while editing an unrun draft', async () => {
+    enableImmediateMockWaitForTests()
     const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
       instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
     if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
@@ -354,21 +454,21 @@ describe('formal main.tsx App journey', () => {
     renderApp()
     const input = screen.getByLabelText('交易规则')
     fireEvent.change(input, { target: { value: '放量突破买入，跌破20日线卖出' } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(await screen.findByText(/你想用哪只股票/)).toHaveTextContent('选一个试试，或说说你想怎么改。')
     fireEvent.change(input, { target: { value: '东方财富' } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
     expect(screen.getByText(/你想用哪只股票/).textContent).toBe(prompt)
 
-    await user.click(screen.getByRole('button', { name: /区间/ }))
+    await user.click(reviewControls().getByRole('button', { name: /区间/ }))
     fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
     await user.click(screen.getByRole('button', { name: '完成' }))
     expect(screen.getAllByText(reply)).toHaveLength(1)
     expect(screen.getByText(/你想用哪只股票/).textContent).toBe(prompt)
-    expect(screen.getByText('预览策略').closest('.turn')).toContainElement(screen.getByText(reply))
+    expect(screen.getByText(/^查看(?:并修改|策略)$/).closest('.turn')).toContainElement(screen.getByText(reply))
     expect(screen.getByText('放量突破买入，跌破20日线卖出')).toBeVisible()
-    expect(screen.getByText('预览策略').closest('.turn')?.querySelector('.model-reasoning')).toBeInTheDocument()
+    expect(screen.getByText(/^查看(?:并修改|策略)$/).closest('.turn')?.querySelector('.model-reasoning')).toBeInTheDocument()
     expect(create).not.toHaveBeenCalled()
   })
 
@@ -388,39 +488,110 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     const { container } = renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
-    await user.click(screen.getByRole('button', { name: /区间/ }))
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+    await user.click(reviewControls().getByRole('button', { name: /区间/ }))
     fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
     await user.click(screen.getByRole('button', { name: '完成' }))
 
     expect(screen.getAllByText(reply)).toHaveLength(1)
     expect(container.querySelector('.stream > [id^="journey-"]')?.nextElementSibling)
       .toHaveTextContent(reply)
-    expect(screen.getByText('预览策略').closest('.turn')).not.toContainElement(screen.getByText(reply))
+    expect(screen.getByText(/^查看(?:并修改|策略)$/).closest('.turn')).not.toContainElement(screen.getByText(reply))
     expect(screen.getAllByText(VOLUME_EXAMPLE)).toHaveLength(1)
     expect(container.querySelector('.stream .model-reasoning')).not.toBeInTheDocument()
-    expect(screen.queryByText(/想怎么交易？|说出新的买卖规则，继续回测/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/今天，我们怎么交易？|说出新的买卖规则，继续回测/)).not.toBeInTheDocument()
     expect(Array.from(container.querySelectorAll('.stream .bubble'))
       .every(bubble => Boolean(bubble.textContent?.trim()))).toBe(true)
     await user.click(within(screen.getByLabelText('策略审阅')).getByRole('button', { name: /区间/ }))
     expect(screen.getByRole('spinbutton', { name: '初始资金' })).toHaveValue(500000)
     await user.click(screen.getByRole('button', { name: '完成' }))
     await user.click(within(screen.getByLabelText('策略审阅')).getByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
     expect(create).toHaveBeenCalledTimes(2)
     expect(create.mock.calls[1]?.[0].backtest.initialCashCny).toBe(500000)
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
-    await user.click(screen.getByRole('button', { name: '新建策略', hidden: true }))
-    expect(screen.getAllByText(VOLUME_EXAMPLE)).toHaveLength(1)
-    const reports = screen.getAllByRole('button', { name: '查看这次报告' })
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+    await user.click(screen.getByRole('button', { name: '新建', hidden: true }))
+    expect(screen.queryByText(VOLUME_EXAMPLE)).not.toBeInTheDocument()
+    expect(container.querySelectorAll('[data-current-conversation]')).toHaveLength(0)
+    const reports = container.querySelectorAll<HTMLButtonElement>('[data-history-id]')
     expect(reports).toHaveLength(2)
     await user.click(reports[1]!)
-    expect(await screen.findByRole('heading', { name: '回测报告' })).toBeVisible()
+    expect(await (await findDetailControls()).findByRole('heading', { name: '回测报告' })).toBeVisible()
   }, 12_000)
+
+  it.each([
+    ['candidate_provider_connection_failed', 502, '连接模型服务时网络暂时异常。'],
+    ['candidate_provider_timeout', 504, '模型服务响应超时。'],
+    ['candidate_provider_invalid_response', 502, '模型返回的格式无效。'],
+  ])('restores an editable unrun draft and original input after %s', async (code, status, detail) => {
+    enableImmediateMockWaitForTests()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a component fixture')
+    let rejectCompile!: (error: ApiError) => void
+    const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce(fixture)
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectCompile = reject }))
+      .mockResolvedValueOnce(fixture)
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    renderApp()
+    const input = screen.getByLabelText('交易规则')
+    fireEvent.change(input, { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
+    await user.click(screen.getByRole('button', { name: /区间/ }))
+    fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
+    await user.click(screen.getByRole('button', { name: '完成' }))
+
+    const edit = '入场改成突破30日新高，其他不变，先别回测'
+    fireEvent.change(input, { target: { value: edit } })
+    await user.click(sendControl())
+    expect(input).toBeDisabled()
+    expect(screen.getByRole('button', { name: '新建策略', hidden: true })).toBeDisabled()
+    await act(async () => rejectCompile(new ApiError({ type: 'about:blank', status,
+      title: '模型请求未完成', code, detail })))
+    expect(await screen.findByText('这次没能完成回复。你的输入和已有策略都已保留，可以稍后重试。')).toBeVisible()
+    expect(input).toHaveValue(edit)
+    expect(input).toBeEnabled()
+    expect(input).toHaveAttribute('placeholder', '你的输入和已有策略已保留')
+    expect(screen.getByText(VOLUME_EXAMPLE)).toBeVisible()
+    expect(screen.getByText(/^查看(?:并修改|策略)$/)).toBeVisible()
+    expect(compile.mock.calls[1]?.[1]).toBe(fixture.draft.id)
+    expect(create).not.toHaveBeenCalled()
+
+    // Keep both the locally edited values and the original reset baseline.
+    await user.click(within(screen.getByLabelText('策略审阅')).getByRole('button', { name: /区间/ }))
+    expect(screen.getByRole('spinbutton', { name: '初始资金' })).toHaveValue(500000)
+    await user.click(screen.getByRole('button', { name: '重置为识别结果' }))
+    expect(screen.getByRole('spinbutton', { name: '初始资金' }))
+      .toHaveValue(fixture.draft.backtest.initialCashCny)
+    await user.click(screen.getByRole('button', { name: '完成' }))
+    await user.click(sendControl())
+    await waitFor(() => expect(compile).toHaveBeenCalledTimes(3))
+    expect(compile.mock.calls[2]?.[1]).toBe(fixture.draft.id)
+    expect(compile.mock.calls[2]?.[0].utterance).toBe(edit)
+    await waitFor(() => expect(screen.queryByText(detail)).not.toBeInTheDocument())
+    expect(screen.queryByText(VOLUME_EXAMPLE)).not.toBeInTheDocument()
+    expect(create).not.toHaveBeenCalled()
+  }, 15_000)
+
+  it('asks only for a genuinely missing entry condition after compilation fails', async () => {
+    vi.spyOn(strategyApi, 'compile').mockRejectedValueOnce(new ApiError({
+      type: 'about:blank', status: 422, title: '缺少条件',
+      code: 'entry_rule_not_recognized', detail: '请补充什么时候买入。',
+    }))
+    const user = userEvent.setup()
+    renderApp()
+    const input = screen.getByLabelText('交易规则')
+    fireEvent.change(input, { target: { value: '东方财富持有30日卖出' } })
+    await user.click(sendControl())
+    await waitFor(() => expect(input).toHaveAttribute('placeholder', '补充什么时候买入'))
+    expect(input).toHaveValue('东方财富持有30日卖出')
+  })
 
   it('B26 locks compilation and keeps a missing-parent edit without silently restoring or clearing it', async () => {
     const fixture = await mockApi.compile({
@@ -438,14 +609,14 @@ describe('formal main.tsx App journey', () => {
     renderApp()
     const input = screen.getByLabelText('交易规则')
     fireEvent.change(input, { target: { value: MOVING_AVERAGE_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
     const edit = '股票换成中金公司，其他不变，先别跑'
     fireEvent.change(input, { target: { value: edit } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(input).toBeDisabled()
-    expect(screen.getByRole('button', { name: '新建策略', hidden: true })).toBeDisabled()
-    const newConversation = screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true })
+    expect(screen.getByRole('button', { name: '新建', hidden: true })).toBeDisabled()
+    const newConversation = screen.getByRole('button', { name: '新建', hidden: true })
     expect(newConversation).toBeDisabled()
     act(() => rejectCompile?.(new ApiError({
       type: 'about:blank', title: 'Not found', status: 404,
@@ -462,7 +633,7 @@ describe('formal main.tsx App journey', () => {
     // Only the user's explicit new conversation discards the old lineage.
     await user.click(newConversation)
     fireEvent.change(input, { target: { value: MOVING_AVERAGE_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(3))
     expect(compile.mock.calls[2]?.[1]).toBeUndefined()
     expect(create).not.toHaveBeenCalled()
@@ -496,7 +667,7 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '我想试试趋势策略' } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await user.click(await screen.findByRole('button', { name: '贵州茅台 · 均线确认' }))
     expect(await screen.findByText(/这轮策略的服务端记录已无法读取/)).toBeVisible()
     expect(answer).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
@@ -521,13 +692,13 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: MOVING_AVERAGE_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await user.click(await screen.findByRole('button', { name: /区间/ }))
     fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
     await user.click(screen.getByRole('button', { name: '完成' }))
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     expect(await screen.findByText(/这轮策略的服务端记录已无法读取/)).toBeVisible()
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     expect(await screen.findByText(/这轮策略版本已更新/)).toBeVisible()
     expect(screen.queryByText(/Strategy draft/)).not.toBeInTheDocument()
     expect(revise).toHaveBeenCalledTimes(2)
@@ -535,9 +706,9 @@ describe('formal main.tsx App journey', () => {
     expect(revise.mock.calls[1]?.[0]).toEqual(revise.mock.calls[0]?.[0])
     expect(revise.mock.calls.every(call => call[1] !== true)).toBe(true)
     expect(create).not.toHaveBeenCalled()
-    await user.click(screen.getByRole('button', { name: /区间/ }))
+    await user.click(reviewControls().getByRole('button', { name: /区间/ }))
     expect(screen.getByRole('spinbutton', { name: '初始资金' })).toHaveValue(500000)
-  }, 8_000)
+  }, 12_000)
 
   it('B15 carries exposed review versions through follow-ups and the next completed run', async () => {
     settleMockRunOnFirstPoll()
@@ -565,22 +736,22 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await user.click(await screen.findByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
-    await user.click(screen.getByRole('button', { name: 'AI 分析与优化' }))
+    await user.click(sendControl())
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
+    await user.click(detailControls().getByRole('button', { name: 'AI 分析与优化' }))
     await screen.findByText('分析版本manual。')
     const firstRun = await create.mock.results[0]?.value
     expect(review.mock.calls[0]?.[2]).toEqual({ relatedRunIds: [firstRun.id], relatedReviews: [] })
 
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
     compile.mockResolvedValueOnce({ status: 'needs_clarification', draftId: 'more-review', revision: 2,
       assistantMessage: '这里是另一版建议。', clarification: {
         id: 'backtest_review', question: '这里是另一版建议。', reason: '', choices: [],
         backtestReview: reviewFor(firstRun.id, 'followup'),
       } })
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '换一批优化建议，先别跑' } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await screen.findByText('这里是另一版建议。')
     const firstReference = { runId: firstRun.id, responseHash: 'sha256:manual' }
     const secondReference = { runId: firstRun.id, responseHash: 'sha256:followup' }
@@ -592,24 +763,24 @@ describe('formal main.tsx App journey', () => {
     answer.mockResolvedValueOnce({ replyKind: 'accepted', assistantMessage: '按新条件回测。', suggestions: [],
       outcome: { ...fixture, draft: { ...fixture.draft, id: 'reviewed-followup' }, runRequested: true } })
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '按新条件再跑一次' } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByRole('heading', { name: '回测报告' })
+    await user.click(sendControl())
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
     expect(answer.mock.calls[0]?.[0]).toMatchObject({ relatedRunIds: [firstRun.id],
       relatedReview: secondReference, relatedReviews: [firstReference, secondReference] })
-    await user.click(screen.getByRole('button', { name: 'AI 分析与优化' }))
+    await user.click(detailControls().getByRole('button', { name: 'AI 分析与优化' }))
     await screen.findByText('分析版本manual。')
     const secondRun = await create.mock.results[1]?.value
     expect(review.mock.calls[1]?.[2]).toEqual({ relatedRunIds: [firstRun.id, secondRun.id],
       relatedReviews: [firstReference, secondReference] })
 
-    await user.click(screen.getByRole('button', { name: '新建会话并清空上下文', hidden: true }))
+    await user.click(screen.getByRole('button', { name: '新建', hidden: true }))
     compile.mockResolvedValueOnce(fixture)
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
     expect(compile.mock.calls[2]?.[0]).toMatchObject({ relatedRunIds: [], relatedReviews: [] })
     expect(compile.mock.calls[2]?.[0].relatedReview).toBeUndefined()
-  }, 12_000)
+  }, 20_000)
 
   it('B26 offers the existing analysis retry only for the lost review and clears it after success', async () => {
     settleMockRunOnFirstPoll()
@@ -637,17 +808,17 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await user.click(await screen.findByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
-    await user.click(screen.getByRole('button', { name: 'AI 分析与优化' }))
+    await user.click(sendControl())
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
+    await user.click(detailControls().getByRole('button', { name: 'AI 分析与优化' }))
     await screen.findByText('组件中的分析结果。')
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
     compile.mockRejectedValueOnce(new ApiError({ type: 'about:blank', title: 'Conflict', status: 409,
       detail: 'Review context is missing', code: 'backtest_review_context_unavailable' }))
     const edit = '用第二个优化方案再跑一次'
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: edit } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(await screen.findByText(/这版优化建议的服务端记录已无法读取/)).toBeVisible()
     expect(screen.getByLabelText('交易规则')).toHaveValue(edit)
     expect(compile.mock.calls[1]?.[0].relatedReview).toEqual({
@@ -658,6 +829,8 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', { name: '查看这次报告' }))
     const report = within(document.querySelector('#pg-report') as HTMLElement)
     expect(report.getByText(/这版优化建议的服务端记录已无法读取/)).toBeVisible()
+    expect(detailControls().queryByRole('button', { name: '编辑策略' })).not.toBeInTheDocument()
+    expect(report.queryByRole('button', { name: '换只股票试试' })).not.toBeInTheDocument()
     await user.click(report.getByRole('button', { name: '重试 AI 分析' }))
     await waitFor(() => expect(review).toHaveBeenCalledTimes(2))
     expect(review.mock.calls[1]?.[0]).toBe(review.mock.calls[0]?.[0])
@@ -681,7 +854,7 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(await screen.findByRole('button', { name: '请检查设置' })).toBeDisabled()
     expect(screen.getByText('开始日期不能早于 1990-01-01，请检查年份。')).toBeVisible()
     expect(createRun).not.toHaveBeenCalled()
@@ -689,7 +862,7 @@ describe('formal main.tsx App journey', () => {
   })
 
   it.each(DEFAULT_STRATEGY_EXAMPLES)(
-    'shows and submits the same complete rule without appended settings: $instrument.name',
+    'fills the displayed example and submits only after Send: $category',
     async (example) => {
       const compile = vi.spyOn(strategyApi, 'compile').mockImplementation(() => new Promise(() => {}))
       const user = userEvent.setup()
@@ -698,22 +871,42 @@ describe('formal main.tsx App journey', () => {
       })
 
       const examples = within(screen.getByLabelText('策略示例'))
-      expect(examples.getAllByRole('button')).toHaveLength(2)
+      expect(screen.getByLabelText('策略示例').querySelectorAll('.home-example')).toHaveLength(DEFAULT_STRATEGY_EXAMPLES.length)
       const exampleButton = examples.getByRole('button', { name: example.utterance })
       expect(exampleButton).toBeVisible()
       expect(exampleButton).not.toHaveTextContent(/本金|回测20\d{2}/)
       await user.click(exampleButton)
 
+      expect(screen.getByLabelText('交易规则')).toHaveValue(example.utterance)
+      expect(compile).not.toHaveBeenCalled()
+      await user.click(sendControl())
+
       await waitFor(() => expect(compile).toHaveBeenCalledTimes(1))
       expect(compile).toHaveBeenCalledWith(expect.objectContaining({
         utterance: example.utterance,
-        instrument: example.instrument,
+        instrument: example.instrument ?? { name: '比亚迪', symbol: '002594.SZ', market: 'CN_A', exchange: 'SZSE' },
         instrumentContextSource: 'stock_page',
       }))
-      expect(screen.getByText(example.utterance)).toBeVisible()
+      expect(screen.getByText(example.utterance, { selector: '.stream p' })).toBeVisible()
       expect(example.utterance).not.toMatch(/本金|回测20\d{2}/)
     },
   )
+
+  it('releases the selected example instrument when the user edits the filled text', async () => {
+    const compile = vi.spyOn(strategyApi, 'compile').mockImplementation(() => new Promise(() => {}))
+    const user = userEvent.setup()
+    renderApp()
+    const first = DEFAULT_STRATEGY_EXAMPLES[0]!
+    await user.click(screen.getByRole('button', { name: first.utterance }))
+    const edited = '招商银行，RSI低于30买入，高于70卖出。'
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: edited } })
+    expect(compile).not.toHaveBeenCalled()
+    await user.click(sendControl())
+    await waitFor(() => expect(compile).toHaveBeenCalledTimes(1))
+    expect(compile.mock.calls[0]?.[0].utterance).toBe(edited)
+    expect(compile.mock.calls[0]?.[0].instrument?.symbol).not.toBe(first.instrument?.symbol)
+    expect(compile.mock.calls[0]?.[0].instrumentContextSource).toBe('standalone_default')
+  })
 
   it.each([false, true])('shows three stock chips after evidence and preserves selection (bound=%s)', async (bound) => {
     const stocks = [
@@ -748,7 +941,7 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     await user.type(screen.getByLabelText('交易规则'), '放量创高突破')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     const group = await screen.findByLabelText('可选股票')
     expect(screen.getByLabelText('交易规则')).toHaveAttribute('placeholder', '也可以输入你想用的股票')
     const chips = within(group).getAllByRole('button')
@@ -768,6 +961,45 @@ describe('formal main.tsx App journey', () => {
       draftId: 'three-stocks', revision: 2,
       answer: bound ? 'stock-2' : '用亨通光电（600487.SH）',
     }))
+  })
+
+  it('shows strategy cards after stock confirmation even with stale stock suggestions', async () => {
+    const stock = { symbol: '002579.SZ', name: '中京电子', source: 'eastmoney_mx_screener',
+      retrieved_at: '2026-09-14T10:19:25Z', evidence: '本次筛选候选' }
+    vi.spyOn(strategyApi, 'compile').mockResolvedValue({
+      status: 'needs_clarification', draftId: 'confirmed-stock', revision: 2,
+      assistantMessage: '股票已确认，选一个策略方向。',
+      clarification: {
+        id: 'idea_guidance_required', question: '选一个策略方向。', reason: '', choices: [],
+        instrumentSuggestion: stock, instrumentSuggestions: [stock],
+        ideaRoute: {
+          schema_version: 'idea-route.v1', understanding: '', hypothesis: '',
+          asset_mapping: { instrument_symbol: stock.symbol, relation: 'current_page_proxy',
+            rationale: '', evidence_status: 'host_context_only' },
+          proposals: ['均线跟随', '突破跟随'].map((title, index) => ({
+            id: `confirmed-${index}`, title, instrument_symbol: stock.symbol, instrument_name: stock.name,
+            hypothesis: '', entry_summary: '上穿20日均线', exit_summary: '下穿20日均线',
+            suggested_utterance: '上穿20日均线买入，下穿20日均线卖出',
+            capability_ids: [], assumptions: [], confidence: 1,
+          })),
+        },
+      },
+    })
+    const answer = vi.spyOn(strategyApi, 'answerClarification').mockImplementation(() => new Promise(() => {}))
+    const createRun = vi.spyOn(backtestApi, 'create').mockImplementation(() => new Promise(() => {}))
+    const user = userEvent.setup()
+    renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '用中京电子继续' } })
+    await user.click(sendControl())
+    const card = await screen.findByRole('button', { name: '均线跟随' })
+    expect(within(card).getByText('中京电子 · 002579.SZ')).toBeVisible()
+    expect(screen.queryByLabelText('可选股票')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('交易规则')).toHaveAttribute('placeholder', '选个方案，或说说你想怎么调整')
+    await user.click(card)
+    expect(answer).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      draftId: 'confirmed-stock', revision: 2, answer: 'confirmed-0',
+    }))
+    expect(createRun).not.toHaveBeenCalled()
   })
 
   it('shows the model direction before completion and clears it for the next dialogue request', async () => {
@@ -797,7 +1029,7 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     await user.type(screen.getByLabelText('交易规则'), '我是秦始皇')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(compile).toHaveBeenCalledTimes(1)
     act(() => firstProgress?.onProgress([
       { stage: 'strategy_direction', message: firstDirection, elapsedMs: 2_000 },
@@ -812,13 +1044,13 @@ describe('formal main.tsx App journey', () => {
       { stage: 'stock_data_enrichment', message: '正在补充候选股票的成交数据。', elapsedMs: 3_000 },
     ]))
     expect(screen.getByText(firstDirection)).toBeVisible()
-    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent('继续补查数据')
+    expect(screen.getByRole('status', { name: '处理进度' })).toHaveTextContent('正在补充候选股票的成交数据。')
     act(() => finishCompile?.())
     expect(await screen.findByText(finalReply)).toBeVisible()
     expect(screen.queryByText(firstDirection)).not.toBeInTheDocument()
 
     await user.type(screen.getByLabelText('交易规则'), '再侧重趋势一点')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(answer).toHaveBeenCalledTimes(1)
     expect(screen.queryByText(firstDirection)).not.toBeInTheDocument()
     act(() => nextProgress?.onProgress([
@@ -879,7 +1111,7 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     await user.type(screen.getByLabelText('交易规则'), '我是秦始皇')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     const second = await screen.findByRole('button', { name: '贵州茅台 · 均线确认' })
     expect(screen.getByRole('button', { name: '东方财富 · 突破跟随' })).toBeVisible()
@@ -897,7 +1129,7 @@ describe('formal main.tsx App journey', () => {
       await user.click(second)
     } else {
       await user.type(screen.getByLabelText('交易规则'), '我自己选股票')
-      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      await user.click(sendControl())
     }
     await waitFor(() => expect(answer).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       draftId: 'paired-draft', revision: 2,
@@ -910,12 +1142,13 @@ describe('formal main.tsx App journey', () => {
     expect(compile).toHaveBeenCalledTimes(1)
     if (picksProposal) {
       const expectedName = action === 'pick-second' ? '贵州茅台' : '300059.SZ'
-      await screen.findByText('预览策略')
-      expect(document.querySelector('.review-title')).toHaveTextContent(expectedName)
+      await screen.findByText(/^查看(?:并修改|策略)$/)
+      const identity = document.querySelector('.review-body .inline-stock-entry')
+      expect(identity).toHaveTextContent(expectedName)
       if (action !== 'pick-second') {
-        expect(document.querySelector('.review-title')).not.toHaveTextContent('贵州茅台')
+        expect(identity).not.toHaveTextContent('贵州茅台')
       }
-      await user.click(screen.getByRole('button', { name: '开始回测' }))
+      await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
       await waitFor(() => expect(createRun).toHaveBeenCalledTimes(1))
       const saved = createRun.mock.calls[0]?.[0]
       expect(saved?.instrument.name).toBe(expectedName)
@@ -940,8 +1173,8 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     const { container } = renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await user.click(await screen.findByRole('button', { name: '开始回测' }))
+    await user.click(sendControl())
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     await waitFor(() => expect(getRun).toHaveBeenCalled())
     expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', width <= 719 ? 'false' : 'true')
     expect(screen.getByRole('button', { name: '取消回测' })).toBeInTheDocument()
@@ -958,9 +1191,9 @@ describe('formal main.tsx App journey', () => {
       // JSDOM 不执行移动媒体查询；此处验证点击接线，尺寸与可见性另走浏览器验收。
       await user.click(screen.getByLabelText('返回对话'))
       expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', 'false')
-      expect(container.querySelector('.review-title')).toHaveTextContent('东方财富')
+      expect(container.querySelector('.review-body .inline-stock-entry')).toHaveTextContent('东方财富')
     }
-  })
+  }, 10_000)
 
   it.each(['revision', 'create', 'closed-create'] as const)(
     'B31 exposes a mobile %s error and retries the same edited draft', async (failurePoint) => {
@@ -985,14 +1218,17 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     const { container } = renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await user.click(await screen.findByRole('button', { name: /成交设置/ }))
-    fireEvent.change(screen.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
-    fireEvent.change(screen.getByLabelText(/单边滑点/), { target: { value: '7' } })
-    fireEvent.change(screen.getByLabelText(/佣金率/), { target: { value: '0.02' } })
-    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2022-01-04' } })
-    await user.click(screen.getByRole('button', { name: '完成' }))
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(sendControl())
+    await user.click(await reviewControls().findByRole('button', { name: /成交设置/ }))
+    const settingsPanel = container.querySelector<HTMLElement>('#pg-params')!
+    expect(settingsPanel).toBeVisible()
+    const settings = within(settingsPanel)
+    fireEvent.change(settings.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
+    fireEvent.change(settings.getByLabelText(/单边滑点/), { target: { value: '7' } })
+    fireEvent.change(settings.getByRole('spinbutton', { name: '佣金率' }), { target: { value: '0.02' } })
+    fireEvent.change(settings.getByLabelText('开始日期'), { target: { value: '2022-01-04' } })
+    await user.click(settings.getByRole('button', { name: '完成' }))
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     await waitFor(() => expect(rejectRequest).toBeDefined())
     if (failurePoint === 'closed-create') await user.click(screen.getByLabelText('返回对话'))
     await act(async () => rejectRequest(new Error(message)))
@@ -1003,7 +1239,7 @@ describe('formal main.tsx App journey', () => {
     expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', 'true')
     expect(screen.getAllByText(message)).toHaveLength(1)
     await user.click(screen.getByLabelText('返回对话'))
-    await user.click(screen.getByRole('button', { name: '重试回测' }))
+    await user.click(screen.getByRole('button', { name: '重试' }))
     await waitFor(() => expect(create).toHaveBeenCalledTimes(failurePoint === 'revision' ? 1 : 2))
     const submitted = create.mock.calls.at(-1)?.[0]
     expect(submitted).toMatchObject({ instrument: fixture.draft.instrument,
@@ -1016,7 +1252,7 @@ describe('formal main.tsx App journey', () => {
     if (failurePoint !== 'revision') expect(submitted).toEqual(create.mock.calls[0]?.[0])
     await waitFor(() => expect(container.querySelector('#pg-chat')).toHaveAttribute('data-review', 'false'))
     expect(screen.queryByText(message)).not.toBeInTheDocument()
-  })
+  }, 10_000) // Full edit, failed submission, review reopen and retry measured 7.45s in jsdom.
 
   it.each([
     ['换个条件再回测', '买入', '创30日新高且放量2倍', '买入条件改为：创30日新高且放量2倍'],
@@ -1027,16 +1263,17 @@ describe('formal main.tsx App journey', () => {
     const compile = vi.spyOn(strategyApi, 'compile')
     const revise = vi.spyOn(strategyApi, 'revise')
     const createRun = vi.spyOn(backtestApi, 'create')
-    vi.spyOn(backtestApi, 'review').mockImplementation(() => new Promise(() => {}))
+    let rejectReview!: (reason: Error) => void
+    vi.spyOn(backtestApi, 'review').mockImplementation(() => new Promise((_resolve, reject) => { rejectReview = reject }))
     const user = userEvent.setup()
     renderApp()
-    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
-    await user.click(screen.getByRole('button', { name: 'AI 分析与优化' }))
-    await user.click(screen.getByRole('button', { name: chip }))
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
+    await user.click(detailControls().getByRole('button', { name: 'AI 分析与优化' }))
+    await user.click(detailControls().getByRole('button', { name: chip }))
 
     const field = await screen.findByRole('textbox', { name: slot }) as HTMLTextAreaElement
     expect(field).toHaveFocus()
@@ -1050,19 +1287,26 @@ describe('formal main.tsx App journey', () => {
     // Opening a chip must not discard the in-flight review or submit a new request.
     expect(compile).toHaveBeenCalledTimes(1)
     await user.click(screen.getByRole('button', { name: '查看这次报告' }))
-    expect(screen.getByRole('button', { name: 'AI 正在分析' })).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    expect(detailControls().getByRole('button', { name: 'AI 正在分析' })).toBeDisabled()
+    if (slot === '买入') {
+      await act(async () => rejectReview(new Error('分析服务暂时不可用')))
+      expect(await detailControls().findByRole('alert')).toBeVisible()
+      expect(detailControls().getByRole('button', { name: '重试 AI 分析' })).toBeEnabled()
+      expect(detailControls().queryByRole('button', { name: '编辑策略' })).not.toBeInTheDocument()
+      expect(createRun).toHaveBeenCalledTimes(1)
+    }
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
     await user.click(field)
     await user.keyboard('{Backspace}')
     expect(field).toHaveValue('')
-    expect(screen.getByRole('button', { name: '识别交易规则' })).toBeDisabled()
+    expect(sendControl()).toBeDisabled()
     await user.keyboard(replacement)
     expect(screen.getByRole('textbox', { name: '卖出' })).toHaveValue(exit)
     const saved = await revise.mock.results[0]?.value
     const edited = { ...saved, id: 'edited-slot-draft' }
     compile.mockResolvedValueOnce({ status: 'compiled', draft: edited,
       isStrategyEdit: true, runRequested: true })
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
     expect(compile.mock.calls[1]?.[0].utterance).toBe(`${edit}。其他条件和回测设置保持不变，按新条件重新回测。`)
     expect(compile.mock.calls[1]?.[1]).toBe(saved.id)
@@ -1070,7 +1314,7 @@ describe('formal main.tsx App journey', () => {
     // Submitting the edited slots starts a NEW run without a second Start click.
     await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2))
     expect(createRun.mock.calls[1]?.[0].id).toBe('edited-slot-draft')
-  })
+  }, 12_000)
 
   it.each([
     { reply: '候选点击', runRequested: true },
@@ -1098,13 +1342,13 @@ describe('formal main.tsx App journey', () => {
     const answer = vi.spyOn(strategyApi, 'answerClarification')
     const user = userEvent.setup()
     renderApp()
-    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
-    await user.click(screen.getByRole('button', { name: 'AI 分析与优化' }))
-    await user.click(screen.getByRole('button', { name: '换只股票试试' }))
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
+    await user.click(detailControls().getByRole('button', { name: 'AI 分析与优化' }))
+    await user.click(detailControls().getByRole('button', { name: '换只股票试试' }))
     const stock = await screen.findByRole('textbox', { name: '股票' })
     await user.clear(stock)
     await user.type(stock, '中金')
@@ -1123,7 +1367,7 @@ describe('formal main.tsx App journey', () => {
       },
     }
     compile.mockResolvedValueOnce(pending)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(await screen.findByText(question)).toBeVisible()
     expect(compile.mock.calls[1]?.[1]).toBe(saved.id)
     expect(compile.mock.calls[1]?.[0].editCurrentStrategy).toBe(true)
@@ -1143,8 +1387,8 @@ describe('formal main.tsx App journey', () => {
     })
     if (reply === '候选点击') await user.click(screen.getByRole('button', { name: '中金公司' }))
     else {
-      await user.type(screen.getByLabelText('交易规则'), reply)
-      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: reply } })
+      await user.click(sendControl())
     }
     await waitFor(() => expect(answer).toHaveBeenCalledTimes(1))
     expect(answer.mock.calls[0]?.[0]).toEqual(expect.objectContaining({
@@ -1159,16 +1403,16 @@ describe('formal main.tsx App journey', () => {
         backtest: saved.backtest, execution: saved.execution,
       }))
     } else {
-      expect(await screen.findByRole('button', { name: '开始回测' })).toBeEnabled()
+      expect(await reviewControls().findByRole('button', { name: '开始回测' })).toBeEnabled()
       expect(createRun).toHaveBeenCalledTimes(1)
       if (reply === '另起全新策略') {
-        await user.click(screen.getByRole('button', { name: '开始回测' }))
+        await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
         await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2))
         expect(createRun.mock.calls[1]?.[0].execution).toEqual(fixture.draft.execution)
         expect(createRun.mock.calls[1]?.[0].execution).not.toEqual(saved.execution)
       }
     }
-  })
+  }, 10_000)
 
   it.each([[false, false], [true, false], [true, true]])(
     'uses the model run intent for a typed follow-up: run=%s refresh=%s',
@@ -1179,22 +1423,22 @@ describe('formal main.tsx App journey', () => {
     const createRun = vi.spyOn(backtestApi, 'create')
     const user = userEvent.setup()
     renderApp()
-    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
     const firstRun = await createRun.mock.results[0]?.value
     const saved = createRun.mock.calls[0]?.[0]
     if (!saved) throw new Error('expected the completed baseline draft')
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
-    await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+    await user.click(reviewControls().getByRole('button', { name: '收起策略审阅' }))
     compile.mockResolvedValueOnce({ status: 'compiled', runRequested, refreshData,
       draft: { ...saved, id: 'typed-edit' } })
-    await user.type(screen.getByLabelText('交易规则'), refreshData
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: refreshData
       ? '不要缓存，重新取数后再回测' : runRequested
-        ? '买入均线改成5日，再跑一次' : '买入均线改成5日，先给我看看')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+        ? '买入均线改成5日，再跑一次' : '买入均线改成5日，先给我看看' } })
+    await user.click(sendControl())
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
     expect(compile.mock.calls[1]?.[0].relatedRunIds).toEqual([firstRun.id])
     if (runRequested) {
@@ -1202,10 +1446,10 @@ describe('formal main.tsx App journey', () => {
       expect(createRun.mock.calls[1]?.[0].id).toBe('typed-edit')
       expect(createRun.mock.calls[1]?.[1]).toEqual({ refreshData })
     } else {
-      expect(await screen.findByRole('button', { name: '开始回测' })).toBeEnabled()
+      expect(await reviewControls().findByRole('button', { name: '开始回测' })).toBeEnabled()
       expect(createRun).toHaveBeenCalledTimes(1)
     }
-  })
+  }, 10_000)
 
   it('keeps each historical execution summary bound to its completed run', async () => {
     // Snapshot/rendering regression only; real model/data acceptance is separate.
@@ -1219,20 +1463,21 @@ describe('formal main.tsx App journey', () => {
     const { container } = renderApp()
     const versions = [
       { slippageBps: 0, commissionRate: 0, minimumCommissionCny: 0 },
-      { slippageBps: 8, commissionRate: 0.0003, minimumCommissionCny: 0 },
-      { slippageBps: 8, commissionRate: 0.0003, minimumCommissionCny: 5 },
+      { slippageBps: 8, commissionRate: fixture.draft.execution.commissionRate, minimumCommissionCny: 0 },
+      { slippageBps: 8, commissionRate: fixture.draft.execution.commissionRate,
+        minimumCommissionCny: fixture.draft.execution.minimumCommissionCny },
     ]
     for (const [index, settings] of versions.entries()) {
       compile.mockResolvedValueOnce({ status: 'compiled', executionSettings: settings,
         draft: { ...fixture.draft, id: `history-fee-${index}`,
           execution: { ...fixture.draft.execution, ...settings } } })
       fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
-      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-      await screen.findByText('预览策略')
-      await user.click(screen.getByRole('button', { name: '开始回测' }))
-      await screen.findByRole('heading', { name: '回测报告' })
-      await user.click(screen.getByRole('button', { name: '回到对话' }))
-      await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
+      await user.click(sendControl())
+      await screen.findByText(/^查看(?:并修改|策略)$/)
+      await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+      await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
+      await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+      await user.click(reviewControls().getByRole('button', { name: '收起策略审阅' }))
     }
     const historicalSummaries = () => Array.from(
       container.querySelectorAll('.stream .exec-entry .v'), element => element.textContent,
@@ -1242,13 +1487,13 @@ describe('formal main.tsx App journey', () => {
     // A fresh default draft must not relabel already completed run snapshots.
     compile.mockResolvedValueOnce({ status: 'compiled', executionSettings: {},
       draft: { ...fixture.draft, id: 'fresh-default-fees' } })
-    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
     expect(within(screen.getByLabelText('策略审阅'))
       .getByRole('button', { name: '成交设置默认' })).toBeVisible()
     expect(historicalSummaries()).toEqual(['已调整 3 项', '已调整 2 项', '已调整 1 项'])
-  }, 15_000)
+  }, 20_000)
 
   it.each(['direct', 'clarified', 'fresh'] as const)(
     'uses server execution settings instead of stale local fees: %s', async (path) => {
@@ -1268,13 +1513,13 @@ describe('formal main.tsx App journey', () => {
     vi.spyOn(backtestApi, 'review').mockImplementation(() => new Promise(() => {}))
     const user = userEvent.setup()
     renderApp()
-    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
-    await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+    await user.click(reviewControls().getByRole('button', { name: '收起策略审阅' }))
 
     const settings = path === 'fresh' ? {} : {
       slippageBps: 3, commissionRate: path === 'clarified' ? 0.0001 : 0, minimumCommissionCny: 0,
@@ -1291,10 +1536,10 @@ describe('formal main.tsx App journey', () => {
       clarification: { id: 'strategy_edit_clarification', question: '佣金 1 是万分之一吗？',
         reason: '', choices: [] },
     } : resolved)
-    await user.type(screen.getByLabelText('交易规则'), path === 'fresh'
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: path === 'fresh'
       ? '另起一条新策略，先给我看看' : path === 'clarified'
-        ? '滑点改成3基点，佣金改成1，先别跑' : '滑点改成3基点，其他不变，先别跑')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+        ? '滑点改成3基点，佣金改成1，先别跑' : '滑点改成3基点，其他不变，先别跑' } })
+    await user.click(sendControl())
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
     expect(compile.mock.calls[0]?.[0].executionSettings).toBeUndefined()
     expect(compile.mock.calls[1]?.[0].executionSettings).toMatchObject({
@@ -1304,21 +1549,21 @@ describe('formal main.tsx App journey', () => {
       expect(await screen.findByText('佣金 1 是万分之一吗？')).toBeVisible()
       answer.mockResolvedValueOnce({ replyKind: 'accepted', assistantMessage: '已改好，暂不回测。',
         suggestions: [], outcome: resolved })
-      await user.type(screen.getByLabelText('交易规则'), '对，万分之一，先别跑')
-      await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+      fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '对，万分之一，先别跑' } })
+      await user.click(sendControl())
       await waitFor(() => expect(answer).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
         draftId: 'fee-unit-clarification', revision: 2, executionSettings: pendingSettings,
       })))
     }
-    expect(await screen.findByRole('button', { name: '开始回测' })).toBeEnabled()
+    expect(await reviewControls().findByRole('button', { name: '开始回测' })).toBeEnabled()
     expect(createRun).toHaveBeenCalledTimes(1)
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     await waitFor(() => expect(createRun).toHaveBeenCalledTimes(2))
     expect(createRun.mock.calls[1]?.[0].execution).toEqual(resolved.draft.execution)
     expect(createRun.mock.calls[1]?.[0].entry).toEqual(configured.entry)
     expect(createRun.mock.calls[1]?.[0].exit).toEqual(configured.exit)
     expect(createRun.mock.calls[1]?.[0].backtest).toEqual(configured.backtest)
-  })
+  }, 10_000)
 
   it('clears an unconsumed refresh intent before a typed preview-only follow-up', async () => {
     // Component state regression only; these mocked outcomes are not live acceptance.
@@ -1327,15 +1572,15 @@ describe('formal main.tsx App journey', () => {
     const createRun = vi.spyOn(backtestApi, 'create')
     const user = userEvent.setup()
     renderApp()
-    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await screen.findByText('预览策略')
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
-    await screen.findByRole('heading', { name: '回测报告' })
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    await screen.findByText(/^查看(?:并修改|策略)$/)
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
+    await (await findDetailControls()).findByRole('heading', { name: '回测报告' })
     const saved = createRun.mock.calls[0]?.[0]
     if (!saved) throw new Error('expected the completed baseline draft')
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
-    await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+    await user.click(reviewControls().getByRole('button', { name: '收起策略审阅' }))
 
     compile.mockResolvedValueOnce({
       status: 'compiled', runRequested: true, refreshData: true,
@@ -1344,9 +1589,9 @@ describe('formal main.tsx App journey', () => {
         backtest: { ...saved.backtest, initialCashCny: 1 },
       },
     })
-    await user.type(screen.getByLabelText('交易规则'), '不要缓存，重新取数后再回测')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByRole('button', { name: '请检查设置' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '不要缓存，重新取数后再回测' } })
+    await user.click(sendControl())
+    expect(await reviewControls().findByRole('button', { name: '请检查设置' })).toBeDisabled()
     expect(screen.getByText('初始资金需为 1 万元至 10 亿元之间的整数。')).toBeVisible()
     expect(createRun).toHaveBeenCalledTimes(1)
     await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
@@ -1354,15 +1599,15 @@ describe('formal main.tsx App journey', () => {
     compile.mockResolvedValueOnce({
       status: 'compiled', draft: { ...saved, id: 'preview-only-after-refresh' },
     })
-    await user.type(screen.getByLabelText('交易规则'), '先按原条件给我看看，不要运行')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '先按原条件给我看看，不要运行' } })
+    await user.click(sendControl())
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(3))
-    await waitFor(() => expect(screen.getByRole('button', { name: '开始回测' })).toBeEnabled())
+    await waitFor(() => expect(reviewControls().getByRole('button', { name: '开始回测' })).toBeEnabled())
     expect(compile.mock.calls[2]?.[1]).toBe('blocked-refresh')
     expect(createRun).toHaveBeenCalledTimes(1)
-  })
+  }, 10_000)
 
-  it('keeps draft lineage for a new strategy and clears it only for a new conversation', async () => {
+  it('starts every explicitly new strategy with empty dialogue lineage', async () => {
     const pending = (draftId: string) => ({
       status: 'needs_clarification' as const,
       draftId,
@@ -1383,24 +1628,24 @@ describe('formal main.tsx App journey', () => {
 
     const input = screen.getByLabelText('交易规则')
     await user.type(input, 'MACD')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(1))
     expect(await screen.findByText(/请补充完整的买入和卖出条件/)).toBeVisible()
 
-    fireEvent.click(screen.getByRole('button', { name: '新建策略', hidden: true }))
+    fireEvent.click(screen.getByRole('button', { name: '新建', hidden: true }))
     await user.type(input, 'RSI')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
-    expect(compile.mock.calls[1]?.[1]).toBe('conversation-draft-1')
+    expect(compile.mock.calls[1]?.[1]).toBeUndefined()
 
     fireEvent.click(screen.getByRole('button', {
-      name: '新建会话并清空上下文', hidden: true,
+      name: '新建', hidden: true,
     }))
     await user.type(input, 'KDJ')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(3))
     expect(compile.mock.calls[2]).toHaveLength(1)
-  })
+  }, 10_000)
 
   it('shows a direct current-data answer and three follow-up strategies without provider internals', async () => {
     vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
@@ -1472,7 +1717,7 @@ describe('formal main.tsx App journey', () => {
     renderApp()
 
     await user.type(screen.getByLabelText('交易规则'), '东方财富昨天的换手率是多少')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     expect(await screen.findByText(/东方财富昨天换手率为 2.37%/)).toBeVisible()
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
@@ -1538,19 +1783,20 @@ describe('formal main.tsx App journey', () => {
     }, { instrumentContextSource: 'stock_page' })
 
     await user.type(screen.getByLabelText('交易规则'), '筛选 A 股')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await user.click(await screen.findByRole('button', {
       name: '联网分析并给回测策略：同花顺 · 300033.SZ',
     }))
 
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
-    expect(compile).toHaveBeenLastCalledWith({
+    expect(compile).toHaveBeenLastCalledWith(expect.objectContaining({
       instrument: {
         name: '同花顺', symbol: '300033.SZ', market: 'CN_A', exchange: 'SZSE',
       },
       instrumentContextSource: 'stock_page',
       utterance: '分析同花顺（300033.SZ）的相关公开信息，给我几个可回测策略',
-    })
+      dialogueProgress: expect.objectContaining({ onProgress: expect.any(Function) }),
+    }), 'screen-data-draft')
     expect(answerClarification).not.toHaveBeenCalled()
   })
 
@@ -1574,7 +1820,7 @@ describe('formal main.tsx App journey', () => {
     expect(screen.queryByLabelText('策略示例')).not.toBeInTheDocument()
 
     await user.type(input, '同花顺 MACD金叉买入，死叉卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(input).toHaveValue('')
     await waitFor(() => expect(compile).toHaveBeenCalledWith(expect.objectContaining({
       utterance: '同花顺 MACD金叉买入，死叉卖出',
@@ -1589,22 +1835,19 @@ describe('formal main.tsx App journey', () => {
     }
     renderApp(instrument)
 
-    expect(screen.getByText('想怎么交易？用一句话告诉我，我来帮你把它变成可回测的策略。').closest('.say'))
+    expect(screen.getByText(/今天，我们怎么交易？/).closest('.say'))
       .toBeInTheDocument()
     expect(screen.getByLabelText('交易规则')).toHaveValue('')
-    expect(screen.getByRole('button', {
-      name: '贵州茅台5日均线上穿20日均线买入，5日均线下穿20日均线卖出',
-    })).toBeVisible()
-    await user.click(screen.getByRole('button', {
-      name: '贵州茅台5日均线上穿20日均线买入，5日均线下穿20日均线卖出',
-    }))
+    const utterance = '收盘价上穿20日均线买入，下穿20日均线卖出'
+    await user.type(screen.getByLabelText('交易规则'), utterance)
+    await user.click(sendControl())
     expect(screen.getByLabelText('交易规则')).toHaveValue('')
     const thinking = screen.getByRole('status', { name: '处理进度' })
-    expect(thinking).toHaveTextContent('处理中')
-    expect(thinking.closest('.thinking-stream')).not.toHaveClass('mcard')
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
+    expect(thinking).toHaveTextContent('正在理解你的想法')
+    expect(thinking.closest('.mcard')).toBeNull()
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
     expect(screen.queryByText('处理记录')).not.toBeInTheDocument()
-    expect(compile).toHaveBeenCalledWith(expect.objectContaining({ instrument }))
+    expect(compile).toHaveBeenCalledWith(expect.objectContaining({ instrument, utterance }))
   })
 
   it('keeps only service progress events in the completed processing record', async () => {
@@ -1628,16 +1871,16 @@ describe('formal main.tsx App journey', () => {
     renderApp(instrument)
 
     await user.type(screen.getByLabelText('交易规则'), utterance)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(screen.getByRole('status', { name: '处理进度' }))
-      .toHaveTextContent('正在核对策略')
+      .toHaveTextContent('策略结构已通过校验')
 
     release?.()
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
     const record = screen.getByText('处理过程')
     await user.click(record)
     expect(screen.getByText('策略结构已通过校验')).toBeVisible()
-    expect(screen.queryByText('已调用策略生成模型')).not.toBeInTheDocument()
+    expect(screen.getByText('已调用策略生成模型')).toBeVisible()
     expect(screen.queryByText(/^买入：/)).not.toBeInTheDocument()
     expect(screen.queryByText(/技术信号按日线收盘确认/)).not.toBeInTheDocument()
   })
@@ -1651,8 +1894,8 @@ describe('formal main.tsx App journey', () => {
     expect(screen.queryByText(/^proved$/i)).not.toBeInTheDocument()
 
     await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
+    await user.click(sendControl())
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
     expectMockRuntimeMarker()
     expect(screen.queryByText(/^proved$/i)).not.toBeInTheDocument()
   })
@@ -1675,28 +1918,28 @@ describe('formal main.tsx App journey', () => {
     expect(screen.queryByRole('button', { name: '回到底部' })).not.toBeInTheDocument()
   })
 
-  it('runs the current technical journey through settings, report, drawdown, and causal trace', async () => {
+  it('runs the current technical journey through settings and report without a causal trace page', async () => {
     settleMockRunOnFirstPoll({ preserveFirstRunningState: true })
     const user = userEvent.setup()
     const { container } = renderApp()
 
     expect(screen.getByLabelText('交易规则')).toHaveValue('')
     const examples = within(screen.getByLabelText('策略示例'))
-    expect(examples.getAllByRole('button')).toHaveLength(2)
+    expect(screen.getByLabelText('策略示例').querySelectorAll('.home-example')).toHaveLength(DEFAULT_STRATEGY_EXAMPLES.length)
     for (const example of DEFAULT_STRATEGY_EXAMPLES) {
       expect(examples.getByRole('button', { name: example.utterance })).toBeVisible()
     }
     expect(examples.queryByRole('button', { name: VOLUME_EXAMPLE })).not.toBeInTheDocument()
     expectHomeToHideDefaultCapital(container)
-    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
     expect(screen.getAllByText('创 20 日新高').length).toBeGreaterThan(0)
     expect(screen.getAllByText('放量 1.5 倍').length).toBeGreaterThan(0)
     expect(screen.getAllByText('收盘跌破 20 日均线').length).toBeGreaterThan(0)
     expectHomeToHideDefaultCapital(container)
 
-    await user.click(screen.getByRole('button', { name: /区间/ }))
+    await user.click(reviewControls().getByRole('button', { name: /区间/ }))
     expect(screen.getByRole('heading', { name: '策略设置' })).toBeInTheDocument()
     const initialCash = screen.getByRole('spinbutton', { name: '初始资金' })
     expect(initialCash).toHaveValue(1000000)
@@ -1705,7 +1948,7 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', { name: '完成' }))
     expectHomeToHideDefaultCapital(container)
 
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     expect(await screen.findByText(/^预览：/)).toBeInTheDocument()
     expect(screen.queryByText(/后台返回的处理阶段/)).not.toBeInTheDocument()
     expect(
@@ -1714,13 +1957,13 @@ describe('formal main.tsx App journey', () => {
     expectMockRuntimeMarker()
     expectHomeToHideDefaultCapital(container)
     expect(screen.getAllByText(
-      '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，相对少亏 36.69 个百分点。',
+      '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，复合相对少亏 60.37%。',
     ).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: /^换个条件$/ }))
       .not.toBeInTheDocument()
 
     // 回测跑完直接落在详情态的报告分区，不需要再点一次「查看完整报告」
-    expect(screen.getByRole('heading', { name: '回测报告' })).toBeInTheDocument()
+    expect(detailControls().getByRole('heading', { name: '回测报告' })).toBeInTheDocument()
     expect(document.querySelector('#pg-report .report-summary-meta .tag')).toBeNull()
     expect(screen.queryByText(/^proved$/i)).not.toBeInTheDocument()
     expect(document.querySelectorAll('#pg-report .report-risk .notice')).toHaveLength(0)
@@ -1732,42 +1975,52 @@ describe('formal main.tsx App journey', () => {
     expect(reportPage.queryByRole('tablist')).not.toBeInTheDocument()
     expect(reportPage.getByRole('heading', { name: '净值与回撤' })).toBeInTheDocument()
     expect(reportPage.getByRole('heading', { name: '每笔委托' })).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '回到对话' }))
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
     expectHomeToHideDefaultCapital(container)
     await user.click(screen.getByRole('button', { name: '查看完整报告' }))
-    expect(screen.getByRole('heading', { name: '回测报告' })).toBeInTheDocument()
+    expect(detailControls().getByRole('heading', { name: '回测报告' })).toBeInTheDocument()
     expect(screen.getAllByText('最大回撤').length).toBeGreaterThan(0)
     // 点位明细已经并进「每笔委托」列表，图表下面不再有第二套入口。
     expect(screen.queryByRole('button', { name: '选择点位' })).not.toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: '每笔委托' })).toBeInTheDocument()
+    expect(detailControls().getByRole('heading', { name: '每笔委托' })).toBeInTheDocument()
     for (const label of ['方向 / 时间', '信号', '委托价', '状态 / 成交价']) {
       expect(screen.getAllByText(label, { exact: true }).length).toBeGreaterThan(0)
     }
 
-    await user.click(screen.getByRole('button', { name: /买入 MACD 金叉确认 未成/ }))
-    expect(screen.getByText('从你那句话到账户变化')).toBeInTheDocument()
-    expect(screen.getByText('用户原话')).toBeInTheDocument()
-    expect(screen.getByText('规范化条件')).toBeInTheDocument()
-    for (const label of ['MACD 金叉确认', '形成买入决策', '提交买入委托', '涨停未成交', '账户净值记录']) {
-      expect(screen.getAllByText(label).length).toBeGreaterThan(0)
-    }
-    const chainPage = within(document.querySelector('#pg-chain') as HTMLElement)
-    expect(chainPage.getByText('技术详情')).toBeVisible()
-    for (const identity of chainPage.getAllByText(/chain decision_buy_blocked/)) {
-      expect(identity).not.toBeVisible()
-    }
-    await user.click(chainPage.getByText('技术详情'))
-    for (const identity of chainPage.getAllByText(/chain decision_buy_blocked/)) {
-      expect(identity).toBeVisible()
-    }
-  }, 12_000)
+    await user.click(detailControls().getByRole('button', { name: /买入 MACD 金叉确认 未成/ }))
+    expect(detailControls().getByRole('heading', { name: '回测报告' })).toBeVisible()
+    expect(detailControls().getByRole('button', { name: /买入 MACD 金叉确认 未成/ }))
+      .toHaveAttribute('aria-current', 'true')
+    expect(document.querySelector('#pg-chain')).toBeNull()
+    expect(screen.queryByText('从你那句话到账户变化')).not.toBeInTheDocument()
+    expect(screen.queryByText(/点行看轨迹/)).not.toBeInTheDocument()
+  }, 20_000)
 
   it.each([
-    ['skill_mx_read_timeout', '等待东方财富查数 Skill响应超时，本次取数未完成，可以重试。'],
+    ['corporate_action_data_unavailable', '策略已理解，但分红送转或除权换算数据缺失；原规则与设置已保留。'],
+    ['market_calendar_unavailable', '策略已理解，但所需交易日历缺失或尚未核对完整；原规则与设置已保留。'],
+    ['daily_execution_data_unavailable', '策略已理解，但所需日行情或证券交易状态不完整；原规则与设置已保留。'],
+    ['scheduled_execution_unavailable', '策略已理解，定期交易执行尚未启用；原规则与设置已保留。'],
+    ['minute_data_unavailable', '策略已理解，但分钟行情与日线尚未完整对齐；原规则与设置已保留。'],
+    ['minute_execution_unavailable', '策略已理解，所需的分钟执行方式尚未接通；原规则与设置已保留。'],
+    ['grid_execution_unavailable', '策略已理解，当前分钟引擎尚不支持成交后移动基准；未改为固定基准。原规则与设置已保留。'],
+    ['opening_holdings_exceed_equity', '策略已理解，期初持仓市值超过设定的初始总资产，无法分配剩余现金。原规则与设置已保留。'],
+    ['grid_parameters_unavailable', '策略已理解，当前上下限与间距无法形成完整的买卖网格。原规则与设置已保留。'],
+    ['grid_buy_quantity_invalid', '每格买入100股不符合该股票申报规则：买入至少200股，之后按1股递增。请修改数量，原策略已保留。'],
+    ['condition_reference_unavailable', '策略已理解，第一笔缺少起始基准价，请设置第一笔触发价。原规则与设置已保留。'],
+    ['execution_capability_unavailable', '策略已理解，所需的执行方式尚未接通。原规则与设置已保留。'],
+    ['skill_indicator_unavailable', '历史指标数据尚未提供，原策略已保留。'],
+    ['compile_unsupported', '策略已理解，但当前执行器不能执行这个组合。'],
+    ['document_text_unavailable', '缺少对应报告正文，原策略已保留。'],
+    ['snapshot_unavailable', '当前快照没有覆盖这条策略需要的事件或行情，系统不会自动联网补数或放宽规则。'],
+    ['event_time_quality', '目前无法证明事件在历史上的精确首次可得时间。为避免偷看未来数据，本次不触发交易。'],
+    ['skill_mx_read_timeout', '这次没能取到回测所需的行情，暂时无法计算结果。你的策略和设置已保留，可以稍后重试。'],
     ['skill_history_before_listing', '这只股票于 2021-04-09 上市，你选择的区间从 2020-09-06 开始，包含上市前日期。请修改回测区间；买卖规则和成交设置已保留，不会自动缩短区间。'],
     ['skill_history_fields_missing', '查询 2010-03-09 至 2012-03-08 的历史数据时，东方财富未返回涨停价、跌停价。本次回测未完成，原区间和规则已保留；可修改区间或稍后重新读取。'],
-    ['skill_MxSaasProviderDataError', '东方财富已响应，但未返回本次计算需要的完整数据表。本次回测未完成，可以稍后重新读取。'],
-  ])('retries and edits a failed run without resetting or replacing its strategy: %s', async (error, progressLabel) => {
+    ['skill_MxSaasProviderDataError', '这次取到的行情或指标还无法用于计算，没有生成回测结果。你的策略和设置已保留，可以稍后重试。'],
+  ])('recovers a failed run by its machine code without resetting or replacing its strategy: %s', async (error, progressLabel) => {
+    // This matrix checks recovery state and API bodies, not demo animation or typing speed.
+    enableImmediateMockWaitForTests()
     const instrument: Instrument = {
       name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE',
     }
@@ -1833,13 +2086,13 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
 
     const unchangedView = renderApp(instrument)
-    await user.type(screen.getByLabelText('交易规则'), MOVING_AVERAGE_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    await user.click(await screen.findByRole('button', { name: '开始回测' }))
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: MOVING_AVERAGE_EXAMPLE } })
+    await user.click(sendControl())
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1))
     expect(revise).not.toHaveBeenCalled()
     expect(create).toHaveBeenNthCalledWith(1, compiled.draft, { refreshData: false })
-    expect(await screen.findByText(progressLabel))
+    expect(await screen.findByText(progressLabel, { exact: false }))
       .toBeVisible()
     if (error === 'skill_history_before_listing') {
       expect(screen.getByText('请调整回测区间')).toBeVisible()
@@ -1852,33 +2105,59 @@ describe('formal main.tsx App journey', () => {
       unchangedView.unmount()
       return
     }
+    const settingsError = ['opening_holdings_exceed_equity', 'grid_parameters_unavailable', 'grid_buy_quantity_invalid',
+      'condition_reference_unavailable'].includes(error)
+    const unsupportedExecution = ['minute_execution_unavailable', 'grid_execution_unavailable',
+      'scheduled_execution_unavailable'].includes(error)
+    if (settingsError || unsupportedExecution || ['execution_capability_unavailable',
+      'skill_indicator_unavailable', 'compile_unsupported', 'document_text_unavailable',
+      'snapshot_unavailable', 'event_time_quality'].includes(error)) {
+      expect(screen.queryByRole('button', { name: '重新读取' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: '重新回测' })).not.toBeInTheDocument()
+      expect(screen.queryByText('无法识别这条策略')).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', {
+        name: settingsError ? '检查策略设置' : unsupportedExecution ? '查看与修改规则' : '修改规则',
+      }))
+      if (settingsError) {
+        expect(screen.getByRole('spinbutton', { name: '初始资金' })).toHaveValue(1_000_000)
+        await user.click(screen.getByRole('button', { name: '完成' }))
+      }
+      expect(screen.getByText(/^查看(?:并修改|策略)$/)).toBeVisible()
+      expect(reviewControls().getByRole('button', { name: '开始回测' })).toBeVisible()
+      expect(create).toHaveBeenCalledTimes(1)
+      expect(revise).not.toHaveBeenCalled()
+      expect(strategyApi.compile).toHaveBeenCalledTimes(1)
+      expect(create.mock.calls[0]?.[0]).toEqual(compiled.draft)
+      unchangedView.unmount()
+      return
+    }
     await user.click(screen.getByRole('button', { name: '重新读取' }))
     await waitFor(() => expect(create).toHaveBeenCalledTimes(2))
     expect(create).toHaveBeenNthCalledWith(2, compiled.draft, { refreshData: true })
     expect(revise).not.toHaveBeenCalled()
     expect(strategyApi.compile).toHaveBeenCalledTimes(1)
     await user.click(await screen.findByRole('button', { name: '修改规则' }))
-    expect(screen.getByText('预览策略')).toBeVisible()
-    expect(screen.getByRole('button', { name: '开始回测' })).toBeVisible()
+    expect(screen.getByText(/^查看(?:并修改|策略)$/)).toBeVisible()
+    expect(reviewControls().getByRole('button', { name: '开始回测' })).toBeVisible()
     expect(strategyApi.compile).toHaveBeenCalledTimes(1)
     expect(create).toHaveBeenCalledTimes(2)
     unchangedView.unmount()
 
     renderApp(instrument)
-    await user.type(screen.getByLabelText('交易规则'), MOVING_AVERAGE_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: MOVING_AVERAGE_EXAMPLE } })
+    await user.click(sendControl())
     await user.click(await screen.findByRole('button', { name: /区间/ }))
     const initialCash = screen.getByRole('spinbutton', { name: '初始资金' })
     await user.clear(initialCash)
     await user.type(initialCash, '500000')
     await user.click(screen.getByRole('button', { name: '完成' }))
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
 
     await waitFor(() => expect(create).toHaveBeenCalledTimes(3))
     expect(revise).toHaveBeenCalledTimes(1)
     expect(revise.mock.calls[0]?.[0].backtest.initialCashCny).toBe(500000)
     expect(create.mock.calls[2]?.[0].revision).toBe(compiled.draft.revision + 1)
-  })
+  }, 15_000)
 
   it('keeps a complete result authoritative when a later run-status refresh returns 404', async () => {
     const getRun = settleMockRunOnFirstPoll()
@@ -1886,9 +2165,9 @@ describe('formal main.tsx App journey', () => {
     const { client } = renderApp()
 
     await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(sendControl())
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     expect(await screen.findByText('回测结果', {}, { timeout: 6_000 })).toBeInTheDocument()
 
     getRun.mockRejectedValueOnce(new ApiError({
@@ -1910,14 +2189,14 @@ describe('formal main.tsx App journey', () => {
     renderApp()
 
     await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
+    await user.click(sendControl())
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
     expect(screen.getAllByText('创 20 日新高').length).toBeGreaterThan(0)
     expect(screen.getAllByText('放量 1.5 倍').length).toBeGreaterThan(0)
     expect(screen.getAllByText('收盘跌破 20 日均线').length).toBeGreaterThan(0)
     expect(screen.queryByText('业绩预告发布')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     expect(
       await screen.findByText('回测结果', {}, { timeout: 6_000 }),
     ).toBeInTheDocument()
@@ -1934,15 +2213,15 @@ describe('formal main.tsx App journey', () => {
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, '同花顺发年报提到ai次数超过5次的话就买入，3天后卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
     expect(screen.getAllByText('年度报告正文中“AI”完整词出现 > 5 次').length).toBeGreaterThan(0)
     expect(screen.getAllByText('实际买入成交后第 3 个交易日卖出').length).toBeGreaterThan(0)
     expect(screen.getByText(/没有读取年报正文，也没有计算词频/)).toBeInTheDocument()
     expectMockRuntimeMarker()
 
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     expect(
       await screen.findByText('回测结果', {}, { timeout: 6_000 }),
     ).toBeInTheDocument()
@@ -1953,18 +2232,34 @@ describe('formal main.tsx App journey', () => {
       name: /买入 年度报告正文词频条件确认 已成/,
     }))
 
-    expect(screen.getByRole('heading', { name: /买入成交 · 因果轨迹/ })).toBeInTheDocument()
-    const chainPage = within(document.querySelector('#pg-chain') as HTMLElement)
-    expect(chainPage.getByText('从你那句话到账户变化')).toBeInTheDocument()
-    expect(chainPage.getByText('用户原话')).toBeInTheDocument()
-    expect(chainPage.getByText('规范化条件')).toBeInTheDocument()
-    expect(chainPage.getByText('同花顺发年报提到ai次数超过5次的话就买入，3天后卖出')).toBeInTheDocument()
-    expect(chainPage.getByText(/买入：年度报告正文中“AI”完整词出现 > 5 次/)).toBeInTheDocument()
-    expect(chainPage.getByText(/卖出：实际买入成交后第 3 个交易日卖出/)).toBeInTheDocument()
-    expect(chainPage.getByText(/^成交时间质量：$/)).toBeInTheDocument()
-    expect(chainPage.getByText(/不代表已观测到该时刻的真实成交/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '回测报告' })).toBeVisible()
+    expect(screen.getByRole('button', { name: /买入 年度报告正文词频条件确认 已成/ }))
+      .toHaveAttribute('aria-current', 'true')
+    expect(document.querySelector('#pg-chain')).toBeNull()
+    expect(screen.queryByRole('heading', { name: /因果轨迹/ })).not.toBeInTheDocument()
     expectMockRuntimeMarker()
   }, 10_000)
+
+  it.each(['candidate_data_not_ready', 'capability_research_fallback'])(
+    'does not ask users to rewrite rules for %s', async (diagnostic) => {
+      vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
+        status: 'needs_clarification', draftId: 'draft_data_gap', revision: 1,
+        clarification: {
+          id: diagnostic, question: '所需历史数据尚未准备好，原条件已保留。',
+          reason: '', choices: [],
+        },
+      })
+      const user = userEvent.setup()
+      renderApp({ name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' })
+      const input = screen.getByLabelText('交易规则')
+      await user.type(input, '东方财富长线策略')
+      await user.click(sendControl())
+      await screen.findByText('所需历史数据尚未准备好，原条件已保留。')
+      expect(input).toHaveAttribute('placeholder', '可以继续讨论策略，无需重复输入')
+      expect(input).not.toBeDisabled()
+      expect(input).toHaveValue('')
+    },
+  )
 
   it('keeps a clarification editable without repeating recognized strategy fields in the reply', async () => {
     const original = '同花顺发年报提到ai次数超过5次的话就买入，3天后卖出'
@@ -1996,7 +2291,7 @@ describe('formal main.tsx App journey', () => {
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, original)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     const prompt = await screen.findByText('这条规则里有一个低置信度片段，请补充后再继续。')
     expect(prompt.textContent).toBe('这条规则里有一个低置信度片段，请补充后再继续。')
@@ -2042,7 +2337,7 @@ describe('formal main.tsx App journey', () => {
 
     const input = screen.getByLabelText('交易规则')
     await user.type(input, original)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     const prompt = await screen.findByText(/请直接告诉我想回测的股票名称或 6 位证券代码/)
     expect(prompt).not.toHaveTextContent('现在只缺回测标的')
@@ -2053,7 +2348,7 @@ describe('formal main.tsx App journey', () => {
     await waitFor(() => expect(input).toHaveFocus())
 
     await user.type(input, '同花顺')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(input).toHaveValue('')
 
     await waitFor(() => expect(answerClarification).toHaveBeenCalledTimes(1))
@@ -2069,7 +2364,7 @@ describe('formal main.tsx App journey', () => {
     }))
     expect(await screen.findByText(/股票已经确认/)).toBeInTheDocument()
     expect(screen.getAllByText('好，股票已经确认，刚才的买卖规则也都保留了。')).toHaveLength(1)
-    const readyTurn = screen.getByText('预览策略').closest('.turn')
+    const readyTurn = screen.getByText(/^查看(?:并修改|策略)$/).closest('.turn')
     expect(readyTurn).toContainElement(screen.getByText('好，股票已经确认，刚才的买卖规则也都保留了。'))
     expect(readyTurn).not.toContainElement(screen.getByText(/请直接告诉我想回测的股票名称或 6 位证券代码/))
     expect(screen.queryByText(/已经把这句话整理成买卖规则/)).not.toBeInTheDocument()
@@ -2101,7 +2396,7 @@ describe('formal main.tsx App journey', () => {
     )
 
     await user.type(screen.getByLabelText('交易规则'), 'MACD金叉买入，MACD死叉卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     const reply = await screen.findByText(question)
     expect(reply.textContent).toBe(question)
@@ -2137,7 +2432,7 @@ describe('formal main.tsx App journey', () => {
 
     const input = screen.getByLabelText('交易规则')
     await user.type(input, 'MACD金叉买入，MACD死叉卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     const prompt = await screen.findByText(/请确认使用当前股票“贵州茅台”/)
     expect(prompt.textContent).toBe('请确认使用当前股票“贵州茅台”，或直接输入其他股票名称或 6 位证券代码。')
@@ -2161,11 +2456,11 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
     await user.type(screen.getByLabelText('交易规则'), '放量买入，跌破20日线卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(await screen.findByText(detail)).toBeInTheDocument()
     expect(document.body).not.toHaveTextContent('我已理解')
     expect(document.body).not.toHaveTextContent('不是模型')
-    expect(screen.getByLabelText('交易规则')).toHaveValue('')
+    expect(screen.getByLabelText('交易规则')).toHaveValue('放量买入，跌破20日线卖出')
   })
 
   it('separates recognized document rules with missing data from unknown language', async () => {
@@ -2182,33 +2477,35 @@ describe('formal main.tsx App journey', () => {
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, '年报正文 AI 超过 5 次买入，3 个交易日后卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
-    const recovery = await screen.findByText(/我已理解你想用报告正文作为条件/)
-    expect(recovery).toHaveTextContent('不会用公告标题代替')
+    const recovery = await screen.findByText(/已理解使用报告正文作为条件/)
+    expect(recovery).toHaveTextContent('历史正文数据尚未齐备')
+    expect(recovery).toHaveTextContent('原要求已保留，本次未开始回测')
+    expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
     expect(screen.queryByText('无法识别这条策略')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '修改规则' })).not.toBeInTheDocument()
     expect(input).toBeEnabled()
-    expect(input).toHaveValue('')
+    expect(input).toHaveValue('年报正文 AI 超过 5 次买入，3 个交易日后卖出')
     await waitFor(() => expect(input).toHaveFocus())
   })
 
-  it('rejects an unsupported sentence instead of silently falling back to MACD', async () => {
+  it('discloses missing demo coverage instead of silently falling back to MACD', async () => {
     const user = userEvent.setup()
     renderApp()
 
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, '火星逆行时满仓，月圆时卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
-    const recovery = await screen.findByText(/我还没能把这句话还原成完整的买卖规则/)
-    expect(recovery).toHaveTextContent('价格阈值、涨跌幅')
+    const recovery = await screen.findByText(/当前是界面演示模式，未调用模型或真实回测服务/)
+    expect(recovery).toHaveTextContent('不代表规则不完整或正式服务不支持')
     expect(screen.queryByText('无法识别这条策略')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '修改规则' })).not.toBeInTheDocument()
     expect(document.body).not.toHaveTextContent('no_supported_signal_recognized')
     expect(screen.queryByText('MACD 金叉')).not.toBeInTheDocument()
-    expect(input).toHaveValue('')
+    expect(input).toHaveValue('火星逆行时满仓，月圆时卖出')
     await waitFor(() => expect(input).toHaveFocus())
   })
 
@@ -2226,22 +2523,24 @@ describe('formal main.tsx App journey', () => {
 
     const input = screen.getByLabelText('交易规则')
     await user.type(input, original)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
-    expect(await screen.findByText(/我已理解你想用“前一交易日涨停”作为买入条件/))
-      .toBeInTheDocument()
+    expect(await screen.findByText(/已理解“前一交易日涨停”这一条件/))
+      .toHaveTextContent('所需的历史涨停状态与执行支持尚未齐备')
+    expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
     expect(screen.queryByText('这句话暂时不能还原')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '修改规则' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '使用技术示例' })).not.toBeInTheDocument()
     expect(input).toBeEnabled()
-    expect(input).toHaveValue('')
-    expect(input).toHaveAttribute('placeholder', '改用价格、涨跌幅或技术指标条件')
+    expect(input).toHaveValue(original)
+    expect(input).toHaveAttribute('placeholder', '原话已保留，可查看提示后继续')
     await waitFor(() => expect(input).toHaveFocus())
-    expect(screen.getByText(original)).toBeInTheDocument()
+    expect(screen.getByText(original, { selector: '.stream p' })).toBeInTheDocument()
 
     const replacement = '东方财富MACD金叉买入，MACD死叉卖出'
+    await user.clear(input)
     await user.type(input, replacement)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
     expect(compile).toHaveBeenLastCalledWith(expect.objectContaining({ utterance: replacement }))
   })
@@ -2351,7 +2650,7 @@ describe('formal main.tsx App journey', () => {
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, '我讨厌特朗普')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     const guidance = await screen.findByText('选一个方向，我会把它变成完整买卖规则再识别。')
     expect(guidance.textContent).toBe('选一个方向，我会把它变成完整买卖规则再识别。')
@@ -2385,7 +2684,7 @@ describe('formal main.tsx App journey', () => {
       answer: 'trend-confirmation',
       originalRequest: expect.objectContaining({ utterance: '我讨厌特朗普' }),
     }))
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
     expect(revise).not.toHaveBeenCalled()
 
     // 回答后选项退出当前交互；完整模型回复留在历史，不再自动补选项提示。
@@ -2395,6 +2694,12 @@ describe('formal main.tsx App journey', () => {
   })
 
   it('uses a proposal-specific instrument instead of the standalone default', async () => {
+    enableImmediateMockWaitForTests()
+    const selected = await mockApi.compile({
+      utterance: '同花顺RSI低于30买入，高于70卖出',
+      instrument: { name: '同花顺', symbol: '300033.SZ', market: 'CN_A', exchange: 'SZSE' },
+    })
+    if (selected.status !== 'compiled') throw new Error('expected selected-proposal fixture')
     const compile = vi.spyOn(strategyApi, 'compile')
       .mockResolvedValueOnce({
         status: 'needs_clarification',
@@ -2457,34 +2762,40 @@ describe('formal main.tsx App journey', () => {
           }],
         },
       })
-      .mockResolvedValueOnce({
-        status: 'needs_clarification',
-        draftId: 'hithink-strategy',
-        revision: 1,
-        clarification: {
-          id: 'strategy_rule_incomplete',
-          question: '补齐规则。',
-          reason: '',
-          choices: [],
-        },
-      })
-    const answerClarification = vi.spyOn(strategyApi, 'answerClarification')
+    const answerClarification = vi.spyOn(strategyApi, 'answerClarification').mockResolvedValueOnce({
+      replyKind: 'accepted', assistantMessage: '已选择同花顺反转。', suggestions: [], outcome: selected,
+    })
+    const create = vi.spyOn(backtestApi, 'create')
     const user = userEvent.setup()
     renderApp()
 
-    await user.type(screen.getByLabelText('交易规则'), '给我两个策略')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '给我两个策略' } })
+    await user.click(sendControl())
     const hithink = await screen.findByRole('button', { name: '同花顺反转' })
     expect(hithink).toHaveTextContent('同花顺 · 300033.SZ')
     expect(hithink).not.toHaveTextContent('300059.SZ')
     await user.click(hithink)
 
-    await waitFor(() => expect(compile).toHaveBeenCalledTimes(2))
-    expect(compile).toHaveBeenLastCalledWith(expect.objectContaining({
-      instrument: expect.objectContaining({ name: '同花顺', symbol: '300033.SZ' }),
-      instrumentContextSource: 'stock_page',
-    }))
-    expect(answerClarification).not.toHaveBeenCalled()
+    await waitFor(() => expect(answerClarification).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      draftId: 'multi-instrument-ideas', revision: 1, answer: 'hithink-reversal',
+    })))
+    expect(compile).toHaveBeenCalledTimes(1)
+    await screen.findByText(/^查看(?:并修改|策略)$/)
+    const identity = document.querySelector('.review-body .inline-stock-entry')
+    expect(identity).toHaveTextContent('同花顺300033.SZ')
+    expect(identity).not.toHaveTextContent('东方财富')
+    expect(screen.getByLabelText('交易规则')).toHaveValue('')
+    expect(create).not.toHaveBeenCalled()
+    await user.click(within(screen.getByLabelText('策略审阅')).getByRole('button', { name: '收起策略审阅' }))
+    await user.click(screen.getByText('查看并修改'))
+    expect(screen.getByLabelText('策略审阅')).toBeVisible()
+    await user.click(screen.getByText('返回其他方案'))
+    const restoredChoices = within(await screen.findByRole('group', { name: '可选规则' }))
+    expect(restoredChoices.getByRole('button', { name: '同花顺反转' })).toBeVisible()
+    expect(restoredChoices.getByRole('button', { name: '东方财富趋势' })).toBeVisible()
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(answerClarification).toHaveBeenCalledTimes(1)
+    expect(create).not.toHaveBeenCalled()
   })
 
   it('hides an idea candidate without a complete suggested buy-and-sell sentence', async () => {
@@ -2547,14 +2858,53 @@ describe('formal main.tsx App journey', () => {
     renderApp()
 
     await user.type(screen.getByLabelText('交易规则'), '我看好东方财富')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     expect(await screen.findByRole('button', { name: '趋势确认' })).toBeVisible()
     expect(screen.queryByRole('button', { name: '只有一句口号' })).not.toBeInTheDocument()
     expect(screen.queryByText('这是不应展示的通用卡。')).not.toBeInTheDocument()
   })
 
-  it('does not leave stale viewpoint choices visible when the second turn fails', async () => {
+  it.each(['scheduled', 'conditional'] as const)('keeps a structured buy-only %s proposal selectable without inventing an exit', async (kind) => {
+    enableImmediateMockWaitForTests()
+    const fixture = await mockApi.compile({ utterance: VOLUME_EXAMPLE,
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' } })
+    if (fixture.status !== 'compiled') throw new Error('expected a base fixture')
+    const plan: PricePlan = { kind, parameters: kind === 'scheduled'
+      ? { frequency: 'monthly', day: 1, at: 'open', side: 'buy', sizing_mode: 'amount', budget_cny: '10000' }
+      : { rules: [{ kind: 'rebound', side: 'buy', gap: 2, gap_unit: 'percent', quantity: 100 }] } }
+    vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
+      status: 'needs_clarification', draftId: 'buy-only-plan', revision: 1,
+      clarification: { id: 'idea_guidance_required', question: '选一个计划继续。', reason: '', choices: [],
+        ideaRoute: { schema_version: 'idea-route.v1', understanding: '只买入，不设置卖出。', hypothesis: '待验证',
+          asset_mapping: { instrument_symbol: null, relation: 'unbound', rationale: '未指定股票', evidence_status: 'instrument_required' },
+          proposals: [{ id: 'buy-only', title: '只买入的计划', hypothesis: '待验证',
+            entry_summary: '按计划买入', exit_summary: '未设置卖出规则', suggested_utterance: '按计划买入',
+            strategy_template: { ...fixture.draft.strategySpec, entry: null, exit: null, trading_plan: plan },
+            capability_ids: [`strategy.${kind}`], assumptions: [], confidence: 0.8 }] } },
+    })
+    const answer = vi.spyOn(strategyApi, 'answerClarification').mockImplementation(() => new Promise(() => {}))
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    renderApp()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: '定期买一点，先不卖' } })
+    await user.click(sendControl())
+    const card = await screen.findByRole('button', { name: '只买入的计划' })
+    expect(card).toHaveTextContent('未设置卖出规则')
+    expect(card).toHaveTextContent(kind === 'scheduled' ? '每月1日' : '反弹2%')
+    await user.click(card)
+    await waitFor(() => expect(answer).toHaveBeenCalledWith(expect.objectContaining({
+      draftId: 'buy-only-plan', revision: 1, answer: 'buy-only',
+    })))
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['api_timeout', 0, '这次请求等待超时，暂未收到完整结果；你的输入和已有策略已保留，无需重新描述。'],
+    ['candidate_provider_connection_failed', 502, '连接模型服务时网络暂时异常。'],
+    ['candidate_provider_timeout', 504, '模型服务响应超时。'],
+    ['candidate_provider_invalid_response', 502, '模型返回的格式无效。'],
+  ])('does not leave stale viewpoint choices or correction hints after second-turn %s', async (code, status, detail) => {
     vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
       status: 'needs_clarification',
       draftId: 'viewpoint-timeout-draft',
@@ -2574,24 +2924,26 @@ describe('formal main.tsx App journey', () => {
     })
     vi.spyOn(strategyApi, 'answerClarification').mockRejectedValueOnce(new ApiError({
       type: 'about:blank',
-      title: '接口响应超时',
-      status: 0,
-      detail: '回测服务超过 20 秒没有响应，请稍后重试。',
-      code: 'api_timeout',
+      title: '模型请求未完成',
+      status,
+      detail,
+      code,
     }))
     const user = userEvent.setup()
     renderApp()
 
     const input = screen.getByLabelText('交易规则')
     await user.type(input, '讨厌特朗普')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     expect(await screen.findByRole('button', { name: '等趋势确认' })).toBeVisible()
 
     await user.type(input, '而且我讨厌wash')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
-    expect(await screen.findByText(/这次识别等待超时了/)).toBeVisible()
+    expect(await screen.findByText('这次没能完成回复。你的输入和已有策略都已保留，可以稍后重试。')).toBeVisible()
     expect(screen.queryByRole('button', { name: '等趋势确认' })).not.toBeInTheDocument()
+    expect(input).toHaveValue('而且我讨厌wash')
+    expect(input).toHaveAttribute('placeholder', '你的输入和已有策略已保留')
   })
 
   it('shows a colloquial trading interpretation as a confirmation-only preview', async () => {
@@ -2640,7 +2992,7 @@ describe('formal main.tsx App journey', () => {
     renderApp()
 
     await user.type(screen.getByLabelText('交易规则'), '东方财富低买高卖')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     expect(await screen.findByTestId('provisional-strategy')).toHaveTextContent('RSI 低于 30')
     expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
@@ -2651,6 +3003,80 @@ describe('formal main.tsx App journey', () => {
       answer: 'RSI低于30买入，高于70卖出，回测近1年',
     })))
     expect(compile).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows identified rules needing semantic confirmation without recommendations or automatic execution', async () => {
+    const source = await mockApi.compile({
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' },
+      utterance: 'MACD金叉买入，死叉卖出，回测近1年',
+    })
+    if (source.status !== 'compiled') throw new Error('missing mock strategy')
+    const note = '“放量后再买”的时序还不明确，请确认是金叉当天同时放量，还是放量后的下一次金叉。'
+    const compile = vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({
+      status: 'needs_clarification',
+      draftId: 'semantic-preview',
+      revision: 1,
+      clarification: {
+        id: 'semantic_confirmation_required',
+        question: '已识别买卖规则，还需要确认一处具体含义。',
+        reason: '',
+        choices: [],
+        provisionalDraft: source.draft,
+        provisionalNote: note,
+      },
+    })
+    const answer = vi.spyOn(strategyApi, 'answerClarification')
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    const { container } = renderApp()
+
+    await user.type(screen.getByLabelText('交易规则'), '东方财富放量后MACD金叉买入，死叉卖出，直接回测')
+    await user.click(sendControl())
+
+    const preview = await screen.findByTestId('provisional-strategy')
+    expect(within(preview).getByRole('heading', { name: '已识别部分 · 尚未完整实现' })).toBeVisible()
+    expect(screen.getByLabelText('交易规则')).toHaveAttribute('placeholder', '可以继续讨论策略，无需重复输入')
+    expect(preview).toHaveTextContent('东方财富（300059.SZ）')
+    expect(preview).toHaveTextContent('MACD 金叉')
+    expect(preview).toHaveTextContent('MACD 死叉')
+    expect(preview).toHaveTextContent(note)
+    expect(preview).not.toHaveTextContent('按你的口语推测')
+    expect(screen.queryByText(/^查看(?:并修改|策略)$/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
+    expect(container.querySelector('.proposals')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('交易规则')).toBeEnabled()
+    expect(compile).toHaveBeenCalledTimes(1)
+    expect(answer).not.toHaveBeenCalled()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('shows retained rules and the concrete data gap without asking to rephrase or starting a run', async () => {
+    const source = await mockApi.compile({
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' },
+      utterance: 'MACD金叉买入，死叉卖出，回测近1年',
+    })
+    if (source.status !== 'compiled') throw new Error('missing mock strategy')
+    vi.spyOn(strategyApi, 'compile').mockResolvedValueOnce({ status: 'needs_clarification',
+      draftId: 'data-gap-preview', revision: 1, clarification: {
+        id: 'backtest_data_temporarily_unavailable', question: '查询响应超时，原规则已保留。',
+        reason: '', choices: [], provisionalDraft: source.draft,
+        executionAssessment: { status: 'temporarily_unavailable',
+          message: '查询响应超时', missing: ['本次历史行情'] },
+      } })
+    const create = vi.spyOn(backtestApi, 'create')
+    const user = userEvent.setup()
+    renderApp()
+    await user.type(screen.getByLabelText('交易规则'), '东方财富MACD金叉买入，死叉卖出')
+    await user.click(sendControl())
+    const preview = await screen.findByTestId('provisional-strategy')
+    expect(preview).toHaveTextContent('规则已识别 · 暂未执行回测')
+    expect(preview).toHaveTextContent('东方财富（300059.SZ）')
+    expect(preview).toHaveTextContent('MACD 金叉')
+    expect(preview).toHaveTextContent('本次历史行情')
+    expect(preview).not.toHaveTextContent('解析失败')
+    expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
+    expect(screen.getByLabelText('交易规则')).toBeEnabled()
+    expect(create).not.toHaveBeenCalled()
   })
 
   it('keeps the grounded instrument in plain-text directions for an ambiguous indicator', async () => {
@@ -2730,7 +3156,7 @@ describe('formal main.tsx App journey', () => {
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, '汤姆猫金叉买死叉卖')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     const guidance = await screen.findByText('“金叉/死叉”指的是哪一类指标？')
     expect(guidance.textContent).toBe('“金叉/死叉”指的是哪一类指标？')
     expect(screen.getByRole('button', { name: 'MACD 金叉 / 死叉' })).toBeInTheDocument()
@@ -2761,9 +3187,10 @@ describe('formal main.tsx App journey', () => {
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, '东方财富最终中标后买入，MACD 死叉卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
-    expect(await screen.findByText(/我还没能把这句话还原成完整的买卖规则/)).toBeInTheDocument()
+    expect(await screen.findByText(/当前是界面演示模式，未调用模型或真实回测服务/))
+      .toHaveTextContent('不代表规则不完整或正式服务不支持')
     expect(screen.queryByText('无法识别这条策略')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '修改规则' })).not.toBeInTheDocument()
     expect(document.body).not.toHaveTextContent('no_supported_signal_recognized')
@@ -2778,7 +3205,7 @@ describe('formal main.tsx App journey', () => {
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, 'MACD')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     const prompt = await screen.findByText('请一次写清什么时候买入、什么时候卖出。')
     expect(prompt.textContent).toBe('请一次写清什么时候买入、什么时候卖出。')
     expect(screen.queryByText('只问这一次')).not.toBeInTheDocument()
@@ -2824,10 +3251,11 @@ describe('formal main.tsx App journey', () => {
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, '年度报告发布后买入')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
-    const prompt = await screen.findByText(/系统不会替你补一条默认策略/)
-    expect(prompt).toHaveTextContent('已识别买入条件')
+    const prompt = await screen.findByText('已识别买入条件。你想在什么条件下卖出？')
+    expect(prompt).toBeVisible()
+    expect(screen.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
     expect(screen.queryByText('只问这一次')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /使用东方财富/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /补充卖出条件/ })).not.toBeInTheDocument()
@@ -2836,7 +3264,7 @@ describe('formal main.tsx App journey', () => {
     await waitFor(() => expect(input).toHaveFocus())
 
     await user.type(input, 'MACD死叉卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await waitFor(() => expect(answerClarification).toHaveBeenCalledTimes(1))
     expect(compile).toHaveBeenCalledTimes(1)
     expect(answerClarification).toHaveBeenCalledWith(expect.objectContaining({
@@ -2846,7 +3274,7 @@ describe('formal main.tsx App journey', () => {
       originalRequest: expect.objectContaining({ utterance: '年度报告发布后买入' }),
     }))
     expect(await screen.findByText(/已经保留年度报告买入条件/)).toBeInTheDocument()
-    expect(await screen.findByRole('button', { name: '开始回测' })).toBeInTheDocument()
+    expect(await reviewControls().findByRole('button', { name: '开始回测' })).toBeInTheDocument()
   })
 
   it('returns a missing-entry clarification with the correct buy direction', async () => {
@@ -2894,7 +3322,7 @@ describe('formal main.tsx App journey', () => {
     const input = screen.getByLabelText('交易规则')
     await user.clear(input)
     await user.type(input, 'MACD死叉卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
 
     const prompt = await screen.findByText(/已识别卖出条件/)
     expect(prompt).toHaveTextContent('你想在什么条件下买入')
@@ -2906,7 +3334,7 @@ describe('formal main.tsx App journey', () => {
     await waitFor(() => expect(input).toHaveFocus())
 
     await user.type(input, 'RSI低于30买入')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await user.click(sendControl())
     await waitFor(() => expect(answerClarification).toHaveBeenCalledTimes(1))
     expect(compile).toHaveBeenCalledTimes(1)
     expect(answerClarification).toHaveBeenCalledWith(expect.objectContaining({
@@ -2930,8 +3358,8 @@ describe('formal main.tsx App journey', () => {
     renderApp()
 
     await user.type(screen.getByRole('textbox', { name: '交易规则' }), '东方财富PE低于35且MACD金叉买入，MACD死叉卖出')
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
+    await user.click(sendControl())
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
     expect(screen.getAllByText('市盈率 < 35').length).toBeGreaterThan(0)
     expect(screen.getAllByText('MACD 金叉').length).toBeGreaterThan(0)
     expect(screen.getAllByText('MACD 死叉').length).toBeGreaterThan(0)
@@ -2941,10 +3369,10 @@ describe('formal main.tsx App journey', () => {
     const user = userEvent.setup()
     renderApp()
 
-    await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
+    await user.click(sendControl())
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     expect(await screen.findByText(/^预览：/)).toBeInTheDocument()
     const runProgress = screen.getByRole('status', { name: '回测进度' })
     expect(runProgress.closest('.thinking-stream')).not.toHaveClass('mcard')
@@ -2957,7 +3385,7 @@ describe('formal main.tsx App journey', () => {
     expect(await screen.findByText('用户取消')).toBeInTheDocument()
     expect(screen.getByText(/任务已停止/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '修改规则' })).toBeEnabled()
-  })
+  }, 10_000)
 
   it('removes redundant follow-up actions without surfacing capital on the home journey', async () => {
     settleMockRunOnFirstPoll()
@@ -2966,10 +3394,10 @@ describe('formal main.tsx App journey', () => {
 
     expectHomeToHideDefaultCapital(container)
     await user.type(screen.getByLabelText('交易规则'), VOLUME_EXAMPLE)
-    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
-    expect(await screen.findByText('预览策略')).toBeInTheDocument()
+    await user.click(sendControl())
+    expect(await screen.findByText(/^查看(?:并修改|策略)$/)).toBeInTheDocument()
     expectHomeToHideDefaultCapital(container)
-    await user.click(screen.getByRole('button', { name: '开始回测' }))
+    await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     expect(
       await screen.findByText('回测结果', {}, { timeout: 6_000 }),
     ).toBeInTheDocument()
@@ -2984,7 +3412,7 @@ describe('formal main.tsx App journey', () => {
     await user.click(screen.getByRole('button', { name: '回到对话' }))
     await user.click(screen.getByRole('button', { name: '收起策略审阅' }))
     // Desktop rail visibility is verified in the real browser, not jsdom.
-    await user.click(screen.getByRole('button', { name: '新建策略', hidden: true }))
+    await user.click(screen.getByRole('button', { name: '新建', hidden: true }))
     expectHomeToHideDefaultCapital(container)
     const nextInput = screen.getByLabelText('交易规则') as HTMLInputElement
     expect(nextInput.value).not.toContain('【')

@@ -4,12 +4,12 @@ import { pathToFileURL } from 'node:url'
 
 export const LEGACY_PUBLIC_API_ORIGIN =
   'https://ashare-backtest-api-305722-11-1330091763.sh.run.tcloudbase.com'
-export const REQUIRED_DATA_AS_OF_DATE = '2026-08-06'
 
 export const FORBIDDEN_SAME_ORIGIN_MARKERS = [
   'draft_mock_demo_001',
   'mock_demo',
   LEGACY_PUBLIC_API_ORIGIN,
+  '2026-08-06',
   '演示',
   '真实数据',
   '正式数据',
@@ -22,11 +22,6 @@ export function assertSameOriginJavaScript(javascript) {
     if (javascript.includes(marker)) {
       throw new Error(`Same-origin Live bundle contains forbidden marker: ${marker}`)
     }
-  }
-  if (!javascript.includes(REQUIRED_DATA_AS_OF_DATE)) {
-    throw new Error(
-      `Same-origin Live bundle does not contain required data cutoff: ${REQUIRED_DATA_AS_OF_DATE}`,
-    )
   }
 }
 
@@ -47,9 +42,9 @@ export async function checkSameOriginBundle(distDirectory = resolve('dist')) {
   if (process.env.VITE_API_BASE_URL !== '') {
     throw new Error('Same-origin bundle verification requires an explicitly empty VITE_API_BASE_URL.')
   }
-  if (process.env.VITE_DATA_AS_OF_DATE !== REQUIRED_DATA_AS_OF_DATE) {
+  if (process.env.VITE_DATA_AS_OF_DATE !== '') {
     throw new Error(
-      `Same-origin bundle verification requires VITE_DATA_AS_OF_DATE=${REQUIRED_DATA_AS_OF_DATE}.`,
+      'Same-origin Live bundle requires an empty VITE_DATA_AS_OF_DATE (no frozen cutoff).',
     )
   }
 

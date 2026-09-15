@@ -211,7 +211,8 @@ async def test_bounded_candidate_cannot_invent_missing_indicator_triggers(
     assert outcome.strategy is None
     assert outcome.candidate_provenance is None
     assert outcome.clarification is not None
-    assert "不会替你补默认触发规则" in outcome.clarification
+    assert outcome.clarification == "你说的指标在什么情况下触发交易？"
+    assert not outcome.run_requested
 
 
 @pytest.mark.asyncio
@@ -256,7 +257,8 @@ async def test_all_bounded_candidates_fail_with_one_directional_clarification_an
 
     assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
     assert outcome.diagnostic_code == "candidate_batch_no_valid_strategy"
-    assert "买入条件、卖出条件和回测区间" in (outcome.clarification or "")
+    assert outcome.clarification == "候选尚未通过规则校验，需要确认其中的含义。"
+    assert outcome.strategy is None and not outcome.run_requested
     assert [item.candidate_rank for item in outcome.candidate_rejections] == [1, 2]
 
 
@@ -370,6 +372,17 @@ async def test_exit_join_matrix_never_rewrites_position_aware_and_as_first_of(
             as_of_date=date(2026, 8, 30),
         )
     )
+
+    if join == "all" and {left_name, right_name} == {"take_profit", "stop_loss"}:
+        assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+        assert outcome.strategy is None
+        assert outcome.strategy_hash is None
+        assert outcome.diagnostic_code == "candidate_batch_no_valid_strategy"
+        assert outcome.candidate_rejections[0].diagnostic_code == (
+            "strategy_validation_failed:ValidationError"
+        )
+        assert not outcome.run_requested
+        return
 
     both_are_market_conditions = all(
         isinstance(item, (IndicatorIntent, EventIntent)) for item in (left, right)

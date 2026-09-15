@@ -265,7 +265,7 @@ def test_editor_none_failure_preserves_original_revision_input_settings_and_hist
     assert payload["revision"] == initial["revision"]
     assert payload["diagnostic_code"] == "strategy_edit_unavailable"
     assert payload["assistant_message"] == (
-        "本次修改未完成校验，原策略已保留。请重试这条修改，尚未执行新回测。"
+        "策略修改服务暂时未能返回可用结果。原策略已保留，尚未启动新回测，请稍后重试。"
     )
     assert payload["execution_settings"] == initial["execution_settings"]
     assert not payload.get("run_requested") and not payload.get("refresh_data")

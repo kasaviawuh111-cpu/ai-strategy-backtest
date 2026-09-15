@@ -244,6 +244,7 @@ def run(
     source_calendar_dates: tuple[date, ...] | None = None,
     provider_entry_timeline: tuple[SignalFact | None, ...] | None = None,
     provider_exit_timeline: tuple[SignalFact | None, ...] | None = None,
+    risk_price_rebases=None,
 ):
     actual_bars = source_bars or bars()
     actual_sessions = source_sessions or sessions(actual_bars)
@@ -262,6 +263,7 @@ def run(
             events=source_events,
             provider_entry_timeline=provider_entry_timeline,
             provider_exit_timeline=provider_exit_timeline,
+            risk_price_rebases=risk_price_rebases,
             corporate_actions=source_actions,
             benchmark_close=benchmark_close,
             benchmark_equity=benchmark_equity,
@@ -307,6 +309,107 @@ def _provider_fact(
     )
 
 
+@pytest.mark.parametrize("accumulate,expected_buys", [(False, 1), (True, 2)])
+@pytest.mark.parametrize("state", [False, True])
+def test_entry_policy_new_occurrences_can_accumulate_and_exit_total(accumulate, expected_buys, state):
+    source = bars(("10",) * 7)
+    spec = strategy(end_offset=6)
+    if state:
+        spec = spec.model_copy(update={"entry": spec.entry.model_copy(update={"trigger": "price_above"})})
+    if accumulate:
+        spec = spec.model_copy(update={"execution": DailyExecutionPolicy(position_policy="accumulate_on_new_entry_signal")})
+    result = run(source_bars=source, spec=spec,
+        provider_entry_timeline=tuple(_provider_fact(bar, condition_ref="entry",
+            triggered=i in ((0, 1, 3, 4) if state else (0, 3))) for i, bar in enumerate(source)),
+        provider_exit_timeline=tuple(_provider_fact(bar, condition_ref="exit", triggered=i == 5)
+            for i, bar in enumerate(source)),
+        config=DailyBacktestConfig(allocation_ratio=Decimal("0.5"), capacity_mode=CapacityMode.UNLIMITED,
+                                  slippage_bps=Decimal(0)))
+    buys = [fill for fill in result.fills if fill.side is OrderSide.BUY]
+    sells = [fill for fill in result.fills if fill.side is OrderSide.SELL]
+    assert len(buys) == expected_buys and len(sells) == 1
+    assert sells[0].quantity.value == sum(fill.quantity.value for fill in buys)
+
+
+def test_pending_accumulation_yields_to_close_confirmed_account_exit():
+    source = bars(("10", "10", "8", "8", "8", "8"))
+    signal = tuple(replace(bar, price_basis=PriceBasis.BACK_ADJUSTED) for bar in source)
+    spec = risk_strategy(
+        PositionReturnExit(trigger="stop_loss", threshold_pct=10),
+        end=source[-1].session_date,
+    ).model_copy(
+        update={
+            "execution": DailyExecutionPolicy(
+                position_policy="accumulate_on_new_entry_signal"
+            )
+        }
+    )
+    controls = list(sessions(source))
+    controls[2] = replace(controls[2], upper_limit=source[2].open)
+    result = run(
+        source_bars=source,
+        source_signal_bars=signal,
+        source_sessions=tuple(controls),
+        spec=spec,
+        provider_entry_timeline=tuple(
+            _provider_fact(bar, condition_ref="entry", triggered=index in (0, 1))
+            for index, bar in enumerate(source)
+        ),
+        config=DailyBacktestConfig(
+            allocation_ratio=Decimal("0.5"),
+            capacity_mode=CapacityMode.UNLIMITED,
+            slippage_bps=Decimal(0),
+            edge_entry_validity_sessions=3,
+        ),
+    )
+
+    assert [(fill.side, fill.trading_date) for fill in result.fills] == [
+        (OrderSide.BUY, source[1].session_date),
+        (OrderSide.SELL, source[3].session_date),
+    ]
+    cancelled_add = next(
+        decision
+        for decision in result.decisions
+        if decision.side is OrderSide.BUY and decision.status is DecisionStatus.CANCELLED
+    )
+    assert cancelled_add.attempts == 1
+    assert cancelled_add.outcome_reason == (
+        "opposite_exit_signal_invalidated_entry:position_return_exit:stop_loss:10.0pct"
+    )
+
+
+@pytest.mark.parametrize("side", [OrderSide.BUY, OrderSide.SELL])
+@pytest.mark.parametrize("failure", ["suspended", "price_limit", "capacity", "no_market_trades"])
+def test_default_indicator_order_failure_does_not_replay_old_signal(side, failure):
+    source = list(bars(("10",) * 7))
+    target = 1 if side is OrderSide.BUY else 3
+    if failure == "capacity":
+        source[target - 1] = replace(source[target - 1], volume=Quantity.zero())
+    elif failure == "no_market_trades":
+        source[target] = replace(source[target], volume=Quantity.zero(), turnover=Decimal(0))
+    controls = list(sessions(tuple(source)))
+    if failure == "suspended":
+        controls[target] = replace(controls[target], status=TradingStatus.SUSPENDED)
+    elif failure == "price_limit":
+        field = "upper_limit" if side is OrderSide.BUY else "lower_limit"
+        controls[target] = replace(controls[target], **{field: source[target].open})
+    result = run(source_bars=tuple(source), source_sessions=tuple(controls),
+        spec=strategy(end_offset=6),
+        provider_entry_timeline=tuple(_provider_fact(bar, condition_ref="entry", triggered=i == 0)
+                                      for i, bar in enumerate(source)),
+        provider_exit_timeline=tuple(_provider_fact(bar, condition_ref="exit", triggered=i == 2)
+                                     for i, bar in enumerate(source)))
+    # A single historical signal cannot silently create later DAY orders.
+    assert not [fill for fill in result.fills if fill.side is side]
+    decision = next(item for item in result.decisions if item.side is side)
+    assert decision.status is DecisionStatus.UNFILLED
+    assert decision.attempts <= 1
+    if failure == "suspended":
+        assert decision.outcome_reason == "security_not_trading"
+    elif failure == "no_market_trades":
+        assert decision.outcome_reason == "no_market_trades"
+
+
 def test_provider_timelines_bypass_local_indicator_calculation() -> None:
     source_bars = bars(("10", "10", "10", "10", "10", "10"))
     entry = tuple(
@@ -340,6 +443,130 @@ def test_provider_timelines_bypass_local_indicator_calculation() -> None:
         signal.evidence[0].provider == "eastmoney_mx_finance_data"
         for signal in result.signals
     )
+
+
+@pytest.mark.parametrize("evidence_type,validation_status", [
+    ("skill_ohlcv_derived_indicator", "local_formula_on_point_in_time_rebases"),
+    ("skill_numeric_history", "provider_history_bound"),
+])
+def test_source_hashed_local_formula_timeline_is_valid_provider_mode_input(
+    evidence_type, validation_status,
+) -> None:
+    source_bars = bars(("10", "10", "10", "10", "10", "10"))
+
+    def derived(bar: DailyBar, *, triggered: bool) -> SignalFact:
+        fact = _provider_fact(bar, condition_ref="technical.ma@1.0.0", triggered=triggered)
+        return replace(fact, evidence=(SignalEvidence(
+            evidence_type=evidence_type,
+            evidence_id=f"derived:{bar.session_date}",
+            available_at=bar.available_at,
+            provider="eastmoney_mx_finance_data",
+            validation_status=validation_status,
+            raw_response_sha256="sha256:" + "c" * 64,
+        ),))
+
+    entry = tuple(derived(bar, triggered=index == 1)
+                  for index, bar in enumerate(source_bars))
+    exits = tuple(derived(bar, triggered=index == 3)
+                  for index, bar in enumerate(source_bars))
+    result = run(source_bars=source_bars, provider_entry_timeline=entry,
+                 provider_exit_timeline=exits)
+    assert [fill.side for fill in result.fills] == [OrderSide.BUY, OrderSide.SELL]
+
+    invalid = replace(entry[0], evidence=(replace(entry[0].evidence[0], raw_response_sha256=None),))
+    with pytest.raises(DailyBacktestInputError, match="auditable source provenance"):
+        run(source_bars=source_bars, provider_entry_timeline=(invalid, *entry[1:]),
+            provider_exit_timeline=exits)
+    unbound = replace(entry[0], evidence=(replace(entry[0].evidence[0], validation_status="unverified"),))
+    with pytest.raises(DailyBacktestInputError, match="auditable source provenance"):
+        run(source_bars=source_bars, provider_entry_timeline=(unbound, *entry[1:]),
+            provider_exit_timeline=exits)
+
+
+@pytest.mark.parametrize("both_true", [False, True])
+def test_market_only_all_exit_preserves_and_semantics_in_share_ledger(both_true):
+    spec = strategy()
+    below = spec.exit.children[0]
+    second = (below.model_copy(update={"params": {"period": 3, "price_field": "close"}})
+              if both_true else spec.entry)
+    spec = spec.model_copy(update={"exit": FirstOfExit(op="all", children=(below, second))})
+    result = run(spec=spec)
+    assert [fill.side for fill in result.fills] == (
+        [OrderSide.BUY, OrderSide.SELL] if both_true else [OrderSide.BUY])
+    assert bool(result.final_portfolio.position_quantity(INSTRUMENT).value) is not both_true
+
+
+@pytest.mark.parametrize("late_signal", [False, True])
+def test_all_holding_and_market_exit_needs_same_close_after_maturity(late_signal):
+    source_bars = bars(("10",) * 6)
+    spec = strategy()
+    spec = spec.model_copy(update={"exit": FirstOfExit(op="all",
+        children=(HoldingPeriodExit(sessions=2), spec.exit.children[0]))})
+    entry = tuple(_provider_fact(bar, condition_ref="entry", triggered=i == 0)
+                  for i, bar in enumerate(source_bars))
+    exits = tuple(_provider_fact(bar, condition_ref="exit", triggered=i == 2 or late_signal and i == 4)
+                  for i, bar in enumerate(source_bars))
+    result = run(spec=spec, source_bars=source_bars,
+                 provider_entry_timeline=entry, provider_exit_timeline=exits)
+    buys = [f for f in result.fills if f.side is OrderSide.BUY]
+    sells = [f for f in result.fills if f.side is OrderSide.SELL]
+    assert buys[0].trading_date == source_bars[1].session_date
+    assert [f.trading_date for f in sells] == ([source_bars[5].session_date] if late_signal else [])
+    if late_signal:
+        decision = next(d for d in result.decisions if d.side is OrderSide.SELL)
+        assert decision.signal.session_date == source_bars[4].session_date
+
+
+@pytest.mark.parametrize("late_profit", [False, True])
+def test_all_holding_and_profit_does_not_latch_earlier_profit(late_profit):
+    source = bars(("10", "10", "12", "10", "12" if late_profit else "10", "12"))
+    signal = tuple(replace(bar, price_basis=PriceBasis.BACK_ADJUSTED) for bar in source)
+    spec = strategy().model_copy(update={"exit": FirstOfExit(op="all", children=(
+        HoldingPeriodExit(sessions=2), PositionReturnExit(trigger="take_profit", threshold_pct=10)))})
+    entry = tuple(_provider_fact(bar, condition_ref="entry", triggered=i == 0) for i, bar in enumerate(source))
+    result = run(spec=spec, source_bars=source, source_signal_bars=signal, provider_entry_timeline=entry)
+    sells = [f for f in result.fills if f.side is OrderSide.SELL]
+    assert [f.trading_date for f in sells] == ([source[5].session_date] if late_profit else [])
+    if late_profit:
+        decision = next(d for d in result.decisions if d.side is OrderSide.SELL)
+        assert decision.signal.condition_ref == "all:account_and_market"
+        assert decision.signal.session_date == source[4].session_date
+
+
+def test_holding_target_uses_calendar_and_does_not_skip_missing_security_day():
+    complete = bars(("10",) * 6)
+    source = tuple(bar for i, bar in enumerate(complete) if i != 3)
+    spec = strategy().model_copy(update={"exit": FirstOfExit(children=(HoldingPeriodExit(sessions=2),))})
+    entry = tuple(_provider_fact(bar, condition_ref="entry", triggered=i == 0) for i, bar in enumerate(source))
+    with pytest.raises(DailyBacktestInputError, match="holding target market session has no security data"):
+        run(spec=spec, source_bars=source, provider_entry_timeline=entry,
+            source_calendar_dates=tuple(bar.session_date for bar in complete))
+
+
+@pytest.mark.parametrize("later_fall", [False, True])
+def test_raw_risk_anchor_rebases_on_ex_date_without_false_stop(later_fall):
+    from ashare_lab.application.minute_price_rebase import MinutePriceRebase
+    from tests.unit.portfolio.test_corporate_actions import _action
+    tail = "8.5" if later_fall else "9.5"
+    source = bars(("10", "10", "10", "10", "9.5", tail, tail))
+    dates = tuple(date(2025, 1, day) for day in (2, 3, 6, 7, 8, 9, 10))
+    source = tuple(replace(bar, session_date=day, available_at=datetime.combine(day, time(15), TZ))
+                   for bar, day in zip(source, dates))
+    action = replace(_action(CorporateActionKind.CASH_DIVIDEND, cash_per_share=Decimal(".5"), pay_date=dates[5]),
+                     record_date=dates[3], ex_date=dates[4])
+    factor = MinutePriceRebase(INSTRUMENT, action.ex_date, Decimal(".95"),
+                              datetime.combine(action.ex_date, time(9), TZ), "a" * 64)
+    spec = strategy(end_offset=6).model_copy(update={"exit": FirstOfExit(children=(
+        PositionReturnExit(trigger="stop_loss", threshold_pct=3),))})
+    spec = spec.model_copy(update={"backtest": spec.backtest.model_copy(update={"end": dates[-1]})})
+    entry = tuple(_provider_fact(bar, condition_ref="entry", triggered=i == 0) for i, bar in enumerate(source))
+    result = run(spec=spec, source_bars=source, provider_entry_timeline=entry,
+                 source_actions=(action,), risk_price_rebases=(factor,),
+                 source_calendar_dates=dates + (date(2025, 1, 13),))
+    sells = [f for f in result.fills if f.side is OrderSide.SELL]
+    assert [f.trading_date for f in sells] == ([source[6].session_date] if later_fall else [])
+    assert not any(s.triggered and s.session_date == action.ex_date and "stop_loss" in s.condition_ref
+                   for s in result.signals)
 
 
 def test_provider_mode_never_mixes_with_local_exit_calculation() -> None:
@@ -736,7 +963,8 @@ def test_holding_exit_waits_through_target_session_suspension() -> None:
     assert sell.attempts == 1
 
 
-def test_holding_exit_retries_after_target_session_one_price_limit_down() -> None:
+@pytest.mark.parametrize("ordinary_retry_budget", [1, 20])
+def test_holding_exit_retries_after_target_session_one_price_limit_down(ordinary_retry_budget) -> None:
     source = bars(closes=("10", "9", "11", "12", "12", "12", "12"))
     source_sessions = list(sessions(source))
     source_sessions[5] = replace(
@@ -749,6 +977,7 @@ def test_holding_exit_retries_after_target_session_one_price_limit_down() -> Non
         source_bars=source,
         source_sessions=tuple(source_sessions),
         spec=spec,
+        config=DailyBacktestConfig(max_exit_attempts=ordinary_retry_budget),
     )
 
     sell = next(item for item in result.decisions if item.side is OrderSide.SELL)
@@ -823,7 +1052,9 @@ def test_open_capacity_uses_only_the_previous_completed_session_volume() -> None
     source[expected_entry_index - 1] = replace(
         source[expected_entry_index - 1], volume=Quantity(1_000_000)
     )
-    source[expected_entry_index] = replace(source[expected_entry_index], volume=Quantity.zero())
+    # A traded session is required, but its final volume must not be used to
+    # size the pre-open order. The distinct zero-trade test covers no execution.
+    source[expected_entry_index] = replace(source[expected_entry_index], volume=Quantity(1))
 
     result = run(source_bars=tuple(source), source_sessions=sessions(tuple(source)))
 
@@ -913,15 +1144,17 @@ def test_full_path_is_deterministic_including_audit_hash() -> None:
     assert [event.sequence for event in first.orders[0].events] == [1, 2, 3, 4]
 
 
-def test_suspended_session_is_skipped_without_inventing_an_order() -> None:
+def test_suspended_target_session_ends_default_signal_without_inventing_an_order() -> None:
     source_bars = bars()
     result = run(
         source_bars=source_bars,
         source_sessions=sessions(source_bars, suspended_offsets=(3,)),
     )
 
-    assert result.fills[0].trading_date == START + timedelta(days=4)
-    assert result.decisions[0].attempts == 1
+    assert result.fills == ()
+    assert result.orders == ()
+    assert result.decisions[0].status is DecisionStatus.UNFILLED
+    assert result.decisions[0].outcome_reason == "security_not_trading"
 
 
 def test_late_signal_waits_until_the_first_open_after_availability() -> None:
@@ -1211,11 +1444,11 @@ def test_one_price_limit_up_is_an_audited_no_fill_under_default_policy() -> None
 
     assert result.fills == ()
     assert result.orders[0].match.reason_code == "one_price_limit_up"
-    assert result.decisions[0].status is DecisionStatus.NO_FUTURE_SESSION
+    assert result.decisions[0].status is DecisionStatus.UNFILLED
     assert result.decisions[0].attempts == 1
 
 
-def test_edge_entry_retries_with_new_day_orders_and_fills_on_third_session() -> None:
+def test_explicit_edge_validity_override_retries_with_new_day_orders() -> None:
     source = bars(closes=("10", "9", "11", "12", "12", "12", "12"))
     source_sessions = list(sessions(source))
     for offset in (3, 4):
@@ -1224,7 +1457,8 @@ def test_edge_entry_retries_with_new_day_orders_and_fills_on_third_session() -> 
             upper_limit=source[offset].open,
         )
 
-    result = run(source_bars=source, source_sessions=tuple(source_sessions))
+    result = run(source_bars=source, source_sessions=tuple(source_sessions),
+                 config=DailyBacktestConfig(edge_entry_validity_sessions=3))
     entry = result.decisions[0]
     entry_orders = tuple(
         trace for trace in result.orders if trace.order.decision_id == entry.decision_id

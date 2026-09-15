@@ -13,6 +13,7 @@ class ExecutionSettingsPatch(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
     slippage_bps: Decimal | None = Field(default=None, ge=0, le=1_000)
+    slippage_cny: Decimal | None = Field(default=None, ge=0)
     commission_rate: Decimal | None = Field(default=None, ge=0)
     minimum_commission_cny: Decimal | None = Field(default=None, ge=0)
     participation_rate: Decimal | None = Field(default=None, gt=0, le=1)

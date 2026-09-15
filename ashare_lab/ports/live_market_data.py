@@ -91,6 +91,14 @@ class LiveFinanceData(Protocol):
     ) -> LiveFinanceDataResult: ...
 
 
+class LiveRecoveringFinanceData(Protocol):
+    """Optional bounded current lookup across the configured Skill channels."""
+
+    async def query_current_finance(
+        self, *, query: str, indicators: str | None, asset_type: str = "A股",
+    ) -> LiveFinanceDataResult: ...
+
+
 class LiveScreenedFinanceData(Protocol):
     """Current screener-to-lookup composition; never a backtest repository."""
 

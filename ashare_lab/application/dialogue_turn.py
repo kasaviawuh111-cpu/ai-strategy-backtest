@@ -9,7 +9,9 @@ exit rule.
 
 from __future__ import annotations
 
+import logging
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
@@ -36,6 +38,9 @@ from ashare_lab.ports.clarification_dialogue import ClarificationDialogueTurn, C
 from ashare_lab.ports.instrument_resolution import InstrumentNameAmbiguous
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True, slots=True)
 class DialogueTurnPlan:
     """One state-aware routing decision and, when applicable, compiler turn."""
@@ -52,29 +57,112 @@ class DialogueTurnOrchestrator:
     def __init__(self, compiler: StrategyCompiler) -> None:
         self._compiler = compiler
 
+    async def classify_intent(self, *, state: DialogueState, answer: str) -> TurnIntent | None:
+        if (answer.strip() in state.available_option_ids or classify_clarification_turn(
+                answer, has_options=bool(state.available_option_ids)) is TurnIntent.SELECT_OPTION):
+            return None
+        classify = getattr(self._compiler, "classify_dialogue_intent", None)
+        if classify is None:
+            return None
+        return await classify(
+            original_input=state.compile_input, prior_outcome=state.outcome,
+            answer=answer, recent_turns=_model_recent_turns(state),
+            backtest_results=state.backtest_results,
+        )
+
     async def plan(
         self, *, state: DialogueState, answer: str, try_strategy_edit: bool = True,
+        semantic_intent: TurnIntent | None = None,
     ) -> DialogueTurnPlan:
+        # A current card ID is already an explicit selection, not prose for a
+        # model or an instrument-name lookup. Resolve against this revision only.
+        if answer.strip() in state.available_option_ids:
+            turn = await self._compiler.answer_clarification(
+                original_input=state.compile_input, prior_outcome=state.outcome,
+                answer=answer.strip(), recent_turns=_model_recent_turns(state),
+                semantic_intent=TurnIntent.SELECT_OPTION,
+            )
+            instrument = verified_instrument_symbol(turn.compile_input, turn.outcome)
+            return DialogueTurnPlan(
+                intent=TurnIntent.SELECT_OPTION, clarification_turn=turn,
+                verified_instrument=(_compiled_instrument_memory(
+                    instrument=instrument, outcome=turn.outcome, source="model_instrument_selection",
+                ) if turn.revision_changed and instrument is not None
+                    and instrument != state.verified_instrument_context else None),
+            )
         intent = classify_clarification_turn(
             answer,
             has_options=bool(state.available_option_ids),
         )
+        # Typed option IDs need no language interpretation. Other follow-ups
+        # use server-owned context before choosing data, strategy or chat work.
+        if semantic_intent is None:
+            semantic_intent = await self.classify_intent(state=state, answer=answer)
+        if semantic_intent is not None:
+            intent = semantic_intent
+        if intent is TurnIntent.SAFETY:
+            return DialogueTurnPlan(intent=intent, clarification_turn=
+                await self._compiler.safety_support_turn(
+                    original_input=state.compile_input, prior_outcome=state.outcome,
+                    answer=answer, recent_turns=_model_recent_turns(state),
+                ))
+        if intent is TurnIntent.VIEWPOINT:
+            return DialogueTurnPlan(intent=intent, clarification_turn=
+                await self._compiler.viewpoint_support_turn(
+                    original_input=state.compile_input, prior_outcome=state.outcome,
+                    answer=answer, recent_turns=_model_recent_turns(state),
+                ))
+        if (state.pending_slot in {"candidate_data_not_ready", "candidate_data_incomplete"}
+                and intent is not TurnIntent.SELECT_OPTION
+                and self._compiler.has_clarification_dialogue
+                and intent not in _FRESH_STRATEGY_INTENTS):
+            # Retained failed choices are recovery inputs, never selectable
+            # options. Let the existing model distinguish retry from reselection.
+            return await self._plan_instrument_choice(state=state, answer=answer, intent=intent)
+        if semantic_intent in {TurnIntent.CASUAL, TurnIntent.CANCEL, TurnIntent.UNKNOWN}:
+            assert semantic_intent is not None
+            message = await self._compiler.compose_dialogue_response(
+                answer=answer,
+                question=("先回答本轮日常问题，末尾用一句非强制邀请接回当前策略修改；"
+                          "不要求补充参数，不重复旧问题，不启动回测。"
+                          if semantic_intent is TurnIntent.CASUAL else ""),
+                recent_turns=_model_recent_turns(state),
+                context=(f"当前意图：{semantic_intent.value}。已保存交易想法："
+                         f"{state.compile_input.utterance}。待补充项："
+                         f"{state.outcome.clarification or '无'}。"
+                         "自然承接本轮表达，不修改或执行策略。用户暂不想继续时尊重暂停；"
+                         "先直接回答用户的日常问题，再用一句自然的话接回当前策略；"
+                         "已有待改条件就接着该条件，没有缺项可邀请调整买卖条件，"
+                         "不要重复要求已提供的股票或规则，也不要把闲聊当作确认执行。"
+                         "意图不明确时只询问必要问题。不得声称已删除、取消后台任务或修改条件。"),
+            )
+            return DialogueTurnPlan(intent=intent, clarification_turn=ClarificationTurnOutcome(
+                reply_kind="clarification", assistant_message=message,
+                outcome=replace(state.outcome, run_requested=False, refresh_data=False),
+                compile_input=state.compile_input, revision_changed=False,
+            ))
         route = state.outcome.idea_route
-        if (route is not None and route.proposals
+        if (semantic_intent is None and route is not None and route.proposals
                 and all(item.strategy_template is not None for item in route.proposals)
                 and any(item.instrument_symbol is not None for item in route.proposals)
                 and _REUSE_REJECT_RE.fullmatch(answer.strip()) is not None):
             return await self._detach_idea_instruments(state=state, answer=answer, intent=intent)
         if try_strategy_edit:
-            edited = await self.plan_strategy_edit(state=state, answer=answer)
+            edited = await self.plan_strategy_edit(
+                state=state, answer=answer, semantic_intent=semantic_intent,
+            )
             if edited is not None:
                 return edited
 
         # A stock plus a pause/run instruction is one semantic choice. Do not
         # send prose through the name-shaped fast path or repeat the old prompt.
         if (self._compiler.has_clarification_dialogue
-                and state.pending_slot in {"instrument_required", "instrument_reuse_confirmation"}
-                and intent not in {*_FRESH_STRATEGY_INTENTS, TurnIntent.DATA_QUERY}
+                and state.pending_slot in {
+                    "instrument_required", "instrument_reuse_confirmation",
+                    "instrument_unconfirmed", "instrument_resolution_unavailable",
+                    "idea_instrument_extraction_unavailable",
+                }
+                and intent not in _FRESH_STRATEGY_INTENTS
                 and _REUSE_ACCEPT_RE.fullmatch(answer.strip()) is None
                 and _REUSE_REJECT_RE.fullmatch(answer.strip()) is None):
             return await self._plan_instrument_choice(state=state, answer=answer, intent=intent)
@@ -88,7 +176,26 @@ class DialogueTurnOrchestrator:
                 return DialogueTurnPlan(intent=TurnIntent.SUPPLEMENT, clarification_turn=followup)
             return DialogueTurnPlan(intent=intent)
 
+        if (state.outcome.status is CompileStatus.UNSUPPORTED
+                and semantic_intent is TurnIntent.SUPPLEMENT):
+            # A rejected execution capability does not erase the user's intent.
+            # Give the model both turns; do not patch timeframes/conditions with
+            # lexical replacements or compile the isolated correction alone.
+            combined = (
+                "以下是同一策略的连续两轮输入。本轮明确修改的部分以本轮为准，"
+                "未修改的股票、条件和设置保留。\n"
+                f"原请求：{state.compile_input.utterance}\n本轮修改：{answer}"
+            )
+            continued = await self._plan_fresh_strategy(
+                state=state, answer=combined, intent=TurnIntent.NEW_STRATEGY,
+                semantic_intent=TurnIntent.NEW_STRATEGY,
+            )
+            if continued is not None:
+                return replace(continued, intent=TurnIntent.SUPPLEMENT)
+
         if intent is TurnIntent.CHANGE_INSTRUMENT:
+            if semantic_intent is not None:
+                return await self._plan_instrument_choice(state=state, answer=answer, intent=intent)
             target = extract_change_instrument_target(answer)
             if target is not None:
                 instrument = await self._compiler.resolve_instrument_context(target)
@@ -123,7 +230,8 @@ class DialogueTurnOrchestrator:
                 intent=intent,
             )
 
-        if intent is TurnIntent.UNKNOWN and _may_be_instrument_answer(state, answer):
+        if (semantic_intent is None and intent is TurnIntent.UNKNOWN
+                and _may_be_instrument_answer(state, answer)):
             instrument = await self._compiler.resolve_instrument_context(answer)
             if instrument is not None:
                 return DialogueTurnPlan(
@@ -144,6 +252,7 @@ class DialogueTurnOrchestrator:
                 state=state,
                 answer=answer,
                 intent=intent,
+                semantic_intent=semantic_intent,
             )
             if fresh_plan is not None:
                 return fresh_plan
@@ -160,6 +269,7 @@ class DialogueTurnOrchestrator:
             prior_outcome=state.outcome,
             answer=answer,
             recent_turns=_model_recent_turns(state),
+            semantic_intent=semantic_intent,
         )
         instrument = verified_instrument_symbol(turn.compile_input, turn.outcome)
         return DialogueTurnPlan(
@@ -172,13 +282,21 @@ class DialogueTurnOrchestrator:
 
     async def plan_strategy_edit(
         self, *, state: DialogueState, answer: str, explicit_edit: bool = False,
+        semantic_intent: TurnIntent | None = None,
     ) -> DialogueTurnPlan | None:
-        intent = classify_clarification_turn(answer)
+        intent = semantic_intent or classify_clarification_turn(answer)
+        if semantic_intent in {
+            TurnIntent.CASUAL, TurnIntent.DATA_QUERY, TurnIntent.CANCEL,
+            TurnIntent.UNKNOWN, TurnIntent.SAFETY, TurnIntent.VIEWPOINT,
+        }:
+            # An editor must not override an already classified non-edit turn,
+            # even when the user entered through the edit UI.
+            return None
         if not explicit_edit and intent in {
             TurnIntent.CANCEL, TurnIntent.VAGUE_STRATEGY,
         }:
             return None
-        if not explicit_edit and intent is TurnIntent.VIEWPOINT and not state.backtest_results:
+        if intent is TurnIntent.VIEWPOINT:
             return None
         turn = await self._compiler.edit_current_strategy(
             original_input=state.compile_input, prior_outcome=state.outcome,
@@ -202,23 +320,30 @@ class DialogueTurnOrchestrator:
         state: DialogueState,
         answer: str,
         intent: TurnIntent,
+        semantic_intent: TurnIntent | None = None,
     ) -> DialogueTurnPlan | None:
         """Compile a fresh sentence without silently inheriting the old symbol."""
 
-        unsupported_timeframe = (
-            state.outcome.status is CompileStatus.UNSUPPORTED
-            and state.outcome.diagnostic_code == "non_daily_timeframe_not_supported"
+        unsupported_strategy = state.outcome.status is CompileStatus.UNSUPPORTED
+        confirmed_idea_instrument = (
+            state.outcome.pending_idea_instrument is not None
+            and state.outcome.pending_idea_instrument == state.verified_instrument_context
         )
         pending_instrument = (
             state.verified_instrument_context
             if intent is TurnIntent.NEW_STRATEGY
-            and (state.outcome.idea_route is not None or unsupported_timeframe)
+            # Unchosen fallback suggestions are not a user-selected strategy.
+            # A genuinely fresh strategy must use the bounded instrument memory
+            # and ask before reuse; an incidental idea_route cannot extend it.
+            and (state.outcome.selected_idea_proposal is not None
+                 or confirmed_idea_instrument or unsupported_strategy)
             and state.outcome.strategy is None else None
         )
         compile_input = CompileInput(
             utterance=answer.strip(),
             instrument_context=pending_instrument,
             as_of_date=state.compile_input.as_of_date,
+            semantic_intent=semantic_intent.value if semantic_intent is not None else None,
         )
         remembered = state.pending_instrument_reuse or state.last_verified_instrument
         if (
@@ -239,8 +364,14 @@ class DialogueTurnOrchestrator:
                 and outcome.diagnostic_code == "instrument_context_mismatch"):
             compile_input = replace(compile_input, instrument_context=None)
             outcome = await self._compiler.compile(compile_input)
+        # A failed/incomplete rule translation is not evidence that its stock
+        # was omitted. Use the same server-verified recovery as the first turn
+        # before offering a stock from conversation memory.
+        compile_input, outcome = await self._compiler.recover_unsupported_identity(
+            compile_input, outcome,
+        )
         if (outcome.status not in {CompileStatus.READY, CompileStatus.NEEDS_CLARIFICATION}
-                and not (unsupported_timeframe and outcome.status is CompileStatus.UNSUPPORTED)):
+                and not (unsupported_strategy and outcome.status is CompileStatus.UNSUPPORTED)):
             return None
 
         instrument = verified_instrument_symbol(compile_input, outcome)
@@ -259,7 +390,9 @@ class DialogueTurnOrchestrator:
                 ),
             )
 
-        if remembered is not None and state.pending_slot != "instrument_required":
+        if (remembered is not None and state.pending_slot != "instrument_required"
+                and outcome.diagnostic_code == "instrument_required"
+                and not has_explicit_idea_instrument_reference(answer)):
             return await _instrument_reuse_confirmation(
                 compiler=self._compiler,
                 intent=intent,
@@ -278,23 +411,28 @@ class DialogueTurnOrchestrator:
 
     async def _detach_idea_instruments(
         self, *, state: DialogueState, answer: str, intent: TurnIntent,
+        message: str | None = None, recommend: bool = False,
     ) -> DialogueTurnPlan:
         """Keep the generated rules while the user supplies their own stock."""
         route = state.outcome.idea_route
         assert route is not None
-        message = await self._compiler.compose_dialogue_response(
+        message = message or await self._compiler.compose_dialogue_response(
             answer=answer, question="你想用哪只股票？告诉我名称或代码就行。",
             context="用户决定自己选股票；保留现有三个策略方向，不重新推荐股票，等待用户输入。",
             recent_turns=_model_recent_turns(state),
         )
         outcome = replace(
             state.outcome, status=CompileStatus.NEEDS_CLARIFICATION,
-            clarification=message, diagnostic_code="idea_guidance_required",
-            instrument_suggestion_declined=True,
+            clarification=message, diagnostic_code=(
+                "candidate_reselection_requested" if recommend else "idea_guidance_required"
+            ),
+            instrument_suggestion_declined=not recommend,
+            stock_recommendations=(), instrument_candidates=(),
+            run_requested=False, refresh_data=False,
             strategy=None, strategy_hash=None, revision_base_strategy=None,
             suggested_strategy=None, suggested_strategy_hash=None,
             suggested_strategy_choice_id=None, suggested_strategy_note=None,
-            selected_idea_proposal=None,
+            selected_idea_proposal=None, pending_idea_instrument=None,
             candidate_grounding=tuple(
                 item for item in state.outcome.candidate_grounding
                 if not item.path.startswith("/instrument")
@@ -319,7 +457,13 @@ class DialogueTurnOrchestrator:
             intent=intent,
             clarification_turn=ClarificationTurnOutcome(
                 reply_kind="accepted", assistant_message=message, outcome=outcome,
-                compile_input=replace(state.compile_input, instrument_context=None),
+                compile_input=replace(
+                    state.compile_input, instrument_context=None,
+                    utterance=answer.strip() if recommend else state.compile_input.utterance,
+                    idea_context=(*state.compile_input.idea_context,
+                                  f"此前交易想法：{state.compile_input.utterance}")
+                    if recommend else state.compile_input.idea_context,
+                ),
                 revision_changed=True,
             ),
         )
@@ -406,7 +550,7 @@ class DialogueTurnOrchestrator:
         )
         outcome = state.outcome
         if assessment is None:
-            message = "对话模型这次未能返回有效回复，请重试这条补充；原规则已保留。"
+            message = "这次没能完成回复。你的方案和输入都已保留，可以直接重试。"
         else:
             message = assessment.natural_reply
             # Unclear/ordinary dialogue never grants execution authority.
@@ -416,6 +560,15 @@ class DialogueTurnOrchestrator:
             )
             name = assessment.instrument_name
             chosen = choices.get(assessment.selected_option_id or "")
+            _LOGGER.info(
+                "instrument_choice_assessment pending_slot=%s reply_kind=%s "
+                "instrument_selected=%s name_present=%s name_in_answer=%s "
+                "known_option=%s strategy_inspiration=%s recommendation_requested=%s",
+                state.pending_slot, assessment.reply_kind, assessment.instrument_selected,
+                name is not None, bool(name is not None and name in answer),
+                chosen is not None, assessment.strategy_inspiration is not None,
+                assessment.instrument_recommendation_requested,
+            )
             if (assessment.reply_kind == "preference"
                     and (chosen is not None or (
                         assessment.instrument_selected and name is not None and name in answer
@@ -434,13 +587,25 @@ class DialogueTurnOrchestrator:
                     message = f"你说的“{name}”，是{labels}中的哪只？"
                 except (OSError, TimeoutError):
                     instrument = None
-                    message = "股票名称查询中断，暂时无法确认输入是否有效；请检查名称或代码后重试。原规则已保留。"
+                    message = (
+                        "股票名称查询中断，暂时无法确认输入是否有效；"
+                        "请检查名称或代码后重试。原规则已保留。"
+                    )
                 except LookupError:
                     instrument = None
                     message = f"未找到“{name}”对应的 A 股，请修改股票名称或代码。原规则已保留。"
                 if instrument is not None:
+                    binding_state = state
+                    if (state.pending_slot in {"candidate_data_not_ready", "candidate_data_incomplete"}
+                            and outcome.idea_route is not None):
+                        # A newly supplied stock must still pass candidate
+                        # preparation; do not turn a retained selected template
+                        # straight into READY while its old cards were hidden.
+                        binding_state = replace(state, outcome=replace(
+                            outcome, selected_idea_proposal=None,
+                        ))
                     turn = await self._apply_instrument(
-                        state=state, instrument=instrument, assistant_message=message,
+                        state=binding_state, instrument=instrument, assistant_message=message,
                     )
                     ready = turn.outcome.status is CompileStatus.READY
                     return DialogueTurnPlan(
@@ -475,11 +640,74 @@ class DialogueTurnOrchestrator:
                     ),
                 )
                 remembered = None
+            elif assessment.instrument_recommendation_requested:
+                if outcome.idea_route is not None:
+                    return await self._detach_idea_instruments(
+                        state=state, answer=answer, intent=TurnIntent.CHANGE_INSTRUMENT,
+                        message=message, recommend=True,
+                    )
+                if (outcome.selected_idea_proposal is None
+                        and state.pending_slot in {
+                            "instrument_unconfirmed", "instrument_resolution_unavailable",
+                            "idea_instrument_extraction_unavailable",
+                        }):
+                    # No validated template exists after identity failure.
+                    # Carry the original style as context, while the latest
+                    # explicit request now authorizes choosing other stocks.
+                    request = CompileInput(
+                        utterance=answer.strip(), as_of_date=state.compile_input.as_of_date,
+                        semantic_intent="vague_strategy",
+                        idea_inspiration=state.compile_input.utterance,
+                        idea_context=(
+                            "此前股票身份未完成核对，本轮用户明确改为请求推荐股票。"
+                            "只保留此前策略风格与设置意图，不沿用此前未核实的股票，"
+                            "不声称已有可执行规则；先给可编辑策略方向。",
+                        ),
+                    )
+                    generated = await self._compiler.compile(request)
+                    return DialogueTurnPlan(
+                        intent=TurnIntent.CHANGE_INSTRUMENT,
+                        clarification_turn=ClarificationTurnOutcome(
+                            reply_kind="clarification", outcome=generated,
+                            assistant_message=generated.clarification or message,
+                            compile_input=request, revision_changed=True,
+                        ),
+                    )
+                # Asking for candidates is independent of permission to execute.
+                # Reopen the existing verified sample-offer path, preserving the
+                # selected template and never treating a recommendation as a choice.
+                outcome = replace(
+                    outcome, instrument_suggestion_declined=False,
+                    run_requested=False, refresh_data=False,
+                    pending_edit_run_requested=False, pending_edit_refresh_data=False,
+                )
+                return DialogueTurnPlan(
+                    intent=TurnIntent.CHANGE_INSTRUMENT,
+                    clarification_turn=ClarificationTurnOutcome(
+                        reply_kind="clarification", assistant_message=message,
+                        outcome=outcome, compile_input=state.compile_input,
+                        revision_changed=True,
+                    ),
+                )
+            elif assessment.requires_new_data:
+                return DialogueTurnPlan(intent=TurnIntent.DATA_QUERY)
             elif ((assessment.run_requested is False and assessment.strategy_inspiration is None)
                   or assessment.reply_kind == "cancelled"):
                 outcome = replace(
                     outcome, run_requested=False, refresh_data=False,
                     pending_edit_run_requested=False, pending_edit_refresh_data=False,
+                )
+            elif state.pending_slot in {"candidate_data_not_ready", "candidate_data_incomplete"}:
+                # A model-confirmed retry only reopens preparation of the same
+                # stock/date/template; it does not select or execute a strategy.
+                return DialogueTurnPlan(
+                    intent=TurnIntent.SUPPLEMENT,
+                    clarification_turn=ClarificationTurnOutcome(
+                        reply_kind="clarification", assistant_message=message,
+                        outcome=replace(outcome, run_requested=False, refresh_data=False),
+                        compile_input=state.compile_input,
+                        revision_changed=assessment.reply_kind == "preference",
+                    ),
                 )
             else:
                 # A missing stock does not turn every later message into a
@@ -591,7 +819,7 @@ _REUSE_REJECT_RE = re.compile(
     r"重新选|另选|我自己选|我自己选股票|用我自己的股票)[。！!]*$"
 )
 _FRESH_STRATEGY_INTENTS = frozenset(
-    {TurnIntent.NEW_STRATEGY, TurnIntent.VAGUE_STRATEGY, TurnIntent.VIEWPOINT}
+    {TurnIntent.NEW_STRATEGY, TurnIntent.VAGUE_STRATEGY}
 )
 
 
@@ -659,9 +887,18 @@ def _resolved_instrument_memory(
     target: str,
     source: str,
 ) -> VerifiedInstrumentMemory:
+    # The resolver has already checked name/code agreement. Keep the original
+    # evidence, but do not repeat its ticker in the display-name field.
+    label = unicodedata.normalize("NFKC", target).strip()
+    code = rf"{re.escape(instrument[:6])}(?:\.{re.escape(instrument[-2:])})?"
+    name_pattern = r"[\u4e00-\u9fffA-Za-z*·\-]{2,20}"
+    pair = re.fullmatch(rf"(?P<name>{name_pattern})\s*\(?\s*{code}\s*\)?", label, re.I) or re.fullmatch(
+        rf"{code}\s*\(?\s*(?P<name>{name_pattern})\s*\)?", label, re.I,
+    )
     return VerifiedInstrumentMemory(
         symbol=instrument,
-        name=None if _SECURITY_CODE_RE.fullmatch(target) is not None else target,
+        name=(pair.group("name") if pair else
+              None if _SECURITY_CODE_RE.fullmatch(target) is not None else target),
         source=source,
         verified_at=datetime.now(UTC),
         evidence=target,

@@ -26,6 +26,13 @@ from ashare_lab.application.compile_strategy import StrategyCompiler
 from ashare_lab.bootstrap import create_configured_app
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
+from ashare_lab.ports.current_fact_research import (
+    CurrentFactResearchRequest,
+    CurrentFactResearchResult,
+    ResearchFact,
+    ResearchPurpose,
+    ResearchSource,
+)
 from ashare_lab.ports.idea_routing import IdeaAssetMapping, IdeaProposal, IdeaRoute
 from ashare_lab.settings import AppSettings
 
@@ -48,9 +55,11 @@ def _settings(tmp_path: Path, **overrides: object) -> AppSettings:
         "market_data_profile": "generic_parquet",
         "session_reference_mode": "research_300059",
         "event_data_required": False,
+        "mx_saas_api_key": "",  # Do not read the workstation's installed Skill credential.
     }
     values.update(overrides)
-    return AppSettings(**values)
+    # Composition fixtures must not inherit the developer's real search keys.
+    return AppSettings(_env_file=None, **values)
 
 
 def _draft(utterance: str) -> dict[str, str]:
@@ -99,6 +108,45 @@ def _macd_batch() -> dict[str, object]:
                 "confidence": 0.91,
             }
         ]
+    }
+
+
+def _semantic_review_payload(request: CandidateTransportRequest) -> dict[str, object]:
+    """Return typed fixture evidence only for the candidate's two known clauses."""
+    assert request.user_payload is not None
+    candidate = cast(dict[str, object], request.user_payload["candidate"])
+    assert (candidate["instrument_symbol"] or request.user_payload["instrumentContext"]) == (
+        "300059.SZ"
+    )
+    clauses = request.utterance.split("，")
+    assert len(clauses) in {2, 3}
+    assert "买入" in clauses[0] and "卖出" in clauses[1]
+    return {
+        "instrument": "equivalent",
+        "requested_bar_interval": "unspecified",
+        "differences": [],
+        "requirements": [
+            {
+                "candidate_path": f"/{side}/0",
+                "source_quote": clause,
+                "requested_meaning": clause,
+                "candidate_meaning": clause,
+                "status": "represented",
+            }
+            for side, clause in zip(("entry", "exit"), clauses[:2], strict=True)
+        ],
+    }
+
+
+def _reply_review_payload(request: CandidateTransportRequest) -> dict[str, object]:
+    assert request.user_payload is not None
+    assert request.user_payload["candidateExecutionState"] == (
+        "proposed_not_selected_or_executed"
+    )
+    return {
+        "facts": "supported",
+        "state_and_authority": "supported",
+        "user_intent_and_tone": "supported",
     }
 
 
@@ -282,6 +330,7 @@ def test_unconfigured_provider_keeps_fast_path_and_marks_long_tail_unavailable(
 ) -> None:
     settings = _settings(tmp_path)
     app = create_configured_app(settings)
+    assert app.state.container.compiler.has_clarification_dialogue is False
 
     with TestClient(app) as client:
         known = cast(
@@ -304,7 +353,9 @@ def test_unconfigured_provider_keeps_fast_path_and_marks_long_tail_unavailable(
     assert known.json()["candidate_provenance"] is None
     assert long_tail.status_code == 201
     assert long_tail.json()["status"] == "needs_clarification"
-    assert long_tail.json()["diagnostic_code"] == "idea_guidance_model_unavailable"
+    # An unknown theme needs research before model proposals; with both
+    # channels disabled its first unavailable dependency is the research path.
+    assert long_tail.json()["diagnostic_code"] == "idea_research_unavailable"
     assert long_tail.json()["idea_route"] is None
     assert app.state.candidate_provider_identity == {
         "provider": "disabled",
@@ -364,6 +415,23 @@ def test_configured_provider_is_model_first_for_a_complete_known_strategy(
         request: CandidateTransportRequest,
     ) -> dict[str, object]:
         calls.append(request)
+        if request.response_schema_name == "initial_dialogue_intent":
+            return {"intent": "new_strategy"}
+        if request.response_schema_name == "strategy_semantic_review":
+            return _semantic_review_payload(request)
+        if request.response_schema_name == "ashare_clarification_dialogue":
+            return {
+                "reply_kind": "question", "acknowledgement_id": "answer_question",
+                "natural_reply": "MACD 买卖规则已准备好，可以核对后再开始回测。",
+            }
+        if request.response_schema_name == "dialogue_reply_semantic_review":
+            assert request.user_payload is not None
+            assert "没有产生回测结果" in str(request.user_payload["contextSummary"])
+            return {
+                "facts": "supported", "state_and_authority": "supported",
+                "user_intent_and_tone": "supported",
+            }
+        assert request.response_schema_name == "ashare_bounded_strategy_candidates"
         return _macd_batch()
 
     async def deterministic_generate(
@@ -397,6 +465,10 @@ def test_configured_provider_is_model_first_for_a_complete_known_strategy(
 
     assert known.status_code == 201
     assert known.json()["status"] == "ready"
+    candidate_call = next(
+        request for request in calls
+        if request.response_schema_name == "ashare_bounded_strategy_candidates"
+    )
     assert known.json()["candidate_provenance"] == {
         "source": "bounded_provider",
         "provider": "fixture-gateway",
@@ -404,7 +476,7 @@ def test_configured_provider_is_model_first_for_a_complete_known_strategy(
         "prompt_version": "ashare-lab.bounded-candidate.prompt.v1",
         "schema_version": "ashare-lab.bounded-candidate.schema.v1",
         "capability_projection_version": "candidate-capabilities.v1",
-        "capability_projection_hash": calls[0].capability_projection_hash,
+        "capability_projection_hash": candidate_call.capability_projection_hash,
         "upstream_pattern_commit": "e90b6c6cd9fea23067a85667e7fbf74f9d73ea48",
         "candidate_rank": 1,
     }
@@ -412,16 +484,25 @@ def test_configured_provider_is_model_first_for_a_complete_known_strategy(
         "/entry/0",
         "/exit/0",
     ]
-    assert len(calls) == 1
-    assert calls[0].max_candidates == 3
-    assert calls[0].capability_projection_version == "candidate-capabilities.v1"
+    assert [request.response_schema_name for request in calls] == [
+        "initial_dialogue_intent",
+        "ashare_bounded_strategy_candidates",
+        "strategy_semantic_review",
+        "ashare_clarification_dialogue",
+        "dialogue_reply_semantic_review",
+    ]
+    assert known.json()["assistant_message"] == (
+        "MACD 买卖规则已准备好，可以核对后再开始回测。"
+    )
+    assert candidate_call.max_candidates == 1
+    assert candidate_call.capability_projection_version == "candidate-capabilities.v1"
     indicator_ids = {
         item["indicator_id"]  # type: ignore[index]
-        for item in calls[0].capability_matrix["indicators"]  # type: ignore[union-attr]
+        for item in candidate_call.capability_matrix["indicators"]  # type: ignore[union-attr]
     }
     event_codes = {
         item["event_code"]  # type: ignore[index]
-        for item in calls[0].capability_matrix["events"]  # type: ignore[union-attr]
+        for item in candidate_call.capability_matrix["events"]  # type: ignore[union-attr]
     }
     assert "technical.macd" in indicator_ids
     assert "event.financial_results.annual_report" in event_codes
@@ -509,12 +590,15 @@ def test_configured_app_uses_dedicated_plan_deep_transport_for_strategy_advice(
         *,
         capability_matrix: CandidateCapabilityMatrix,
         provider_identity: CandidateProviderIdentityView,
+        model_semantic_review: bool,
     ) -> VibeVerifiedFactStrategyAdvisor:
+        assert model_semantic_review is True
         captured.append(transport)
         return original_advisor(
             transport,
             capability_matrix=capability_matrix,
             provider_identity=provider_identity,
+            model_semantic_review=model_semantic_review,
         )
 
     monkeypatch.setattr(
@@ -526,14 +610,19 @@ def test_configured_app_uses_dedicated_plan_deep_transport_for_strategy_advice(
     def capture_review_advisor(
         transport: OpenAICompatibleCandidateTransport,
         *,
+        review_transport: OpenAICompatibleCandidateTransport,
         capability_matrix: CandidateCapabilityMatrix,
         provider_identity: CandidateProviderIdentityView,
+        model_semantic_review: bool,
     ) -> VibeBacktestReviewAdvisor:
+        assert model_semantic_review is True
         review_captured.append(transport)
         return original_review_advisor(
             transport,
+            review_transport=review_transport,
             capability_matrix=capability_matrix,
             provider_identity=provider_identity,
+            model_semantic_review=model_semantic_review,
         )
 
     monkeypatch.setattr(
@@ -574,6 +663,7 @@ def test_configured_app_uses_dedicated_plan_deep_transport_for_strategy_advice(
             provider="deepseek",
             model="deepseek-v4-flash",
         )
+        | {"timeout_fallback_model": "deepseek-v4-pro"}
     )
     assert app.state.language_provider_diagnostics["strategy_advice"] == (
         _profile_diagnostic(
@@ -607,9 +697,16 @@ def test_vague_strategy_uses_dedicated_plan_deep_transport_and_compiler_gate(
         request: CandidateTransportRequest,
     ) -> dict[str, object]:
         calls.append((transport.identity.model, request))
+        if request.response_schema_name == "initial_dialogue_intent":
+            return {"intent": "vague_strategy"}
+        if request.response_schema_name == "strategy_semantic_review":
+            return _semantic_review_payload(request)
+        if request.response_schema_name == "dialogue_reply_semantic_review":
+            return _reply_review_payload(request)
         properties = cast(dict[str, object], request.response_schema["properties"])
         if "proposals" in properties:
             return _idea_payload()
+        assert request.response_schema_name == "ashare_bounded_strategy_candidates"
         return _idea_candidate_batch(request.utterance)
 
     monkeypatch.setattr(OpenAICompatibleCandidateTransport, "generate_json", generate_json)
@@ -648,21 +745,28 @@ def test_vague_strategy_uses_dedicated_plan_deep_transport_and_compiler_gate(
     assert payload["diagnostic_code"] == "idea_guidance_required"
     assert payload["idea_route"]["provenance"]["provider"] == "deepseek"
     assert payload["idea_route"]["provenance"]["model"] == "deepseek-v4-pro"
-    assert payload["idea_route"]["provenance"]["prompt_version"] == "idea-route.prompt.v2"
+    assert payload["idea_route"]["provenance"]["prompt_version"] == "idea-route.prompt.v26"
     assert payload["idea_route"]["provenance"]["schema_version"] == (
-        "idea-route-provider.v2"
+        "idea-route-provider.v6"
     )
-    assert [model for model, _request in calls] == [
-        "deepseek-v4-pro",
-        "deepseek-v4-flash",
-        "deepseek-v4-flash",
-        "deepseek-v4-flash",
+    plan_calls = [request for model, request in calls if model == "deepseek-v4-pro"]
+    assert len(plan_calls) == 1
+    assert plan_calls[0].response_schema_name == "strategy_ideas"
+    assert all(
+        model == "deepseek-v4-flash"
+        for model, request in calls if request.response_schema_name != "strategy_ideas"
+    )
+    assert [request.response_schema_name for _model, request in calls] == [
+        "initial_dialogue_intent", "strategy_ideas", "dialogue_reply_semantic_review",
+        "ashare_bounded_strategy_candidates", "strategy_semantic_review",
+        "ashare_bounded_strategy_candidates", "strategy_semantic_review",
+        "ashare_bounded_strategy_candidates", "strategy_semantic_review",
     ]
-    properties = cast(dict[str, object], calls[0][1].response_schema["properties"])
+    properties = cast(dict[str, object], plan_calls[0].response_schema["properties"])
     assert "proposals" in properties
     assert "template_ids" not in properties
-    assert calls[0][1].user_payload is not None
-    assert "capabilityMatrix" in calls[0][1].user_payload
+    assert plan_calls[0].user_payload is not None
+    assert "capabilityMatrix" in plan_calls[0].user_payload
 
 
 def test_configured_app_can_select_volcengine_web_search(tmp_path: Path) -> None:
@@ -687,22 +791,65 @@ def test_configured_app_routes_a_pure_viewpoint_to_idea_guidance(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The real composition root must wire both bounded provider stages."""
+    """Wire source-backed research, proposals, extraction and independent reviews."""
 
     calls: list[CandidateTransportRequest] = []
+    research_calls: list[CurrentFactResearchRequest] = []
+
+    class FixtureResearcher:
+        async def research(
+            self, request: CurrentFactResearchRequest,
+        ) -> CurrentFactResearchResult:
+            research_calls.append(request)
+            return CurrentFactResearchResult(
+                provider="fixture-research", model="fixture-search",
+                provider_response_id="research-viewpoint-1",
+                query=request.query, purpose=request.purpose, as_of=request.as_of,
+                summary="公开资料可用于理解观点，但不能证明其与当前股票的因果关系。",
+                facts=(ResearchFact(
+                    statement="资料讨论了特朗普这一公众人物。",
+                    fact_kind="reported_fact", source_ids=("source-1",), time_scope=None,
+                ),),
+                sources=(ResearchSource(
+                    source_id="source-1", title="观点研究测试资料",
+                    url="https://research.example.test/public-context",
+                    publisher="fixture-publisher", published_at=None,
+                ),),
+                unresolved_questions=("没有东方财富的直接资产暴露证据。",),
+                retrieved_at=request.as_of, response_sha256="sha256:" + "a" * 64,
+                search_call_count=1,
+            )
 
     async def generate_json(
         _self: OpenAICompatibleCandidateTransport,
         request: CandidateTransportRequest,
     ) -> dict[str, object]:
         calls.append(request)
+        if request.response_schema_name == "initial_dialogue_intent":
+            return {"intent": "viewpoint"}
+        if request.response_schema_name == "strategy_semantic_review":
+            return _semantic_review_payload(request)
+        if request.response_schema_name == "dialogue_reply_semantic_review":
+            assert request.user_payload is not None
+            assert request.user_payload["research"] is not None
+            return _reply_review_payload(request)
         properties = cast(dict[str, object], request.response_schema.get("properties", {}))
         assert "template_ids" not in properties
         if "proposals" in properties:
-            return _idea_payload()
+            assert len(research_calls) == 1  # Research must precede the proposals.
+            result = _idea_payload()
+            result["understanding"] = (
+                "听起来你对特朗普很反感。可以先把这种感受放在讨论中，"
+                "另外用当前股票检验几种价格规则，不假定二者存在因果关系。"
+            )
+            return result
+        assert request.response_schema_name == "ashare_bounded_strategy_candidates"
         return _idea_candidate_batch(request.utterance)
 
     monkeypatch.setattr(OpenAICompatibleCandidateTransport, "generate_json", generate_json)
+    monkeypatch.setattr(
+        bootstrap_module, "_build_web_researcher", lambda _settings: FixtureResearcher(),
+    )
     settings = _settings(
         tmp_path,
         candidate_provider_mode="openai_compatible",
@@ -745,13 +892,34 @@ def test_configured_app_routes_a_pure_viewpoint_to_idea_guidance(
         "technical.rsi",
         "technical.macd",
     }
-    assert len(calls) == 4
-    assert "proposals" in cast(dict[str, object], calls[0].response_schema["properties"])
-    assert calls[0].user_payload is not None
-    assert "capabilityMatrix" in calls[0].user_payload
+    assert [request.response_schema_name for request in calls] == [
+        "initial_dialogue_intent", "strategy_ideas", "dialogue_reply_semantic_review",
+        "ashare_bounded_strategy_candidates", "strategy_semantic_review",
+        "ashare_bounded_strategy_candidates", "strategy_semantic_review",
+        "ashare_bounded_strategy_candidates", "strategy_semantic_review",
+    ]
+    assert len(research_calls) == 1
+    assert research_calls[0].query == "我讨厌特朗普"
+    assert research_calls[0].purpose is ResearchPurpose.VIEWPOINT
+    assert research_calls[0].instrument_context == "300059.SZ"
+    proposal_call = calls[1]
+    assert "proposals" in cast(dict[str, object], proposal_call.response_schema["properties"])
+    assert proposal_call.user_payload is not None
+    assert "capabilityMatrix" in proposal_call.user_payload
+    research_context = cast(dict[str, object], proposal_call.user_payload["research"])
+    assert research_context["facts"] == [{
+        "statement": "资料讨论了特朗普这一公众人物。", "factKind": "reported_fact",
+        "sourceIds": ["source-1"], "timeScope": None,
+    }]
+    assert "观点研究测试资料" in str(research_context["sources"])
+    assert payload["idea_route"]["research"]["sources"][0]["url"] == (
+        "https://research.example.test/public-context"
+    )
+    assert "对特朗普很反感" in payload["idea_route"]["understanding"]
+    assert "不假定二者存在因果关系" in payload["idea_route"]["understanding"]
     assert all(
         "candidates" in cast(dict[str, object], request.response_schema["properties"])
-        for request in calls[1:]
+        for request in calls[3::2]
     )
 
 

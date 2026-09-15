@@ -25,8 +25,8 @@ export function MiniEquity(
     const hasBenchmark = series.some((point) => point.benchmark != null)
     const benchmark = series.map((point) => point.benchmark ?? 0)
     const values = hasBenchmark ? strategy.concat(benchmark) : strategy
-    const lo = Math.min(...values)
-    const hi = Math.max(...values)
+    const lo = values.reduce((minimum, value) => Math.min(minimum, value), values[0] ?? 0)
+    const hi = values.reduce((maximum, value) => Math.max(maximum, value), values[0] ?? 0)
     const span = hi - lo || 1
     const X = (index: number) => (W * index) / (series.length - 1)
     const Y = (value: number) => PAD_Y + (H - PAD_Y * 2) * (1 - (value - lo) / span)

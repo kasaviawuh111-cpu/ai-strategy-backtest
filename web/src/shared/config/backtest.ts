@@ -10,7 +10,7 @@ export const DEFAULT_EXECUTION_SETTINGS = {
   capacityMode: 'point_in_time_volume',
   participationRate: 0.05,
   allocationRatio: 1,
-  commissionRate: 0.0003,
+  commissionRate: 0.00025,
   minimumCommissionCny: 5,
   slippageBps: 5,
   retryUnfilledExits: true,

@@ -128,12 +128,18 @@ async def test_ma_close_annotation_does_not_supply_or_replace_trading_parameters
     ("gte_multiple", "成交量达到前20日均量1.5倍买入"),
     ("lte_multiple", "相对成交量缩量1.5倍且baseline_period为20买入"),
 ])
-def test_single_session_volume_only_fills_unused_catalog_field(trigger: str, entry: str) -> None:
+@pytest.mark.parametrize("unused_days", [None, 0, 3])
+def test_single_session_volume_omits_unused_catalog_field(
+    trigger: str, entry: str, unused_days: int | None,
+) -> None:
     exit_text = "持有满10个交易日卖出"
     utterance = f"{entry}；{exit_text}"
+    params = {"baseline_period": 20}
+    if unused_days is not None:
+        params["consecutive_days"] = unused_days
     payload = {"candidates": [{
         "entry": [_indicator_payload(
-            "volume.relative", trigger, {"baseline_period": 20}, value=1.5,
+            "volume.relative", trigger, params, value=1.5,
         )],
         "exit": [{"kind": "holding_period", "sessions": 10}],
         "entry_spans": [_source_span(utterance, entry)],
@@ -144,19 +150,20 @@ def test_single_session_volume_only_fills_unused_catalog_field(trigger: str, ent
     normalized = _normalize_transport_candidate(original, request=request, matrix=CAPABILITY_MATRIX)
     _validate_candidate_against_matrix(normalized, CAPABILITY_MATRIX)
     _validate_candidate_grounding(normalized, CAPABILITY_MATRIX, request)
-    assert normalized.entry[0].params == {"baseline_period": 20, "consecutive_days": 3}
+    assert normalized.entry[0].params == {"baseline_period": 20}
     assert normalized.entry[0].trigger == trigger and normalized.entry[0].value == 1.5
-    assert normalized.defaulted_fields == ("/entry/0/params/consecutive_days",)
-    assert original.entry[0].params == {"baseline_period": 20}
+    assert normalized.defaulted_fields == ()
+    assert original.entry[0].params == params
 
 
-@pytest.mark.parametrize(("trigger", "params", "defaulted"), [
-    ("consecutive_gte_multiple", {"baseline_period": 20}, False),
-    ("gt_multiple", {"baseline_period": 20, "consecutive_days": 0}, False),
-    ("gt_multiple", {}, True),
+@pytest.mark.parametrize(("trigger", "params"), [
+    ("consecutive_gte_multiple", {"baseline_period": 20}),
+    ("consecutive_gte_multiple", {"baseline_period": 20, "consecutive_days": 0}),
+    ("gt_multiple", {}),
+    ("gt_multiple", {"baseline_period": 0}),
 ])
-def test_volume_default_never_repairs_semantic_or_existing_invalid_fields(
-    trigger: str, params: dict[str, int], defaulted: bool,
+def test_volume_never_invents_missing_active_parameters_or_repairs_invalid_values(
+    trigger: str, params: dict[str, int],
 ) -> None:
     text = "相对成交量持续放量1.5倍买入"
     original = _validate_transport_payload({"candidates": [{
@@ -167,7 +174,7 @@ def test_volume_default_never_repairs_semantic_or_existing_invalid_fields(
     normalized = _normalize_transport_candidate(
         original, request=_request(text), matrix=CAPABILITY_MATRIX,
     )
-    assert normalized.entry[0].params == (dict(params, consecutive_days=3) if defaulted else params)
+    assert normalized.entry[0].params == params
     with pytest.raises(ValueError):
         _validate_candidate_against_matrix(normalized, CAPABILITY_MATRIX)
 

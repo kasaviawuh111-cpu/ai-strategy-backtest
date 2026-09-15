@@ -8,8 +8,9 @@ sets.  The equity history can corroborate a share-listing date and surface
 split-like candidates, but it is not an explicit exhaustive stock-split or
 reverse-split category query.  It can nevertheless provide a bounded negative
 proof when every capital change in the requested interval has a recognized,
-non-split reason.  Any unknown reason or split-like positive candidate fails
-closed.  This mixed positive/negative contract is intentionally distinct from
+non-split reason or a matching issuer issuance announcement and share-class
+ledger. Unresolved reasons and split-like positive candidates fail closed.
+This mixed positive/negative contract is intentionally distinct from
 the current strict Choice contract and cannot promote itself into that profile.
 
 Every response page, including Eastmoney's explicit ``9201`` empty-result
@@ -46,6 +47,7 @@ from ashare_lab.domain.shared import InstrumentId, StrongId
 DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 F10_DATACENTER_URL = "https://datacenter.eastmoney.com/securities/api/data/v1/get"
 BONUS_FINANCING_URL = "https://emweb.securities.eastmoney.com/PC_HSF10/BonusFinancing/PageAjax"
+DIVIDEND_MAIN_URL = "https://datacenter.eastmoney.com/securities/api/data/get"
 PROVIDER = "eastmoney_public_corporate_action_reference"
 SCHEMA_VERSION = "eastmoney.corporate-action-reference.v1"
 COVERAGE_SCOPE = "all_categories_mixed_positive_and_negative_proof"
@@ -94,6 +96,8 @@ _KNOWN_NON_SPLIT_CHANGE_MARKERS = (
     "首次公开发行",
     "首发上市",
     "首发限售股份上市",
+    "限售股上市",
+    "限售股份上市",
     "网下配售股份上市",
     "战略配售上市",
     "股权分置改革",
@@ -382,7 +386,7 @@ class EastmoneyCorporateActionReferenceAdapter:
             url=F10_DATACENTER_URL,
             params={
                 "client": "PC",
-                "columns": "SECUCODE,SECURITY_CODE,END_DATE,TOTAL_SHARES,CHANGE_REASON",
+                "columns": "ALL",
                 "filter": f'(SECUCODE="{instrument_id.value}")',
                 "pageSize": str(self._page_size),
                 "reportName": "RPT_F10_EH_EQUITY",
@@ -391,7 +395,10 @@ class EastmoneyCorporateActionReferenceAdapter:
                 "source": "HSF10",
             },
         )
-        bonus_detail = self._fetch_bonus_financing(prefixed_code)
+        try:
+            bonus_detail = self._fetch_bonus_financing(prefixed_code)
+        except EastmoneyCorporateActionError:
+            bonus_detail = self._fetch_dividend_main(instrument_id)
 
         _validate_lane_identity(dividend, digits=digits, instrument_id=instrument_id)
         _validate_lane_identity(rights, digits=digits, instrument_id=instrument_id)
@@ -426,6 +433,10 @@ class EastmoneyCorporateActionReferenceAdapter:
             equity,
             start=start,
             end=end,
+            resolved_changes=self._resolve_ambiguous_equity(
+                equity, instrument_id=instrument_id, start=start, end=end,
+                captured_at=capture_time,
+            ),
         )
         collections: tuple[CorporateActionEvidenceCollection, ...] = (
             dividend,
@@ -451,6 +462,56 @@ class EastmoneyCorporateActionReferenceAdapter:
             coverage=coverage,
             query_collections=collections,
         )
+
+    def _resolve_ambiguous_equity(
+        self, equity: EastmoneyLaneCollection, *, instrument_id: InstrumentId,
+        start: date, end: date, captured_at: datetime,
+    ) -> dict[str, object]:
+        """Corroborate ambiguous A-share incentive issuance, never infer a split factor."""
+        resolved: dict[str, object] = {}
+        batches: dict[date, EventFetchBatch] = {}
+        for source_row in equity.rows:
+            row = source_row.value
+            changed = _optional_date(row.get("END_DATE"), "END_DATE")
+            reason = str(row.get("CHANGE_REASON", ""))
+            if changed is None or not start <= changed <= end or "其他变动原因" not in reason:
+                continue
+            if _limited_only_capital_increase(row):
+                resolved[f"{changed.isoformat()}|{reason}"] = {
+                    "basis": "capital_ledger_limited_only_increase",
+                    "totalSharesChange": str(row["TOTAL_SHARES_CHANGE"]),
+                    "listedASharesChange": "0",
+                    "limitedASharesChange": str(row["LIMITED_ASHARES_CHANGE"]),
+                    "meaning": "仅限售A股增加，现有流通A股数量不变；不生成送股或价格复权因子",
+                }
+                continue
+            notice = _optional_date(row.get("NOTICE_DATE"), "NOTICE_DATE")
+            if notice is None or notice > captured_at.astimezone(_SHANGHAI).date():
+                continue
+            if notice not in batches:
+                try:
+                    with EastmoneyAnnouncementSource(client=self._client, extract_document_text=True) as source:
+                        batches[notice] = source.fetch_batch(
+                            instrument_id=instrument_id, start=notice, end=notice,
+                            retrieved_at=captured_at,
+                            requested_provider_column_codes=("001002007001007001",),
+                        )
+                except EastmoneyAnnouncementError as exc:
+                    raise EastmoneyCorporateActionError(
+                        f"ambiguous equity event evidence acquisition failed: {exc}"
+                    ) from exc
+            batch = batches[notice]
+            if batch.acquisition_evidence.get("querySucceeded") is not True:
+                continue
+            matches = [o for o in batch.observations if _matches_incentive_issuance(row, o)]
+            if len(matches) == 1:
+                resolved[f"{changed.isoformat()}|{reason}"] = {
+                    "classification": "directed_incentive_issuance_no_holder_entitlement",
+                    "accountSharesMultiplier": "1", "accountCashDelta": "0",
+                    "acquisitionEvidence": dict(batch.acquisition_evidence),
+                    "document": _cash_settlement_observation_evidence(matches[0]),
+                }
+        return resolved
 
     def _fetch_cash_settlement_announcements(
         self,
@@ -588,6 +649,49 @@ class EastmoneyCorporateActionReferenceAdapter:
             zero_result=not all_rows,
         )
 
+    def _fetch_dividend_main(self, instrument_id: InstrumentId) -> EastmoneyLaneCollection:
+        """Alternative settlement dates; never infer amounts from annual totals."""
+        dataset = "RPT_F10_DIVIDEND_MAIN"
+        pages: list[EastmoneyPageEvidence] = []
+        rows: list[EastmoneySourceRow] = []
+        count = total_pages = None
+        for number in range(1, _MAX_PAGES + 1):
+            params = {
+                "type": dataset, "sty": "ALL", "p": str(number),
+                "ps": str(self._page_size), "sr": "-1", "st": "NOTICE_DATE",
+                "filter": f'(SECUCODE="{instrument_id.value}")',
+                "source": "SECURITIES", "client": "APP",
+            }
+            payload, raw = self._request_json(DIVIDEND_MAIN_URL, params)
+            result = _validated_result(payload, dataset=dataset)
+            page_count = _required_nonnegative_int(result.get("count"), "count")
+            page_total = max(1, _required_nonnegative_int(result.get("pages"), "pages"))
+            values = _required_object_list(result.get("data"), "data")
+            if count is not None and (count != page_count or total_pages != page_total):
+                raise EastmoneyCorporateActionError("dividend pagination changed during acquisition")
+            count, total_pages = page_count, page_total
+            if total_pages > _MAX_PAGES:
+                raise EastmoneyCorporateActionError("dividend pagination exceeds acquisition limit")
+            for value in values:
+                if value.get("SECUCODE") != instrument_id.value:
+                    raise EastmoneyCorporateActionError("dividend returned a different security")
+            page = _page_evidence(
+                lane="settlement_enrichment", dataset=dataset, url=DIVIDEND_MAIN_URL,
+                params=params, page_number=number, total_pages=total_pages,
+                declared_count=count, rows=values, zero_result=count == 0,
+                raw=raw, payload=payload,
+            )
+            pages.append(page)
+            rows.extend(EastmoneySourceRow(value, number, page.raw_wire_sha256) for value in values)
+            if number == total_pages:
+                break
+        if len(rows) != count:
+            raise EastmoneyCorporateActionError("dividend pagination row count mismatch")
+        return EastmoneyLaneCollection(
+            lane="settlement_enrichment", dataset=dataset, url=DIVIDEND_MAIN_URL,
+            rows=tuple(rows), pages=tuple(pages), declared_count=count, zero_result=count == 0,
+        )
+
     def _fetch_bonus_financing(self, prefixed_code: str) -> EastmoneyLaneCollection:
         params = {"code": prefixed_code}
         payload, raw = self._request_json(BONUS_FINANCING_URL, params)
@@ -681,6 +785,8 @@ def to_choice_snapshot_payload(
         "coverage": dict(result.coverage),
         "queryCollections": [collection.as_dict() for collection in result.query_collections],
     }
+
+
 
 
 def _build_actions(
@@ -918,11 +1024,94 @@ def _build_coverage(
     }
 
 
+def _limited_only_capital_increase(row: Mapping[str, object]) -> bool:
+    """Prove no allocation to circulating A shares from reconciled share counts."""
+    try:
+        def value(key: str, *, nullable: bool = False) -> Decimal:
+            raw = row.get(key)
+            if raw is None and nullable:
+                return Decimal(0)
+            if raw is None or isinstance(raw, bool):
+                raise ValueError("missing share count")
+            number = Decimal(str(raw))
+            if not number.is_finite() or number != number.to_integral_value():
+                raise ValueError("invalid share count")
+            return number
+        delta = value("TOTAL_SHARES_CHANGE")
+        total, listed, limited = (value(k) for k in ("TOTAL_SHARES", "LISTED_A_SHARES", "LIMITED_A_SHARES"))
+        other_changes = ("H_FREESHARE_CHANGE", "LIMITED_H_SHARES_CHANGE", "B_FREESHARE_CHANGE",
+                         "LIMITED_BSHARES_CHANGE", "OTHERFREE_SHARES_CHANGE", "NONFREE_SHARES_CHANGE")
+        return (delta > 0 and total > delta and listed > 0 and limited >= delta
+                and total == value("TOTAL_A_SHARES") == listed + limited
+                and value("LISTED_ASHARES_CHANGE") == 0
+                and value("LIMITED_ASHARES_CHANGE") == delta
+                and all(value(k, nullable=True) == 0 for k in other_changes))
+    except (ValueError, InvalidOperation):
+        return False
+
+
+def _matches_incentive_issuance(row: Mapping[str, object], observation: EventObservation) -> bool:
+    """Match a completed directed A-share issue to the capital ledger exactly.
+
+    Mixed A/H capital is reconciled separately; a vague reason alone never passes.
+    Other ambiguous categories remain unresolved until their own evidence exists.
+    """
+    if observation.validation_status != "validated":
+        return False
+    tokens = set(_CHANGE_REASON_SEPARATOR.split(str(row.get("CHANGE_REASON", ""))))
+    if not tokens <= {"其他变动原因", "自主行权", "期权行权", "限制性股票", "股权激励"}:
+        return False
+    title = re.sub(r"\s+", "", observation.title)
+    if "限制性股票" not in title or "归属结果" not in title:
+        return False
+    text = re.sub(r"\s+", "", str(observation.attributes.get("document_text", "")))
+    if not re.search(r"向激励对象定向发行[^。；]{0,30}A股", text):
+        return False
+    def number(key: str) -> Decimal | None:
+        value = row.get(key)
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            result = Decimal(str(value))
+            return result if result.is_finite() and result == result.to_integral_value() else None
+        except InvalidOperation:
+            return None
+    limited, listed, total, after = (number(k) for k in (
+        "LIMITED_ASHARES_CHANGE", "LISTED_ASHARES_CHANGE", "TOTAL_SHARES_CHANGE", "TOTAL_SHARES"))
+    if limited is None or limited <= 0 or listed != 0 or total is None or after is None:
+        return False
+    # Missing foreign-share deltas mean no such share class in this provider schema.
+    foreign = [number(k) if row.get(k) is not None else Decimal(0) for k in (
+        "H_FREESHARE_CHANGE", "LIMITED_H_SHARES_CHANGE", "B_FREESHARE_CHANGE",
+        "LIMITED_BSHARES_CHANGE", "OTHERFREE_SHARES_CHANGE", "NONFREE_SHARES_CHANGE")]
+    if any(v is None or v < 0 for v in foreign):
+        return False
+    foreign_delta = sum(v for v in foreign if v is not None)
+    if total != limited + foreign_delta:
+        return False
+    if foreign_delta and not tokens.intersection({"自主行权", "期权行权"}):
+        return False
+    changed = _optional_date(row.get("END_DATE"), "END_DATE")
+    if changed is None:
+        return False
+    registration = rf"{changed.year}年0?{changed.month}月0?{changed.day}日[^。]{{0,100}}股份完成登记"
+    if not re.search(registration, text):
+        return False
+    # Announcement's A-issue-only before/after may already include same-day H exercise.
+    raw_text = str(observation.attributes.get("document_text", ""))
+    table = re.search(r"股本总数\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)", raw_text)
+    if table is None:
+        return False
+    before_doc, amount_doc, after_doc = (Decimal(v.replace(",", "")) for v in table.groups())
+    return amount_doc == limited and after_doc == after and before_doc + amount_doc == after_doc
+
+
 def _validate_negative_split_proof(
     equity: EastmoneyLaneCollection,
     *,
     start: date,
     end: date,
+    resolved_changes: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     if equity.zero_result or not equity.rows:
         raise EastmoneyCorporateActionError(
@@ -952,9 +1141,10 @@ def _validate_negative_split_proof(
             not any(marker in token for marker in _KNOWN_NON_SPLIT_CHANGE_MARKERS)
             for token in tokens
         ):
-            raise EastmoneyCorporateActionError(
-                f"capital-structure ledger has an unclassified change reason: {reason}"
-            )
+            if f"{changed_at.isoformat()}|{reason}" not in (resolved_changes or {}):
+                raise EastmoneyCorporateActionError(
+                    f"capital-structure ledger has an unclassified change reason: {reason}"
+                )
         recognized_reasons.update(tokens)
     return {
         "categoryMode": "complete_negative_proof",
@@ -963,6 +1153,7 @@ def _validate_negative_split_proof(
         "end": end.isoformat(),
         "scannedRows": scanned_rows,
         "recognizedChangeReasons": sorted(recognized_reasons),
+        "resolvedAmbiguousChanges": dict(resolved_changes or {}),
         "stockSplitCandidates": 0,
         "reverseSplitCandidates": 0,
         "sourceDataset": equity.dataset,
@@ -1038,10 +1229,14 @@ def _bonus_cash_pay_date(
         row = source_row.value
         if row.get("SECURITY_CODE") != digits:
             continue
+        if row.get("ASSIGN_PROGRESS") not in _IMPLEMENTED_ASSIGN_PROGRESS:
+            continue
         candidate_record = _optional_date(row.get("EQUITY_RECORD_DATE"), "EQUITY_RECORD_DATE")
         candidate_ex = _optional_date(row.get("EX_DIVIDEND_DATE"), "EX_DIVIDEND_DATE")
         if candidate_record == record_date and candidate_ex == ex_date:
-            pay_date = _required_date(row.get("PAY_CASH_DATE"), "PAY_CASH_DATE")
+            pay_date = _optional_date(row.get("PAY_CASH_DATE"), "PAY_CASH_DATE")
+            if pay_date is None:
+                continue
             matches.append((pay_date, source_row.raw_wire_sha256))
     unique_dates = {item[0] for item in matches}
     if not matches:

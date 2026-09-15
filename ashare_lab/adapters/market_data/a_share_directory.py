@@ -90,8 +90,9 @@ class InstrumentDirectory:
     def exact_matches(self, query: str) -> tuple[DirectoryInstrument, ...]:
         """Match complete names, codes, pinyin or initials, before any UI limit.
 
-        Search prefixes remain suggestions; even one partial result cannot
-        supply an executable identity. An alias shared by two stocks is ambiguous.
+        This lookup does not promote partial matches to exact aliases. The
+        caller separately decides whether a unique name fragment is usable.
+        An alias shared by two stocks is ambiguous.
         """
         key = _query_key(query)
         if key is None:

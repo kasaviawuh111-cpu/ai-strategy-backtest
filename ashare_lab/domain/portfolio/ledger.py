@@ -76,6 +76,7 @@ def apply_buy(
         sellable_on=sellable_on,
         remaining_quantity=fill.quantity,
         cost_basis=acquisition_cost,
+        acquisition_principal=fill.gross_amount,
     )
     entry = _buy_entry(fill)
     return PortfolioState(
@@ -129,6 +130,10 @@ def apply_sell(state: PortfolioState, fill: FillRecord) -> PortfolioState:
                 lot,
                 remaining_quantity=Quantity(lot.remaining_quantity.value - consumed),
                 cost_basis=lot.cost_basis - allocated_cost,
+                acquisition_principal=(Money(
+                    lot.acquisition_principal.amount * Decimal(lot.remaining_quantity.value - consumed)
+                    / Decimal(lot.remaining_quantity.value), lot.acquisition_principal.currency
+                ) if lot.acquisition_principal is not None else None),
             )
         sold_cost += allocated_cost
         remaining_to_sell -= consumed

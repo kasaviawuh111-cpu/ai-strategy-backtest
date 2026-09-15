@@ -419,7 +419,12 @@ def test_omitted_entity_query_reuses_the_previously_verified_instrument(
 
     assert created["diagnostic_code"] == "exit_rule_not_recognized"
     assert queried["draft"]["revision"] == created["revision"]
-    assert finance.calls == [("300033.SZ；昨天换手率多少", "昨天换手率")]
+    assert ("300033.SZ；昨天换手率多少", "昨天换手率") in finance.calls
+    assert all(
+        call == ("300033.SZ；昨天换手率多少", "昨天换手率")
+        or call == ("查询A股300033.SZ的证券代码和股票简称", "证券代码和股票简称")
+        for call in finance.calls
+    )
 
 
 @pytest.mark.parametrize("choice", ["1", "2", "3"])
@@ -615,18 +620,17 @@ def test_emotional_text_does_not_pollute_verified_instrument_memory() -> None:
             )
         calls_before_emotional_turn = len(idea_router.requests)
         emotional = _answer(client, created, "我讨厌特朗普")
-        confirmed = _answer(client, cast(dict[str, Any], emotional["draft"]), "沿用")
+        resumed = _answer(client, cast(dict[str, Any], emotional["draft"]), "MACD死叉卖出")
 
-    assert emotional["draft"]["diagnostic_code"] == "instrument_reuse_confirmation"
-    assert "300059.SZ" in emotional["assistant_message"]
+    assert emotional["draft"]["diagnostic_code"] == created["diagnostic_code"]
+    assert emotional["draft"]["revision"] == created["revision"]
+    assert emotional["draft"]["idea_route"] == created["idea_route"]
     assert "特朗普（" not in emotional["assistant_message"]
     assert emotional["draft"]["strategy"] is None
-    assert len(idea_router.requests) == calls_before_emotional_turn + 1
-    assert confirmed["draft"]["diagnostic_code"] == "idea_guidance_required"
-    assert all(
-        proposal["instrument_symbol"] == "300059.SZ"
-        for proposal in confirmed["draft"]["idea_route"]["proposals"]
-    )
+    assert len(idea_router.requests) == calls_before_emotional_turn
+    assert resumed["draft"]["status"] == "ready"
+    assert resumed["draft"]["strategy"]["instrument"]["symbol"] == "300059.SZ"
+    assert resumed["draft"]["strategy"]["entry"]["indicator_id"] == "technical.macd"
     assert resolved_names == []
 
 

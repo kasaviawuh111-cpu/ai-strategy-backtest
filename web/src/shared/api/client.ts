@@ -1,4 +1,5 @@
 import { mockApi } from './mock'
+import type { GridRequest, GridResult } from '../../grid/types'
 import { ApiError } from './types'
 import {
   fromLiveDraftResponse,
@@ -10,6 +11,7 @@ import {
   toLiveCompileBody,
   toLiveRevisionBody,
   toLiveExecutionSettings,
+  setAvailableDataEnd,
 } from './contract'
 import type { LiveClarificationAnswerResponse, LiveDraftResponse } from './contract'
 import type {
@@ -44,6 +46,7 @@ const BACKTEST_REVIEW_TIMEOUT_MS = null
 const DIALOGUE_PROGRESS_POLL_MS = 1_000
 const DIALOGUE_PROGRESS_FINAL_TIMEOUT_MS = 1_000
 const DIALOGUE_PROGRESS_LIMIT = 12
+const IDEMPOTENT_POST_RETRY_DELAYS_MS = [250, 1_000] as const
 
 // Anonymous browser scheduling key. This is not login or access authorization.
 let previewClientId: string | undefined
@@ -94,11 +97,11 @@ const requestFailure = (error: unknown, timeoutMs: number | null): ApiError => {
   const timeoutSeconds = Math.round((timeoutMs ?? 0) / 1_000)
   return new ApiError({
     type: 'about:blank',
-    title: timedOut ? '接口响应超时' : '无法连接回测服务',
+    title: timedOut ? '请求响应超时' : '请求网络异常',
     status: 0,
     detail: timedOut
-      ? `回测服务超过 ${timeoutSeconds} 秒没有响应，请稍后重试。`
-      : '浏览器没有连上回测服务，请检查网络、API 地址和跨域配置。',
+      ? `这次请求等待超过 ${timeoutSeconds} 秒，暂未收到完整结果。`
+      : '这次请求遇到网络异常，暂未收到结果。',
     code: timedOut ? 'api_timeout' : 'api_network_unavailable',
   })
 }
@@ -145,7 +148,7 @@ const notifyRecovery = (
 }
 
 const pausePreviewPoll = (
-  observer: DialogueProgressObserver, attempt: number, signal?: AbortSignal | null,
+  observer: DialogueProgressObserver, attempt: number, reason: string, signal?: AbortSignal | null,
 ): Promise<void> => new Promise((resolve, reject) => {
   let settled = false
   function cleanup() {
@@ -157,7 +160,7 @@ const pausePreviewPoll = (
     settled = true
     cleanup()
     notifyRecovery(observer, { status: 'retrying', attempt: 0,
-      message: '正在重新连接，继续查询本次结果，不会重复提交。' })
+      message: '正在继续查询本次结果，不会重复提交。' })
     resolve()
   }
   function abort() {
@@ -170,10 +173,19 @@ const pausePreviewPoll = (
   window.addEventListener('online', resume)
   signal?.addEventListener('abort', abort, { once: true })
   notifyRecovery(observer, { status: 'paused', attempt, resume,
-    message: '暂时无法取得结果，后台任务可能仍在处理。恢复连接后会继续，也可以点击继续查询；不会重复提交。' })
+    message: `${reason}，后台任务可能仍在处理。可以点击继续查询；不会重复提交。` })
 })
 
 const transientPreviewStatuses = new Set([408, 429, 502, 503, 504])
+const previewQueryFailureReason = (error: unknown, status: number | undefined): string => {
+  if (error instanceof DOMException && error.name === 'TimeoutError') return '结果查询响应超时'
+  if (status !== undefined && transientPreviewStatuses.has(status)) {
+    return status === 429 ? '结果查询频率受限（HTTP 429）'
+      : `结果查询服务暂时异常（HTTP ${status}）`
+  }
+  if (status !== undefined) return '已收到结果查询响应，但内容未完整返回或格式无效'
+  return error instanceof TypeError ? '结果查询连接暂时中断' : '结果查询暂时未完成'
+}
 const isBusinessProblem = (response: Response, payload: unknown): boolean => {
   if (response.headers.get('Content-Type')?.includes('application/problem+json')) return true
   if (!payload || typeof payload !== 'object') return false
@@ -190,12 +202,14 @@ const pollPreviewResult = async (
   try {
     for (;;) {
       await waitForPreviewPoll(delay, signal)
+      let responseStatus: number | undefined
       try {
         const result = await withRequestSignal(signal, REQUEST_TIMEOUT_MS, async (pollSignal) => {
           const response = await fetch(`${baseUrl}${location}`, {
             headers: { Accept: 'application/json, application/problem+json' },
             signal: pollSignal, redirect: 'error',
           })
+          responseStatus = response.status
           // A retained GET result can safely be re-read after a truncated body.
           const payload: unknown = response.ok ? await response.json()
             : await response.json().catch(() => undefined)
@@ -210,15 +224,16 @@ const pollPreviewResult = async (
         if (result.response.status !== 202 || result.response.headers.get('X-Preview-Pending') !== '1') {
           return result
         }
-      } catch {
+      } catch (error) {
         if (signal?.aborted) throw abortReason(signal)
+        const reason = previewQueryFailureReason(error, responseStatus)
         if (retries < 3) {
           delay = 1_000 * 2 ** retries
           retries += 1
           notifyRecovery(observer, { status: 'retrying', attempt: retries,
-            message: `结果查询暂时中断，正在恢复连接（${retries}/3）；不会重复提交。` })
+            message: `${reason}，正在重试查询（${retries}/3）；不会重复提交。` })
         } else if (observer?.onRecovery) {
-          await pausePreviewPoll(observer, retries, signal)
+          await pausePreviewPoll(observer, retries, reason, signal)
           retries = 0
           delay = 0
         } else {
@@ -254,12 +269,29 @@ const request = async <T>(
     let response: Response
     let responsePayload: unknown
     let hasResponsePayload = false
-    try {
-      response = await fetch(`${baseUrl}${path}`, { ...init, headers, signal: requestSignal })
-    } catch (error) {
-      if (signal?.aborted) throw abortReason(signal)
-      if (error instanceof ApiError) throw error
-      throw requestFailure(requestSignal.aborted ? abortReason(requestSignal) : error, timeoutMs)
+    const canRetryPost = init?.method?.toUpperCase() === 'POST'
+      && headers.has('Idempotency-Key')
+    let networkAttempt = 0
+    for (;;) {
+      try {
+        response = await fetch(`${baseUrl}${path}`, { ...init, headers, signal: requestSignal })
+        break
+      } catch (error) {
+        if (signal?.aborted) throw abortReason(signal)
+        if (error instanceof ApiError) throw error
+        if (!canRetryPost || networkAttempt >= IDEMPOTENT_POST_RETRY_DELAYS_MS.length) {
+          throw requestFailure(requestSignal.aborted ? abortReason(requestSignal) : error, timeoutMs)
+        }
+        networkAttempt += 1
+        notifyRecovery(observer, {
+          status: 'retrying', attempt: networkAttempt,
+          message: `连接短暂中断，正在重试本次请求（${networkAttempt}/${IDEMPOTENT_POST_RETRY_DELAYS_MS.length}），不会重复提交。`,
+        })
+        await waitForPreviewPoll(
+          IDEMPOTENT_POST_RETRY_DELAYS_MS[networkAttempt - 1] ?? 0,
+          requestSignal,
+        )
+      }
     }
 
     if (import.meta.env.VITE_PRIVATE_PREVIEW === 'true'
@@ -299,7 +331,7 @@ const request = async <T>(
         type: 'about:blank',
         title: '接口响应格式错误',
         status: response.status,
-        detail: '回测服务没有返回有效 JSON，请检查 API 网关或服务版本。',
+        detail: '请求链路返回内容异常，系统暂未取得可用结果。',
         code: 'api_invalid_json',
       })
     }
@@ -419,17 +451,21 @@ const withDialogueProgress = async <T>(
     latestEvents = events
     observer.onProgress(events)
   } }
-  const poll = pollDialogueProgress(progressId, trackedObserver, polling.signal)
+  let poll: Promise<boolean> | undefined
   let failed = false
   try {
-    return await operation(progressId)
+    // Dispatch the work before asking the server for its progress record.
+    // A network race may still return 404; polling remains best-effort.
+    const result = operation(progressId)
+    poll = pollDialogueProgress(progressId, trackedObserver, polling.signal)
+    return await result
   } catch (error) {
     failed = true
     throw error
   } finally {
     stopPolling()
     const finished = await poll
-    if (!finished) await readFinalDialogueProgress(progressId, trackedObserver)
+    if (poll !== undefined && !finished) await readFinalDialogueProgress(progressId, trackedObserver)
     if (failed && !observer.signal?.aborted && latestEvents.at(-1)?.stage !== 'failed') {
       try {
         observer.onProgress([...latestEvents.slice(-(DIALOGUE_PROGRESS_LIMIT - 1)), {
@@ -455,6 +491,7 @@ const normalizeProblem = (payload: unknown, fallback: ApiProblem, status: number
       detail: typeof error.message === 'string' ? error.message : fallback.detail,
       code: typeof error.code === 'string' ? error.code : undefined,
       requestId: typeof value.request_id === 'string' ? value.request_id : undefined,
+      details: normalizeProblemDetails(error.details),
     }
   }
   return {
@@ -462,7 +499,22 @@ const normalizeProblem = (payload: unknown, fallback: ApiProblem, status: number
     ...value,
     status,
     detail: typeof value.detail === 'string' ? value.detail : fallback.detail,
+    details: normalizeProblemDetails(value.details),
   }
+}
+
+const normalizeProblemDetails = (value: unknown): ApiProblem['details'] => {
+  if (!Array.isArray(value)) return undefined
+  return value.flatMap((item: unknown) => {
+    if (!item || typeof item !== 'object') return []
+    const detail = item as Record<string, unknown>
+    if (typeof detail.message !== 'string' || !detail.message.trim()) return []
+    return [{
+      message: detail.message,
+      location: typeof detail.location === 'string' ? detail.location : undefined,
+      type: typeof detail.type === 'string' ? detail.type : undefined,
+    }]
+  })
 }
 
 export const MOCK_CAPABILITIES = {
@@ -510,7 +562,10 @@ export const systemApi = {
   capabilities: (): Promise<CapabilitiesResponse> =>
     useMock
       ? Promise.resolve(MOCK_CAPABILITIES as CapabilitiesResponse)
-      : request<CapabilitiesResponse>('/api/v1/capabilities', { cache: 'no-store' }),
+      : request<CapabilitiesResponse>('/api/v1/capabilities', { cache: 'no-store' }).then(value => {
+        setAvailableDataEnd(value.available_data_end)
+        return value
+      }),
 }
 
 const requireExecutionCapability = (capabilities: CapabilitiesResponse): void => {
@@ -519,12 +574,13 @@ const requireExecutionCapability = (capabilities: CapabilitiesResponse): void =>
     type: 'about:blank',
     title: '当前不能运行回测',
     status: 503,
-    detail: '后端当前没有可用的回测执行环境，请稍后重试。',
+    detail: '系统暂未准备好执行这次回测，规则和参数可以继续保留或修改。',
     code: 'backtest_service_unavailable',
   })
 }
 
-const eventCodesFromCondition = (condition: StrategySpecCondition): string[] => {
+const eventCodesFromCondition = (condition: StrategySpecCondition | null): string[] => {
+  if (!condition) return []
   if (condition.type === 'event_condition') return [condition.event_code]
   if (condition.type === 'indicator_condition' || condition.type === 'financial_condition') return []
   if (condition.type === 'not') return eventCodesFromCondition(condition.child)
@@ -533,15 +589,17 @@ const eventCodesFromCondition = (condition: StrategySpecCondition): string[] => 
 
 const eventCodesFromStrategy = (strategy: StrategySpec): string[] => [
   ...eventCodesFromCondition(strategy.entry),
-  ...strategy.exit.children.flatMap((condition) =>
-    condition.type === 'holding_period_exit'
+  ...(strategy.exit?.children ?? []).flatMap((condition) =>
+      condition.type === 'holding_period_exit'
       || condition.type === 'position_return_exit'
       || condition.type === 'trailing_drawdown_exit'
+      || condition.type === 'minute_protection_exit'
       ? []
       : eventCodesFromCondition(condition)),
 ]
 
-const documentTextEventCodesFromCondition = (condition: StrategySpecCondition): string[] => {
+const documentTextEventCodesFromCondition = (condition: StrategySpecCondition | null): string[] => {
+  if (!condition) return []
   if (condition.type === 'event_condition') {
     return condition.document_text ? [condition.event_code] : []
   }
@@ -552,10 +610,11 @@ const documentTextEventCodesFromCondition = (condition: StrategySpecCondition): 
 
 const documentTextEventCodesFromStrategy = (strategy: StrategySpec): string[] => [
   ...documentTextEventCodesFromCondition(strategy.entry),
-  ...strategy.exit.children.flatMap((condition) =>
-    condition.type === 'holding_period_exit'
+  ...(strategy.exit?.children ?? []).flatMap((condition) =>
+      condition.type === 'holding_period_exit'
       || condition.type === 'position_return_exit'
       || condition.type === 'trailing_drawdown_exit'
+      || condition.type === 'minute_protection_exit'
       ? []
       : documentTextEventCodesFromCondition(condition)),
 ]
@@ -633,6 +692,16 @@ export const instrumentApi = {
   },
 }
 
+export const gridApi = {
+  run: (body: GridRequest, signal?: AbortSignal) => request<GridResult>(
+    '/api/v1/grid/backtests', {
+      method: 'POST', body: JSON.stringify(body), signal,
+      // This endpoint only computes a report; repeating cannot place real orders.
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    }, BACKTEST_CREATE_TIMEOUT_MS,
+  ),
+}
+
 export const strategyApi = {
   compile: async (
     input: ProgressAware<CompileRequest>,
@@ -642,7 +711,10 @@ export const strategyApi = {
     return withDialogueProgress(input.dialogueProgress, async (progressId) => {
       const headers = new Headers()
       if (parentDraftId) headers.set('X-Conversation-Parent-Draft-ID', parentDraftId)
-      if (progressId) headers.set('X-Dialogue-Progress-ID', progressId)
+      if (progressId) {
+        headers.set('X-Dialogue-Progress-ID', progressId)
+        headers.set('Idempotency-Key', `draft:${progressId}`)
+      }
       const [response, capabilities] = await Promise.all([
         request<LiveDraftResponse>('/api/v1/strategy-drafts', {
           method: 'POST',
@@ -704,18 +776,56 @@ export const strategyApi = {
     requireStrategyCapability(draft.strategySpec, capabilities)
     const response = await request<LiveDraftResponse>(
       `/api/v1/strategy-drafts/${encodeURIComponent(draft.id)}/revisions`,
-      { method: 'POST', ...(signal ? {
-        signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
-      } : {}), body: JSON.stringify({
+      { method: 'POST', ...(signal ? { signal } : {}), body: JSON.stringify({
         ...toLiveRevisionBody(draft),
         ...(recoverIfMissing ? { recover_if_missing: true } : {}),
-      }) },
+      }) }, BACKTEST_CREATE_TIMEOUT_MS,
     )
     return mergeLiveRevision(response, draft, capabilities)
   },
 }
 
+export const metricApi = {
+  discover: async (input: { instrument_id: string; metric_query: string; start: string; end: string }, signal?: AbortSignal) => {
+    const result = await request<{
+      instrument_id: string
+      instrument_verified: boolean
+      status: 'discovered' | 'unavailable'
+      candidate_table_indices: number[]
+      tables: { table_index: number; instrument_verified: boolean; issues: string[]; fields: {
+        return_name: string | null; display_name: string | null; unit: string | null
+        issues: string[]; values: (string | number | null)[]
+      }[] }[]
+    }>('/api/v1/market/series-discovery', {
+      method: 'POST', signal, body: JSON.stringify(input),
+    }, BACKTEST_CREATE_TIMEOUT_MS)
+    if (!result.instrument_verified || result.instrument_id !== input.instrument_id
+      || result.status !== 'discovered') return []
+    const fields = result.tables.filter(table => table.instrument_verified && table.issues.length === 0
+      && result.candidate_table_indices.includes(table.table_index)).flatMap(table => table.fields)
+      .filter(field => field.issues.length === 0 && field.unit?.trim()
+        && field.values.some(value => value !== null))
+    return fields.map(field => ({ name: field.display_name || field.return_name || input.metric_query,
+      unit: field.unit ?? '', note: '已返回历史数据，执行前仍需检查' })).filter((field, index, all) =>
+      all.findIndex(other => other.name === field.name && other.unit === field.unit) === index)
+  },
+}
+
 export const backtestApi = {
+  prepare: async (draft: StrategyDraft, signal?: AbortSignal): Promise<{ ready: true }> => {
+    if (signal?.aborted) throw abortReason(signal)
+    if (useMock) return { ready: true }
+    const prepared = await request<{ ready: boolean }>('/api/v1/backtest-runs/prepare', {
+      method: 'POST', signal, body: JSON.stringify(toLiveBacktestBody(draft)),
+    }, BACKTEST_CREATE_TIMEOUT_MS)
+    if (prepared.ready !== true) {
+      throw new ApiError({ type: 'about:blank', title: '策略准备未完成', status: 502,
+        detail: '服务没有返回已准备好的结果，请重新检查条件后重试。',
+        code: 'backtest_preparation_incomplete' })
+    }
+    return { ready: true }
+  },
+
   create: async (
     draft: StrategyDraft, options: { refreshData?: boolean } = {},
   ): Promise<BacktestRun> => {

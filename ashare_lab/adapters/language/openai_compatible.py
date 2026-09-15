@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from json import JSONDecodeError
 from time import monotonic
 from typing import Literal, cast
@@ -27,6 +29,7 @@ from .vibe_candidates import (
     CandidateTransportError,
     CandidateTransportRequest,
     CandidateTransportResponse,
+    IdentifiedCandidatePayload,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,12 +37,36 @@ _PAYLOAD_SIZE_FIELDS = (
     "utterance", "previousResponse", "capabilityMatrix", "responseSchema",
     "verifiedRows", "supplementalData", "dataSnapshot", "backtestResults", "recentTurns",
 )
+_THINKING_LANGUAGE_CONTRACT = (
+    "\n思考语言要求：思考通道 reasoning_content 中的自然语言请使用简体中文，"
+    "不要用整段英文展开分析。必要的指标名（如 RSI、MACD）、证券代码、公式、"
+    "JSON 字段名和枚举值保持原样；引用原文时保留原文。"
+    "此要求仅约束思考文本的语言，不改变输出结构，"
+    "不要将思考过程复制到最终 JSON 中。"
+)
 
 
 def _safe_request_purpose(name: str) -> str:
     if len(name) <= 80 and name.isascii() and name.replace("_", "").isalnum():
         return name
     return "other"
+
+
+def _parse_candidate_json(content: str) -> object:
+    """Accept the provider's JSON object with an optional Markdown fence.
+
+    Some JSON-only gateways still wrap a valid object in one ``json`` code
+    fence.  The object remains subject to every downstream schema and Catalog
+    check; accepting the wrapper avoids discarding an otherwise complete
+    response.  Arbitrary prose or trailing material stays invalid.
+    """
+
+    stripped = content.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        first_newline = stripped.find("\n")
+        if first_newline > 0 and stripped[:first_newline].casefold() in {"```", "```json"}:
+            stripped = stripped[first_newline + 1:-3].strip()
+    return json.loads(stripped, parse_constant=_reject_non_json_constant)
 
 
 class CandidateProviderTransportError(CandidateTransportError):
@@ -155,6 +182,9 @@ class OpenAICompatibleCandidateTransport:
         self._max_request_bytes = max_request_bytes
         self._max_response_bytes = max_response_bytes
         self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
+        self._timeout_fallback: OpenAICompatibleCandidateTransport | None = None
         self._identity = CandidateProviderIdentity(
             provider=provider,
             model=model,
@@ -170,6 +200,57 @@ class OpenAICompatibleCandidateTransport:
     def response_mode(self) -> Literal["json_schema", "json_object"]:
         return self._response_mode
 
+    def use_timeout_fallback(self, transport: OpenAICompatibleCandidateTransport) -> None:
+        """Reuse a separately owned model pool; never install a recursive route."""
+        if transport is self or transport._timeout_fallback is not None:
+            raise ValueError("timeout fallback must be a distinct single-hop transport")
+        self._timeout_fallback = transport
+
+    @property
+    def timeout_fallback_identity(self) -> CandidateProviderIdentity | None:
+        return self._timeout_fallback.identity if self._timeout_fallback is not None else None
+
+    def _new_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=self._timeout,
+            # Retry only TCP/TLS establishment, never an HTTP response or a
+            # partially delivered stream. Reuse healthy connections across turns.
+            transport=self._transport or httpx.AsyncHTTPTransport(
+                retries=2, trust_env=False,
+                limits=httpx.Limits(keepalive_expiry=30.0),
+            ),
+            follow_redirects=False,
+            trust_env=False,
+        )
+
+    async def startup(self) -> None:
+        """Own one connection pool on the application's long-lived event loop."""
+        loop = asyncio.get_running_loop()
+        if self._client is not None:
+            if self._client_loop is not loop:
+                raise RuntimeError("candidate client belongs to another event loop")
+            return
+        self._client = self._new_client()
+        self._client_loop = loop
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            if self._client_loop is not asyncio.get_running_loop():
+                raise RuntimeError("candidate client must close on its owner event loop")
+            await self._client.aclose()
+            self._client = None
+            self._client_loop = None
+
+    @asynccontextmanager
+    async def _request_client(self) -> AsyncGenerator[httpx.AsyncClient]:
+        if self._client is not None and self._client_loop is asyncio.get_running_loop():
+            yield self._client
+        else:
+            # Backtest workers use short-lived asyncio.run loops. Their clients
+            # must close before those loops stop, without touching the ASGI pool.
+            async with self._new_client() as client:
+                yield client
+
     def _default_system_footer(self, request: CandidateTransportRequest) -> str:
         return (
             f"Prompt contract: {self._identity.prompt_version}; "
@@ -181,9 +262,47 @@ class OpenAICompatibleCandidateTransport:
         self,
         request: CandidateTransportRequest,
     ) -> CandidateTransportResponse:
+        try:
+            return await self._generate_json_once(request)
+        except CandidateTransportError as exc:
+            fallback = self._timeout_fallback
+            if fallback is None or not exc.timed_out:
+                raise
+            # Generation is side-effect free. Discard any partial primary JSON;
+            # the secondary receives the identical contract, not partial output.
+            # Cancellation, authentication, billing and validation failures do not
+            # enter this branch. No second fallback or parallel duplicate call.
+            _LOGGER.warning(
+                "candidate_timeout_fallback request_id=%s attempt=%d purpose=%s "
+                "from_model=%s to_model=%s",
+                current_request_id(), current_candidate_attempt(),
+                _safe_request_purpose(request.response_schema_name),
+                self.identity.model, fallback.identity.model,
+            )
+            emit_progress("model_fallback", "快速模型响应超时，已交由 Pro 继续处理，无需重新输入。")
+            return await fallback._generate_json_once(request)
+
+    async def _generate_json_once(
+        self, request: CandidateTransportRequest,
+    ) -> CandidateTransportResponse:
         if not 1 <= request.max_candidates <= 3:
             raise CandidateProviderTransportError("candidate request exceeds the bounded limit")
         is_deepseek = self._identity.provider.casefold().startswith("deepseek")
+        request_timeout = self._timeout
+        total_timeout = None if is_deepseek else self._timeout_seconds
+        if (
+            is_deepseek
+            and request.response_schema_name == "ashare_clarification_dialogue"
+            and (request.user_payload or {}).get("responseOnly") is True
+        ):
+            # Give optional display generation more time to connect, not a
+            # shorter read budget or a new deadline on an active model stream.
+            request_timeout = httpx.Timeout(
+                connect=20.0,
+                read=self._timeout.read,
+                write=self._timeout.write,
+                pool=self._timeout.pool,
+            )
         model_label = "DeepSeek" if is_deepseek else "模型"
         progress_message = {
             "public_search_query": f"已发起 {model_label} 检索词生成请求，等待响应。",
@@ -266,6 +385,7 @@ class OpenAICompatibleCandidateTransport:
                         f"{request.system_contract}\n"
                         f"{request.system_footer or self._default_system_footer(request)}"
                         f"{schema_contract}"
+                        f"{_THINKING_LANGUAGE_CONTRACT if self._thinking == 'enabled' else ''}"
                     ),
                 },
                 {
@@ -294,6 +414,24 @@ class OpenAICompatibleCandidateTransport:
         request_size = 0
         response_size = 0
         response_status: int | None = None
+        connection_retries = 0
+
+        async def connection_progress(name: str, info: dict[str, object]) -> None:
+            nonlocal connection_retries
+            # httpcore emits this only before retrying TCP/TLS establishment.
+            # Trace info can contain hostnames, headers or errors: never use it.
+            del info
+            if name == "connection.retry.started":
+                connection_retries += 1
+                try:
+                    emit_progress(
+                        "model_retry",
+                        f"模型连接暂时未建立，正在自动重连（第 {connection_retries + 1}/3 次）。",
+                    )
+                except Exception:
+                    # A disconnected progress consumer must not break recovery.
+                    _LOGGER.warning("candidate_reconnect_progress_unavailable")
+
         try:
             request_bytes = json.dumps(
                 body,
@@ -318,64 +456,42 @@ class OpenAICompatibleCandidateTransport:
                     self._max_request_bytes, json.dumps(field_bytes, separators=(",", ":")),
                 )
                 raise CandidateProviderTransportError("candidate provider request is too large")
-            async with httpx.AsyncClient(
-                timeout=self._timeout,
-                # httpx retries only connection establishment here, never a
-                # received response or a partially delivered model stream.
-                transport=self._transport or httpx.AsyncHTTPTransport(retries=1, trust_env=False),
-                follow_redirects=False,
-                trust_env=False,
-            ) as client:
+            # All DeepSeek streams retain their original inactivity bound with
+            # no total deadline. Other providers retain their total deadline.
+            async with (
+                self._request_client() as client,
+                asyncio.timeout(total_timeout),
+                client.stream(
+                    "POST",
+                    self._endpoint,
+                    headers=headers,
+                    content=request_bytes,
+                    timeout=request_timeout,
+                    extensions={"trace": connection_progress},
+                ) as response,
+            ):
+                response_status = response.status_code
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise CandidateProviderTransportError(
+                        "candidate provider request failed",
+                        failure_kind=self._http_failure_kind(response.status_code),
+                        http_status=response.status_code,
+                    )
                 if is_deepseek:
-                    # No total wall-clock deadline: every httpx read still has
-                    # ``timeout_seconds`` as its inactivity bound, while connect,
-                    # write and pool acquisition remain bounded as before.
-                    async with client.stream(
-                        "POST",
-                        self._endpoint,
-                        headers=headers,
-                        content=request_bytes,
-                    ) as response:
-                        response_status = response.status_code
-                        if response.status_code < 200 or response.status_code >= 300:
-                            raise CandidateProviderTransportError(
-                                "candidate provider request failed",
-                                failure_kind=self._http_failure_kind(response.status_code),
-                                http_status=response.status_code,
-                            )
-                        candidate_content, response_size = await _read_deepseek_stream(
-                            response,
-                            max_bytes=self._max_response_bytes,
-                        )
+                    candidate_content, response_size = await _read_deepseek_stream(
+                        response,
+                        max_bytes=self._max_response_bytes,
+                        progress_timeout=self._timeout_seconds,
+                    )
                 else:
-                    # Preserve the pre-existing total deadline for other gateways.
-                    async with (
-                        asyncio.timeout(self._timeout_seconds),
-                        client.stream(
-                            "POST",
-                            self._endpoint,
-                            headers=headers,
-                            content=request_bytes,
-                        ) as response,
-                    ):
-                        response_status = response.status_code
-                        if response.status_code < 200 or response.status_code >= 300:
-                            raise CandidateProviderTransportError(
-                                "candidate provider request failed",
-                                failure_kind=self._http_failure_kind(response.status_code),
-                                http_status=response.status_code,
-                            )
-                        raw = await _read_bounded_response(
-                            response,
-                            max_bytes=self._max_response_bytes,
-                        )
+                    raw = await _read_bounded_response(
+                        response,
+                        max_bytes=self._max_response_bytes,
+                    )
                     response_size = len(raw)
                     envelope = _ChatCompletion.model_validate_json(raw)
                     candidate_content = envelope.choices[0].message.content
-            candidate_payload = json.loads(
-                candidate_content,
-                parse_constant=_reject_non_json_constant,
-            )
+            candidate_payload = _parse_candidate_json(candidate_content)
             if not isinstance(candidate_payload, dict):
                 raise CandidateProviderTransportError(
                     "candidate provider response is not a JSON object"
@@ -397,10 +513,13 @@ class OpenAICompatibleCandidateTransport:
                 _safe_request_purpose(request.response_schema_name),
             )
             emit_progress("validation", "模型已返回结果，正在校验结构与可执行条件。")
-            return cast(dict[str, object], candidate_payload)
+            return IdentifiedCandidatePayload(
+                cast(dict[str, object], candidate_payload), self.identity,
+            )
         except CandidateProviderTransportError as exc:
             failure = _classified_transport_failure(exc, response_status)
-            emit_progress("failed", "模型调用未完成，正在返回错误说明。")
+            if not (failure.timed_out and self._timeout_fallback is not None):
+                emit_progress("failed", "模型调用未完成，正在返回错误说明。")
             _LOGGER.warning(
                 "candidate_transport_failed request_id=%s attempt=%d "
                 "provider=%s model=%s status=%s elapsed_ms=%d "
@@ -434,13 +553,14 @@ class OpenAICompatibleCandidateTransport:
                 "timeout" if timed_out else "connection_failed"
                 if isinstance(exc, httpx.HTTPError) else "invalid_response"
             )
-            emit_progress(
-                "failed",
-                "模型请求超时，正在返回错误说明。"
-                if timed_out else "模型连接未完成，正在返回错误说明。"
-                if failure_kind == "connection_failed"
-                else "模型响应未通过检查，正在返回错误说明。",
-            )
+            if not (timed_out and self._timeout_fallback is not None):
+                emit_progress(
+                    "failed",
+                    "模型请求超时，正在返回错误说明。"
+                    if timed_out else "模型连接未完成，正在返回错误说明。"
+                    if failure_kind == "connection_failed"
+                    else "模型响应未通过检查，正在返回错误说明。",
+                )
             _LOGGER.warning(
                 "candidate_transport_failed request_id=%s attempt=%d "
                 "provider=%s model=%s status=%s elapsed_ms=%d "
@@ -522,6 +642,7 @@ async def _read_deepseek_stream(
     response: httpx.Response,
     *,
     max_bytes: int,
+    progress_timeout: float | None = None,
 ) -> tuple[str, int]:
     """Keep final content separate; optionally stream reasoning to the local UI."""
 
@@ -539,6 +660,7 @@ async def _read_deepseek_stream(
     content_parts: list[str] = []
     wire_total = 0
     semantic_total = 0
+    last_progress = monotonic()
     done = False
     finish_reasons: list[str] = []
     reasoning_last_emit: float | None = None
@@ -653,7 +775,23 @@ async def _read_deepseek_stream(
                     "candidate provider response is too large"
                 )
 
-    async for chunk in response.aiter_bytes():
+    stream = response.aiter_bytes().__aiter__()
+    while True:
+        remaining = (
+            None if progress_timeout is None
+            else progress_timeout - (monotonic() - last_progress)
+        )
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError("model stream made no semantic progress")
+        try:
+            # Bound the wait itself, not just arrival of the next heartbeat.
+            async with asyncio.timeout(remaining):
+                chunk = await anext(stream)
+        except StopAsyncIteration:
+            break
+        except TimeoutError:
+            raise TimeoutError("model stream made no semantic progress") from None
+        previous_semantic_total = semantic_total
         wire_total += len(chunk)
         if wire_total > wire_limit:
             raise CandidateProviderTransportError("candidate provider response is too large")
@@ -663,6 +801,8 @@ async def _read_deepseek_stream(
             consume_line(raw_line[:-1] if raw_line.endswith(b"\r") else raw_line)
             if done:
                 break
+        if semantic_total > previous_semantic_total:
+            last_progress = monotonic()
         if len(buffer) > event_limit:
             raise CandidateProviderTransportError("candidate provider response is too large")
         if done:

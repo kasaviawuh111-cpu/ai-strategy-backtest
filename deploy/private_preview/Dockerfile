@@ -27,8 +27,30 @@ ENV APP_ENV=production \
     QUEUE_BACKEND=thread \
     LOCAL_WORKER_THREADS=1 \
     MARKET_DATA_PROFILE=eastmoney_skill \
+    RESEARCH_PROVIDER_MODE=tencent_web_search \
+    RESEARCH_PROVIDER_TIMEOUT_SECONDS=30 \
+    CANDIDATE_PROVIDER_MODE=openai_compatible \
+    CANDIDATE_PROVIDER_NAME=deepseek \
+    CANDIDATE_PROVIDER_ENDPOINT=https://api.deepseek.com/chat/completions \
+    CANDIDATE_PROVIDER_MODEL=deepseek-v4-flash \
+    CANDIDATE_PROVIDER_RESPONSE_MODE=json_object \
+    CANDIDATE_PROVIDER_THINKING=disabled \
+    CANDIDATE_PROVIDER_TIMEOUT_SECONDS=30 \
+    PLAN_DEEP_PROVIDER_MODE=openai_compatible \
+    PLAN_DEEP_PROVIDER_NAME=deepseek \
+    PLAN_DEEP_PROVIDER_ENDPOINT=https://api.deepseek.com/chat/completions \
+    PLAN_DEEP_PROVIDER_MODEL=deepseek-v4-pro \
+    PLAN_DEEP_PROVIDER_RESPONSE_MODE=json_object \
+    PLAN_DEEP_PROVIDER_THINKING=enabled \
+    PLAN_DEEP_PROVIDER_REASONING_EFFORT=high \
+    PLAN_DEEP_PROVIDER_TIMEOUT_SECONDS=180 \
     SKILL_HISTORY_CACHE_ROOT=/app/var/cache/mx-daily-history \
     PROVIDER_INDICATOR_CACHE_ROOT=/app/var/cache/provider-indicators \
+    MINUTE_GRID_ENABLED=true \
+    EXTERNAL_MINUTE_ROOT=/data/stock_1min \
+    MINUTE_MARKET_CALENDAR_PATH=/data/market-calendar.json \
+    MINUTE_SNAPSHOT_ROOT=/app/var/cache/eastmoney-minute \
+    PRICE_PLAN_CORPORATE_ACTION_ROOT=/app/var/cache/price-plan-corporate-actions \
     CATALOG_ROOT=/app/catalogs \
     WEB_DIST_ROOT=/app/web/dist \
     CORS_ALLOWED_ORIGINS="" \
@@ -49,6 +71,7 @@ COPY web/dist /app/web/dist
 COPY source-manifest.json /app/source-manifest.json
 RUN python -c "import hashlib,json; m=json.load(open('/app/source-manifest.json')); v='sha256:'+hashlib.sha256(json.dumps(m['files'],ensure_ascii=False,separators=(',',':')).encode()).hexdigest(); assert m['codeRevision']==v"
 USER app:app
+RUN python -c "from pathlib import Path; roots=['ashare_lab','astock_backtest','catalogs','contracts','alembic','deploy/private_preview','web/dist']; files=[p for r in roots for p in Path('/app',r).rglob('*') if p.is_file()]; [p.open('rb').close() for p in files]"
 EXPOSE 8000
 # Liveness only; the ASGI boundary applies the configured public/private policy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \

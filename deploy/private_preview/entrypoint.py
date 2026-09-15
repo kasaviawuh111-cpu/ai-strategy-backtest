@@ -15,6 +15,8 @@ from starlette.types import ASGIApp
 from ashare_lab.api.skill_app import _compose_skill_app  # pyright: ignore[reportPrivateUsage]
 from ashare_lab.api.web_hosting import validate_web_dist_root
 from ashare_lab.settings import AppSettings
+from ashare_lab.application.local_minute_grid import LocalMinuteGrid
+from ashare_lab.application.minute_replay_input import MinuteReplayDataError
 
 from .access import PreviewAccessConfig, PrivatePreviewAccess
 from .dialogue_requests import PreviewDialogueRequests
@@ -32,9 +34,8 @@ def create_app() -> ASGIApp:
     access = PreviewAccessConfig.from_environment(environment)
     settings = AppSettings(_env_file=None)  # pyright: ignore[reportCallIssue]
     _validate_preview_settings(settings, environment, access)
-    # Match the local Skill entrypoint: expose only provider-emitted reasoning
-    # through the existing request-scoped progress stream, without another call.
-    app = _compose_skill_app(settings, include_model_reasoning=True, max_pending=2)
+    # Match the local Skill entrypoint: show progress, not internal model reasoning.
+    app = _compose_skill_app(settings, include_model_reasoning=False, max_pending=2)
 
     async def preview_meta() -> dict[str, object]:
         return {"persistence": "ephemeral", "revision": settings.code_revision}
@@ -75,15 +76,28 @@ def _validate_preview_settings(
             "Private preview requires an explicitly injected MX credential"
         )
     if (
+        settings.research_provider_mode != "tencent_web_search"
+        or settings.research_provider_api_key is None
+        or not settings.research_provider_api_key.get_secret_value().strip()
+    ):
+        raise PreviewDeploymentError(
+            "Release requires Tencent WSA search and its dedicated RESEARCH_PROVIDER_API_KEY; "
+            "do not substitute DeepSeek credentials or silently disable the primary search"
+        )
+    if (
         settings.candidate_provider_mode != "openai_compatible"
         or settings.candidate_provider_name != "deepseek"
-        or settings.plan_deep_provider_mode == "disabled"
-        or (
-            settings.plan_deep_provider_mode == "openai_compatible"
-            and settings.plan_deep_provider_name != "deepseek"
-        )
+        or settings.candidate_provider_model != "deepseek-v4-flash"
+        or settings.candidate_provider_thinking != "disabled"
+        or settings.plan_deep_provider_mode != "openai_compatible"
+        or settings.plan_deep_provider_name != "deepseek"
+        or settings.plan_deep_provider_model != "deepseek-v4-pro"
+        or settings.plan_deep_provider_thinking != "enabled"
+        or settings.plan_deep_provider_reasoning_effort != "high"
     ):
-        raise PreviewDeploymentError("Private preview requires real DeepSeek model profiles")
+        raise PreviewDeploymentError(
+            "Release requires the reviewed DeepSeek Flash extraction and V4 Pro high-thinking planning profiles"
+        )
     endpoints = [settings.candidate_provider_endpoint]
     if settings.plan_deep_provider_mode == "openai_compatible":
         endpoints.append(settings.plan_deep_provider_endpoint)
@@ -98,6 +112,32 @@ def _validate_preview_settings(
     if settings.web_dist_root is None:
         raise PreviewDeploymentError("Private preview requires the built same-origin frontend")
     validate_web_dist_root(_ROOT / settings.web_dist_root)
+    _validate_minute_inputs(settings)
+
+
+def _validate_minute_inputs(settings: AppSettings) -> None:
+    """Reject a deployment missing the reviewed minute capability, never disable it."""
+    root = settings.external_minute_root
+    if not settings.minute_grid_enabled or root is None or not root.is_absolute():
+        raise PreviewDeploymentError("Release requires MINUTE_GRID_ENABLED=true and an absolute EXTERNAL_MINUTE_ROOT")
+    try:
+        if not root.is_dir():
+            raise ValueError("minute directory missing")
+        # The reviewed full-data bundle contains this file. COSFS directory
+        # enumeration can block startup for minutes; probe one known object
+        # directly, without restricting the universe available to backtests.
+        sample = root / "000001.SZ.parquet"
+        with sample.open("rb") as stream:
+            if stream.read(4) != b"PAR1":
+                raise ValueError("minute file invalid")
+        from ashare_lab.adapters.market_data.minute_availability import MinuteAvailability
+        MinuteAvailability(root, require_index=True).latest_date()
+        LocalMinuteGrid(_ROOT / settings.minute_snapshot_root,
+                        _ROOT / settings.minute_market_calendar_path).load_calendar()
+    except (OSError, ValueError, MinuteReplayDataError) as exc:
+        raise PreviewDeploymentError(
+            "Release minute data/calendar missing, unreadable or invalid; fix data and mount permissions before publishing"
+        ) from exc
 
 
 def _validate_ephemeral_database(database_url: str, configured_root: str) -> None:

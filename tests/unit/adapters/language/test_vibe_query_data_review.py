@@ -119,6 +119,32 @@ async def test_query_review_accepts_actual_single_day_ranking_and_preserves_snap
     assert "抓取时间" in request.system_contract
     assert "同一资产宇宙" in request.system_contract
     assert "不能只查原来的几只股票" in request.system_contract
+    assert result.strategy_requested is False
+    assert properties["strategy_requested"]["type"] == "boolean"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strategy_requested", [False, True])
+async def test_query_review_reports_explicit_strategy_intent_without_another_model_call(
+    advisor_factory, strategy_requested: bool,
+) -> None:
+    question = "查询东方财富最新价，并分析两种交易策略" if strategy_requested else (
+        "查询东方财富最新价"
+    )
+    advisor, transport = advisor_factory({
+        "satisfied": True, "evidence": ["最新价(元)"], "retry_query": None,
+        "message": "东方财富最新价为19.15元。", "strategy_requested": strategy_requested,
+    })
+    result = await advisor.review_query_result(
+        question=question, data_snapshot={
+            "kind": "finance", "columns": ["名称", "最新价(元)"],
+            "rows": [{"名称": "东方财富", "最新价(元)": "19.15"}],
+        },
+    )
+    assert result is not None and result.strategy_requested is strategy_requested
+    assert len(transport.requests) == 1
+    assert "明确同时要求" in transport.requests[0].system_contract
+    assert "历史会话含策略" in transport.requests[0].system_contract
 
 
 @pytest.mark.asyncio
@@ -235,6 +261,7 @@ async def test_query_review_fails_closed_on_local_contract_and_transport_errors(
     responses = (
         CandidateTransportError("unit-test-only"),
         _retry_payload(satisfied="false"),
+        _retry_payload(strategy_requested="true"),
         _retry_payload(evidence=["单日成交额 2026.09.04"]),
         _retry_payload(retry_query="请访问https://example.test/data查询成交额"),
         _retry_payload(retry_query="SELECT name FROM stocks ORDER BY amount DESC"),

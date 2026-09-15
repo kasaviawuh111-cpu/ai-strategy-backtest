@@ -24,6 +24,8 @@ def _source(tmp_path: Path) -> Path:
         "alembic/env.py": "",
         "deploy/private_preview/entrypoint.py": "def create_app(): pass\n",
         "deploy/private_preview/Dockerfile": "FROM python:3.12-slim\n",
+        "deploy/private_preview/full-data.env.example": "RESEARCH_PROVIDER_MODE=tencent_web_search\n",
+        "deploy/private_preview/README.md": "Deploy the Skill runtime, not the legacy snapshot runtime.\n",
         "scripts/prepare_private_preview_bundle.py": "# packager\n",
         "web/dist/index.html": '<script src="/assets/app.js"></script>',
         "web/dist/assets/app.js": (
@@ -38,12 +40,34 @@ def _source(tmp_path: Path) -> Path:
                 for index in range(5567)
             ],
         }),
+        "web/src/example.ts": "export const example = true\n",
     }
     for name, body in files.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body)
+    (root / "web/dist/build-provenance.json").write_text(json.dumps({
+        "schemaVersion": "ashare-lab.web-build-provenance.v1",
+        "sourceDigest": "test-fixture",
+    }))
+    # The fixture is intentionally synthetic; the real-source consistency check is
+    # covered by the build command and the package-level digest test below.
+    (root / "web/src/example.ts").unlink()
+    (root / "web/src").rmdir()
     return root
+
+
+def test_bundle_normalizes_copied_modes_without_changing_source(tmp_path: Path) -> None:
+    root = _source(tmp_path)
+    source = root / 'web/dist/strategy-gallery-samples.json'
+    source.write_text('{"entries":[]}')
+    source.chmod(0o600)
+    output = tmp_path / 'bundle'
+    prepare_bundle(repository=root, output=output)
+    assert source.stat().st_mode & 0o777 == 0o600
+    assert (output / 'web/dist/strategy-gallery-samples.json').stat().st_mode & 0o777 == 0o644
+    assert (output / 'web/dist').stat().st_mode & 0o777 == 0o755
+    assert (output / 'source-manifest.json').stat().st_mode & 0o777 == 0o644
 
 
 def test_bundle_is_allowlisted_and_revision_is_reproducible(tmp_path: Path) -> None:
@@ -70,6 +94,8 @@ def test_bundle_is_allowlisted_and_revision_is_reproducible(tmp_path: Path) -> N
     assert all(not (tmp_path / "first" / name).exists() for name in forbidden)
     assert (tmp_path / "first/Dockerfile").exists()
     assert (tmp_path / "first/source-manifest.json").exists()
+    assert (tmp_path / "first/deploy/private_preview/full-data.env.example").exists()
+    assert not (tmp_path / "first/deploy/cloudbase/deployment_entrypoint.py").exists()
     (root / "ashare_lab/__init__.py").write_text("# changed\n")
     assert prepare_bundle(repository=root, output=tmp_path / "third")["codeRevision"] != expected
 

@@ -2,7 +2,7 @@
  * 超额收益等式。
  *
  * 「相对同期持有 +36.69%」是一个结论，用户没法验算，也不知道它和上面的总收益是什么关系。
- * 拆成等式之后，三个数字互相解释：超额 = 策略收益 − 买入后一直持有的收益。
+ * 拆成等式之后，三个数字互相解释：超额 = (1+策略收益)/(1+持有收益)-1。
  * 术语保留（超额收益、买入持有是通用说法），但每个词下面给一行不需要背景知识的解释。
  */
 import { fmtPct, signClass } from './primitives'
@@ -40,7 +40,7 @@ export function ExcessEquation(
 
   return (
     <div className={`equation${compact ? ' equation--compact' : ''}`}
-      role="group" aria-label={`超额收益 ${fmtPct(excess)}，等于策略收益 ${fmtPct(total)} 减去${BENCHMARK_LABEL} ${fmtPct(bench)}`}>
+      role="group" aria-label={`超额收益 ${fmtPct(excess)}，按策略净值除以${BENCHMARK_LABEL}净值计算`}>
       <div className="eq-lead">
         <b className={signClass(excess)}>{fmtPct(excess)}</b>
         <span>超额收益{compact ? null : <small>比一直持有多出来的部分</small>}</span>
@@ -51,7 +51,7 @@ export function ExcessEquation(
           <b className={signClass(total)}>{fmtPct(total)}</b>
           <span>策略收益</span>
         </div>
-        <i className="eq-op">−</i>
+        <i className="eq-op">相对</i>
         <div className="eq-term">
           <b className={signClass(bench)}>{fmtPct(bench)}</b>
           <span>{BENCHMARK_LABEL}</span>

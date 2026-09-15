@@ -18,6 +18,10 @@ ChangeDimension = Literal[
 ]
 
 
+class BacktestReviewContentError(ValueError):
+    """The model responded, but its review is not safe to display."""
+
+
 @dataclass(frozen=True, slots=True)
 class BacktestReviewRequest:
     run_id: str
@@ -58,6 +62,8 @@ class BacktestModelReview:
 
 
 class BacktestReviewAdvisor(Protocol):
+    """Return None only for unavailability; invalid prose raises a content error."""
+
     async def review(self, request: BacktestReviewRequest) -> BacktestModelReview | None: ...
 
 
@@ -65,6 +71,7 @@ __all__ = [
     "BacktestModelReview",
     "BacktestOptimizationCandidate",
     "BacktestReviewAdvisor",
+    "BacktestReviewContentError",
     "BacktestReviewRequest",
     "ChangeDimension",
     "EvidenceGrade",

@@ -70,6 +70,60 @@ class EmptyLiveFinanceData:
         raise MxSaasProviderNoDataError("no matching rows")
 
 
+def test_skill_history_discovery_requeries_current_only_and_serializes_real_evidence() -> None:
+    class HistoryProvider:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None]] = []
+
+        async def query_finance(
+            self, *, query: str, indicators: str | None,
+        ) -> LiveFinanceDataResult:
+            self.calls.append((query, indicators))
+            days = ["2026-09-01"] if len(self.calls) == 1 else [
+                "2026-09-01", "2026-09-02", "2026-09-03",
+            ]
+            return LiveFinanceDataResult(
+                provider="eastmoney_mx_finance_data", query=query, indicators=indicators,
+                tables=({
+                    "entityCode": "300059",
+                    "fieldSet": [{"returnCode": "328773", "returnName": "市盈率PE(TTM)",
+                                  "unitName": "倍", "fixedParamValue": "Period=1"}],
+                    "rawTable": {"headName": days, "328773": [20] * len(days)},
+                },),
+                provenance=LiveMarketDataProvenance(
+                    response_sha256="sha256:" + str(len(self.calls)) * 64,
+                    retrieved_at=datetime(2026, 9, 7, tzinfo=UTC), schema_version="test.v1",
+                ),
+            )
+
+    provider = HistoryProvider()
+    with TestClient(create_app(live_finance_data=provider)) as client:
+        response = client.post("/api/v1/market/series-discovery", json={
+            "instrument_id": "300059.SZ", "metric_query": "市盈率PE(TTM)",
+            "start": "2026-09-01", "end": "2026-09-03",
+        })
+    assert response.status_code == 200
+    result = response.json()
+    assert result["status"] == "discovered"
+    assert len(result["attempts"]) == len(provider.calls) == 2
+    assert result["tables"][0]["fields"][0]["return_code"] == "328773"
+    for query, indicators in provider.calls:
+        assert "300059.SZ" in query
+        assert indicators is not None and "300059" not in indicators
+        assert all(text in indicators for text in ("市盈率PE(TTM)", "2026-09-01", "2026-09-03"))
+
+
+def test_skill_history_discovery_no_results_reports_completed_requery() -> None:
+    with TestClient(create_app(live_finance_data=EmptyLiveFinanceData())) as client:
+        response = client.post("/api/v1/market/series-discovery", json={
+            "instrument_id": "300059.SZ", "metric_query": "市盈率PE(TTM)",
+            "start": "2026-09-01", "end": "2026-09-03",
+        })
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "skill_series_no_history_after_requery"
+    assert "重新查询" in response.json()["error"]["message"]
+
+
 def test_empty_screen_is_not_reported_as_a_parser_failure() -> None:
     class EmptyScreen:
         async def screen(self, *, query: str, asset_type: str) -> LiveMarketDataResult:
@@ -82,7 +136,7 @@ def test_empty_screen_is_not_reported_as_a_parser_failure() -> None:
         )
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "live_market_data_no_results"
-    assert "未找到符合本次条件" in response.json()["error"]["message"]
+    assert "未返回本次查询的匹配数据" in response.json()["error"]["message"]
 
 
 @pytest.mark.parametrize("empty_result", [True, False])
@@ -120,13 +174,12 @@ def test_missing_stock_offers_an_active_sample_only_after_empty_results(empty_re
         assert len(provider.queries) == 2
         assert "日线策略" in provider.queries[0]
         assert "最近交易日成交额排名前10" in provider.queries[1]
-        assert draft["instrument_suggestion"]["symbol"] == "300059.SZ"
-        assert draft["instrument_suggestion"]["name"] == "东方财富"
-        assert "你想用哪只股票试试" in draft["clarification"]
+        assert draft["instrument_suggestion"] is None
+        assert "未完成核实" in draft["clarification"]
     else:
         assert len(provider.queries) == 1
         assert draft["instrument_suggestion"] is None
-        assert "东方财富选股 Skill授权失败" in draft["clarification"]
+        assert "暂时无法查询" in draft["clarification"]
 
 
 class FakeScreenedFinanceData(FakeLiveMarketData):

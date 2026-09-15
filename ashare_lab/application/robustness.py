@@ -21,6 +21,7 @@ class ExecutionStressOutcome:
     config_hash: str
     participation_rate: Decimal
     slippage_bps: Decimal
+    slippage_cny: Decimal
     total_return: float
     maximum_drawdown: float
     trade_count: int
@@ -44,6 +45,7 @@ class ExecutionRobustnessReport:
                     "configHash": item.config_hash,
                     "participationRate": float(item.participation_rate),
                     "slippageBps": float(item.slippage_bps),
+                    **({"slippageCny": float(item.slippage_cny)} if item.slippage_cny else {}),
                     "totalReturn": _finite(item.total_return),
                     "maxDrawdown": _finite(item.maximum_drawdown),
                     "tradeCount": item.trade_count,
@@ -64,8 +66,10 @@ def run_execution_robustness(
     base = request.config
     candidates = (
         ("base", base),
-        ("slippage_1_5x", replace(base, slippage_bps=base.slippage_bps * Decimal("1.5"))),
-        ("slippage_2x", replace(base, slippage_bps=base.slippage_bps * Decimal("2"))),
+        ("slippage_1_5x", replace(base, slippage_bps=base.slippage_bps * Decimal("1.5"),
+                                 slippage_cny=base.slippage_cny * Decimal("1.5"))),
+        ("slippage_2x", replace(base, slippage_bps=base.slippage_bps * Decimal("2"),
+                               slippage_cny=base.slippage_cny * 2)),
         ("participation_2_5pct", replace(base, participation_rate=Decimal("0.025"))),
         ("participation_5pct", replace(base, participation_rate=Decimal("0.05"))),
         ("participation_10pct", replace(base, participation_rate=Decimal("0.10"))),
@@ -94,6 +98,7 @@ def run_execution_robustness(
                 config_hash=config_hash,
                 participation_rate=scenario_config.participation_rate,
                 slippage_bps=scenario_config.slippage_bps,
+                slippage_cny=scenario_config.slippage_cny,
                 total_return=result.metrics.total_return,
                 maximum_drawdown=result.metrics.maximum_drawdown,
                 trade_count=result.metrics.trade_count,
@@ -118,6 +123,7 @@ def _config_hash(config: DailyBacktestConfig) -> str:
             "participationRate": _decimal_text(config.participation_rate),
             "retryUnfilledExits": config.retry_unfilled_exits,
             "slippageBps": _decimal_text(config.slippage_bps),
+            **({"slippageCny": _decimal_text(config.slippage_cny)} if config.slippage_cny else {}),
             "stateEntryValiditySessions": config.state_entry_validity_sessions,
         }
     )

@@ -10,31 +10,43 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
+from ashare_lab.domain.execution.rules import HistoricalAshareRuleBook, PriceLimitRuleInput
 from ashare_lab.domain.market_data import (
     AshareInstrumentCodeError,
     Board,
     TradingStatus,
     normalize_a_share_instrument,
 )
-from ashare_lab.domain.shared import DomainValidationError
+from ashare_lab.domain.shared import DomainValidationError, InstrumentId, Price
 from ashare_lab.ports.live_market_data import LiveFinanceDataResult, LiveMarketDataResult
 
-from .mx_saas import MxSaasMarketDataClient, MxSaasProviderNoDataError, notify_mx_data_retry
+from .mx_saas import (
+    MxSaasMarketDataClient,
+    MxSaasProviderNoDataError,
+    MxSaasProviderUnavailableError,
+    notify_mx_data_retry,
+)
 
 MX_DAILY_HISTORY_PROVIDER = "eastmoney_mx_finance_data"
 MX_BACK_ADJUSTMENT = "provider_declared_back_adjusted"
 MX_DAILY_HISTORY_CACHE_SCHEMA = "ashare-lab.mx-daily-history-cache.v1"
+MX_LISTING_NO_LIMIT_SOURCE = "cn_a.daily_market_rules.fallback.v2.no_limit"
+MxLimitSource = Literal[
+    "eastmoney_mx_finance_data", "eastmoney_mx_screener", "not_applicable_suspended",
+    "cn_a.daily_market_rules.fallback.v2.no_limit",
+]
 _MAX_HISTORY_CHUNK_DAYS = 730
 
 PERSISTENT_SKILL_INSTRUMENTS = frozenset(
@@ -57,6 +69,7 @@ _TRADING_STATUSES = {
     "正常交易": TradingStatus.TRADING,
     "复牌": TradingStatus.TRADING,
     "连续停牌": TradingStatus.SUSPENDED,
+    "停牌一天": TradingStatus.SUSPENDED,
 }
 _ST_STATUSES = {"否": False, "是": True}
 _MISSING_VALUES = {"", "-", "--", "null", "none"}
@@ -137,7 +150,8 @@ class MxDailyRow:
     is_st: bool
     upper_limit: Decimal | None
     lower_limit: Decimal | None
-    limit_source: Literal["eastmoney_mx_finance_data", "not_applicable_suspended"]
+    limit_source: MxLimitSource
+    listing_session_number: int | None = None
 
     def __post_init__(self) -> None:
         raw = (self.raw_open, self.raw_high, self.raw_low, self.raw_close)
@@ -165,11 +179,20 @@ class MxDailyRow:
             raise MxDailyHistoryError("MX ST flag must be boolean")
         if (self.upper_limit is None) != (self.lower_limit is None):
             raise MxDailyHistoryError("MX upper and lower limits must be present together")
+        if self.listing_session_number is not None and (
+            type(self.listing_session_number) is not int or self.listing_session_number < 1
+        ):
+            raise MxDailyHistoryError("MX listing session number must be a positive integer")
         if self.upper_limit is None:
-            if self.trading_status is not TradingStatus.SUSPENDED:
+            if self.trading_status is TradingStatus.SUSPENDED:
+                if self.limit_source != "not_applicable_suspended":
+                    raise MxDailyHistoryError("suspended missing limits require provenance")
+            elif (
+                self.trading_status is not TradingStatus.TRADING
+                or self.limit_source != MX_LISTING_NO_LIMIT_SOURCE
+                or self.listing_session_number is None
+            ):
                 raise MxDailyHistoryError("trading sessions require provider limit prices")
-            if self.limit_source != "not_applicable_suspended":
-                raise MxDailyHistoryError("missing limits are allowed only for suspended sessions")
         else:
             assert self.lower_limit is not None
             if (
@@ -179,7 +202,7 @@ class MxDailyRow:
                 or self.lower_limit >= self.upper_limit
             ):
                 raise MxDailyHistoryError("MX provider limit prices are invalid")
-            if self.limit_source != MX_DAILY_HISTORY_PROVIDER:
+            if self.limit_source not in (MX_DAILY_HISTORY_PROVIDER, "eastmoney_mx_screener"):
                 raise MxDailyHistoryError("provider limit prices require MX provenance")
         if self.trading_status is TradingStatus.SUSPENDED and (
             self.volume != 0 or self.amount != 0
@@ -218,6 +241,20 @@ class MxDailyHistory:
         if not self.rows:
             raise MxDailyHistoryError("MX daily history must contain rows")
         dates = tuple(row.session_date for row in self.rows)
+        for row in self.rows:
+            if row.limit_source != MX_LISTING_NO_LIMIT_SOURCE:
+                continue
+            number = row.listing_session_number
+            if number is None or not _listing_has_no_price_limit(
+                self.instrument_id, self.board, self.listing_date, row.session_date,
+                number, row.raw_preclose, row.is_st,
+            ):
+                raise MxDailyHistoryError("MX missing limits are not a verified listing exception")
+            if number > (row.session_date - self.listing_date).days + 1 or (
+                self.start == self.listing_date
+                and (dates[0] != self.listing_date or dates.index(row.session_date) + 1 != number)
+            ):
+                raise MxDailyHistoryError("MX listing session number conflicts with the date axis")
         if dates != tuple(sorted(set(dates))):
             raise MxDailyHistoryError("MX daily rows must be unique and strictly ordered")
         if any(not self.start <= value <= self.end for value in dates):
@@ -253,12 +290,24 @@ class MxDailyHistoryClient:
         cache_root: Path,
         *,
         memory_max_entries: int = 128,
+        persistent_instruments: frozenset[str] | None = PERSISTENT_SKILL_INSTRUMENTS,
+        cache_ttl: timedelta | None = None,
+        disk_max_entries: int | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if type(memory_max_entries) is not int or memory_max_entries < 1:
             raise ValueError("MX daily history memory cache size must be positive")
+        if cache_ttl is not None and cache_ttl <= timedelta(0):
+            raise ValueError("MX daily history cache ttl must be positive")
+        if disk_max_entries is not None and (
+            type(disk_max_entries) is not int or disk_max_entries < 1
+        ):
+            raise ValueError("MX daily history disk cache size must be positive")
         self._client = client
         self._cache_root = cache_root.expanduser().resolve()
         self._memory_max_entries = memory_max_entries
+        self._persistent_instruments = persistent_instruments
+        self._cache_ttl, self._disk_max_entries, self._clock = cache_ttl, disk_max_entries, clock
         self._memory: OrderedDict[tuple[str, date, date], MxDailyHistory] = OrderedDict()
         self._inflight: dict[tuple[str, date, date], Future[MxDailyHistory]] = {}
         self._gate = threading.RLock()
@@ -278,10 +327,10 @@ class MxDailyHistoryClient:
         with self._gate:
             if not force_refresh:
                 in_memory = self._memory.get(key)
-                if in_memory is not None:
+                if in_memory is not None and self._is_fresh(in_memory):
                     self._memory.move_to_end(key)
                     return replace(in_memory, cache_status="memory")
-                if canonical in PERSISTENT_SKILL_INSTRUMENTS:
+                if self._persists(canonical):
                     cached = self._read_cache(canonical, start, end)
                     if cached is not None:
                         self._remember(key, cached)
@@ -310,8 +359,8 @@ class MxDailyHistoryClient:
             history = replace(history, cache_status=None)
             with self._gate:
                 if self._inflight.get(key) is future:
-                    if canonical in PERSISTENT_SKILL_INSTRUMENTS:
-                        self._write_cache(history)
+                    if self._persists(canonical):
+                        self._try_write_cache(history)
                     self._remember(key, history)
         except BaseException as exc:
             future.set_exception(exc)
@@ -350,7 +399,11 @@ class MxDailyHistoryClient:
         listing_date, listing_name = _listing_metadata(listing_response, symbol)
         board = _board_for_symbol(symbol)
         if listing_name != identity_name:
-            raise MxDailyHistoryError("MX identity responses disagree on the security name")
+            # Code, exchange, type and listing status have already bound the
+            # security master response.  A finance endpoint may use an older
+            # name or a provider alias for that same code; it is presentation
+            # metadata, not an identity key for historical prices.
+            logging.getLogger(__name__).info("mx_identity_display_name_alias")
         if start < listing_date:
             raise MxDailyHistoryBeforeListingError(start=start, listing_date=listing_date)
 
@@ -373,7 +426,9 @@ class MxDailyHistoryClient:
             with self._gate:
                 if not force_refresh:
                     chunk = self._memory.get(chunk_key)
-                    if chunk is None and symbol in PERSISTENT_SKILL_INSTRUMENTS:
+                    if chunk is not None and not self._is_fresh(chunk):
+                        chunk = None
+                    if chunk is None and self._persists(symbol):
                         chunk = self._read_cache(symbol, cursor, chunk_end)
             if chunk is None:
                 chunk = await self._fetch_range(
@@ -405,8 +460,8 @@ class MxDailyHistoryClient:
                 # A superseded long refresh must not overwrite its successor's
                 # chunk cache, matching the existing whole-request ownership rule.
                 if owner is None or self._inflight.get((symbol, start, end)) is owner:
-                    if symbol in PERSISTENT_SKILL_INSTRUMENTS:
-                        self._write_cache(chunk)
+                    if self._persists(symbol):
+                        self._try_write_cache(chunk)
                     self._remember(chunk_key, chunk)
             if chunk_end == end:
                 break
@@ -433,16 +488,33 @@ class MxDailyHistoryClient:
             call_id = f"history-fields:{uuid4().hex}"
             for attempt in range(2):
                 try:
-                    response = await self._client.query_finance(query=query, indicators=indicators)
+                    # Keep the same requested fields, symbol, dates and adjustment.
+                    # The alternate adapts actual dated columns, not current values.
+                    alternate = (
+                        getattr(self._client, "query_finance_via_screen", None)
+                        if attempt and callable(getattr(
+                            type(self._client), "query_finance_via_screen", None,
+                        )) else None
+                    )
+                    operation = (
+                        cast(Callable[..., Awaitable[LiveFinanceDataResult]], alternate)
+                        if callable(alternate) else self._client.query_finance
+                    )
+                    response = await operation(query=query, indicators=indicators)
                     _history_fields(
                         response, symbol=symbol, required=required, start=start, end=end,
                     )
                     if attempt:
                         notify_mx_data_retry(call_id, recovered=True)
                     return response
-                except (MxSaasProviderNoDataError, MxDailyHistoryFieldsMissingError) as exc:
+                except (
+                    MxSaasProviderNoDataError, MxDailyHistoryFieldsMissingError,
+                    MxSaasProviderUnavailableError,
+                ) as exc:
                     if attempt:
-                        if isinstance(exc, MxDailyHistoryFieldsMissingError):
+                        if isinstance(exc, (
+                            MxDailyHistoryFieldsMissingError, MxSaasProviderUnavailableError,
+                        )):
                             raise
                         raise MxDailyHistoryFieldsMissingError(
                             required, start=start, end=end,
@@ -470,12 +542,23 @@ class MxDailyHistoryClient:
         limit_indicators = "涨停价、跌停价"
         raw_indicators = "不复权开盘价、不复权最高价、不复权最低价、不复权收盘价、成交量、成交额"
         adjusted_indicators = "后复权开盘价、后复权最高价、后复权最低价、后复权收盘价"
+
+        async def query_limits() -> LiveFinanceDataResult | MxDailyHistoryFieldsMissingError:
+            try:
+                return await query_fields(
+                    query=f"查询{symbol} {range_text}每个交易日的{limit_indicators}",
+                    indicators=limit_indicators, required=_LIMIT_FIELDS,
+                )
+            except MxDailyHistoryFieldsMissingError as exc:
+                if set(exc.fields) != set(_LIMIT_FIELDS):
+                    raise
+                # An IPO-only range may have no limit table at all. The exception
+                # is accepted only after every trading day is independently proven
+                # to be an exchange-rule no-limit session below.
+                return exc
+
         limit_response, raw_response, adjusted_response = await asyncio.gather(
-            query_fields(
-                query=f"查询{symbol} {range_text}每个交易日的{limit_indicators}",
-                indicators=limit_indicators,
-                required=_LIMIT_FIELDS,
-            ),
+            query_limits(),
             query_fields(
                 query=f"查询{symbol}{range_text}每个交易日数据",
                 indicators=raw_indicators,
@@ -487,13 +570,14 @@ class MxDailyHistoryClient:
                 required=_RAW_FIELDS[:4],
             ),
         )
-        limit_dates, limit_fields = _history_fields(
-            limit_response,
-            symbol=symbol,
-            required=_LIMIT_FIELDS,
-            start=start,
-            end=end,
-        )
+        limit_dates: tuple[date, ...]
+        limit_fields: dict[str, list[object]]
+        if isinstance(limit_response, MxDailyHistoryFieldsMissingError):
+            limit_dates, limit_fields = (), {name: [] for name in _LIMIT_FIELDS}
+        else:
+            limit_dates, limit_fields = _history_fields(
+                limit_response, symbol=symbol, required=_LIMIT_FIELDS, start=start, end=end,
+            )
         raw_dates, raw_fields = _history_fields(
             raw_response,
             symbol=symbol,
@@ -518,12 +602,31 @@ class MxDailyHistoryClient:
             if _provider_trading_status(session_fields["交易状态"][index])
             is TradingStatus.TRADING
         }
-        if set(limit_dates) != trading_dates:
+        limit_index = {value: index for index, value in enumerate(limit_dates)}
+        if set(limit_dates) - trading_dates:
+            raise MxDailyHistoryError(
+                "MX provider limits must cover every trading session and no suspended session"
+            )
+        missing_limits = trading_dates - set(limit_dates)
+        missing_limits.update(
+            day for day, index in limit_index.items()
+            if any(_is_missing(limit_fields[name][index]) for name in _LIMIT_FIELDS)
+        )
+        try:
+            no_limit_sessions, listing_evidence = await self._listing_no_limit_sessions(
+                symbol, board, listing_date, start, session_dates, session_fields, missing_limits,
+            )
+        except MxDailyHistoryError as exc:
+            if isinstance(limit_response, MxDailyHistoryFieldsMissingError):
+                raise limit_response from exc
+            raise
+        if missing_limits - set(no_limit_sessions):
+            if isinstance(limit_response, MxDailyHistoryFieldsMissingError):
+                raise limit_response
             raise MxDailyHistoryError(
                 "MX provider limits must cover every trading session and no suspended session"
             )
         session_index = {value: index for index, value in enumerate(session_dates)}
-        limit_index = {value: index for index, value in enumerate(limit_dates)}
         session_fields = {
             **session_fields,
             **{
@@ -545,13 +648,22 @@ class MxDailyHistoryClient:
                 raw_index=raw_index[day],
                 adjusted_fields=adjusted_fields,
                 adjusted_index=adjusted_index[day],
+                provider_limit_source=(
+                    MX_DAILY_HISTORY_PROVIDER
+                    if isinstance(limit_response, MxDailyHistoryFieldsMissingError)
+                    else cast(MxLimitSource, limit_response.provider)
+                ),
+                listing_no_limit_session_number=no_limit_sessions.get(day),
             )
             for day in sorted(session_dates)
         )
         evidence = (
             *identity_evidence,
             _finance_evidence("sessions", session_response, row_count=len(session_dates)),
-            _finance_evidence("limits", limit_response, row_count=len(limit_dates)),
+            *listing_evidence,
+            *(() if isinstance(limit_response, MxDailyHistoryFieldsMissingError) else (
+                _finance_evidence("limits", limit_response, row_count=len(limit_dates)),
+            )),
             _finance_evidence("raw_prices", raw_response, row_count=len(raw_dates)),
             _finance_evidence("adjusted_prices", adjusted_response, row_count=len(adjusted_dates)),
         )
@@ -567,6 +679,65 @@ class MxDailyHistoryClient:
             query_evidence=evidence,
         )
 
+    async def _listing_no_limit_sessions(
+        self, symbol: str, board: Board, listing_date: date, start: date,
+        session_dates: tuple[date, ...], session_fields: Mapping[str, Sequence[object]],
+        missing_dates: set[date],
+    ) -> tuple[dict[date, int], tuple[MxQueryEvidence, ...]]:
+        if not missing_dates or not _listing_has_no_price_limit(
+            symbol, board, listing_date, listing_date, 1, Decimal("1"), False,
+        ):
+            return {}, ()
+        evidence: tuple[MxQueryEvidence, ...] = ()
+        listing_axis = session_dates
+        if start != listing_date:
+            assert self._client is not None
+            # A small listing-origin proof, never a whole multi-year query. A
+            # date outside this returned axis is not granted a no-limit exception.
+            proof_end = min(max(missing_dates), listing_date + timedelta(days=31))
+            indicators = "前收盘价、交易状态、是否ST"
+            response = await self._client.query_finance(
+                query=(f"查询{symbol} {listing_date.isoformat()}至{proof_end.isoformat()}"
+                       f"每个交易日的{indicators}"),
+                indicators=indicators,
+            )
+            listing_axis, listing_fields = _history_fields(
+                response, symbol=symbol, required=_SESSION_FIELDS,
+                start=listing_date, end=proof_end,
+            )
+            overlap = tuple(day for day in session_dates if day <= proof_end)
+            if overlap != tuple(day for day in listing_axis if day >= start):
+                raise MxDailyHistoryError("MX listing-origin and requested session dates disagree")
+            for day in overlap:
+                original_index, proof_index = session_dates.index(day), listing_axis.index(day)
+                if any(
+                    session_fields[name][original_index] != listing_fields[name][proof_index]
+                    for name in _SESSION_FIELDS
+                ):
+                    raise MxDailyHistoryError("MX listing-origin session fields disagree")
+            evidence = (_finance_evidence(
+                "listing_session_axis", response, row_count=len(listing_axis),
+            ),)
+        if not listing_axis or listing_axis[0] != listing_date:
+            raise MxDailyHistoryError("MX listing-origin session axis must include the listing day")
+        result: dict[date, int] = {}
+        # Count the complete provider session axis, including suspended sessions;
+        # suspension must not silently extend an IPO no-limit window.
+        for number, day in enumerate(listing_axis, start=1):
+            if day not in missing_dates:
+                continue
+            index = session_dates.index(day)
+            st = _required_text(session_fields["是否为ST股票"][index], "是否为ST股票")
+            if st not in _ST_STATUSES:
+                raise MxDailyHistoryError(f"unsupported MX ST status: {st}")
+            if _listing_has_no_price_limit(
+                symbol, board, listing_date, day, number,
+                _positive_decimal(session_fields["前收盘价"][index], "前收盘价"),
+                _ST_STATUSES[st],
+            ):
+                result[day] = number
+        return result, evidence
+
     def _cache_path(self, symbol: str, start: date, end: date) -> Path:
         return self._cache_root / symbol / f"{start.isoformat()}_{end.isoformat()}.json"
 
@@ -579,7 +750,7 @@ class MxDailyHistoryClient:
                 continue
             seen.add(path)
             history = self._read_cache_file(path)
-            if history is None or history.instrument_id != symbol:
+            if history is None or history.instrument_id != symbol or not self._is_fresh(history):
                 continue
             if history.start > start or history.end < end:
                 continue
@@ -588,6 +759,18 @@ class MxDailyHistoryClient:
                 continue
             return replace(history, start=start, end=end, rows=rows)
         return None
+
+    def _persists(self, symbol: str) -> bool:
+        return self._persistent_instruments is None or symbol in self._persistent_instruments
+
+    def _is_fresh(self, history: MxDailyHistory) -> bool:
+        if self._cache_ttl is None:
+            return True
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("MX daily history cache clock must be timezone-aware")
+        age = now - history.retrieved_at
+        return timedelta(0) <= age <= self._cache_ttl
 
     def _read_cache_file(self, path: Path) -> MxDailyHistory | None:
         try:
@@ -622,8 +805,19 @@ class MxDailyHistoryClient:
         ):
             return None
 
+    def _try_write_cache(self, history: MxDailyHistory) -> None:
+        try:
+            self._write_cache(history)
+        except OSError:
+            # Persistence is optional. Do not discard validated provider data
+            # because the cache volume is read-only/full/unavailable.
+            logging.getLogger(__name__).warning("mx_history_cache_write_unavailable")
+
     def _write_cache(self, history: MxDailyHistory) -> None:
         path = self._cache_path(history.instrument_id, history.start, history.end)
+        if (self._disk_max_entries is not None and not path.exists()
+                and sum(1 for _ in self._cache_root.glob('*/*.json')) >= self._disk_max_entries):
+            return
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = {
             "schemaVersion": MX_DAILY_HISTORY_CACHE_SCHEMA,
@@ -651,9 +845,12 @@ def _history_fields(
     start: date,
     end: date,
 ) -> tuple[tuple[date, ...], dict[str, list[object]]]:
-    if response.provider != MX_DAILY_HISTORY_PROVIDER:
+    if response.provider not in (MX_DAILY_HISTORY_PROVIDER, "eastmoney_mx_screener"):
         raise MxDailyHistoryError("MX history response has the wrong provider")
-    grouped: dict[tuple[date, ...], list[Mapping[str, Any]]] = {}
+    wanted = set(required)
+    grouped: dict[
+        tuple[date, ...], list[tuple[Mapping[str, Any], tuple[int, ...]]]
+    ] = {}
     for table in response.tables:
         if not _table_belongs_to(table, symbol):
             continue
@@ -661,6 +858,14 @@ def _history_fields(
         if not isinstance(raw_value, Mapping):
             continue
         raw = cast(Mapping[str, object], raw_value)
+        names = table.get("nameMap")
+        if not isinstance(names, Mapping) or not any(
+            _provider_field_name(name) in wanted
+            for name in cast(Mapping[object, object], names).values()
+        ):
+            # An extra table for the same stock is not evidence about the
+            # requested fields and must not determine their historical axis.
+            continue
         raw_dates = raw.get("headName")
         if not isinstance(raw_dates, list) or not raw_dates:
             continue
@@ -673,7 +878,9 @@ def _history_fields(
             raise MxDailyHistoryError("MX history response contains duplicate dates")
         if any(not start <= value <= end for value in dates):
             raise MxDailyHistoryError("MX history response contains dates outside the request")
-        grouped.setdefault(dates, []).append(table)
+        order = tuple(sorted(range(len(dates)), key=dates.__getitem__))
+        axis = tuple(dates[index] for index in order)
+        grouped.setdefault(axis, []).append((table, order))
     if not grouped:
         raise MxDailyHistoryError("MX history response omitted an exact-symbol historical table")
     longest = max(len(axis) for axis in grouped)
@@ -682,8 +889,7 @@ def _history_fields(
         raise MxDailyHistoryError("MX history response has ambiguous historical date axes")
     dates, tables = winners[0]
     fields: dict[str, list[object]] = {}
-    wanted = set(required)
-    for table in tables:
+    for table, order in tables:
         raw = cast(Mapping[str, object], table["rawTable"])
         names = table.get("nameMap")
         if not isinstance(names, Mapping):
@@ -700,7 +906,9 @@ def _history_fields(
             values = cast(list[object], values_value)
             if len(values) != len(dates):
                 raise MxDailyHistoryError(f"MX {name} values do not align with dates")
-            typed_values = list(values)
+            # Reorder values with their own table's dates, never align tables
+            # by row number or fill a date absent from a related field table.
+            typed_values = [values[index] for index in order]
             existing = fields.get(name)
             if existing is not None and existing != typed_values:
                 raise MxDailyHistoryError(f"MX history has conflicting {name} fields")
@@ -738,7 +946,12 @@ def _identity_name(response: LiveMarketDataResult, symbol: str) -> str:
         raise MxDailyHistoryError("MX security-master response is not currently listed")
     if _one_text(row, ("市场类型",), "exchange") != _EXCHANGE_NAMES[market]:
         raise MxDailyHistoryError("MX security-master exchange conflicts with the symbol")
-    return _one_text(row, ("证券简称", "股票简称", "名称"), "security name")
+    # A code-bound screener can carry its current short name alongside a
+    # historical name or a display-spaced alias (for example, ``怡亚通`` and
+    # ``怡 亚 通``).  The fields above remain the identity proof; retain the
+    # preferred official short-name label for display instead of rejecting a
+    # valid security for its name history.
+    return _preferred_text(row, ("证券简称", "股票简称", "名称"), "security name")
 
 
 def _listing_metadata(response: LiveFinanceDataResult, symbol: str) -> tuple[date, str]:
@@ -804,7 +1017,11 @@ def _provider_field_name(value: object) -> str:
     return _PROVIDER_FIELD_ALIASES.get(name, name)
 
 
-def _one_text(row: Mapping[str, Any], aliases: Sequence[str], label: str) -> str:
+def _one_text(
+    row: Mapping[str, Any],
+    aliases: Sequence[str],
+    label: str,
+) -> str:
     values = {
         str(row[alias]).strip()
         for alias in aliases
@@ -815,11 +1032,32 @@ def _one_text(row: Mapping[str, Any], aliases: Sequence[str], label: str) -> str
     return next(iter(values))
 
 
+def _preferred_text(row: Mapping[str, Any], aliases: Sequence[str], label: str) -> str:
+    """Return the first non-empty provider alias in the declared priority."""
+
+    for alias in aliases:
+        if alias in row and not _is_missing(row[alias]):
+            return str(row[alias]).strip()
+    raise MxDailyHistoryError(f"MX {label} is missing")
+
+
 def _one_provider_value(values: Sequence[object], label: str) -> str:
     cleaned = {str(value).strip() for value in values if not _is_missing(value)}
     if len(cleaned) != 1:
         raise MxDailyHistoryError(f"MX {label} is missing or ambiguous")
     return next(iter(cleaned))
+
+
+def _listing_has_no_price_limit(
+    symbol: str, board: Board, listing_date: date, session_date: date,
+    listing_session_number: int, previous_close: Decimal, is_st: bool,
+) -> bool:
+    session = HistoricalAshareRuleBook().build_session(PriceLimitRuleInput(
+        instrument_id=InstrumentId(symbol), session_date=session_date, board=board,
+        status=TradingStatus.TRADING, previous_close=Price(previous_close),
+        listing_date=listing_date, listing_session_number=listing_session_number, is_st=is_st,
+    ))
+    return session.upper_limit is None and session.lower_limit is None
 
 
 def _daily_row(
@@ -831,6 +1069,8 @@ def _daily_row(
     raw_index: int,
     adjusted_fields: Mapping[str, Sequence[object]],
     adjusted_index: int,
+    provider_limit_source: MxLimitSource = MX_DAILY_HISTORY_PROVIDER,
+    listing_no_limit_session_number: int | None = None,
 ) -> MxDailyRow:
     trading_status = _provider_trading_status(session_fields["交易状态"][session_index])
     raw_st = _required_text(session_fields["是否为ST股票"][session_index], "是否为ST股票")
@@ -845,13 +1085,18 @@ def _daily_row(
     ):
         upper_limit = None
         lower_limit = None
-        limit_source: Literal[
-            "eastmoney_mx_finance_data", "not_applicable_suspended"
-        ] = "not_applicable_suspended"
+        limit_source: MxLimitSource = "not_applicable_suspended"
+    elif (
+        trading_status is TradingStatus.TRADING
+        and listing_no_limit_session_number is not None
+        and _is_missing(raw_upper) and _is_missing(raw_lower)
+    ):
+        upper_limit = lower_limit = None
+        limit_source = MX_LISTING_NO_LIMIT_SOURCE
     else:
         upper_limit = _positive_decimal(raw_upper, "涨停价")
         lower_limit = _positive_decimal(raw_lower, "跌停价")
-        limit_source = MX_DAILY_HISTORY_PROVIDER
+        limit_source = provider_limit_source
     return MxDailyRow(
         session_date=day,
         raw_open=_positive_decimal(raw_fields["开盘价"][raw_index], "不复权开盘价"),
@@ -880,12 +1125,19 @@ def _daily_row(
         upper_limit=upper_limit,
         lower_limit=lower_limit,
         limit_source=limit_source,
+        listing_session_number=(
+            listing_no_limit_session_number if limit_source == MX_LISTING_NO_LIMIT_SOURCE else None
+        ),
     )
 
 
 def _provider_trading_status(value: object) -> TradingStatus:
     raw_status = _required_text(value, "交易状态")
     if raw_status not in _TRADING_STATUSES:
+        safe_status = raw_status if len(raw_status) <= 20 and all(
+            "\u4e00" <= char <= "\u9fff" for char in raw_status
+        ) else "unrecognized_format"
+        logging.getLogger("uvicorn.error").warning("mx_unknown_trading_status status=%s", safe_status)
         raise MxDailyHistoryError(f"unsupported MX trading status: {raw_status}")
     return _TRADING_STATUSES[raw_status]
 
@@ -1000,6 +1252,7 @@ def _history_payload(history: MxDailyHistory) -> dict[str, object]:
                 "amount": str(row.amount),
                 "isSt": row.is_st,
                 "limitSource": row.limit_source,
+                "listingSessionNumber": row.listing_session_number,
                 "lowerLimit": None if row.lower_limit is None else str(row.lower_limit),
                 "rawClose": str(row.raw_close),
                 "rawHigh": str(row.raw_high),
@@ -1051,10 +1304,8 @@ def _history_from_payload(payload: Mapping[str, Any]) -> MxDailyHistory:
                 lower_limit=(
                     None if row["lowerLimit"] is None else Decimal(str(row["lowerLimit"]))
                 ),
-                limit_source=cast(
-                    Literal["eastmoney_mx_finance_data", "not_applicable_suspended"],
-                    str(row["limitSource"]),
-                ),
+                limit_source=cast(MxLimitSource, str(row["limitSource"])),
+                listing_session_number=cast(int | None, row.get("listingSessionNumber")),
             )
             for row in cast(Sequence[Mapping[str, Any]], payload["rows"])
         ),

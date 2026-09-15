@@ -18,6 +18,7 @@ from ashare_lab.domain.execution import MatchOutcome
 from ashare_lab.domain.orders import OrderSide, OrderStatus
 from ashare_lab.domain.runs import result_hash
 from ashare_lab.domain.shared import OrderId
+from ashare_lab.application.execution_feedback import zero_fill_execution_note
 
 RESULT_HASH_SCHEMA_VERSION = "ashare-lab.backtest-result-hash.v1"
 
@@ -117,6 +118,9 @@ def build_result_bundle(
         },
         "robustness": None if robustness is None else dict(robustness),
     }
+    note = zero_fill_execution_note(bundle["activities"])
+    if note is not None:
+        bundle["summary"]["executionNote"] = note
     bundle["audit"]["resultHash"] = calculate_result_bundle_hash(bundle)
     return bundle
 

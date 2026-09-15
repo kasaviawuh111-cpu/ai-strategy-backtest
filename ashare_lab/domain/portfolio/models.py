@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from dataclasses import dataclass
 from datetime import date, datetime
 from enum import StrEnum
@@ -116,6 +118,9 @@ class PositionLot:
     sellable_on: date
     remaining_quantity: Quantity
     cost_basis: Money
+    # Execution-only acquisition principal, separate from fee-inclusive books.
+    # None means old/imported lots do not carry this provenance.
+    acquisition_principal: Money | None = None
 
     def __post_init__(self) -> None:
         require_aware(self.acquired_at, "acquired_at")
@@ -132,6 +137,11 @@ class PositionLot:
             raise PortfolioInvariantError("position lot quantity must be positive")
         if self.cost_basis.amount < 0:
             raise PortfolioInvariantError("position lot cost basis cannot be negative")
+        if self.acquisition_principal is not None and (
+            self.acquisition_principal.currency != self.cost_basis.currency
+            or self.acquisition_principal.amount < 0
+        ):
+            raise PortfolioInvariantError("invalid fee-exclusive acquisition principal")
 
 
 class CorporateActionPhase(StrEnum):
@@ -166,6 +176,11 @@ class CorporateActionEntitlement:
     captured_at: datetime
     accrued_at: datetime | None = None
     settled_at: datetime | None = None
+    # Immutable registration-date lots; later sales must not erase the holding
+    # clocks of shares subsequently credited from this entitlement.
+    record_lots: tuple[PositionLot, ...] = ()
+    # Fee-exclusive principal reserved for each registration lot's bonus shares.
+    share_principals: tuple[Money | None, ...] = ()
 
     def __post_init__(self) -> None:
         require_aware(self.captured_at, "captured_at")
@@ -179,6 +194,15 @@ class CorporateActionEntitlement:
             raise PortfolioInvariantError("corporate-action entitlement dates are inconsistent")
         if self.cash_amount.amount < 0:
             raise PortfolioInvariantError("corporate-action cash entitlement cannot be negative")
+        if self.share_principals and (len(self.share_principals) != len(self.record_lots)
+            or any(p is not None and (p.amount < 0 or p.currency != self.cash_amount.currency)
+                   for p in self.share_principals)):
+            raise PortfolioInvariantError("bonus principal allocation does not match registration lots")
+        if self.record_lots and (
+            any(lot.instrument_id != self.instrument_id for lot in self.record_lots)
+            or sum(lot.remaining_quantity.value for lot in self.record_lots) != self.entitled_quantity.value
+        ):
+            raise PortfolioInvariantError("record-date lots do not match entitlement")
         if self.status is CorporateActionEntitlementStatus.CAPTURED:
             if self.accrued_at is not None or self.settled_at is not None:
                 raise PortfolioInvariantError("captured entitlement cannot have later clocks")
@@ -358,6 +382,16 @@ class PortfolioState:
                 if lot.instrument_id == instrument_id
             )
         )
+
+    def pending_share_principal(self, instrument_id: InstrumentId) -> Decimal:
+        total = Decimal(0)
+        for item in self.corporate_action_entitlements:
+            if item.instrument_id == instrument_id and item.status is CorporateActionEntitlementStatus.ACCRUED:
+                for principal in item.share_principals:
+                    if principal is None:
+                        raise PortfolioInvariantError("pending share principal provenance missing")
+                    total += principal.amount
+        return total
 
     def sellable_quantity(self, instrument_id: InstrumentId, trading_date: date) -> Quantity:
         if type(trading_date) is not date:

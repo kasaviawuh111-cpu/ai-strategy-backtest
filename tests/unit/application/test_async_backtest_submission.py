@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from threading import Event
+from time import monotonic, sleep
 from typing import cast
 
 from fastapi.testclient import TestClient
@@ -135,6 +137,81 @@ def test_submit_returns_preparing_run_before_snapshot_provider_finishes() -> Non
         coordinator.shutdown()
 
 
+def test_cancel_waiting_preparation_skips_provider_and_allows_explicit_retry() -> None:
+    store = InMemoryBacktestRunStore(clock=lambda: NOW)
+    inner = _BlockingSubmission(store)
+    coordinator = _coordinator(inner, store)
+    try:
+        first = coordinator.submit(_strategy(), BacktestRunConfig())
+        assert inner.started.wait(1)
+        config = BacktestRunConfig(allocation_ratio=Decimal("0.5"))
+        waiting = coordinator.submit(_strategy(), config)
+        app = create_app(backtest_submission=coordinator, run_store=store)
+        with TestClient(app) as client:
+            response = client.post(f"/api/v1/backtest-runs/{waiting.record.run_id}/cancel")
+            assert response.status_code == 202
+            assert response.json()["state"] == "cancelled"
+            polled = client.get(f"/api/v1/backtest-runs/{waiting.record.run_id}")
+            assert polled.status_code == 200
+            assert polled.json()["state"] == "cancelled"
+        cancelled = coordinator.get_preparation(waiting.record.run_id)
+        assert cancelled is not None and cancelled.state is BacktestJobState.CANCELLED
+        assert coordinator.get_preparation(waiting.record.run_id) == cancelled
+        assert coordinator.request_cancel_preparation(waiting.record.run_id) == cancelled
+        assert store.get(waiting.record.run_id) is None
+        assert inner.received_run_id == first.record.run_id
+        retry = coordinator.submit(_strategy(), config)
+        assert not retry.replayed and retry.record.run_id != waiting.record.run_id
+        inner.release.set()
+        coordinator.shutdown()
+        assert inner.received_run_id == retry.record.run_id
+        assert store.get(waiting.record.run_id) is None
+        assert coordinator.get_preparation(waiting.record.run_id) == cancelled
+    finally:
+        inner.release.set()
+        coordinator.shutdown()
+
+
+def test_replayed_preparation_tracks_current_canonical_run_state() -> None:
+    store = InMemoryBacktestRunStore(clock=lambda: NOW)
+    inner = _BlockingSubmission(store)
+    inner.release.set()
+    canonical = inner.submit(
+        _strategy(), BacktestRunConfig(), run_id=RunId("run:canonical")
+    ).record
+    coordinator = _coordinator(inner, store)
+    temporary = coordinator.submit(_strategy(), BacktestRunConfig()).record
+    coordinator.shutdown()  # Wait until the temporary ID resolves to the replay.
+
+    assert temporary.run_id != canonical.run_id
+    assert coordinator.get_preparation(temporary.run_id) == canonical
+    assert store.get(temporary.run_id) is None
+    app = create_app(backtest_submission=coordinator, run_store=store)
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/backtest-runs/{temporary.run_id}/cancel")
+        assert response.status_code == 202
+        assert response.json()["id"] == str(canonical.run_id)
+        assert response.json()["state"] == "cancel_requested"
+        polled = client.get(f"/api/v1/backtest-runs/{temporary.run_id}")
+        assert polled.status_code == 200
+        assert polled.json()["state"] == "cancel_requested"
+    cancelled = store.get(canonical.run_id)
+    assert cancelled is not None
+    assert cancelled.state is BacktestJobState.CANCEL_REQUESTED
+    assert coordinator.get_preparation(temporary.run_id) == cancelled
+    terminal = store.transition(
+        canonical.run_id,
+        expected=(BacktestJobState.CANCEL_REQUESTED,),
+        target=BacktestJobState.CANCELLED,
+        progress_percent=100,
+        progress_label="已取消",
+    )
+    assert coordinator.get_preparation(temporary.run_id) == terminal
+    replay = coordinator.submit(_strategy(), BacktestRunConfig())
+    assert replay.replayed is True
+    assert replay.record == terminal
+
+
 def test_background_preparation_failure_is_pollable_without_fake_run_data() -> None:
     store = InMemoryBacktestRunStore(clock=lambda: NOW)
     inner = _FailingSubmission(store)
@@ -181,6 +258,51 @@ def test_http_post_returns_202_while_historical_preparation_is_blocked() -> None
             materialized = client.get(f"/api/v1/backtest-runs/{payload['id']}")
             assert materialized.status_code == 200
             assert materialized.json()["state"] == "queued"
+    finally:
+        inner.release.set()
+        coordinator.shutdown()
+
+
+def test_explicit_retry_after_preparation_failure_requeries_and_keeps_old_failure() -> None:
+    class FailOnce(_BlockingSubmission):
+        calls = 0
+
+        def submit(
+            self, strategy: StrategySpec, config: BacktestRunConfig,
+            *, run_id: RunId | None = None,
+        ) -> CreateRunResult:
+            self.calls += 1
+            if self.calls == 1:
+                raise BacktestDataNotYetAvailableError("data not ready yet")
+            return super().submit(strategy, config, run_id=run_id)
+
+    store = InMemoryBacktestRunStore(clock=lambda: NOW)
+    inner = FailOnce(store)
+    coordinator = _coordinator(inner, store)
+    try:
+        first = coordinator.submit(_strategy(), BacktestRunConfig())
+        deadline = monotonic() + 2
+        failed = None
+        while monotonic() < deadline:
+            failed = coordinator.get_preparation(first.record.run_id)
+            if failed is not None and failed.state is BacktestJobState.FAILED:
+                break
+            sleep(0.005)
+        assert failed is not None and failed.state is BacktestJobState.FAILED
+        retry = coordinator.submit(_strategy(), BacktestRunConfig())
+        assert not retry.replayed
+        assert retry.record.run_id != first.record.run_id
+        assert inner.started.wait(1)
+        assert inner.calls == 2
+        duplicate = coordinator.submit(_strategy(), BacktestRunConfig())
+        assert duplicate.replayed and duplicate.record.run_id == retry.record.run_id
+        assert coordinator.get_preparation(first.record.run_id) == failed
+        assert store.get(first.record.run_id) is None
+        inner.release.set()
+        assert inner.done.wait(1)
+        materialized = coordinator.get_preparation(retry.record.run_id)
+        assert materialized is not None and materialized.state is BacktestJobState.QUEUED
+        assert store.get(retry.record.run_id) == materialized
     finally:
         inner.release.set()
         coordinator.shutdown()

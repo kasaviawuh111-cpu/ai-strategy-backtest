@@ -417,6 +417,7 @@ def test_composite_readiness_accepts_only_persisted_strict_event_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     revision = "a" * 40
+    monkeypatch.setattr(AppSettings, "resolved_mx_saas_api_key", lambda _self: None)
     monkeypatch.setattr(settings_module, "_repository_has_git_metadata", lambda: True)
     monkeypatch.setattr(settings_module, "_working_tree_revision", lambda: revision)
     data_root = _write_composite_v2(tmp_path / "composite")

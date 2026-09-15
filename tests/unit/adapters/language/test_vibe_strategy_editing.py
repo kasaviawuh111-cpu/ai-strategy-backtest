@@ -2,6 +2,7 @@
 
 import json
 from asyncio import sleep
+from contextlib import nullcontext
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -15,20 +16,1078 @@ from ashare_lab.adapters.language.vibe_candidates import (
     CandidateTransportError,
     CandidateTransportRequest,
     CandidateTransportResponse,
+    _bounded_response_schema,  # pyright: ignore[reportPrivateUsage]
     build_candidate_capability_matrix,
 )
 from ashare_lab.adapters.language.vibe_strategy_editing import (
     VibeStrategyEditor,
+    _edit_response_schema,  # pyright: ignore[reportPrivateUsage]
     _ProviderEdit,
     _report_references,
 )
 from ashare_lab.application.backtest_submission import resolve_execution_settings
+from ashare_lab.application.skill_numeric_catalog import extend_skill_numeric_catalogs
 from ashare_lab.domain.catalog import load_catalog_directory, load_coverage_catalog_directory
+from ashare_lab.domain.signals.comparators import Comparator, evaluate_comparator
+from ashare_lab.domain.signals.skill_numeric import skill_series_compare_binding
 from ashare_lab.domain.strategy import FirstOfExit, IndicatorCondition, StrategySpec, canonical_hash
-from ashare_lab.ports.clarification_dialogue import ClarificationDialogueTurn
+from ashare_lab.domain.strategy.models import AllCondition, HoldingPeriodExit
+from ashare_lab.ports.clarification_dialogue import ClarificationDialogueTurn, ClarificationOption
 from ashare_lab.ports.dialogue_progress import emit_progress, progress_sink
 from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
-from ashare_lab.ports.strategy_editing import StrategyEditRequest
+from ashare_lab.ports.strategy_editing import StrategyEditRequest, StrategyEditSemanticError
+
+
+@pytest.mark.asyncio
+async def test_calendar_aside_uses_server_date_not_backtest_date(monkeypatch) -> None:
+    from ashare_lab.adapters.language import vibe_strategy_editing as editing
+
+    calendar = {"date": "2026-09-08", "weekday": "星期二", "timezone": "Asia/Shanghai"}
+    monkeypatch.setattr(editing, "_server_calendar", lambda: calendar)
+    root = Path(__file__).parents[4]
+    catalog = load_catalog_directory(root / "catalogs")
+    coverage = load_coverage_catalog_directory(root / "catalogs/coverage")
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+
+    class Transport:
+        async def generate_json(self, request):
+            assert request.user_payload["serverCalendar"] == calendar
+            return {"disposition": "conversation", "strategy": None,
+                    "message": "北京时间今天是星期二。我们可以继续修改刚才的策略。",
+                    "run_requested": False, "refresh_data": False}
+
+    result = await VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(catalog, coverage),
+        catalog=catalog,
+        provider_identity=CandidateProviderIdentityView("fixture", "fixture", "test", "test"),
+    ).edit(StrategyEditRequest(answer="今天周几", prior_utterance="改一下卖出规则",
+                               strategy=original, as_of_date=date(2025, 1, 1)))
+    assert result.disposition == "conversation" and result.strategy is None
+    assert not result.run_requested and not result.refresh_data
+    assert "星期二" in result.message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+async def test_cross_day_edit_review_receives_catalog_semantics_and_repairs_once(
+    repair_succeeds: bool,
+) -> None:
+    root = Path(__file__).parents[4]
+    catalog, coverage = extend_skill_numeric_catalogs(
+        load_catalog_directory(root / "catalogs"),
+        load_coverage_catalog_directory(root / "catalogs/coverage"),
+    )
+    matrix = build_candidate_capability_matrix(catalog, coverage)
+    definition = next(item for item in matrix.indicators
+                      if item.indicator_id == "provider.series_compare")
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    crossed = IndicatorCondition(
+        indicator_id="provider.series_compare", definition_version="1.0.0",
+        params={"left_metric_query": "当日不复权收盘价", "right_metric_query": "当日涨停价",
+                "unit": "元"}, trigger="crosses_below",
+    )
+    below = crossed.model_copy(update={"trigger": "below"})
+    touched = crossed.model_copy(update={
+        "trigger": "at_least", "params": {
+            **crossed.params, "left_metric_query": "当日不复权最高价",
+        },
+    })
+    broken = original.model_copy(update={
+        "entry": crossed, "exit": FirstOfExit(op="all", children=(HoldingPeriodExit(sessions=1),
+                                                                 below)),
+    })
+    fixed = broken.model_copy(update={"entry": AllCondition(children=(touched, below))})
+    generated = 0
+    reviewed = 0
+
+    class ReviewFixture:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            nonlocal reviewed
+            reviewed += 1
+            assert request.response_schema_name == "strategy_edit_semantic_review"
+            assert request.user_payload is not None
+            metadata = cast(dict[str, object], request.user_payload["candidateExecutionSemantics"])
+            definitions = cast(list[dict[str, object]], metadata["selectedIndicatorDefinitions"])
+            assert len(definitions) == 1
+            assert definitions[0]["indicator_id"] == "provider.series_compare"
+            assert definitions[0]["formula_summary"] == definition.formula_summary
+            assert "前一交易日和当前交易日" in str(definitions[0]["formula_summary"])
+            assert "日内触及后打开" in request.system_contract
+            candidate = cast(dict[str, object], request.user_payload["candidateEdit"])
+            valid = repair_succeeds and reviewed == 2
+            expected = fixed if valid else broken
+            assert candidate["strategy"] == expected.model_dump(mode="json")
+            assert metadata["conditions"] == {"entry": expected.entry.model_dump(mode="json"),
+                                               "exit": expected.exit.model_dump(mode="json")}
+            # Runtime counterexample: an intraday touch/open can occur without
+            # yesterday's close being on/above yesterday's limit price.
+            comparator = skill_series_compare_binding(crossed).comparisons[0].comparator
+            assert comparator is Comparator.CROSSES_BELOW
+            assert not evaluate_comparator(comparator, Decimal(9), Decimal(10),
+                                           previous_left=Decimal(9), previous_right=Decimal(10))
+            assert evaluate_comparator(Comparator.GTE, Decimal(10), Decimal(10))
+            return {"requested_changes": "equivalent" if valid else "mismatch",
+                    "preserved_fields": "equivalent", "execution_authority": "equivalent",
+                    "message_consistency": "equivalent", "issues": [] if valid else [
+                        "当前是前一交易日到当日的穿越，缺少当日曾触及涨停的条件。",
+                    ]}
+
+    class Fast:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            raise AssertionError("a resolved selection must not call the fast profile")
+
+    class Deep:
+        identity = CandidateProviderIdentityView("deep-provider", "deep-model", "test", "test")
+
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            nonlocal generated
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                return await ReviewFixture().generate_json(request)
+            generated += 1
+            assert request.response_schema_name == "strategy_edit"
+            assert request.user_payload is not None
+            assert "currentExecutionSemantics" in request.user_payload
+            if generated == 2:
+                metadata = cast(
+                    dict[str, object], request.user_payload["rejectedExecutionSemantics"],
+                )
+                assert metadata["selectedIndicatorDefinitions"] == [
+                    definition.model_dump(mode="json"),
+                ]
+                assert request.user_payload["rejectedEdit"] is not None
+            return {"disposition": "apply", "message": "按已确认口径整理，尚未运行。",
+                    "strategy": (fixed if generated == 2 and repair_succeeds
+                                 else broken).model_dump(mode="json"),
+                    "run_requested": False, "refresh_data": False}
+
+    result = None
+    with (nullcontext() if repair_succeeds else pytest.raises(StrategyEditSemanticError)):
+        result = await VibeStrategyEditor(
+            Fast(), continuation_transport=Deep(), capability_matrix=matrix, catalog=catalog,
+            provider_identity=CandidateProviderIdentityView("fast", "fast", "test", "test"),
+            model_semantic_review=True,
+        ).edit(StrategyEditRequest(
+            answer="收盘价是否达到当日涨停价（", prior_utterance="当日炸板买入，第二天不涨停卖出",
+            strategy=original, as_of_date=date(2026, 9, 8),
+            selected_clarification=ClarificationOption(
+                id="close", title="按收盘判定", preview="当日曾触及涨停且收盘不封板。",
+            ),
+        ))
+    assert generated == reviewed == 2
+    if repair_succeeds:
+        assert result is not None and result.strategy == fixed
+        assert not result.run_requested and not result.refresh_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relation,profile,expected_deep", [
+    ("continuation", "enabled", True),
+    ("selected", "enabled", True),
+    ("new_edit", "enabled", False),
+    ("unclear", "enabled", False),
+    ("normal", "enabled", False),
+    ("discuss", "enabled", False),
+    ("continuation", "none", False),
+    ("continuation", "disabled", False),
+    ("continuation", "production", False),
+])
+async def test_confirmed_continuation_routes_generation_and_review_not_intent(
+    relation: str, profile: str, expected_deep: bool,
+) -> None:
+    from ashare_lab.api.app import build_hybrid_candidate_compiler
+
+    root = Path(__file__).parents[4]
+    catalog = load_catalog_directory(root / "catalogs")
+    matrix = build_candidate_capability_matrix(
+        catalog, load_coverage_catalog_directory(root / "catalogs/coverage"),
+    )
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    calls: list[tuple[str, str]] = []
+
+    class Transport:
+        def __init__(self, provider: str, model: str) -> None:
+            self.identity = CandidateProviderIdentityView(provider, model, "test", "test")
+
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            calls.append((self.identity.model, request.response_schema_name))
+            if request.response_schema_name == "edit_turn_intent":
+                return {"target_instrument_refs": [], "pending_relation": relation}
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                return {"requested_changes": "equivalent", "preserved_fields": "equivalent",
+                        "execution_authority": "equivalent", "message_consistency": "equivalent",
+                        "issues": []}
+            return {"disposition": "discuss" if relation == "discuss" else "apply",
+                    "strategy": None if relation == "discuss" else original.model_dump(mode="json"),
+                    "message": "规则已保留，尚未运行。", "run_requested": False,
+                    "refresh_data": False}
+
+    fast = Transport("fast-provider", "fast-model")
+    deep = Transport("disabled" if profile == "disabled" else "deep-provider", "deep-model")
+    if profile == "production":
+        # The optional continuation profile remains deliberately unwired in production.
+        compiler = build_hybrid_candidate_compiler(
+            catalog, candidate_transport=fast, idea_transport=deep,
+            capability_matrix=matrix, candidate_model_semantic_review=True,
+        )
+        editor = cast(
+            VibeStrategyEditor, compiler._strategy_editor,  # pyright: ignore[reportPrivateUsage]
+        )
+    else:
+        editor = VibeStrategyEditor(
+            fast, continuation_transport=None if profile == "none" else deep,
+            resolve_pending_intent=True, catalog=catalog, capability_matrix=matrix,
+            provider_identity=fast.identity, model_semantic_review=True,
+        )
+    pending = relation not in {"normal", "discuss"}
+    result = await editor.edit(StrategyEditRequest(
+        answer="保留原规则，先不运行。", prior_utterance="原策略", strategy=original,
+        as_of_date=date(2026, 9, 8),
+        pending_clarification="是否保留原规则？" if pending else None,
+        pending_edit_inputs=("保留原规则，先不运行。",) if pending else (),
+        selected_clarification=(ClarificationOption(
+            id="keep", title="保留原规则", preview="保留当前规则，不运行。",
+        ) if relation == "selected" else None),
+    ))
+    expected_model = "deep-model" if expected_deep else "fast-model"
+    assert calls == (
+        ([("fast-model", "edit_turn_intent")] if pending and relation != "selected" else [])
+        + [(expected_model, "strategy_edit")]
+        + ([(expected_model, "strategy_edit_semantic_review")] if relation != "discuss" else [])
+    )
+    assert result is not None
+    assert result.provenance.provider == ("deep-provider" if expected_deep else "fast-provider")
+    assert result.provenance.model == expected_model
+    assert not result.run_requested and not result.refresh_data
+    assert result.strategy == (None if relation == "discuss" else original)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_kind,escalate", [
+    ("schema", False), ("semantic", False), ("schema", True),
+])
+async def test_continuation_repairs_stay_deep_without_adding_authority(
+    repair_kind: str, escalate: bool,
+) -> None:
+    root = Path(__file__).parents[4]
+    catalog = load_catalog_directory(root / "catalogs")
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    calls: list[tuple[str, str]] = []
+    generated = 0
+    reviewed = 0
+
+    class Fast:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            raise AssertionError("a resolved selection must not call the fast profile")
+
+    class Deep:
+        identity = CandidateProviderIdentityView("deep-provider", "deep-model", "test", "test")
+
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            nonlocal generated, reviewed
+            calls.append(("deep", request.response_schema_name))
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                reviewed += 1
+                return {"requested_changes": "mismatch" if repair_kind == "semantic"
+                        and reviewed == 1 else "equivalent", "preserved_fields": "equivalent",
+                        "execution_authority": "equivalent", "message_consistency": "equivalent",
+                        "issues": ["需核对本轮修改"] if reviewed == 1 else []}
+            assert request.response_schema_name == "strategy_edit"
+            generated += 1
+            changed = original.model_dump(mode="json")
+            if repair_kind == "schema" and generated == 1:
+                changed["entry"]["children"][1]["trigger"] = "gte"
+            if generated == 2:
+                assert request.user_payload is not None
+                assert ("schemaRepair" if repair_kind == "schema" else "semanticReview") in (
+                    request.user_payload
+                )
+            return {"disposition": "apply", "strategy": changed,
+                    "message": "保留规则，尚未运行。", "run_requested": escalate and generated == 2,
+                    "refresh_data": False}
+
+    result = await VibeStrategyEditor(
+        Fast(), capability_matrix=build_candidate_capability_matrix(
+            catalog, load_coverage_catalog_directory(root / "catalogs/coverage"),
+        ), catalog=catalog, provider_identity=CandidateProviderIdentityView(
+            "fast-provider", "fast-model", "test", "test",
+        ), continuation_transport=Deep(), resolve_pending_intent=True, model_semantic_review=True,
+    ).edit(StrategyEditRequest(
+        answer="保留原规则，先不运行。", prior_utterance="原策略", strategy=original,
+        as_of_date=date(2026, 9, 8), selected_clarification=ClarificationOption(
+            id="keep", title="保留原规则", preview="保留当前规则，不运行。",
+        ),
+    ))
+    assert generated == 2
+    assert all(model == "deep" for model, _ in calls)
+    if escalate:
+        assert result is None and reviewed == 0
+    else:
+        assert result is not None and result.strategy == original
+        assert result.provenance.provider == "deep-provider"
+        assert result.provenance.model == "deep-model"
+        assert not result.run_requested and not result.refresh_data
+        assert reviewed == (2 if repair_kind == "semantic" else 1)
+
+
+@pytest.mark.parametrize("indicator,trigger,value,valid", [
+    ("provider.numeric", "below", None, False),
+    ("provider.numeric", "above", 0, True),
+    ("provider.series_compare", "below", None, True),
+    ("provider.series_compare", "below", 0, False),
+    ("technical.ma", "above", 20, False),
+    ("technical.rsi", "above", 101, False),
+    ("technical.rsi", "above", 70, True),
+])
+def test_edit_schema_reuses_candidate_catalog_contract(
+    indicator: str, trigger: str, value: float | None, valid: bool,
+) -> None:
+    validator_type = pytest.importorskip("jsonschema").Draft202012Validator
+    root = Path(__file__).parents[4]
+    catalog, coverage = extend_skill_numeric_catalogs(
+        load_catalog_directory(root / "catalogs"),
+        load_coverage_catalog_directory(root / "catalogs/coverage"),
+    )
+    matrix = build_candidate_capability_matrix(catalog, coverage)
+    schema = _edit_response_schema(matrix)
+    definitions = cast(dict[str, dict[str, object]], schema["$defs"])
+    indicator_schema = definitions["IndicatorCondition"]
+    initial = _bounded_response_schema(matrix)
+    initial_definitions = cast(dict[str, dict[str, object]], initial["$defs"])
+    assert indicator_schema["allOf"] == initial_definitions["IndicatorCandidate"]["allOf"]
+    validator = validator_type({**indicator_schema, "$defs": definitions})
+    assert validator.is_valid({
+        "type": "indicator_condition", "indicator_id": indicator,
+        "definition_version": "1.0.0", "trigger": trigger, "value": value,
+    }) is valid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_valid", [True, False])
+async def test_dynamic_comparison_edit_repairs_catalog_shape_without_losing_holding_time(
+    repair_valid: bool,
+) -> None:
+    root = Path(__file__).parents[4]
+    catalog, coverage = extend_skill_numeric_catalogs(
+        load_catalog_directory(root / "catalogs"),
+        load_coverage_catalog_directory(root / "catalogs/coverage"),
+    )
+    matrix = build_candidate_capability_matrix(catalog, coverage)
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    # The real bad output: a dynamic comparison bound to a scalar, plus a
+    # position-relative date hidden in a historical metric query.
+    broken_entry = IndicatorCondition(
+        indicator_id="provider.numeric", definition_version="1.0.0", trigger="below",
+        params={"metric_query": "当日收盘价是否达到当日涨停价", "unit": "元"}, value=None,
+    )
+    broken_exit = broken_entry.model_copy(update={
+        "params": {"metric_query": "次日收盘价是否达到当日涨停价", "unit": "元"},
+    })
+    broken = original.model_copy(update={
+        "entry": broken_entry, "exit": FirstOfExit(children=(broken_exit,)),
+    })
+    close_below_limit = IndicatorCondition(
+        indicator_id="provider.series_compare", definition_version="1.0.0", trigger="below",
+        params={"left_metric_query": "收盘价（不复权）",
+                "right_metric_query": "当日涨停价", "unit": "元"}, value=None,
+    )
+    event_occurrence = IndicatorCondition(
+        indicator_id="provider.numeric", definition_version="1.0.0", trigger="above",
+        params={"metric_query": "当日炸板次数", "unit": "次"}, value=0,
+    )
+    repaired = original.model_copy(update={
+        "entry": AllCondition(children=(event_occurrence, close_below_limit)),
+        "exit": FirstOfExit(op="all", children=(
+            HoldingPeriodExit(sessions=1), close_below_limit,
+        )),
+    })
+    calls: list[str] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            calls.append(request.response_schema_name)
+            assert request.user_payload is not None
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                assert len(calls) == 3 and repair_valid
+                candidate = cast(dict[str, object], request.user_payload["candidateEdit"])
+                assert candidate["strategy"] == repaired.model_dump(mode="json")
+                return {"requested_changes": "equivalent", "preserved_fields": "equivalent",
+                        "execution_authority": "equivalent", "message_consistency": "equivalent",
+                        "issues": []}
+            assert request.response_schema == _edit_response_schema(matrix)
+            if len(calls) == 2:
+                feedback = cast(dict[str, object], request.user_payload["schemaRepair"])
+                errors = cast(list[dict[str, object]], feedback["errors"])
+                assert {item["path"] for item in errors} == {
+                    "/conditions/0/value", "/conditions/1/value",
+                }
+                assert all(item["type"] == "trigger_value_required"
+                           and item["indicator_id"] == "provider.numeric"
+                           and item["trigger"] == "below"
+                           and item["value_requirement"] == "required" for item in errors)
+                assert all(item["required_parameters"] == [
+                    {"name": "metric_query", "type": "string"},
+                    {"name": "unit", "type": "string"},
+                ] for item in errors)
+                assert "两条动态指标" in (request.system_footer or "")
+                assert "不得藏进metric_query" in (request.system_footer or "")
+            selected = repaired if repair_valid and len(calls) == 2 else broken
+            return {"disposition": "apply", "strategy": selected.model_dump(mode="json"),
+                    "message": "已按收盘口径整理买卖条件，第二个交易日起检查卖出，尚未运行。",
+                    "run_requested": False, "refresh_data": False}
+
+    result = await VibeStrategyEditor(
+        Transport(), capability_matrix=matrix, catalog=catalog,
+        provider_identity=CandidateProviderIdentityView("test", "test", "test", "test"),
+        model_semantic_review=True,
+    ).edit(StrategyEditRequest(
+        answer="按收盘确认，炸板时买入，买入后第二个交易日起不涨停就卖，先不运行。",
+        prior_utterance="原策略", strategy=original, as_of_date=date(2026, 9, 8),
+    ))
+    assert len(calls) == (3 if repair_valid else 2)
+    assert (result is not None) is repair_valid
+    if result:
+        assert result.strategy == repaired
+        assert result.strategy is not None and result.strategy.instrument == original.instrument
+        assert not result.run_requested and not result.refresh_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_valid", [True, False])
+async def test_catalog_errors_repair_before_semantic_review(repair_valid):
+    root = Path(__file__).parents[4]
+    catalog = load_catalog_directory(root / "catalogs")
+    strategy = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    calls: list[str] = []
+
+    class Transport:
+        async def generate_json(self, request):
+            calls.append(request.response_schema_name)
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                assert len(calls) == 3
+                return {"requested_changes": "equivalent", "preserved_fields": "equivalent",
+                        "execution_authority": "equivalent", "message_consistency": "equivalent",
+                        "issues": []}
+            changed = strategy.model_dump(mode="json")
+            changed["entry"]["children"][1]["value"] = 3
+            if len(calls) == 1 or not repair_valid:
+                changed["entry"]["children"][1]["trigger"] = "gte"
+            if len(calls) == 2:
+                assert "schemaRepair" in request.user_payload
+            return {"disposition": "apply", "strategy": changed, "message": "放量改为3倍。"}
+
+    editor = VibeStrategyEditor(
+        Transport(), catalog=catalog, capability_matrix=build_candidate_capability_matrix(
+            catalog, load_coverage_catalog_directory(root / "catalogs/coverage"),
+        ), provider_identity=CandidateProviderIdentityView("test", "test", "test", "test"),
+        model_semantic_review=True,
+    )
+    result = await editor.edit(StrategyEditRequest(
+        answer="放量改3倍，先不运行。", prior_utterance="旧规则", strategy=strategy,
+        as_of_date=date(2026, 9, 7),
+    ))
+    assert len(calls) == (3 if repair_valid else 2)
+    assert (result is not None) == repair_valid
+    if result:
+        assert not result.run_requested and result.strategy.exit == strategy.exit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+@pytest.mark.parametrize("review_misses_exact_repeat", [True, False])
+async def test_unactionable_clarification_is_reviewed_and_repaired_before_display(
+    repair_succeeds, review_misses_exact_repeat,
+):
+    root = Path(__file__).parents[4]
+    strategy = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    requests = []
+
+    class Transport:
+        async def generate_json(self, request):
+            requests.append(request)
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                corrected = len(requests) == 4 and repair_succeeds
+                return {"requested_changes": "equivalent" if corrected
+                        or review_misses_exact_repeat else "mismatch",
+                        "preserved_fields": "equivalent", "execution_authority": "equivalent",
+                        "message_consistency": "equivalent",
+                        "clarification_actionability": {
+                            "latest_answer_resolves_question": review_misses_exact_repeat,
+                            "response_repeats_question": not corrected
+                            and not review_misses_exact_repeat,
+                            "completion_path": "needs_data_verification",
+                            "asks_parameters_for_unsupported_behavior": False,
+                        },
+                        "issues": [] if corrected else ["已选定口径却要求重复回答"]}
+            return {"disposition": "clarify", "strategy": None,
+                    "message": "缺少逐日历史数据证据，尚不能确认可回测。" if len(requests) == 3
+                    and (repair_succeeds or not review_misses_exact_repeat)
+                    else "请确认：按收盘还是盘中判定？"}
+
+    editor = VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs/coverage"),
+        ), provider_identity=CandidateProviderIdentityView("test", "test", "test", "test"),
+        model_semantic_review=True,
+    )
+    with nullcontext() if repair_succeeds else pytest.raises(StrategyEditSemanticError):
+        result = await editor.edit(StrategyEditRequest(
+            answer="收盘价是否达到当日涨停价（", strategy=strategy,
+            prior_utterance="涨停板打开买入", as_of_date=date(2026, 9, 7),
+            pending_clarification="为了继续修改，需要确认：按收盘还是盘中判定？请明确后继续。",
+        ))
+    assert len(requests) == 4
+    if repair_succeeds:
+        assert result is not None and result.disposition == "clarify"
+        assert "缺少逐日历史数据" in result.message
+        assert result.strategy is None and not result.run_requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_kind", ["valid", "malformed", "run_escalation"])
+async def test_missing_condition_tag_repairs_once_without_changing_authority(
+    repair_kind: str,
+) -> None:
+    root = Path(__file__).parents[4]
+    strategy = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    changed = strategy.model_dump(mode="json")
+    changed["entry"]["children"][1]["value"] = 3
+    broken = json.loads(json.dumps(changed))
+    del broken["entry"]["type"]
+    requests: list[CandidateTransportRequest] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            requests.append(request)
+            assert len(requests) <= 2
+            if len(requests) == 2:
+                assert request.user_payload is not None
+                assert "schemaRepair" in request.user_payload
+                assert request.user_payload["currentStrategy"] == strategy.model_dump(mode="json")
+            return {"disposition": "apply", "message": "放量阈值改为3倍，其他不变。",
+                    "strategy": broken if len(requests) == 1 or repair_kind == "malformed"
+                    else changed, "run_requested": len(requests) == 2
+                    and repair_kind == "run_escalation"}
+
+    result = await VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ), provider_identity=CandidateProviderIdentityView("test", "test", "test", "test"),
+    ).edit(StrategyEditRequest(
+        answer="放量改3倍，其他不变，先不运行。", prior_utterance="旧规则",
+        strategy=strategy, as_of_date=date(2026, 9, 6),
+    ))
+    assert len(requests) == 2
+    if repair_kind == "valid":
+        assert result is not None and result.strategy == StrategySpec.model_validate(changed)
+        assert not result.run_requested
+    else:
+        assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+async def test_authority_only_dispute_preserves_edit_as_non_running_draft(
+    repair_succeeds: bool,
+) -> None:
+    root = Path(__file__).parents[4]
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    changed = original.model_dump(mode="json")
+    changed["entry"]["children"][1]["value"] = 3
+    requests: list[CandidateTransportRequest] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            requests.append(request)
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                assert request.user_payload is not None
+                candidate = request.user_payload["candidateEdit"]
+                assert isinstance(candidate, dict) and candidate["strategy"] == changed
+                assert candidate["run_requested"] is (len(requests) == 2)
+                assert candidate["refresh_data"] is (len(requests) == 2)
+                return {"requested_changes": "equivalent", "preserved_fields": "equivalent",
+                        "message_consistency": "equivalent", "issues": [],
+                        "execution_authority": "equivalent"
+                        if repair_succeeds and len(requests) == 3 else "mismatch"}
+            assert len(requests) == 1, "Permission dispute must not regenerate valid rules"
+            return {"disposition": "apply", "strategy": changed,
+                    "run_requested": True, "refresh_data": True, "message": "已修改，将重新回测。"}
+
+    editor = VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ), provider_identity=CandidateProviderIdentityView(
+            provider="test", model="test", prompt_version="test", schema_version="test",
+        ), model_semantic_review=True,
+    )
+    with nullcontext() if repair_succeeds else pytest.raises(StrategyEditSemanticError):
+        result = await editor.edit(StrategyEditRequest(
+            answer="放量阈值改成3倍", strategy=original,
+            prior_utterance="此前要求重新回测", as_of_date=date(2026, 9, 7),
+        ))
+    assert len(requests) == 3
+    if repair_succeeds:
+        assert result is not None and result.strategy == StrategySpec.model_validate(changed)
+        assert not result.run_requested and not result.refresh_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending", [False, True])
+async def test_review_target_uses_existing_binding_without_regenerating_rules(
+    pending: bool,
+) -> None:
+    root = Path(__file__).parents[4]
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    calls: list[str] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            calls.append(request.response_schema_name)
+            if request.response_schema_name == "edit_turn_intent":
+                assert pending
+                return {"target_instrument_refs": ["贵州茅台"], "pending_relation": "new_edit"}
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                assert request.user_payload is not None
+                candidate = request.user_payload["candidateEdit"]
+                assert isinstance(candidate, dict)
+                expected_view = original.model_dump(mode="json")
+                if candidate["disposition"] == "change_instrument":
+                    expected_view["instrument"] = {
+                        "market": original.instrument.market,
+                        "position_mode": original.instrument.position_mode,
+                        "requested_references": ["贵州茅台"],
+                        "binding_status": "pending_verification",
+                    }
+                    # No guessed/resolved target code and no old placeholder in
+                    # the review; the executable result remains unchanged below.
+                    assert "symbol" not in expected_view["instrument"]
+                assert candidate["strategy"] == expected_view
+                assert request.user_payload["currentStrategy"] == original.model_dump(mode="json")
+                if len(calls) == 3:
+                    assert candidate["disposition"] == "change_instrument"
+                    assert candidate["instrument_refs"] == ["贵州茅台"]
+                return {"requested_changes": "equivalent", "preserved_fields": "equivalent",
+                        "execution_authority": "equivalent", "message_consistency": "equivalent",
+                        "target_instrument_refs": ["贵州茅台"], "issues": []}
+            assert len(calls) == (2 if pending else 1)
+            if pending:
+                assert request.user_payload is not None
+                old_pending = request.user_payload["pendingEdit"]
+                assert isinstance(old_pending, dict)
+                assert old_pending["inputs"] == [] and old_pending["runRequested"] is False
+            return {"disposition": "apply", "strategy": original.model_dump(mode="json"),
+                    "message": "整理好了", "run_requested": False}
+
+    editor = VibeStrategyEditor(Transport(), capability_matrix=build_candidate_capability_matrix(
+        load_catalog_directory(root / "catalogs"),
+        load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+    ), provider_identity=CandidateProviderIdentityView(
+        provider="test", model="test", prompt_version="test", schema_version="test",
+    ), model_semantic_review=True, resolve_pending_intent=pending)
+    result = await editor.edit(StrategyEditRequest(
+        answer="贵州茅台按这个规则", prior_utterance="旧策略", strategy=original,
+        as_of_date=date(2026, 9, 7),
+        pending_edit_inputs=("此前尚未确认的公告修改",) if pending else (),
+        pending_run_requested=pending,
+    ))
+    assert len(calls) == 3 and result is not None
+    assert result.disposition == "change_instrument"
+    assert result.instrument_refs == ("贵州茅台",) and result.strategy == original
+    assert result.strategy is not None
+    assert result.strategy.instrument.symbol == original.instrument.symbol
+    assert not result.run_requested
+    assert result.pending_relation == ("new_edit" if pending else "unclear")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("semantic_repair", [False, True])
+async def test_identity_and_authority_repairs_have_independent_bounded_budgets(
+    semantic_repair: bool,
+) -> None:
+    root = Path(__file__).parents[4]
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    changed = original.model_dump(mode="json")
+    changed["entry"]["children"][1]["value"] = 3
+    generation_count = 0
+    reviewed: list[dict[str, object]] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            nonlocal generation_count
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                assert request.user_payload is not None
+                candidate = request.user_payload["candidateEdit"]
+                assert isinstance(candidate, dict)
+                candidate = cast(dict[str, object], candidate)
+                reviewed.append(candidate)
+                candidate_strategy = cast(dict[str, object], candidate["strategy"])
+                correct = ({k: v for k, v in candidate_strategy.items() if k != "instrument"}
+                           == {k: v for k, v in changed.items() if k != "instrument"})
+                return {
+                    "requested_changes": "equivalent" if correct else "mismatch",
+                    "preserved_fields": "equivalent", "message_consistency": "equivalent",
+                    "execution_authority": "mismatch" if candidate["run_requested"]
+                    else "equivalent", "target_instrument_refs": ["贵州茅台"],
+                    "issues": [] if correct else ["倍数应为3"],
+                }
+            generation_count += 1
+            assert generation_count <= (2 if semantic_repair else 1)
+            return {
+                "disposition": "apply", "message": "已整理规则。",
+                "strategy": original.model_dump(mode="json")
+                if semantic_repair and generation_count == 1 else changed,
+                "run_requested": True, "refresh_data": True,
+            }
+
+    editor = VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ), provider_identity=CandidateProviderIdentityView("test", "test", "test", "test"),
+        model_semantic_review=True,
+    )
+    result = await editor.edit(StrategyEditRequest(
+        answer="贵州茅台，放量阈值改3倍，先不运行。", prior_utterance="旧策略",
+        strategy=original, as_of_date=date(2026, 9, 7),
+    ))
+    assert result is not None and result.disposition == "change_instrument"
+    assert result.instrument_refs == ("贵州茅台",)
+    assert result.strategy == StrategySpec.model_validate(changed)
+    assert not result.run_requested and not result.refresh_data
+    assert generation_count == (2 if semantic_repair else 1)
+    assert len(reviewed) == (4 if semantic_repair else 3)
+    assert reviewed[0]["disposition"] == "apply"
+    assert all(candidate["disposition"] == "change_instrument" for candidate in reviewed[1:])
+    assert reviewed[-1]["run_requested"] is False
+    assert reviewed[-1]["refresh_data"] is False
+    projected = {
+        **changed,
+        "instrument": {"market": original.instrument.market,
+                       "position_mode": original.instrument.position_mode,
+                       "requested_references": ["贵州茅台"],
+                       "binding_status": "pending_verification"},
+    }
+    assert reviewed[-1]["strategy"] == reviewed[-2]["strategy"] == projected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relation,answer", [
+    ("continuation", "保留买入，持有30日卖出"),
+    ("continuation", "保留买入，持有30日卖出（"),
+    ("new_edit", "改成持有20日卖出，先不运行。"),
+    ("new_edit", "不要旧方案，持有20日卖出，先不运行。"),
+])
+async def test_selected_clarification_belongs_to_the_resolved_pending_scope(
+    relation: str, answer: str,
+) -> None:
+    root = Path(__file__).parents[4]
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    selected = ClarificationOption(
+        id="edit-choice-1", title="保留买入，持有30日卖出", preview="保留买入，仅持有30日卖出。",
+    )
+    selected_json = {"id": selected.id, "title": selected.title, "preview": selected.preview}
+    changed = original.model_dump(mode="json")
+    changed["exit"] = {"op": "first_of", "children": [{
+        "type": "holding_period_exit", "sessions": 20 if relation == "new_edit" else 30,
+        "anchor": "first_entry_fill", "count_mode": "subsequent_trading_sessions",
+        "execution": "target_session_open_proxy",
+    }]}
+    calls: list[str] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            calls.append(request.response_schema_name)
+            if request.response_schema_name == "edit_turn_intent":
+                assert relation == "new_edit", "a resolved choice must not be reclassified"
+                return {"target_instrument_refs": [], "pending_relation": relation}
+            assert request.user_payload is not None
+            assert request.user_payload["selectedClarification"] == (
+                None if relation == "new_edit" else selected_json
+            )
+            pending = request.user_payload["pendingEdit"]
+            assert isinstance(pending, dict)
+            pending = cast(dict[str, object], pending)
+            assert bool(pending["inputs"]) is (relation == "continuation")
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                return {"requested_changes": "equivalent", "preserved_fields": "equivalent",
+                        "execution_authority": "equivalent", "message_consistency": "equivalent",
+                        "issues": []}
+            return {"disposition": "apply", "strategy": changed,
+                    "message": "已整理本轮持有期，尚未运行。", "run_requested": False}
+
+    result = await VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ), provider_identity=CandidateProviderIdentityView("test", "test", "test", "test"),
+        model_semantic_review=True, resolve_pending_intent=True,
+    ).edit(StrategyEditRequest(
+        answer=answer,
+        prior_utterance="旧策略", strategy=original, as_of_date=date(2026, 9, 7),
+        selected_clarification=selected if relation == "continuation" else None,
+        pending_edit_inputs=("公告后买入，持有30日卖出",),
+        pending_clarification="是否保留买入，仅持有30日卖出？",
+    ))
+    assert calls == (["edit_turn_intent"] if relation == "new_edit" else []) + [
+        "strategy_edit", "strategy_edit_semantic_review",
+    ]
+    assert result is not None and result.pending_relation == relation
+    assert result.strategy == StrategySpec.model_validate(changed)
+    assert not result.run_requested and not result.refresh_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("relation,has_pending_inputs,answer,echo_identity", [
+    ("continuation", True, "收盘价是否达到当日涨停价（", False),
+    ("continuation", False, "收盘价是否达到当日涨停价（", False),
+    ("continuation", False, "收盘价是否达到当日涨停价（", True),
+    ("new_edit", False, "不要旧方案，改成持有20天卖出。", False),
+    ("unclear", False, "那个再看看", False),
+])
+async def test_legacy_pending_answer_classifier_receives_the_actual_question_context(
+    relation: str, has_pending_inputs: bool, answer: str, echo_identity: bool,
+) -> None:
+    root = Path(__file__).parents[4]
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    question = "按收盘价是否达到当日涨停价，还是按盘中触及判断？"
+    original_edit = "涨停板打开买入，第二天不涨停卖出"
+    pending_inputs = (original_edit,) if has_pending_inputs else ()
+    calls: list[str] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            calls.append(request.response_schema_name)
+            assert request.user_payload is not None
+            payload = request.user_payload
+            assert payload["selectedClarification"] is None
+            superseded = (
+                request.response_schema_name != "edit_turn_intent" and relation == "new_edit"
+            )
+            assert payload["pendingEdit"] == {
+                "inputs": [] if superseded else list(pending_inputs),
+                "question": None if superseded else question,
+                "executionSettings": {} if superseded else {"slippage_bps": "17"},
+                "runRequested": False, "refreshData": False, "instrumentCandidates": [],
+            }
+            assert payload["recentTurns"] == [{
+                "user": original_edit, "assistant": question,
+            }]
+            if request.response_schema_name == "edit_turn_intent":
+                return {"target_instrument_refs": (
+                    [original.instrument.symbol] if echo_identity else []
+                ), "pending_relation": relation}
+            assert payload["resolvedTurnIntent"] == {
+                "target_instrument_refs": [], "pending_relation": relation,
+            }
+            return {"disposition": "clarify", "strategy": None,
+                    "message": "已承接本轮口径，还需核实逐日数据，尚未运行。",
+                    "run_requested": False}
+
+    result = await VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ), provider_identity=CandidateProviderIdentityView("test", "test", "test", "test"),
+        resolve_pending_intent=True,
+    ).edit(StrategyEditRequest(
+        answer=answer, prior_utterance="旧策略", strategy=original,
+        as_of_date=date(2026, 9, 7), pending_edit_inputs=pending_inputs,
+        pending_clarification=question,
+        pending_execution_settings=ExecutionSettingsPatch(slippage_bps=Decimal(17)),
+        recent_turns=(ClarificationDialogueTurn(
+            user_text=original_edit, assistant_text=question,
+            intent="clarification", revision=2,
+            created_at=datetime(2026, 9, 7, tzinfo=UTC),
+        ),),
+    ))
+    assert calls == ["edit_turn_intent", "strategy_edit"]
+    assert result is not None and result.pending_relation == relation
+    assert not result.run_requested and not result.refresh_data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+async def test_semantic_edit_review_rejects_or_for_requested_and_and_repairs_once(
+    repair_succeeds: bool,
+) -> None:
+    root = Path(__file__).parents[4]
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    changed = original.model_dump(mode="json")
+    changed["exit"] = {"op": "first_of", "children": [
+        {"type": "holding_period_exit", "sessions": 10, "anchor": "first_entry_fill",
+         "count_mode": "subsequent_trading_sessions", "execution": "target_session_open_proxy"},
+        {"type": "indicator_condition", "indicator_id": "technical.rsi",
+         "definition_version": "1.0.0", "params": {"period": 14}, "timeframe": "1d",
+         "evaluation_mode": "bar_close_confirmed", "trigger": "above", "value": 55},
+    ]}
+    requests: list[CandidateTransportRequest] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            requests.append(request)
+            assert len(requests) <= 4
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                assert request.user_payload is not None
+                candidate = request.user_payload["candidateEdit"]
+                assert isinstance(candidate, dict)
+                assert candidate["strategy"]["entry"] == original.model_dump(mode="json")["entry"]
+                correct = candidate["strategy"]["exit"]["op"] == "all"
+                return {"requested_changes": "equivalent" if correct else "mismatch",
+                        "preserved_fields": "equivalent", "execution_authority": "equivalent",
+                        "message_consistency": "equivalent" if correct else "mismatch",
+                        "issues": [] if correct else ["用户要求同时满足，结构却是任意先发生"]}
+            candidate = json.loads(json.dumps(changed))
+            if len(requests) > 1 and repair_succeeds:
+                candidate["exit"]["op"] = "all"
+            return {"disposition": "apply", "strategy": candidate,
+                    "message": "满10天且RSI高于55才卖，先不运行。", "run_requested": False}
+
+    editor = VibeStrategyEditor(
+        Transport(),
+        capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ),
+        provider_identity=CandidateProviderIdentityView(
+            provider="test", model="test", prompt_version="test", schema_version="test",
+        ), model_semantic_review=True,
+    )
+    with nullcontext() if repair_succeeds else pytest.raises(StrategyEditSemanticError):
+        result = await editor.edit(StrategyEditRequest(
+            answer="卖出改为满10天且RSI高于55，其他不变，先不运行。",
+            strategy=original, prior_utterance="旧规则", as_of_date=date(2026, 9, 6),
+        ))
+    assert len(requests) == 4
+    if repair_succeeds:
+        assert result is not None and result.strategy is not None
+        assert result.strategy.exit.op == "all"
+        assert result.strategy.entry == original.entry
+        assert result.strategy.instrument == original.instrument
+        assert result.strategy.backtest == original.backtest
+        assert not result.run_requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("review_patch", "changed_identity", "accepted", "calls"), [
+    pytest.param({}, False, True, 2, id="advisory-issues-only"),
+    pytest.param({"requested_changes": "uncertain", "preserved_fields": "uncertain",
+                  "message_consistency": "uncertain"}, False, True, 2, id="general-uncertainty"),
+    pytest.param({"requested_changes": "mismatch"}, False, False, 4, id="requested-mismatch"),
+    pytest.param({"preserved_fields": "mismatch"}, False, False, 4, id="preservation-mismatch"),
+    pytest.param({"message_consistency": "mismatch"}, False, False, 4, id="message-mismatch"),
+    pytest.param({"execution_authority": "uncertain"}, False, False, 4, id="authority-uncertain"),
+    pytest.param({"execution_authority": "mismatch"}, False, False, 4, id="authority-mismatch"),
+    pytest.param({"preserved_fields": "uncertain"}, True, False, 2, id="identity-engine-gate"),
+])
+async def test_semantic_edit_review_is_broad_except_material_differences_and_authority(
+    review_patch: dict[str, str], changed_identity: bool, accepted: bool, calls: int,
+) -> None:
+    root = Path(__file__).parents[4]
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    changed = original.model_dump(mode="json")
+    changed["entry"]["children"][1]["value"] = 3
+    if changed_identity:
+        changed["instrument"]["symbol"] = "600519.SH"
+    requests: list[CandidateTransportRequest] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            requests.append(request)
+            assert len(requests) <= calls
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                return {"requested_changes": "equivalent", "preserved_fields": "equivalent",
+                        "execution_authority": "equivalent", "message_consistency": "equivalent",
+                        "issues": ["默认执行约定未逐字复述，无明确实质差异"], **review_patch}
+            return {"disposition": "apply", "strategy": changed,
+                    "message": "放量阈值改成3倍，其他不变，先不运行。", "run_requested": False}
+
+    editor = VibeStrategyEditor(
+        Transport(),
+        capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ),
+        provider_identity=CandidateProviderIdentityView(
+            provider="test", model="test", prompt_version="test", schema_version="test",
+        ), model_semantic_review=True,
+    )
+    expected = nullcontext() if accepted or changed_identity else pytest.raises(
+        StrategyEditSemanticError,
+    )
+    with expected:
+        result = await editor.edit(StrategyEditRequest(
+            answer="放量阈值改成3倍，其他不变，先不运行。",
+            strategy=original, prior_utterance="旧规则", as_of_date=date(2026, 9, 6),
+        ))
+    assert len(requests) == calls
+    if not accepted and not changed_identity:
+        return
+    assert (result is not None) == accepted
+    if result is not None:
+        assert result.strategy == StrategySpec.model_validate(changed)
+        assert not result.run_requested and not result.refresh_data
 
 
 @pytest.mark.asyncio
@@ -114,6 +1173,58 @@ def test_report_references_distinguish_cost_versions_and_unrun_settings(
         "previousDifferentStrategy": reports[0] if current_slippage == 0 else None,
         "earliest": reports[0],
     }
+
+
+@pytest.mark.asyncio
+async def test_restoring_previous_report_is_reviewed_against_server_selected_version() -> None:
+    root = Path(__file__).parents[4]
+    original = StrategySpec.model_validate_json(
+        (root / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text(),
+    )
+    previous_json = original.model_dump(mode="json")
+    previous_json["entry"]["children"][1]["value"] = 3
+    reports = tuple({
+        "runId": run_id, "strategy": strategy,
+        "executionSettings": {}, "summary": {"totalReturn": 0.05, "tradeCount": 3},
+    } for run_id, strategy in (
+        ("prior-executed-version", previous_json),
+        ("current-executed-version", original.model_dump(mode="json")),
+    ))
+    requests: list[CandidateTransportRequest] = []
+
+    class Transport:
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            requests.append(request)
+            if request.response_schema_name == "strategy_edit_semantic_review":
+                assert request.user_payload is not None
+                assert request.user_payload["reportReferences"] == {
+                    "current": reports[1], "previousDifferentStrategy": reports[0],
+                    "earliest": reports[0],
+                }
+                assert "backtestResults" not in request.user_payload
+                candidate = request.user_payload["candidateEdit"]
+                assert isinstance(candidate, dict) and candidate["strategy"] == previous_json
+                return {"requested_changes": "equivalent", "preserved_fields": "equivalent",
+                        "execution_authority": "equivalent", "message_consistency": "equivalent",
+                        "issues": []}
+            return {"disposition": "apply", "message": "已恢复上一版规则，暂不运行。",
+                    "strategy": previous_json, "run_requested": False}
+
+    result = await VibeStrategyEditor(
+        Transport(), capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(root / "catalogs"),
+            load_coverage_catalog_directory(root / "catalogs" / "coverage"),
+        ), provider_identity=CandidateProviderIdentityView("test", "test", "test", "test"),
+        model_semantic_review=True,
+    ).edit(StrategyEditRequest(
+        answer="恢复上次回测的那版规则，先不运行。", prior_utterance="旧策略", strategy=original,
+        as_of_date=date(2026, 9, 7), backtest_results=reports,
+    ))
+    assert len(requests) == 2
+    assert result is not None and result.strategy == StrategySpec.model_validate(previous_json)
+    assert not result.run_requested and not result.refresh_data
 
 
 @pytest.mark.asyncio
@@ -223,7 +1334,7 @@ async def test_loss_feedback_keeps_user_goal_and_does_not_defend_or_execute_reco
     assert result is not None
     assert result.disposition == disposition and result.message == model_message
     assert result.strategy is None and not result.run_requested and not result.refresh_data
-    assert result.provenance.prompt_version == "strategy-edit.prompt.v24"
+    assert result.provenance.prompt_version == "strategy-edit.prompt.v34"
     assert len(requests) == 1
     payload = requests[0].user_payload
     assert payload is not None and payload["answer"] == answer
@@ -378,7 +1489,7 @@ async def test_version_comparison_keeps_ordered_reports_and_distinguishes_previo
     assert result is not None and result.disposition == "discuss"
     assert result.message == model_message and result.strategy is None
     assert not result.run_requested and not result.refresh_data
-    assert result.provenance.prompt_version == "strategy-edit.prompt.v24"
+    assert result.provenance.prompt_version == "strategy-edit.prompt.v34"
     assert len(requests) == 1
     payload = requests[0].user_payload
     assert payload is not None and payload["answer"] == answer
@@ -521,7 +1632,9 @@ def test_optimization_request_cannot_supply_a_strategy_or_select_a_candidate() -
     }
     baseline = StrategySpec.model_validate_json((Path(__file__).parents[4]
         / "contracts/examples/strategy.macd-volume.daily.v1.json").read_text())
-    with pytest.raises(ValidationError, match="only an apply result contains a strategy"):
+    with pytest.raises(
+        ValidationError, match="only an apply or instrument change contains a strategy",
+    ):
         _ProviderEdit.model_validate({**payload, "strategy": baseline})
     with pytest.raises(ValidationError, match="only optimization selection contains a candidate"):
         _ProviderEdit.model_validate({**payload, "optimization_candidate_id": "model-opt-1"})
@@ -629,7 +1742,7 @@ async def test_instrument_reference_repair_is_exact_once_and_cannot_expand_autho
     assert result is not None and result.disposition == expected_disposition
     assert result.message == (original if repair_patch is None else repaired)["message"]
     assert result.strategy is None and not result.refresh_data
-    assert result.provenance.prompt_version == "strategy-edit.prompt.v24"
+    assert result.provenance.prompt_version == "strategy-edit.prompt.v34"
     if expected_disposition == "change_instrument":
         assert result.instrument_refs == ("贵州茅台", "300059")
         assert result.run_requested == original_run

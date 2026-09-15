@@ -162,7 +162,7 @@ async def test_p1_ambiguous_direction_or_threshold_fails_closed(
     assert outcome.strategy is None
     assert outcome.diagnostic_code == "indicator_trigger_requires_clarification"
     assert outcome.clarification is not None
-    assert "不会替你补默认触发规则" in outcome.clarification
+    assert "什么情况下触发交易" in outcome.clarification
 
 
 @pytest.mark.asyncio
@@ -290,11 +290,9 @@ async def test_risk_exit_without_an_explicit_percent_fails_closed(
         "MACD金叉买入，止盈20%且止损5%卖出",
         "MACD金叉买入，止损5%并且止盈20%卖出",
         "MACD金叉买入，止盈20%同时止损5%卖出",
-        "MACD金叉买入，MACD死叉且止损5%卖出",
-        "MACD金叉买入，持有3个交易日且止盈20%卖出",
     ],
 )
-async def test_position_aware_exit_and_fails_closed_without_becoming_first_of(
+async def test_contradictory_position_returns_cannot_become_first_of(
     compiler: StrategyCompiler,
     utterance: str,
 ) -> None:
@@ -306,13 +304,57 @@ async def test_position_aware_exit_and_fails_closed_without_becoming_first_of(
         )
     )
 
-    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.status is CompileStatus.INVALID
     assert outcome.strategy is None
-    assert outcome.diagnostic_code == "position_aware_exit_and_not_supported"
-    assert "同时满足才卖出" in (outcome.clarification or "")
+    assert outcome.diagnostic_code == "strategy_validation_failed:ValidationError"
     assert {item.diagnostic_code for item in outcome.candidate_rejections} == {
-        "position_aware_exit_and_not_supported"
+        "strategy_validation_failed:ValidationError"
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "child_types"),
+    [
+        (
+            "MACD金叉买入，MACD死叉且止损5%卖出",
+            {"indicator_condition", "position_return_exit"},
+        ),
+        (
+            "MACD金叉买入，持有3个交易日且止盈20%卖出",
+            {"holding_period_exit", "position_return_exit"},
+        ),
+    ],
+)
+async def test_supported_position_aware_and_preserves_all_conditions(
+    compiler: StrategyCompiler,
+    utterance: str,
+    child_types: set[str],
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300059.SZ",
+            as_of_date=date(2026, 8, 30),
+        )
+    )
+
+    assert outcome.status is CompileStatus.READY, outcome.diagnostic_code
+    assert outcome.strategy is not None
+    assert outcome.strategy.exit.op == "all"
+    children = outcome.strategy.exit.children
+    assert len(children) == 2
+    assert {child.type for child in children} == child_types
+    for child in children:
+        if child.type == "holding_period_exit":
+            assert child.sessions == 3
+        elif isinstance(child, PositionReturnExit):
+            assert (child.trigger, child.threshold_pct) == (
+                ("stop_loss", 5.0) if "止损" in utterance else ("take_profit", 20.0)
+            )
+        else:
+            assert isinstance(child, IndicatorCondition)
+            assert (child.indicator_id, child.trigger) == ("technical.macd", "death_cross")
 
 
 @pytest.mark.asyncio

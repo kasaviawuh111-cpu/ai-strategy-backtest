@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
@@ -53,12 +54,55 @@ from ashare_lab.ports.strategy_advice import (
 
 
 @pytest.mark.asyncio
+async def test_empty_research_route_keeps_answer_without_stock_pairing() -> None:
+    outcome = CompileOutcome(
+        status=CompileStatus.NEEDS_CLARIFICATION,
+        diagnostic_code="capability_research_fallback",
+        clarification="已查到部分资料，但缺少连续板块数据，暂不能执行原规则。",
+        idea_route=replace(_route(), proposals=()),
+    )
+    preserved, stock = await _offer_missing_instrument(
+        outcome=outcome,
+        compile_input=CompileInput(utterance="金融科技板块强势股策略", as_of_date=date(2026, 9, 8)),
+        state=None, container=cast(ApiContainer, SimpleNamespace()),
+    )
+    assert preserved is outcome
+    assert stock is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["new_strategy", "vague_strategy", "casual"])
+async def test_missing_stock_provider_keeps_vague_templates_without_auto_execution(intent: str) -> None:
+    outcome = CompileOutcome(
+        status=CompileStatus.NEEDS_CLARIFICATION,
+        diagnostic_code="idea_guidance_required",
+        clarification="先给策略方向，再确认股票。",
+        idea_route=_route(),
+    )
+    preserved, stock = await _offer_missing_instrument(
+        outcome=outcome,
+        compile_input=CompileInput(
+            utterance="定期投点钱进去，省得总盯盘",
+            as_of_date=date(2026, 9, 8), semantic_intent=intent,
+        ),
+        state=None,
+        # Any attempted screening would fail because no provider is present.
+        container=cast(ApiContainer, SimpleNamespace(live_market_data=None)),
+    )
+    assert preserved.idea_route is outcome.idea_route
+    assert not preserved.run_requested
+    assert stock is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("with_template", [True, False])
+@pytest.mark.parametrize("scoped_retry", [True, False])
 async def test_complete_rules_are_preserved_across_ranked_stock_choices(
-    with_template: bool,
+    with_template: bool, scoped_retry: bool,
 ) -> None:
     request = CompileInput(
-        utterance="收盘价上穿20日均线买入，收盘价下穿20日均线卖出，回测近一年",
+        utterance=("收盘价上穿20日均线买入，收盘价下穿20日均线卖出，回测近一年"
+                   + ("，只选金融科技板块股票" if scoped_retry else "")),
         as_of_date=date(2026, 9, 5),
     )
 
@@ -79,7 +123,16 @@ async def test_complete_rules_are_preserved_across_ranked_stock_choices(
     screen = replace(_screen(), rows=(*_screen().rows, {"代码": "600183", "名称": "生益科技"}))
 
     class Data:
+        calls = 0
+
         async def screen(self, *, query: str, asset_type: str) -> LiveMarketDataResult:
+            self.calls += 1
+            assert request.utterance in query
+            if scoped_retry:
+                assert "只选金融科技板块股票" in query
+                if self.calls == 1:
+                    raise MxSaasProviderNoDataError("fixture retry within original sector")
+                assert "不放宽原选股范围" in query
             return screen
 
     class Advisor:
@@ -102,6 +155,17 @@ async def test_complete_rules_are_preserved_across_ranked_stock_choices(
     pending = await compiler.compile(request)
     assert pending.status is CompileStatus.NEEDS_CLARIFICATION
     assert pending.selected_idea_proposal is not None
+    # A real absence verdict keeps the existing stock-offer flow, not merely
+    # an instrument_required flag caused by a parser omission.
+    identity_router = Mock(assess=AsyncMock(return_value=ClarificationDialogueAssessment(
+        reply_kind="preference", acknowledgement_id="respect_preference",
+        natural_reply="本轮没有指定股票。", instrument_selected=False,
+    )))
+    compiler._clarification_dialogue_router = identity_router
+    effective, recovered = await compiler.recover_unsupported_identity(request, pending)
+    assert effective is request and recovered is pending
+    identity_router.assess.assert_awaited_once()
+    compiler._clarification_dialogue_router = None
     template = pending.selected_idea_proposal.strategy_template
     assert template is not None
     if with_template:
@@ -133,12 +197,14 @@ async def test_complete_rules_are_preserved_across_ranked_stock_choices(
         assert own_stock.instrument_suggestion_declined
     if not with_template:
         pending = replace(pending, selected_idea_proposal=None)
+    data = Data()
     offered, default_stock = await _offer_missing_instrument(
         outcome=pending, compile_input=request, state=None,
         container=cast(ApiContainer, SimpleNamespace(
-            compiler=compiler, live_market_data=Data(), strategy_advisor=Advisor(),
+            compiler=compiler, live_market_data=data, strategy_advisor=Advisor(),
         )),
     )
+    assert data.calls == (2 if scoped_retry else 1)
     assert offered.strategy is None
     response = _to_response(StoredDraftRevision(
         draft_id=uuid4(), revision=1, outcome=offered, compile_input=request,
@@ -280,6 +346,25 @@ async def test_failed_template_binding_response_preserves_options_and_can_recove
     template = UnboundIdeaStrategy.model_validate(
         initial.strategy.model_dump(exclude={"instrument", "schema_version"}),
     )
+    pending = CompileOutcome(
+        status=CompileStatus.NEEDS_CLARIFICATION, diagnostic_code="idea_guidance_required",
+        idea_route=replace(_route(), proposals=tuple(
+            replace(item, strategy_template=template) for item in _route().proposals
+        )),
+        stock_recommendations=(StockRecommendation(
+            symbol="300059.SZ", name="东方财富", reason="本次筛选候选",
+            source="eastmoney_mx_screener", retrieved_at=datetime.now(UTC),
+        ),),
+    )
+    confirmed = compiler.bind_selected_idea(
+        replace(original, instrument_context="300059.SZ"), pending,
+    )
+    assert confirmed is not None and confirmed.idea_route is not None
+    assert not confirmed.stock_recommendations
+    assert not confirmed.run_requested
+    assert len(confirmed.idea_route.proposals) == 2
+    assert all(item.strategy == template.bind("300059.SZ")
+               for item in confirmed.idea_route.proposals)
     assert isinstance(template.entry, IndicatorCondition)
     invalid = template.model_copy(update={
         "entry": template.entry.model_copy(update={"trigger": "golden_cross"}),
@@ -379,6 +464,11 @@ async def test_unselected_persona_directions_survive_stock_reply_composition(
             compiler=compiler, live_market_data=Data(), strategy_advisor=None,
         )),
     )
+    if not remembered:
+        assert requests == []
+        assert candidate is None and offered.stock_recommendations == ()
+        assert offered.idea_route is route
+        return
     assert len(requests) == 1
     submitted = requests[0]
     assert submitted.answer == original.utterance and submitted.question == ""
@@ -413,7 +503,8 @@ def _matched() -> StockStrategyPairing:
     "借秦始皇的果断劲儿，先给出可修改的趋势方案。",
     "保留低估值偏好，历史估值条件尚未纳入回测，先给可修改的日线反转方案。",
 ])
-async def test_pairing_keeps_original_direction_understanding(understanding: str) -> None:
+@pytest.mark.parametrize("intent", ["new_strategy", "vague_strategy", "casual"])
+async def test_pairing_keeps_original_direction_understanding(understanding: str, intent: str) -> None:
     route = replace(_route(), understanding=understanding)
     pairing = _matched()
 
@@ -442,14 +533,14 @@ async def test_pairing_keeps_original_direction_understanding(understanding: str
     )
     offered, candidate = await _offer_missing_instrument(
         outcome=pending, compile_input=CompileInput(
-            utterance="策略灵感", as_of_date=date(2026, 9, 5),
+            utterance="策略灵感", as_of_date=date(2026, 9, 5), semantic_intent=intent,
         ), state=None, container=cast(ApiContainer, SimpleNamespace(
             compiler=Compiler(), live_market_data=Data(), strategy_advisor=Advisor(),
         )),
     )
     assert candidate is None and offered.idea_route is not None
-    assert offered.idea_route.understanding == understanding
-    assert offered.clarification == pairing.introduction
+    assert offered.idea_route.understanding == pairing.introduction
+    assert offered.clarification == offered.idea_route.understanding
     assert len(offered.idea_route.proposals) == 2
     assert offered.strategy is None and not offered.run_requested
 
@@ -510,6 +601,48 @@ async def test_missing_field_is_queried_and_original_finance_tables_reach_next_p
 
 
 @pytest.mark.asyncio
+async def test_oversized_enrichment_requests_narrower_lookup_without_claiming_no_match() -> None:
+    needed, matched = _need("最近交易日成交额"), _matched()
+    extra = replace(_finance("最近交易日成交额"), tables=({"data": "x" * 100_001},))
+    advisor, data = _Advisor((needed, matched)), _Data((extra,))
+    result, error = await _run(advisor, data, _screen(), _route())
+    assert result is matched and error is None
+    assert advisor.calls[1].supplements == ()
+    assert "数据过大" in advisor.calls[1].feedback[0]
+    assert "不能据此判断股票无关联" in advisor.calls[1].feedback[0]
+    assert "最新可用一条" in data.finance_calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_pairing_uses_recovery_without_replacing_candidates_or_source() -> None:
+    needed, matched = _need("最近交易日成交额"), _matched()
+    extra = replace(_finance("最近交易日成交额"), provider="eastmoney_mx_screener")
+
+    class RecoveringData(_Data):
+        async def query_current_finance(
+            self, *, query: str, indicators: str | None, asset_type: str = "A股",
+        ) -> LiveFinanceDataResult:
+            assert asset_type == "A股"
+            self.finance_calls.append((query, indicators))
+            return extra
+
+        async def query_finance(
+            self, *, query: str, indicators: str | None,
+        ) -> LiveFinanceDataResult:
+            raise AssertionError("Pairing bypassed the recovering lookup")
+
+    advisor, data = _Advisor((needed, matched)), RecoveringData(())
+    result, error = await _run(advisor, data, _screen(), _route())
+    assert result is matched and error is None
+    assert len(data.finance_calls) == 1
+    assert "300059.SZ" in data.finance_calls[0][0]
+    assert data.finance_calls[0][1] == "最近交易日成交额"
+    assert advisor.calls[1].supplements == (extra,)
+    assert advisor.calls[1].supplements[0].provider == "eastmoney_mx_screener"
+    assert advisor.calls[1].previous == (needed.data_request,)
+
+
+@pytest.mark.asyncio
 async def test_no_data_is_feedback_then_different_model_fields_can_succeed() -> None:
     first, second, matched = _need("最近交易日换手率"), _need("最近交易日成交额"), _matched()
     extra = _finance("最近交易日成交额")
@@ -549,3 +682,98 @@ async def test_unknown_requested_symbol_is_rejected_before_finance_lookup() -> N
     assert "补查请求未通过校验" in error
     assert len(advisor.calls) == 1
     assert data.finance_calls == []
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport_failure", [False, True])
+async def test_rejected_matching_never_resurrects_raw_stock_choices(transport_failure) -> None:
+    screen = _screen()
+    route = _route()
+    class Data:
+        async def screen(self, **kwargs):
+            return screen
+    class Advisor:
+        async def pair_stock_strategies(self, *args, **kwargs):
+            if transport_failure:
+                from ashare_lab.adapters.language.vibe_candidates import CandidateTransportError
+                raise CandidateTransportError("fixture", failure_kind="connection_failed")
+            return None
+    outcome = CompileOutcome(status=CompileStatus.NEEDS_CLARIFICATION,
+                             diagnostic_code="idea_guidance_required", idea_route=route)
+    offered, default = await _offer_missing_instrument(
+        outcome=outcome,
+        compile_input=CompileInput(utterance="给我一个策略", as_of_date=date(2026, 9, 5)),
+        state=None, container=cast(ApiContainer, SimpleNamespace(
+            live_market_data=Data(), strategy_advisor=Advisor(),
+        )),
+    )
+    assert default is None and offered.idea_route is route
+    assert offered.strategy is None and not offered.run_requested
+    assert offered.stock_recommendations == ()
+    assert "保留" in offered.clarification
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("topic", ["山竹", "榴莲", "咖啡"])
+@pytest.mark.parametrize("matched", [True, False])
+async def test_parent_industry_research_is_bounded_and_disclosed(topic, matched):
+    class Data:
+        calls = []
+        async def screen(self, **kwargs):
+            self.calls.append(kwargs['query'])
+            return _screen()
+    class Advisor:
+        calls = 0
+        async def plan_industry_expansion(self, utterance):
+            from ashare_lab.ports.strategy_advice import IndustryExpansion
+            assert topic in utterance
+            return IndustryExpansion('水果种植业', 'A股主营业务涉及水果种植业，返回代码、简称、主营业务、行业，最多10只')
+        async def pair_stock_strategies(self, utterance, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1 or not matched:
+                return StockStrategyPairing('', ())
+            assert '所属行业' in utterance and topic in utterance
+            assert '禁止扩展' in utterance
+            return _matched()
+    class Compiler:
+        def bind_idea_proposal(self, request, proposal, symbol):
+            return replace(proposal, instrument_symbol=symbol)
+    data, advisor = Data(), Advisor()
+    route = _route()
+    outcome = CompileOutcome(status=CompileStatus.NEEDS_CLARIFICATION,
+                             diagnostic_code='idea_guidance_required', idea_route=route)
+    offered, default = await _offer_missing_instrument(
+        outcome=outcome, compile_input=CompileInput(utterance=f'{topic}相关股票策略', as_of_date=date(2026,9,5)),
+        state=None, container=cast(ApiContainer, SimpleNamespace(live_market_data=data,
+            strategy_advisor=advisor, compiler=Compiler())),
+    )
+    assert len(data.calls) == advisor.calls == 2
+    assert topic not in data.calls[1] and '水果种植业' in data.calls[1]
+    assert default is None and not offered.run_requested
+    if matched:
+        assert offered.clarification == _matched().introduction
+        assert len(offered.idea_route.proposals) == 2
+    else:
+        assert offered.stock_recommendations == ()
+        assert offered.idea_route is route
+
+
+@pytest.mark.asyncio
+async def test_followup_receives_previously_displayed_stock_chips():
+    from ashare_lab.application.turn_intent import TurnIntent
+    captured = []
+    class Dialogue:
+        async def assess(self, request):
+            captured.append(request)
+            return None
+    compiler = StrategyCompiler(generator=RuleBasedCandidateGenerator(),
+        catalog=load_catalog_directory(Path(__file__).parents[3] / 'catalogs'),
+        catalog_id='cn_a.signals', release_version='2026.09.01', clarification_dialogue_router=Dialogue())
+    prior = CompileOutcome(status=CompileStatus.NEEDS_CLARIFICATION,
+        diagnostic_code='idea_guidance_required', idea_route=_route(),
+        stock_recommendations=(StockRecommendation('300059.SZ', '东方财富', '旧候选理由'),))
+    await compiler._assess_clarification_dialogue(
+        CompileInput(utterance='山竹相关股票策略', as_of_date=date(2026,9,5)), prior,
+        '为什么这只是相关股票？', TurnIntent.DATA_QUERY, ())
+    assert '东方财富（300059.SZ）' in captured[0].context_summary
+    assert '旧候选理由' in captured[0].context_summary
+    assert '不证明主题关联' in captured[0].context_summary

@@ -28,7 +28,7 @@ export const validateBacktestDates = (
       return { valid: false, field, reason: `${label}不能早于 1990-01-01，请检查年份。` }
     }
     if (value > latestDate) {
-      return { valid: false, field, reason: `${label}不能晚于 ${latestDate}，请检查日期。` }
+      return { valid: false, field, reason: '数据尚未更新，请选择可用日期。' }
     }
   }
   if (start > end) {

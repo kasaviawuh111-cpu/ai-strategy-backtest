@@ -86,6 +86,17 @@ export type StrategySpecTrailingDrawdownExit = {
   execution: 'next_tradable_session_open'
 }
 
+export type StrategySpecMinuteProtectionExit = {
+  type: 'minute_protection_exit'
+  take_profit_pct: number | null
+  stop_loss_pct: number | null
+  trailing_drawdown_pct: number | null
+  limit_price_cny: number | null
+  anchor: 'fee_exclusive_weighted_acquisition_cost'
+  observation: 'raw_minute_high_low'
+  execution: 'next_bar_order_activation'
+}
+
 export type StrategySpecCondition =
   | StrategySpecIndicatorCondition
   | StrategySpecFinancialCondition
@@ -98,6 +109,12 @@ export type StrategySpecExitRule =
   | StrategySpecHoldingPeriodExit
   | StrategySpecPositionReturnExit
   | StrategySpecTrailingDrawdownExit
+  | StrategySpecMinuteProtectionExit
+
+export type PricePlan = {
+  kind: 'grid' | 'conditional' | 'scheduled'
+  parameters: Record<string, string | number | boolean | null | Array<Record<string, string | number | null>>>
+}
 
 export type StrategySpec = {
   schema_version: 'strategy.v1'
@@ -110,27 +127,35 @@ export type StrategySpec = {
     symbol: string
     position_mode: 'long_only'
   }
-  entry: StrategySpecCondition
+  trading_plan?: PricePlan | null
+  entry: StrategySpecCondition | null
   exit: {
     op: 'first_of' | 'all'
     children: StrategySpecExitRule[]
-  }
+  } | null
   execution: {
     timezone: 'Asia/Shanghai'
-    entry_policy: 'next_tradable_session_open'
-    exit_policy: 'next_tradable_session_open'
+    entry_policy: 'composed_entry_leg' | 'next_tradable_session_open' | 'next_market_session_open' | 'next_bar_order_activation' | 'scheduled_session_open' | 'scheduled_session_close' | 'server_selected_grid'
+    exit_policy: 'composed_exit_leg' | 'next_tradable_session_open' | 'daily_signal_open_or_next_minute_activation' | 'next_bar_order_activation' | 'scheduled_session_open' | 'scheduled_session_close' | 'server_selected_grid'
     data_capability:
+      | 'minute_ohlcv' | 'server_selected'
       | 'daily_ohlcv'
       | 'daily_ohlcv_events'
       | 'daily_ohlcv_financials'
       | 'daily_ohlcv_events_financials'
-    execution_resolution: '1d'
+      | 'daily_and_minute_ohlcv'
+      | 'daily_and_minute_ohlcv_events'
+      | 'daily_and_minute_ohlcv_financials'
+      | 'daily_and_minute_ohlcv_events_financials'
+    execution_resolution: '1d' | '1m' | 'server_selected'
     evaluation_frequency:
+      | '1m_bar' | 'pre_session_schedule' | 'server_selected'
       | '1d_close'
       | 'event_available_plus_1d_close'
       | 'financial_available_plus_1d_close'
       | 'event_financial_available_plus_1d_close'
-    position_policy: 'single_position_no_pyramiding'
+      | 'daily_close_and_minute_bar'
+    position_policy: 'single_position_no_pyramiding' | 'bounded_inventory' | 'accumulate_on_new_entry_signal'
     t_plus_one: true
   }
   backtest: {
@@ -200,6 +225,18 @@ export type StrategyTrailingDrawdownCondition = StrategyConditionBase & {
   editable: false
 }
 
+export type StrategyMinuteProtectionCondition = StrategyConditionBase & {
+  kind: 'minute_protection'
+  takeProfitPct: number | null
+  stopLossPct: number | null
+  trailingDrawdownPct: number | null
+  limitPriceCny: number | null
+  anchor: 'fee_exclusive_weighted_acquisition_cost'
+  observation: 'raw_minute_high_low'
+  execution: 'next_bar_order_activation'
+  editable: false
+}
+
 export type StrategyCondition =
   | StrategyIndicatorCondition
   | StrategyFinancialCondition
@@ -207,6 +244,7 @@ export type StrategyCondition =
   | StrategyHoldingPeriodCondition
   | StrategyPositionReturnCondition
   | StrategyTrailingDrawdownCondition
+  | StrategyMinuteProtectionCondition
 
 export type StrategyLeg = {
   operator: 'all' | 'any' | 'first_of'
@@ -221,26 +259,19 @@ export type PriceLimitMode =
 export type CapacityMode = 'point_in_time_volume' | 'unlimited'
 
 export type ExecutionPolicy = {
-  entryPolicy: 'next_tradable_session_open'
-  exitPolicy: 'next_tradable_session_open'
+  entryPolicy: StrategySpec['execution']['entry_policy']
+  exitPolicy: StrategySpec['execution']['exit_policy']
   priceLimitMode: PriceLimitMode
   tPlusOne: true
-  dataCapability:
-    | 'daily_ohlcv'
-    | 'daily_ohlcv_events'
-    | 'daily_ohlcv_financials'
-    | 'daily_ohlcv_events_financials'
-  evaluationFrequency:
-    | '1d_close'
-    | 'event_available_plus_1d_close'
-    | 'financial_available_plus_1d_close'
-    | 'event_financial_available_plus_1d_close'
+  dataCapability: StrategySpec['execution']['data_capability']
+  evaluationFrequency: StrategySpec['execution']['evaluation_frequency']
   capacityMode: CapacityMode
   participationRate: number
   allocationRatio: number
   commissionRate: number
   minimumCommissionCny: number
   slippageBps: number
+  slippageCny?: number
   retryUnfilledExits: boolean
   maxExitAttempts: number
   warmupCalendarDays: number
@@ -310,6 +341,10 @@ export type CandidateRejectionItem = {
 }
 
 export type IdeaRouteProposal = {
+  grid_plan?: PricePlan | null
+  /** Optional server-owned rules; absence is a textual idea, not an empty strategy. */
+  strategy?: StrategySpec | null
+  strategy_template?: Omit<StrategySpec, 'instrument' | 'schema_version'> | null
   id: string
   title: string
   hypothesis: string
@@ -400,6 +435,11 @@ export type InstrumentSuggestion = {
 }
 
 export type Clarification = {
+  executionAssessment?: {
+    status: 'executable' | 'research_degraded' | 'understood_not_executable' | 'temporarily_unavailable'
+    message: string
+    missing: string[]
+  }
   id: string
   question: string
   reason: string
@@ -413,8 +453,9 @@ export type Clarification = {
   /** Server-reviewed candidates retain exact DSL and their completed source run. */
   backtestReview?: BacktestReviewResponse
   /**
-   * 服务器把少量口语交易表达还原成的待确认预览。它不能直接进入回测；
-   * 用户必须主动采用对应 choice，服务端会再编译和校验。
+   * 服务器返回的待确认规则预览，包含口语推测和语义复核待确认两类。
+   * 它不能直接进入回测；用户补充或确认后，服务端仍须重新编译和校验。
+   * 语义复核预览没有推荐 choice，也不创建 ideaRoute。
    */
   provisionalDraft?: StrategyDraft
   provisionalChoiceId?: string
@@ -587,6 +628,7 @@ export type EventCapability = {
 }
 
 export type CapabilitiesResponse = {
+  available_data_end?: string | null
   markets: ['CN_A']
   input_modes: ['natural_language_zh']
   strategy_scopes: ['single_instrument', 'long_only']
@@ -641,9 +683,13 @@ export type BacktestSummary = {
   sharpeRatio: number | null
   winRate: number | null
   tradeCount: number
+  tradeCountSemantics?: 'closed_position_cycles'
   initialCashCny: number | null
+  /** Opening total assets; differs from cash when existing holdings are imported. */
+  initialEquityCny?: number | null
   finalEquityCny: number
   interpretation: string
+  executionNote?: string | null
   dataRange: { start: string; end: string; sessions: number }
   warnings: string[]
   runEvidence?: BacktestRunEvidence | null
@@ -653,7 +699,7 @@ export type BacktestSummary = {
 export type SkillDataProvenance = {
   provider: 'eastmoney_mx_finance_data'
   instrumentId: string
-  priceBasis: 'provider_back_adjusted'
+  priceBasis: 'provider_back_adjusted' | 'unadjusted'
   retrievedAt: string
   historyStart: string
   historyEnd: string
@@ -712,6 +758,7 @@ export type BacktestSignalEvidence = {
 }
 
 export type BacktestActivity = {
+  executionDetails?: { signalAt?: string | null; effectiveAt?: string | null; [key: string]: unknown } | null
   id: string
   kind: ActivityKind
   occurredAt: string
@@ -727,6 +774,7 @@ export type BacktestActivity = {
     | 'partially_filled'
     | 'cancelled'
     | 'expired'
+    | 'rejected'
   reason: string
   chainId?: string | null
   decisionId?: string | null
@@ -801,6 +849,7 @@ export type ApiProblem = {
   detail: string
   code?: string
   requestId?: string
+  details?: Array<{ location?: string | null; message: string; type?: string | null }>
 }
 
 export class ApiError extends Error {

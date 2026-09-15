@@ -16,8 +16,11 @@ from zoneinfo import ZoneInfo
 
 from ashare_lab.adapters.market_data.mx_daily_history import MxDailyHistory, MxDailyRow
 from ashare_lab.application.backtest_submission import BacktestRunConfig
+from ashare_lab.application.trading_schedule import holding_due_session
 from ashare_lab.domain.analytics import BacktestMetrics, EquityPoint, RoundTrip, calculate_metrics
 from ashare_lab.domain.execution import CapacityMode, LimitHandling
+from ashare_lab.domain.execution.bar_prices import BarPrices, match_bar_price
+from ashare_lab.domain.orders import OrderSide
 from ashare_lab.domain.market_data import TradingStatus
 from ashare_lab.domain.shared import DomainValidationError, InstrumentId
 from ashare_lab.domain.signals import SignalFact
@@ -127,6 +130,7 @@ def run_skill_backtest(
     entry_timeline: tuple[SignalFact | None, ...],
     exit_timeline: tuple[SignalFact | None, ...],
     config: BacktestRunConfig,
+    market_sessions: tuple[date, ...] | None = None,
 ) -> SkillBacktestResult:
     """Simulate one long-only strategy using MX provider-adjusted returns.
 
@@ -137,13 +141,25 @@ def run_skill_backtest(
     completed sell cannot be followed by a same-session buy.
     """
 
+    from ashare_lab.domain.strategy import HybridExecutionPolicy
+    if isinstance(strategy.execution, HybridExecutionPolicy):
+        raise ValueError("minute_protection_requires_hybrid_executor")
     rows, eligible_indices = _validate_input(
         strategy=strategy,
         history=history,
         entry_timeline=entry_timeline,
         exit_timeline=exit_timeline,
     )
+    from ashare_lab.application.entry_occurrences import ACCUMULATE_ON_NEW_ENTRY, entry_occurrences
+    accumulate = strategy.execution.position_policy == ACCUMULATE_ON_NEW_ENTRY
+    order_entries = (entry_occurrences(entry_timeline, condition=strategy.entry)
+                     if accumulate else entry_timeline)
     initial_cash = Decimal(strategy.backtest.initial_cash_cny)
+    if _holding_sessions(strategy) is not None and market_sessions is not None:
+        if (not market_sessions or market_sessions[0] > strategy.backtest.start
+                or market_sessions[-1] < strategy.backtest.end
+                or any(a >= b for a, b in zip(market_sessions, market_sessions[1:]))):
+            raise SkillBacktestInputError("holding market calendar does not cover backtest end")
     cash = initial_cash
     position: _Position | None = None
     pending_entry: _PendingDecision | None = None
@@ -255,10 +271,13 @@ def run_skill_backtest(
                 reason=reason,
                 available_at=open_at,
                 signal=None,
-                max_sessions=config.max_exit_attempts if config.retry_unfilled_exits else 1,
+                # Scheduled maturity remains due until filled or period end;
+                # the ordinary indicator-exit retry budget cannot cancel it.
+                max_sessions=len(eligible_indices) if config.retry_unfilled_exits else 1,
                 decision_id=origin_signal_id,
                 origin_signal_id=origin_signal_id,
             )
+            pending_entry = None
             position.holding_exit_index = None
 
         if position is not None and pending_exit is not None:
@@ -365,7 +384,7 @@ def run_skill_backtest(
                     )
                     pending_exit = None
 
-        if position is None and pending_entry is not None and not sold_today:
+        if (position is None or accumulate) and pending_entry is not None and pending_exit is None and not sold_today:
             entry_decision = pending_entry
             if entry_decision.available_at <= open_at:
                 entry_decision.sessions_seen += 1
@@ -395,6 +414,17 @@ def run_skill_backtest(
                 if buy_fill.filled_notional > 0:
                     cash -= buy_fill.cash_debit
                     holding_sessions = _holding_sessions(strategy)
+                    holding_index = None if holding_sessions is None else index + holding_sessions
+                    if holding_sessions is not None and market_sessions is not None:
+                        due = holding_due_session(market_sessions, row.session_date, holding_sessions)
+                        if due is None and market_sessions[-1] < strategy.backtest.end:
+                            raise SkillBacktestInputError("holding market calendar does not cover backtest end")
+                        holding_index = None
+                        if due is not None and due <= strategy.backtest.end:
+                            holding_index = next((i for i, item in enumerate(rows) if item.session_date == due), None)
+                            if holding_index is None:
+                                raise SkillBacktestInputError("holding target market session has no security data")
+                    previous_position = position
                     position = _Position(
                         return_units=buy_fill.return_units,
                         entry_date=row.session_date,
@@ -405,10 +435,16 @@ def run_skill_backtest(
                             buy_fill.adjusted_execution_price,
                             row.adjusted_close,
                         ),
-                        holding_exit_index=(
-                            None if holding_sessions is None else index + holding_sessions
-                        ),
+                        holding_exit_index=holding_index,
                     )
+                    if previous_position is not None:
+                        # Keep the declared first-entry holding/risk anchor;
+                        # accumulate actual exposure and cost in the same cycle.
+                        previous_position.return_units += position.return_units
+                        previous_position.total_cost_cny += position.total_cost_cny
+                        previous_position.peak_adjusted_close = max(
+                            previous_position.peak_adjusted_close, position.peak_adjusted_close)
+                        position = previous_position
                     append_activity(
                         kind=(
                             "partial_fill"
@@ -468,13 +504,37 @@ def run_skill_backtest(
         )
 
         entry_fact = entry_timeline[index]
+        order_entry_fact = order_entries[index]
         exit_fact = exit_timeline[index]
         if entry_fact is None:
             unknown_entry_sessions.append(row.session_date)
         if exit_fact is None and _has_market_exit(strategy):
             unknown_exit_sessions.append(row.session_date)
 
-        if position is None:
+        exit_reason = None
+        if position is not None:
+            position.peak_adjusted_close = max(
+                position.peak_adjusted_close,
+                row.adjusted_close,
+            )
+            if pending_exit is None:
+                exit_reason = _close_exit_reason(
+                    strategy=strategy,
+                    position=position,
+                    adjusted_close=row.adjusted_close,
+                    exit_fact=exit_fact,
+                    session_index=index,
+                )
+        # A market child is not a complete ALL exit when its account condition
+        # is false (or there is no position yet). Reuse the full close result.
+        exit_blocks_entry = exit_reason is not None or (
+            position is None and exit_fact is not None and exit_fact.triggered
+            and (strategy.exit.op == "first_of" or not any(
+                isinstance(rule, (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit))
+                for rule in strategy.exit.children))
+        )
+
+        if position is None or accumulate:
             if (
                 exit_fact is not None
                 and exit_fact.triggered
@@ -497,40 +557,33 @@ def run_skill_backtest(
                         origin_signal_id=pending_entry.origin_signal_id,
                     )
                 pending_entry = None
-            if entry_fact is not None and entry_fact.triggered and pending_entry is None:
-                available_at = max(entry_fact.available_at, close_at)
+            if (order_entry_fact is not None and order_entry_fact.triggered and pending_entry is None
+                    and pending_exit is None and not (accumulate and exit_blocks_entry)):
+                available_at = max(order_entry_fact.available_at, close_at)
                 origin_signal_id = append_activity(
                     kind="signal",
                     occurred_at=available_at,
                     side="buy",
                     status="confirmed",
-                    reason=entry_fact.reason,
-                    signal=entry_fact,
+                    reason=order_entry_fact.reason,
+                    signal=order_entry_fact,
                 )
                 pending_entry = _PendingDecision(
                     side="buy",
-                    reason=entry_fact.reason,
+                    reason=order_entry_fact.reason,
                     available_at=available_at,
-                    signal=entry_fact,
+                    signal=order_entry_fact,
                     max_sessions=_entry_validity_sessions(strategy, config),
                     decision_id=origin_signal_id,
                     origin_signal_id=origin_signal_id,
                 )
-        else:
-            position.peak_adjusted_close = max(
-                position.peak_adjusted_close,
-                row.adjusted_close,
-            )
+        if position is not None:
             if pending_exit is None:
-                exit_reason = _close_exit_reason(
-                    strategy=strategy,
-                    position=position,
-                    adjusted_close=row.adjusted_close,
-                    exit_fact=exit_fact,
-                    session_index=index,
-                )
                 if exit_reason is not None:
                     reason, signal = exit_reason
+                    # Once a position exit activates, an older add-on entry may
+                    # neither block it nor execute after an unfilled sell.
+                    pending_entry = None
                     available_at = (
                         close_at if signal is None else max(signal.available_at, close_at)
                     )
@@ -548,7 +601,12 @@ def run_skill_backtest(
                         available_at=available_at,
                         signal=signal,
                         max_sessions=(
-                            config.max_exit_attempts if config.retry_unfilled_exits else 1
+                            config.max_exit_attempts
+                            if config.retry_unfilled_exits and (
+                                signal is None or (strategy.exit.op == "all" and any(
+                                    isinstance(rule, (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit))
+                                    for rule in strategy.exit.children)))
+                            else 1
                         ),
                         decision_id=origin_signal_id,
                         origin_signal_id=origin_signal_id,
@@ -585,6 +643,7 @@ def run_skill_backtest(
             "研究模拟使用东方财富声明的后复权价格计算资金暴露收益；"
             "它不是证券账户逐笔股份账本，不代表现金分红、送转股或税费实际到账。"
         ),
+        "本路径未逐日重建当时可用的动态前复权序列；供应商历史复权值的时点一致性尚未验收，不应视为已通过未来信息检查。",
         (
             "原始价格仅用于每日开盘参考与停牌、涨跌停、流动性检查；"
             "quantity 恒为空，不推断真实股数、排队位置或逐笔成交。"
@@ -613,6 +672,7 @@ def run_skill_backtest(
             "close_signal_next_session_open_proxy",
             "a_share_t_plus_one",
             "sell_priority_no_same_session_reentry",
+            strategy.execution.position_policy,
             "fees_and_slippage_from_backtest_run_config",
             (
                 "point_in_time_liquidity_previous_completed_session_volume"
@@ -663,7 +723,7 @@ def _buy_exposure(
     fee = _commission(filled, config)
     if filled <= 0 or filled + fee > budget:
         return _empty_fill("insufficient_executable_notional_after_fee", requested=requested)
-    adjusted_price = row.adjusted_open * (Decimal("1") + config.slippage_bps / _BPS_DENOMINATOR)
+    adjusted_price = _adjusted_execution_price(row, config, side="buy")
     if adjusted_price <= 0:
         return _empty_fill("invalid_adjusted_open", requested=requested)
     return _ExposureFill(
@@ -676,6 +736,28 @@ def _buy_exposure(
         cash_credit=Decimal("0"),
         reason=("filled_at_open_proxy" if filled == requested else "partial_liquidity_fill"),
     )
+
+
+def _adjusted_execution_price(
+    row: MxDailyRow, config: BacktestRunConfig, *, side: Literal["buy", "sell"],
+) -> Decimal:
+    # Yuan is a raw-price unit. Convert its impact through this bar's adjustment
+    # factor; adding 0.02 directly to a back-adjusted series changes its meaning.
+    direction = Decimal("1") if side == "buy" else Decimal("-1")
+    raw_price = (row.raw_open * (1 + direction * config.slippage_bps / _BPS_DENOMINATOR)
+                 + direction * config.slippage_cny)
+    if raw_price <= 0:
+        return raw_price  # Execution reports no fill; never invent a valid price.
+    raw_price = match_bar_price(
+        BarPrices(row.raw_open, row.raw_high, row.raw_low, row.raw_close),
+        side=OrderSide.BUY if side == "buy" else OrderSide.SELL, observation="open",
+        slippage_bps=config.slippage_bps, slippage_cny=config.slippage_cny,
+    )
+    if row.upper_limit is not None:
+        raw_price = min(raw_price, row.upper_limit)
+    if row.lower_limit is not None:
+        raw_price = max(raw_price, row.lower_limit)
+    return row.adjusted_open * raw_price / row.raw_open
 
 
 def _sell_exposure(
@@ -691,7 +773,7 @@ def _sell_exposure(
         side="sell",
         config=config,
     )
-    adjusted_price = row.adjusted_open * (Decimal("1") - config.slippage_bps / _BPS_DENOMINATOR)
+    adjusted_price = _adjusted_execution_price(row, config, side="sell")
     requested = return_units * adjusted_price
     if reason is not None or requested <= 0 or adjusted_price <= 0:
         return _empty_fill(reason or "invalid_adjusted_open", requested=requested)
@@ -721,6 +803,8 @@ def _execution_capacity(
 ) -> tuple[str | None, Decimal | None]:
     if row.trading_status is not TradingStatus.TRADING:
         return f"security_{row.trading_status.value}", Decimal("0")
+    if row.volume <= 0:
+        return "no_market_trades", Decimal("0")
     if row.raw_open <= 0 or row.adjusted_open <= 0:
         return "invalid_open_price", Decimal("0")
     adverse_limit = (

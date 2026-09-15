@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { PricePlanEditor } from '../components/PricePlanEditor'
+import { SettingInfo } from '../components/SettingInfo'
 
 import type {
   CapacityMode,
@@ -16,7 +18,6 @@ import { dataAsOfDate } from '../shared/api/contract'
 import { MINIMUM_BACKTEST_DATE, validateBacktestDates } from '../shared/backtest-date-validation'
 import {
   BackIcon,
-  Glyph,
   Notice,
   Row,
   Section,
@@ -28,12 +29,12 @@ import { EquityChart } from '../components/EquityChart'
 import { ExcessEquation } from '../components/ExcessEquation'
 import { RuleTree } from '../components/SummaryCards'
 import { RuleSpecEditor } from '../components/RuleSpecEditor'
+import { NumericInput, NumericInputGroup } from '../components/NumericInput'
 import { InlineStockEditor, type InlineStockEditorActions } from '../components/InlineStockEditor'
 import { numericResultConclusion } from '../result-conclusion'
 import { secondaryMetric, strategyRuleTrees, toOrderRows } from '../view-model'
 import type {
   BacktestMetrics,
-  ChainNode,
   ChartMark,
   EditableRow,
   OrderStatus,
@@ -41,6 +42,16 @@ import type {
   SeriesPoint,
   TradeRow,
 } from '../types'
+
+function signalExecutionSummary(draft: StrategyDraft): string {
+  if (draft.execution.evaluationFrequency === 'daily_close_and_minute_bar'
+      || draft.exit.conditions.some((condition) => condition.kind === 'minute_protection')) {
+    return '日线条件收盘后确认，下一交易日开盘尝试建仓；分钟保护在完成K线后确认，新委托下一分钟生效（非真实逐笔成交）'
+  }
+  return draft.entry.conditions.some((condition) => condition.kind === 'event')
+    ? '可靠秒级按实际首次可得；可信日期按收盘后可得，下一交易日委托'
+    : '收盘确认 → 下一交易日开盘价代理（时间非精确）'
+}
 
 export function Page(
   { id, title, open, onBack, footer, children }:
@@ -138,6 +149,8 @@ export function ParamsScreen(
     conditionPath?: string; capabilities?: CapabilitiesResponse },
 ) {
   const [stockEditing, setStockEditing] = useState(false)
+  const [numericReset, setNumericReset] = useState(0)
+  const [numbersValid, setNumbersValid] = useState(true)
   if (!open && stockEditing) setStockEditing(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const startDateRef = useRef<HTMLInputElement>(null)
@@ -179,13 +192,21 @@ export function ParamsScreen(
 
   const finishEditing = () => {
     if (stockEditing) return
+    // Numeric controls buffer incomplete text; never leave using the previous legal draft.
+    const invalidNumbers = [...(scrollRef.current?.querySelectorAll<HTMLInputElement>('[data-numeric-input]') ?? [])]
+      .filter((input) => !input.disabled && !input.checkValidity())
+    if (invalidNumbers.length) {
+      invalidNumbers[0]?.focus()
+      return
+    }
     // Native date controls may change their displayed value without React's change event.
     const currentDates = currentDateValues()
     const currentValidation = validateBacktestDates(currentDates.start, currentDates.end, latestDate)
     if (!currentValidation.valid) {
       setDateEdits({ draftId: draft.id, ...currentDates })
       const input = currentValidation.field === 'start' ? startDateRef : endDateRef
-      input.current?.focus()
+      input.current?.focus({ preventScroll: true })
+      input.current?.scrollIntoView?.({ block: 'center', behavior: 'instant' })
       return
     }
     if (currentDates.start !== draft.backtest.start || currentDates.end !== draft.backtest.end) {
@@ -213,6 +234,7 @@ export function ParamsScreen(
         <div className="btns">
           <button type="button" className="btn ghost" onClick={() => {
             setDateEdits(null)
+            setNumericReset((value) => value + 1)
             onReset()
           }} disabled={isLocked || stockEditing}>重置为识别结果</button>
           <button type="button" className="btn solid" disabled={stockEditing} onClick={finishEditing}>完成</button>
@@ -224,12 +246,16 @@ export function ParamsScreen(
           <Section title="股票">
             <div className="settings-stock">
               {stockEditor ? <InlineStockEditor key={`${draft.id}-${open}`} instrument={{ name: draft.instrument.name, code: draft.instrument.symbol }}
-                disabled={isLocked} {...stockEditor} onEditingChange={setStockEditing} />
+                disabled={isLocked || !numbersValid} {...stockEditor} onEditingChange={setStockEditing} />
                 : <span>{draft.instrument.name} {draft.instrument.symbol}</span>}
             </div>
           </Section>
+          <NumericInputGroup resetKey={`${draft.id}-${numericReset}`} onValidityChange={setNumbersValid}>
           <fieldset className="settings-fields" disabled={isLocked || stockEditing}>
-          {focus === 'entry' || focus === 'exit' ? <div data-focus={focus}><Section title={focus === 'entry' ? '编辑买入条件' : '编辑卖出条件'}>
+          {draft.strategySpec.trading_plan ? <Section title="交易计划参数">
+            <PricePlanEditor draft={draft} onChange={onChange} />
+          </Section> : null}
+          {!draft.strategySpec.trading_plan && (focus === 'entry' || focus === 'exit') ? <div data-focus={focus}><Section title={focus === 'entry' ? '编辑买入条件' : '编辑卖出条件'}>
             <RuleSpecEditor draft={draft} side={focus} path={conditionPath} capabilities={capabilities} onChange={onChange} />
           </Section></div> : null}
           <div data-focus="entry" className="section-anchor" />
@@ -253,31 +279,29 @@ export function ParamsScreen(
           {focus !== 'entry' && focus !== 'exit' && indicatorConditions.length > 0 ? (
             <Section title="指标参数" aside="不改也可以直接回测">
               {indicatorConditions.flatMap((condition) => condition.parameters.map((parameter) => (
-                <label className="grow setting-row" key={`${condition.id}-${parameter.key}`}>
-                  <span className="k">{condition.label}<small>{parameter.label}</small></span>
-                  <input
-                    className="settings-input"
-                    type="number"
-                    aria-label={`${condition.label} ${parameter.label}`}
+                <div className="grow setting-row" key={`${condition.id}-${parameter.key}`}>
+                  <span className="k"><SettingInfo label={parameter.label} /><small>{condition.label}</small></span>
+                  <NumericInput
+                    label={`${condition.label} ${parameter.label}`}
                     min={parameter.min}
                     max={parameter.max}
-                    step={parameter.integer ? 1 : 'any'}
+                    integer={parameter.integer}
                     value={parameter.value}
                     disabled={isLocked}
-                    onChange={(event) => updateParameter(
+                    onValueChange={(value) => updateParameter(
                       condition.id,
                       parameter.key,
-                      Number(event.target.value),
+                      value,
                     )}
                   />
-                </label>
+                </div>
               )))}
             </Section>
           ) : null}
 
           <div data-focus="range" className="section-anchor" />
           <Section title="回测范围">
-            <label className="setting-row"><span>常用区间</span><select aria-label="常用区间" value="custom"
+            <div className="grow setting-row"><span className="k"><SettingInfo label="常用区间" /></span><select className="settings-select" aria-label="常用区间" value="custom"
               onChange={(event) => {
                 if (event.target.value === 'custom') return
                 const end = latestDate
@@ -288,164 +312,177 @@ export function ParamsScreen(
                 const last = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0)).getUTCDate()
                 start.setUTCDate(Math.min(day, last))
                 setDateEdits({ draftId: draft.id, start: start.toISOString().slice(0, 10), end })
-              }}><option value="custom">自定义日期</option><option value="6">近半年</option><option value="12">近一年</option><option value="36">近三年</option></select></label>
-            <label className="grow setting-row">
-              <span className="k">开始日期</span>
-              <input ref={startDateRef} className="settings-input settings-input--date" type="date"
+              }}><option value="custom">自定义日期</option><option value="6">近半年</option><option value="12">近一年</option><option value="36">近三年</option></select></div>
+            <div className="grow setting-row">
+              <span className="k"><SettingInfo label="开始日期" /></span>
+              <input ref={startDateRef} className="settings-input settings-input--date" type="date" aria-label="开始日期"
                 value={dates.start} min={MINIMUM_BACKTEST_DATE} max={latestDate} required disabled={isLocked}
                 aria-invalid={dateValidation.field === 'start'}
                 aria-describedby={dateValidation.field === 'start' ? 'backtest-date-error' : undefined}
                 onInput={syncDateInputs} onChange={syncDateInputs} />
-            </label>
-            <label className="grow setting-row">
-              <span className="k">结束日期</span>
-              <input ref={endDateRef} className="settings-input settings-input--date" type="date"
+            </div>
+            <div className="grow setting-row">
+              <span className="k"><SettingInfo label="结束日期" /></span>
+              <input ref={endDateRef} className="settings-input settings-input--date" type="date" aria-label="结束日期"
                 value={dates.end} min={MINIMUM_BACKTEST_DATE} max={latestDate} required disabled={isLocked}
                 aria-invalid={dateValidation.field === 'end'}
                 aria-describedby={dateValidation.field === 'end' ? 'backtest-date-error' : undefined}
                 onInput={syncDateInputs} onChange={syncDateInputs} />
-            </label>
+            </div>
             {!dateValidation.valid ? (
               <div id="backtest-date-error" role="alert">
                 <Notice>{dateValidation.reason} 更正后再点完成，当前输入尚未保存。</Notice>
               </div>
             ) : null}
-            <label className="grow setting-row">
+            <div className="grow setting-row">
               <span data-focus="cash" className="section-anchor" />
-              <span className="k">初始资金<small>只影响手数、费用与容量，不代表真实账户</small></span>
+              <span className="k"><SettingInfo label="初始资金" /><small>只影响手数、费用与容量，不代表真实账户</small></span>
               <span className="setting-with-unit">
-                <input className="settings-input" type="number" aria-label="初始资金"
-                  min={MINIMUM_INITIAL_CASH_CNY} max={MAXIMUM_INITIAL_CASH_CNY} step={10_000}
+                <NumericInput label="初始资金"
+                  min={MINIMUM_INITIAL_CASH_CNY} max={MAXIMUM_INITIAL_CASH_CNY}
+                  integer
                   value={draft.backtest.initialCashCny} disabled={isLocked}
-                  onChange={(event) => updateBacktest('initialCashCny', Number(event.target.value))} />
+                  onValueChange={(value) => updateBacktest('initialCashCny', value)} />
                 <small>元</small>
               </span>
-            </label>
+            </div>
           </Section>
 
           <div data-focus="more" className="section-anchor" />
-          <Section title="成交与费用" aside="影响能否成交和成交价格">
-            <Row label="信号与成交" value={draft.entry.conditions.some((condition) => condition.kind === 'event')
-              ? '可靠秒级按实际首次可得；可信日期按收盘后可得，下一交易日委托'
-              : '收盘确认 → 下一交易日开盘价代理（时间非精确）'} wrap />
-            <Row label="A 股次日可卖规则" sub="当日买入不可卖出" value="固定开启" />
-            <label className="grow setting-row">
-              <span className="k">涨跌停处理<small>{priceLimitLabel[draft.execution.priceLimitMode]}</small></span>
-              <select className="settings-select" value={draft.execution.priceLimitMode} disabled={isLocked}
+          {!draft.strategySpec.trading_plan ? <Section title="成交与费用" aside="影响能否成交和成交价格">
+            <Row label={<SettingInfo label="信号与成交" />} value={signalExecutionSummary(draft)} wrap />
+            <div className="grow setting-row">
+              <span className="k"><SettingInfo label="涨跌停处理" help={priceLimitHelp[draft.execution.priceLimitMode]} /></span>
+              <select className="settings-select" aria-label="涨跌停处理" value={draft.execution.priceLimitMode} disabled={isLocked}
                 onChange={(event) => updateExecution('priceLimitMode', event.target.value as PriceLimitMode)}>
                 <option value="wait_for_unlock">默认保守</option>
                 <option value="strict_no_fill_at_limit">严格不成交</option>
                 <option value="allow_limit_volume">限价容量估算</option>
               </select>
-            </label>
-            <p className="settings-help" role="note">{priceLimitHelp[draft.execution.priceLimitMode]}</p>
-            <label className="grow setting-row">
-              <span className="k">单边滑点</span>
+            </div>
+            <div className="grow setting-row">
+              <span className="k"><SettingInfo label="单边比例滑点" /></span>
               <span className="setting-with-unit">
-                <input className="settings-input" type="number" min={0} max={100}
+                <NumericInput label="单边滑点" min={0} max={100}
                   value={draft.execution.slippageBps} disabled={isLocked}
-                  onChange={(event) => updateExecution('slippageBps', Number(event.target.value))} />
+                  onValueChange={(value) => updateExecution('slippageBps', value)} />
                 <small>基点</small>
               </span>
-            </label>
-            <label className="grow setting-row">
-              <span className="k">佣金率</span>
+            </div>
+            <div className="grow setting-row">
+              <span className="k"><SettingInfo label="单边固定价差" /></span>
               <span className="setting-with-unit">
-                <input className="settings-input" type="number" min={0} max={1} step={0.01}
+                <NumericInput label="单边固定价差" min={0}
+                  value={draft.execution.slippageCny ?? 0} disabled={isLocked}
+                  onValueChange={(value) => updateExecution('slippageCny', value)} />
+                <small>元/股</small>
+              </span>
+            </div>
+            <div className="grow setting-row">
+              <span className="k"><SettingInfo label="佣金率" /></span>
+              <span className="setting-with-unit">
+                <NumericInput label="佣金率" min={0} max={1}
                   value={draft.execution.commissionRate * 100} disabled={isLocked}
-                  onChange={(event) => updateExecution('commissionRate', Number(event.target.value) / 100)} />
+                  onValueChange={(value) => updateExecution('commissionRate', value / 100)} />
                 <small>%</small>
               </span>
-            </label>
-            <label className="grow setting-row">
-              <span className="k">最低佣金</span>
+            </div>
+            <div className="grow setting-row">
+              <span className="k"><SettingInfo label="最低佣金" /></span>
               <span className="setting-with-unit">
-                <input className="settings-input" type="number" min={0}
+                <NumericInput label="最低佣金" min={0}
                   value={draft.execution.minimumCommissionCny} disabled={isLocked}
-                  onChange={(event) => updateExecution('minimumCommissionCny', Number(event.target.value))} />
+                  onValueChange={(value) => updateExecution('minimumCommissionCny', value)} />
                 <small>元</small>
               </span>
-            </label>
-          </Section>
+            </div>
+          </Section> : null}
 
-          <details className="advanced-settings" open>
+          {!draft.strategySpec.trading_plan ? <details className="advanced-settings" open>
             <summary>
               <span>高级研究设置</span>
               <small>容量、仓位、退出重试与预热</small>
             </summary>
             <Section title="研究执行参数" aside="默认值已适合 Demo">
-              <label className="grow setting-row">
-                <span className="k">成交容量模式<small>缺少可验证容量时不会自动放宽</small></span>
+              <div className="grow setting-row">
+                <span className="k">后续买入</span>
+                <span>{draft.strategySpec.execution.position_policy === 'accumulate_on_new_entry_signal'
+                  ? '每次新触发可继续买入；条件持续成立不重复买入'
+                  : '持仓未清空时不再买入'}</span>
+              </div>
+              <div className="grow setting-row">
+                <span className="k"><SettingInfo label="成交容量模式" /><small>缺少可验证容量时不会自动放宽</small></span>
                 <select className="settings-select" aria-label="成交容量模式"
                   value={draft.execution.capacityMode} disabled={isLocked}
                   onChange={(event) => updateExecution('capacityMode', event.target.value as CapacityMode)}>
                   <option value="point_in_time_volume">默认：时点容量</option>
                   <option value="unlimited">研究：不设上限</option>
                 </select>
-              </label>
-              <label className="grow setting-row">
-                <span className="k">成交量参与率</span>
+              </div>
+              <div className="grow setting-row">
+              <span className="k"><SettingInfo label="成交量参与率" /></span>
                 <span className="setting-with-unit">
-                  <input className="settings-input" type="number" aria-label="成交量参与率"
-                    min={0.01} max={100} step={0.01} value={draft.execution.participationRate * 100}
+                  <NumericInput label="成交量参与率"
+                    min={0.01} max={100} value={draft.execution.participationRate * 100}
                     disabled={isLocked || draft.execution.capacityMode === 'unlimited'}
-                    onChange={(event) => updateExecution('participationRate', Number(event.target.value) / 100)} />
+                    onValueChange={(value) => updateExecution('participationRate', value / 100)} />
                   <small>%</small>
                 </span>
-              </label>
-              <label className="grow setting-row">
-                <span className="k">最大使用仓位</span>
+              </div>
+              <div className="grow setting-row">
+              <span className="k"><SettingInfo label="每次买入资金比例" /></span>
                 <span className="setting-with-unit">
-                  <input className="settings-input" type="number" aria-label="最大使用仓位"
-                    min={0.01} max={100} step={1} value={draft.execution.allocationRatio * 100}
+                  <NumericInput label="每次买入资金比例"
+                    min={0.01} max={100} value={draft.execution.allocationRatio * 100}
                     disabled={isLocked}
-                    onChange={(event) => updateExecution('allocationRatio', Number(event.target.value) / 100)} />
+                    onValueChange={(value) => updateExecution('allocationRatio', value / 100)} />
                   <small>%</small>
                 </span>
-              </label>
-              <label className="grow setting-row">
-                <span className="k">卖出未成交后重试</span>
+              </div>
+              <div className="grow setting-row">
+              <span className="k"><SettingInfo label="卖出未成交后重试" /></span>
                 <select className="settings-select" aria-label="卖出未成交后重试"
                   value={draft.execution.retryUnfilledExits ? 'yes' : 'no'} disabled={isLocked}
                   onChange={(event) => updateExecution('retryUnfilledExits', event.target.value === 'yes')}>
                   <option value="yes">开启</option>
                   <option value="no">关闭</option>
                 </select>
-              </label>
-              <label className="grow setting-row">
-                <span className="k">最多卖出尝试次数</span>
-                <input className="settings-input" type="number" aria-label="最多卖出尝试次数"
-                  min={1} max={1000} step={1} value={draft.execution.maxExitAttempts}
+              </div>
+              <div className="grow setting-row">
+              <span className="k"><SettingInfo label="最多卖出尝试次数" /></span>
+                <NumericInput label="最多卖出尝试次数"
+                  min={1} max={1000} integer value={draft.execution.maxExitAttempts}
                   disabled={isLocked || !draft.execution.retryUnfilledExits}
-                  onChange={(event) => updateExecution('maxExitAttempts', Number(event.target.value))} />
-              </label>
-              <label className="grow setting-row">
-                <span className="k">指标预热日历天数</span>
-                <input className="settings-input" type="number" aria-label="指标预热日历天数"
-                  min={0} max={3650} step={1} value={draft.execution.warmupCalendarDays}
+                  onValueChange={(value) => updateExecution('maxExitAttempts', value)} />
+              </div>
+              <div className="grow setting-row">
+              <span className="k"><SettingInfo label="指标预热日历天数" /></span>
+                <NumericInput label="指标预热日历天数"
+                  min={0} max={3650} integer value={draft.execution.warmupCalendarDays}
                   disabled={isLocked}
-                  onChange={(event) => updateExecution('warmupCalendarDays', Number(event.target.value))} />
-              </label>
-              <label className="grow setting-row">
-                <span className="k">结算延长日历天数</span>
-                <input className="settings-input" type="number" aria-label="结算延长日历天数"
-                  min={1} max={365} step={1} value={draft.execution.settlementExtensionDays}
+                  onValueChange={(value) => updateExecution('warmupCalendarDays', value)} />
+              </div>
+              <div className="grow setting-row">
+              <span className="k"><SettingInfo label="结算延长日历天数" /></span>
+                <NumericInput label="结算延长日历天数"
+                  min={1} max={365} integer value={draft.execution.settlementExtensionDays}
                   disabled={isLocked}
-                  onChange={(event) => updateExecution('settlementExtensionDays', Number(event.target.value))} />
-              </label>
-              <label className="grow setting-row">
-                <span className="k">稳健性检查</span>
+                  onValueChange={(value) => updateExecution('settlementExtensionDays', value)} />
+              </div>
+              <div className="grow setting-row">
+              <span className="k"><SettingInfo label="稳健性检查" /></span>
                 <select className="settings-select" aria-label="稳健性检查"
                   value={draft.execution.runRobustness ? 'yes' : 'no'} disabled={isLocked}
                   onChange={(event) => updateExecution('runRobustness', event.target.value === 'yes')}>
                   <option value="yes">开启</option>
                   <option value="no">关闭</option>
                 </select>
-              </label>
+              </div>
             </Section>
-          </details>
+          </details> : null}
 
           </fieldset>
+          </NumericInputGroup>
 
           <div className="settings-note">
             <Notice tone="info">
@@ -469,10 +506,10 @@ const ORDER_STATUS: Record<OrderStatus, {
   filled: { label: '已成', hint: '已记录模拟成交', brief: '成交价未记录', settled: true },
   partial: { label: '部成', hint: '只成交了一部分，剩余数量没有成交', brief: '成交价未记录', settled: true },
   unfilled: { label: '未成', hint: '当天没有成交，可能受涨跌停、容量或次日可卖限制', brief: '未成交', settled: false },
-  expired: { label: '废单', hint: '信号有效期内没有等到可成交的机会，委托作废', brief: '已作废', settled: false },
+  expired: { label: '已失效', hint: '委托有效期已结束；如有部分成交，已成交部分仍有效，剩余数量不再成交', brief: '已失效', settled: false },
 }
 
-/** 列表里只需要「哪天几点」，秒和时区留给因果轨迹页。 */
+/** 列表只显示「哪天几点」，不改变原始活动的时间精度。 */
 const shortStamp = (value: string) => {
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) return value.slice(0, 16).replace('T', ' ')
@@ -552,6 +589,10 @@ const entryValidityKeys = new Set<string>([
 ])
 
 const executionAssumptionLabels: Record<string, string> = {
+  timeQuality: '成交时间口径',
+  capacity: '实际成交容量',
+  producerSnapshotId: '来源快照',
+  corporateActions: '公司行动数据状态',
   allocation_ratio: '资金使用比例',
   benchmark_policy: '同期持有基准',
   capacity_mode: '成交容量模式',
@@ -570,6 +611,7 @@ const executionAssumptionLabels: Record<string, string> = {
   robustness_profile: '稳健性检验口径',
   resolution: '回测周期',
   slippage_bps: '单边滑点',
+  slippage_cny: '单边固定价差',
 }
 
 const percentValue = (value: string) => {
@@ -578,10 +620,30 @@ const percentValue = (value: string) => {
 }
 
 const executionAssumptionValue = (key: string, value: string) => {
+  if (key === 'timeQuality') {
+    return ({ minute_bar_end_proxy: '分钟K线末端时间代理（非真实逐笔成交）',
+      daily_bar_proxy: '日线开盘价代理（时间非精确）' } as Record<string, string>)[value]
+      ?? `记录口径：${value}`
+  }
+  if (key === 'producerSnapshotId') return value
+  if (key === 'corporateActions') {
+    return value === 'source_export_loaded' ? '已加载来源导出记录；不代表全部历史完整'
+      : value === 'unknown' ? '尚未确认' : `记录状态：${value}`
+  }
+  if (key === 'capacity') {
+    const [basis, ratio] = value.split(':')
+    const label = basis === 'previous_completed_minute_volume' ? '上一已完成分钟成交量'
+      : basis === 'first_completed_minute_volume_for_opening_order_else_previous_completed_minute_volume'
+        ? '首笔开盘委托按首根完整分钟成交量，后续按上一已完成分钟成交量'
+      : basis === 'previous_completed_session_volume' ? '上一已完成交易日成交量' : null
+    if (label && ratio && Number.isFinite(Number(ratio))) return `${label} × ${percentValue(ratio)}`
+    return value === 'unlimited_ohlc_research' ? '不设容量上限（OHLC研究模式）' : `记录口径：${value}`
+  }
   if (key === 'allocation_ratio' || key === 'commission_rate' || key === 'participation_rate') {
     return percentValue(value)
   }
   if (key === 'slippage_bps') return `${value} 基点`
+  if (key === 'slippage_cny') return `${value} 元/股`
   if (key === 'minimum_commission_cny') return `${value} 元`
   if (key === 'max_exit_attempts') return `${value} 次`
   if (key === 'retry_unfilled_exits') return value === 'true' ? '开启' : '关闭'
@@ -643,16 +705,32 @@ const hasCompleteIdentity = (evidence: RunEvidence) => Boolean(
   && SHA256_IDENTITY.test(evidence.strategyHash ?? ''),
 )
 
+// Input bundles are not composite Parquet snapshots. Validate each declared
+// content-addressed schema without treating a recorded input as a release.
+const hasContentAddressedInputIdentity = (evidence: RunEvidence) => {
+  const prefix = evidence.dataSchemaVersion === 'mx-share-input.v1' ? 'mx-share:'
+    : evidence.dataSchemaVersion === 'price-plan-input.v1' ? 'price-plan-input:' : null
+  if (!prefix || !evidence.snapshotId?.startsWith(prefix)) return false
+  const digest = evidence.snapshotId.slice(prefix.length)
+  return /^[0-9a-f]{64}$/.test(digest)
+    && evidence.snapshotChecksum === `sha256:${digest}`
+    && SHA256_IDENTITY.test(evidence.catalog ?? '')
+    && SHA256_IDENTITY.test(evidence.strategyHash ?? '')
+}
+const identityLabelFor = (evidence: RunEvidence) => evidence.skillData ? 'Skill 来源已记录'
+  : hasCompleteIdentity(evidence) ? '身份已记录'
+  : hasContentAddressedInputIdentity(evidence) ? '数据版本已记录' : '身份不完整'
+
 /**
  * 报告正文。抽出来是为了让它既能就地展开在对话里，也能被二级页包起来——
  * 同一份内容，两种容器，不做第二套实现。
  */
 export function ReportBody(
-  { metrics, series, marks, trades, evidence, onOpenChain,
+  { metrics, series, marks, trades, evidence,
     onOpenExecution, mode = 'mock', showExecutionEntry = true }:
   { metrics: BacktestMetrics;
     series: SeriesPoint[]; marks: ChartMark[]; trades: TradeRow[]; evidence: RunEvidence;
-    onOpenChain: (trade: TradeRow) => void; onOpenExecution: () => void;
+    onOpenExecution: () => void;
     mode?: 'mock' | 'live';
     /**
      * 「成交规则与数据依据」讲的是这条策略怎么执行，属于工作流而不是结果。
@@ -661,6 +739,7 @@ export function ReportBody(
     showExecutionEntry?: boolean },
 ) {
   const [pagination, setPagination] = useState({ runId: evidence.runId, count: 20 })
+  const [allOrdersRun, setAllOrdersRun] = useState<string | null>(null)
   const [selection, setSelection] = useState<{
     runId: string;
     orderId: string | null;
@@ -669,22 +748,33 @@ export function ReportBody(
   const listRef = useRef<HTMLDivElement>(null)
   const identityComplete = hasCompleteIdentity(evidence)
   const identityStatus = identityComplete || evidence.skillData ? 'implemented' : 'partial'
-  const identityLabel = identityComplete ? '身份已记录' : '身份不完整'
+  const identityLabel = identityLabelFor(evidence)
 
   const orders = useMemo(() => toOrderRows(trades), [trades])
   const secondary = secondaryMetric(metrics)
   const visibleCount = pagination.runId === evidence.runId ? pagination.count : 20
   const selectedOrderId = selection.runId === evidence.runId ? selection.orderId : null
   const selectedMarkId = selection.runId === evidence.runId ? selection.activityId : null
-  const visibleOrders = orders.slice(0, visibleCount)
-  const remaining = orders.length - visibleOrders.length
-  const filledCount = orders.filter((order) =>
-    order.status === 'filled' || order.status === 'partial').length
+  const filledOrders = orders.filter((order) => order.status === 'filled' || order.status === 'partial')
+  const filledCount = filledOrders.length
+  const showingAll = allOrdersRun === evidence.runId
+  const listedOrders = showingAll ? orders : filledOrders
+  const visibleOrders = listedOrders.slice(0, visibleCount)
+  const remaining = listedOrders.length - visibleOrders.length
+  const unfilledReasons = new Map<string, number>()
+  for (const order of orders) {
+    if (order.status === 'filled' || order.status === 'partial') continue
+    const reason = order.outcomeNote ?? (order.status === 'placed' ? '委托已提交，尚未记录成交结果' : '记录未提供具体原因')
+    unfilledReasons.set(reason, (unfilledReasons.get(reason) ?? 0) + 1)
+  }
 
   /** 图上点一个 B/S 点，就把下面列表滚到那一笔并高亮，而不是另开一块明细。 */
   const focusOrder = (activityId: string) => {
-    const index = orders.findIndex((order) => order.activityIds.includes(activityId))
-    const orderId = index >= 0 ? orders[index]?.id ?? null : null
+    const order = orders.find((item) => item.activityIds.includes(activityId))
+    const orderId = order?.id ?? null
+    const revealAll = order != null && !filledOrders.includes(order)
+    if (revealAll) setAllOrdersRun(evidence.runId)
+    const index = (showingAll || revealAll ? orders : filledOrders).findIndex(item => item.id === orderId)
     setSelection({ runId: evidence.runId, orderId, activityId })
     if (index >= visibleCount) {
       setPagination({ runId: evidence.runId, count: Math.ceil((index + 1) / 20) * 20 })
@@ -739,13 +829,23 @@ export function ReportBody(
             排版对齐券商 App 的委托列表：方向/时间 · 触发信号 · 委托价 · 状态/成交价。
             券商那一列「名称/代码」在这里没有信息量（单股回测，每行都是同一只），
             换成触发这笔委托的信号，列的节奏保持一致。委托数量按需求不展示。
-            长解释和逐笔时间都收进因果轨迹页，列表只负责一眼扫完。
+            列表保留关键信息，与图中的买卖点互相定位。
           */}
           <section id="report-trades" aria-labelledby="report-trades-title">
             <div className="sect-h">
               <h2 id="report-trades-title">每笔委托</h2>
-              <em>{orders.length} 笔 · 成交 {filledCount} 笔 · 点行看轨迹</em>
+              <em>{orders.length} 笔 · 成交 {filledCount} 笔</em>
             </div>
+            {orders.length > filledCount ? <div className="order-outcomes">
+              <details>
+                <summary>{orders.length - filledCount} 笔尚无成交，查看原因汇总</summary>
+                <ul>{[...unfilledReasons].map(([reason, count]) => <li key={reason}>{reason} · {count} 笔</li>)}</ul>
+              </details>
+              <button type="button" className="order-more" onClick={() => {
+                setAllOrdersRun(showingAll ? null : evidence.runId)
+                setPagination({ runId: evidence.runId, count: 20 })
+              }}>{showingAll ? '只看有成交的委托' : `查看全部委托（${orders.length}笔）`}</button>
+            </div> : null}
             <div className="order-table" ref={listRef}>
               <div className="order-head" aria-hidden="true">
                 <span>方向 / 时间</span>
@@ -756,10 +856,14 @@ export function ReportBody(
               {orders.length === 0 ? <div className="empty-row">
                 区间内没有产生任何委托。请延长回测区间，或检查买入/卖出条件是否能在该区间成立。
               </div> : null}
+              {orders.length > 0 && !showingAll && filledCount === 0 ? <div className="empty-row">
+                本次没有成交。未成交原因已汇总在上方，可查看全部委托核对；未隐藏或删除原始记录。
+              </div> : null}
               {visibleOrders.map((order) => {
                 const status = ORDER_STATUS[order.status]
                 const active = order.id === selectedOrderId
-                const stamp = order.orderAt ?? order.signalAt ?? order.filledAt
+                const stamp = order.orderAt ?? order.filledAt ?? order.signalAt
+                const stampKind = order.orderAt ? '委托' : order.filledAt ? '成交' : '信号'
                 return (
                   <button
                     key={order.id}
@@ -779,16 +883,16 @@ export function ReportBody(
                         orderId: order.id,
                         activityId: chartMark?.activityId ?? null,
                       })
-                      if (anchor) onOpenChain(anchor)
                     }}
                   >
                     <span className="oc oc-side">
                       <b className={order.side}>{order.side === 'buy' ? '买入' : '卖出'}</b>
-                      <small>{stamp ? shortStamp(stamp) : '时间未记录'}</small>
+                      <small title={stamp ? `${stampKind}时间：${stamp}${order.filledAt ? `；成交时间：${order.filledAt}` : ''}` : undefined}>{stamp ? `${stampKind} ${shortStamp(stamp)}` : '时间未记录'}</small>
                     </span>
                     <span className="oc oc-signal">
                       <b>{order.title}</b>
-                      <small>{order.signalAt ? `${shortDate(order.signalAt)} 确认` : '信号未记录'}</small>
+                      <small>{order.title === '定期计划触发' ? '按计划日期执行，休市顺延'
+                        : order.signalAt ? `${shortDate(order.signalAt)} 确认` : '信号未记录'}</small>
                     </span>
                     <span className="oc oc-num">
                       <b>{order.orderPrice != null ? `¥${order.orderPrice.toFixed(2)}` : '—'}</b>
@@ -799,6 +903,7 @@ export function ReportBody(
                       </b>
                       <small>{order.price != null ? `¥${order.price.toFixed(2)}` : status.brief}</small>
                     </span>
+                    {active && order.outcomeNote ? <span className="order-outcome-note">{order.outcomeNote}</span> : null}
                   </button>
                 )
               })}
@@ -816,6 +921,12 @@ export function ReportBody(
               <Row label="成交规则与数据依据" sub="涨跌停、费用、信号来源与运行身份"
                 onClick={onOpenExecution} />
             </Section>
+          ) : null}
+          {metrics.executionNote ? (
+            <section className="report-risk" aria-label="回测说明与风险提示">
+              <h3>回测说明与风险提示</h3>
+              <p>{metrics.executionNote}</p>
+            </section>
           ) : null}
         </div>
   )
@@ -857,8 +968,7 @@ export function ExecutionDetailsScreen(
   )
   const identityComplete = hasCompleteIdentity(evidence)
   const identityStatus = identityComplete || evidence.skillData ? 'implemented' : 'partial'
-  const identityLabel = evidence.skillData ? 'Skill 来源已记录'
-    : identityComplete ? '身份已记录' : '身份不完整'
+  const identityLabel = identityLabelFor(evidence)
   const validityRows = entryValidityRows(evidence.executionAssumptions)
 
   // 只保留真正有值的身份项；缺失的合并成一句说明，不用一行一个「未记录」占屏。
@@ -876,9 +986,11 @@ export function ExecutionDetailsScreen(
   ] : [
     { label: '代码版本', value: evidence.gitSha },
     { label: '数据快照', value: evidence.snapshotId },
-    { label: '生产快照', value: evidence.producerSnapshotId },
+    ...(evidence.dataSchemaVersion === 'mx-share-input.v1' ? [] : [
+      { label: '生产快照', value: evidence.producerSnapshotId },
+      { label: '快照生成结构版本', value: evidence.producerSnapshotSchemaVersion },
+    ]),
     { label: '数据结构版本', value: evidence.dataSchemaVersion },
-    { label: '快照生成结构版本', value: evidence.producerSnapshotSchemaVersion },
     { label: '快照校验值', value: evidence.snapshotChecksum },
     { label: '规则目录校验值', value: evidence.catalog },
     { label: '策略校验值', value: evidence.strategyHash },
@@ -895,13 +1007,10 @@ export function ExecutionDetailsScreen(
     <Page id="execution" title="成交规则与数据依据" open={open} onBack={onBack}>
       <div className="scroll"><div className="sect">
         <Section title="成交规则">
-          <Row label="信号与成交" value={draft.entry.conditions.some((condition) => condition.kind === 'event')
-            ? '可靠秒级按实际首次可得；可信日期按收盘后可得，下一交易日委托'
-            : '收盘确认 → 下一交易日开盘价代理（时间非精确）'} wrap />
-          <Row label="A 股次日可卖规则" value="固定开启" />
+          <Row label="信号与成交" value={signalExecutionSummary(draft)} wrap />
           <Row label="涨跌停" value={priceLimitLabel[draft.execution.priceLimitMode]} wrap />
           <Row label="滑点与佣金" sub={`最低佣金 ${draft.execution.minimumCommissionCny} 元`}
-            value={`${draft.execution.slippageBps} 基点 · ${(draft.execution.commissionRate * 100).toFixed(3)}%`} wrap />
+            value={`${draft.execution.slippageBps} 基点${draft.execution.slippageCny ? ` + ${draft.execution.slippageCny} 元/股` : ''} · ${(draft.execution.commissionRate * 100).toFixed(3)}%`} wrap />
           {otherAssumptions.map(([key, value]) => (
             <Row key={key} label={executionAssumptionLabels[key] ?? '其他执行参数'}
               value={executionAssumptionValue(key, value)} wrap />
@@ -921,6 +1030,8 @@ export function ExecutionDetailsScreen(
           ? <Tag status={identityStatus}>{identityLabel}</Tag>
           : undefined}>
           <Row label="回测任务编号" sub="报给工程时带上这个就够了" value={evidence.runId} wrap />
+          {evidence.gitSha?.endsWith('+dirty') ? <Row label="代码状态"
+            value="本地修改版，尚未固定为发布版本；数据版本记录不代表已通过发布验收。" wrap /> : null}
           {recordedIdentity.map((item) => (
             <Row key={item.label} label={item.label} value={item.value} wrap />
           ))}
@@ -972,60 +1083,6 @@ export function ExecutionDetailsScreen(
         {mode === 'live' && !identityComplete ? <div className="settings-note"><Notice>
           缺少完整快照校验值或 40 位代码版本，这份结果只能查看，不能标为已验证。
         </Notice></div> : null}
-      </div></div>
-    </Page>
-  )
-}
-
-export function ChainScreen(
-  { open, onBack, title, nodes }:
-  { open: boolean; onBack: () => void; title: string; nodes: ChainNode[] },
-) {
-  return (
-    <Page id="chain" title={title} open={open} onBack={onBack}>
-      <div className="scroll"><div className="sect">
-        <div className="sect-h"><h2>从你那句话到账户变化</h2><em>每一步都能查</em></div>
-        <div className="chain">
-          {nodes.length === 0 ? <div className="empty-row">
-            这条活动没有保存完整的可追溯关系。请返回报告选择其他活动，或重新读取结果。
-          </div> : null}
-          {nodes.map((node, index) => (
-            <div className="node" key={`${node.ref}-${index}`}>
-              <span className="mk">{node.kind === 'decision' ? (
-                <svg width="14" height="14" viewBox="0 0 14 14" role="img" aria-label="决策">
-                  <path d="M7 1.1 12.9 7 7 12.9 1.1 7Z" fill="none" stroke="currentColor" strokeWidth="1.5" />
-                  <path d="m4.7 7 1.5 1.5 3.2-3.2" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              ) : <Glyph kind={node.kind} />}</span>
-              <span className="ct">
-                <b>{node.title}</b>
-                {node.timestamp ? <span className="ts">{node.timestamp}</span> : null}
-                <p>{node.detail}</p>
-                {node.facts?.map((fact) => {
-                  const href = safeSourceUrl(fact.href)
-                  return <p key={`${fact.label}:${fact.value}`}><strong>{fact.label}：</strong>{href
-                    ? <a href={href} target="_blank" rel="noreferrer">{fact.value} ↗</a>
-                    : fact.value}</p>
-                })}
-              </span>
-            </div>
-          ))}
-        </div>
-        {nodes.length > 0 ? <details className="technical-details chain-technical-details">
-          <summary>技术详情</summary>
-          {nodes.map((node, index) => (
-            <div className="technical-row" key={`${node.ref}:technical:${index}`}>
-              <strong>步骤 {index + 1}</strong><br />
-              <span>链路身份：<code>{node.ref}</code></span>
-              {node.technicalFacts?.map((fact) => (
-                <span key={`${fact.label}:${fact.value}`}><br />{fact.label}：<code>{fact.value}</code></span>
-              ))}
-            </div>
-          ))}
-        </details> : null}
-        <div className="settings-note"><Notice tone="info">
-          信号、决策、委托和成交的关系以回测结果保存的链路为准；未返回的逐笔现金不会由前端补算。
-        </Notice></div>
       </div></div>
     </Page>
   )

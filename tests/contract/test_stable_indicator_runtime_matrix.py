@@ -152,7 +152,7 @@ def _strategy_for(condition: IndicatorCondition) -> StrategySpec:
 
 def test_stable_catalog_and_daily_evaluator_registry_are_identical() -> None:
     assert len(STABLE_DEFINITIONS) == 37
-    assert len(TRIGGER_CASES) == 138
+    assert len(TRIGGER_CASES) == 139  # Includes strict volume.relative:gt_multiple.
     validate_stable_indicator_evaluator_catalog(CATALOG)
 
 

@@ -15,7 +15,9 @@ from ashare_lab.domain.financials import (
     FinancialUnit,
 )
 from ashare_lab.domain.strategy.models import JsonScalar
+from ashare_lab.domain.strategy.price_plans import PricePlan
 from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
+from ashare_lab.ports.instrument_resolution import InstrumentNameCandidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +28,10 @@ class CompileInput:
     # Model-authored, display-only inspiration; never an execution condition.
     idea_inspiration: str | None = None
     idea_context: tuple[str, ...] = ()
+    # Internal model route, not supplied by the public request or execution authority.
+    semantic_intent: str | None = None
+    # Server-resolved identity for this exact source span, never public/model input.
+    resolved_instrument: ResolvedCompileInstrument | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +107,23 @@ class CandidateGroundingEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedCompileInstrument:
+    """Bind a verified code to its original name/code mention across recovery."""
+
+    symbol: str
+    evidence: CandidateGroundingEvidence
+
+    def matches(self, request: CompileInput) -> bool:
+        span = self.evidence
+        return (
+            request.instrument_context == self.symbol
+            and span.path in {"/instrument/name", "/instrument/symbol"}
+            and 0 <= span.start < span.end <= len(request.utterance)
+            and request.utterance[span.start:span.end] == span.text
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DocumentTextIntent:
     term: str
     match_mode: Literal["ascii_token", "literal"]
@@ -118,11 +141,16 @@ class HoldingPeriodIntent:
 class PositionReturnIntent:
     trigger: Literal["take_profit", "stop_loss"]
     threshold_pct: float
+    # Programmatic/legacy producers stay daily unless they opt into the new
+    # phase-one minute contract. The live language boundary defaults new user
+    # utterances to minute_bar and persists that choice explicitly.
+    observation: Literal["minute_bar", "daily_close"] = "daily_close"
 
 
 @dataclass(frozen=True, slots=True)
 class TrailingDrawdownIntent:
     threshold_pct: float
+    observation: Literal["minute_bar", "daily_close"] = "daily_close"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,8 +172,12 @@ class CandidateAst:
     # Unresolved model-extracted name. Never grants an executable symbol until
     # the server-owned security resolver confirms it.
     instrument_name: str | None = None
+    instrument_candidates: tuple[InstrumentNameCandidate, ...] = ()
     execution_settings: ExecutionSettingsPatch = field(default_factory=ExecutionSettingsPatch)
     instrument_suggestion_declined: bool = False
+    # Display-only review disagreements; never source evidence or execution approval.
+    semantic_review_issues: tuple[str, ...] = ()
+    trading_plan: PricePlan | None = None
 
 
 class CandidateGenerator(Protocol):

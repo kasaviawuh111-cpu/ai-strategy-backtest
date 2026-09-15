@@ -115,7 +115,7 @@ def test_temporary_preparation_failures_use_stable_non_leaky_503(
         code="backtest_data_temporarily_unavailable",
     )
     assert response.json()["error"]["message"] == (
-        "Historical backtest data is temporarily unavailable; retry later"
+        "本次历史数据暂未准备完成，请稍后重试；无需重新描述买卖规则。本次未启动回测。"
     )
     assert "secret" not in response.text
     assert "/private" not in response.text
@@ -144,8 +144,8 @@ def test_unsupported_preparation_scope_uses_stable_422(
         code="backtest_data_request_unsupported",
     )
     assert response.json()["error"]["message"] == (
-        "The requested instrument, date range, or data capability is not supported "
-        "by the configured backtest data sources"
+        "当前数据源不支持本次股票、回测区间或所需的数据能力。"
+        "请核对股票和区间，或补齐对应数据；无需重新描述买卖规则。本次未启动回测。"
     )
     assert "Eastmoney" not in response.text
     assert submitter.calls == 1
@@ -213,7 +213,8 @@ def test_missing_frozen_report_text_uses_a_dedicated_non_leaky_422(
         code="event_document_text_data_unavailable",
     )
     assert response.json()["error"]["message"] == (
-        "The requested report text is not available as a complete frozen document for this backtest"
+        "本次回测缺少可核验的完整报告正文快照，无法计算正文条件。"
+        "请补齐正文数据后重试；不会用标题代替正文，无需重新描述买卖规则。本次未启动回测。"
     )
     assert "/private" not in response.text
     assert "secret" not in response.text

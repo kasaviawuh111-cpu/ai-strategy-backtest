@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from ashare_lab.adapters.language.candidate_semantic_review import SemanticReview
 from ashare_lab.adapters.language.vibe_candidates import (
     CandidateCapabilityMatrix,
     CandidateJsonTransport,
@@ -24,6 +25,7 @@ from ashare_lab.domain.catalog import (
 from ashare_lab.domain.events.catalog import EXECUTABLE_EVENT_DEFINITIONS
 from ashare_lab.domain.strategy import AllCondition, AnyCondition, HoldingPeriodExit
 from ashare_lab.ports.candidate_generation import CompileInput, EventIntent, IndicatorIntent
+from catalogs.tools.build_coverage import STABLE_FORMULAS
 
 ROOT = Path(__file__).parents[4]
 CATALOG = load_catalog_directory(ROOT / "catalogs")
@@ -329,11 +331,71 @@ async def test_request_schema_contains_bounded_enums_and_projection_identity() -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("indicator_id", "trigger", "semantic_fragments"),
+    (
+        ("volume.relative", "gt_multiple", (
+            "gt_multiple/gte_multiple/lte_multiple 分别判断当日 RVOL > / >= / <= value",
+            "不使用 consecutive_days", "仅 consecutive_gte_multiple 使用 consecutive_days",
+        )),
+        ("price.rolling_high", "new_high", (
+            "同一 price_field 的最大值", "price_field=close（默认）", "此前最高收盘价",
+            "不能表达当日收盘价与此前 high 的比较", "不要求上一日未触发",
+        )),
+        ("technical.donchian", "price_crosses_above_upper", (
+            "high 最大值/low 最小值", "当日价格始终为 close", "不支持 price_field 参数",
+            "前一日 close <= 前一日上轨", "前一日 close >= 前一日下轨",
+            "不复用当日轨道",
+        )),
+    ),
+)
+async def test_indicator_formula_semantics_reach_generation_and_semantic_review(
+    indicator_id: str, trigger: str, semantic_fragments: tuple[str, ...],
+) -> None:
+    case = _batch([_indicator_payload(indicator_id, trigger)])
+
+    class ReviewingTransport(_FakeTransport):
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.requests.append(request)
+            if request.response_schema_name == "strategy_semantic_review":
+                return {**SemanticReview(
+                    instrument="equivalent", requested_bar_interval="unspecified", differences=[],
+                ).model_dump(mode="json"), "requirements": [{
+                    "status": "represented", "candidate_path": "/entry",
+                    "source_quote": request.utterance,
+                    "requested_meaning": "测试条件", "candidate_meaning": "测试条件",
+                }]}
+            return self.response
+
+    transport = ReviewingTransport(case.response)
+    generator = VibeBoundedCandidateGenerator(
+        transport, capability_matrix=MATRIX, model_semantic_review=True,
+    )
+    generated = await generator.generate(_request(case.utterance))
+
+    assert generated[0].unsupported_code is None
+    assert len(transport.requests) == 2
+    assert transport.requests[1].response_schema_name == "strategy_semantic_review"
+    expected = STABLE_FORMULAS[indicator_id]
+    assert all(fragment in expected for fragment in semantic_fragments)
+    for request in transport.requests:
+        capability = next(item for item in request.capability_matrix["indicators"]
+                          if item["indicator_id"] == indicator_id)
+        assert capability["formula_summary"] == expected
+    review_payload = transport.requests[1].user_payload
+    assert review_payload is not None
+    assert "capabilityMatrix" not in review_payload
+    assert next(item for item in review_payload["selectedIndicatorDefinitions"]
+                if item["indicator_id"] == indicator_id)["formula_summary"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     "mutation",
     (
         "unknown_indicator",
         "unknown_trigger",
-        "missing_parameter",
         "unknown_parameter",
         "research_event",
         "unknown_event_attribute",
@@ -351,8 +413,6 @@ async def test_non_catalog_or_unmodeled_provider_output_fails_closed(mutation: s
         entry["indicator_id"] = "technical.not_real"  # type: ignore[index]
     elif mutation == "unknown_trigger":
         entry["trigger"] = "clairvoyant_cross"  # type: ignore[index]
-    elif mutation == "missing_parameter":
-        del entry["params"]["signal"]  # type: ignore[index]
     elif mutation == "unknown_parameter":
         entry["params"]["lookahead"] = 1  # type: ignore[index]
     elif mutation == "research_event":
@@ -393,16 +453,9 @@ async def test_missing_matrix_fails_closed_without_calling_transport() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("missing_field", "expected_code"),
-    (
-        ("entry", "entry_rule_not_recognized"),
-        ("exit", "exit_rule_not_recognized"),
-    ),
-)
-async def test_provider_missing_one_critical_rule_requests_one_clarification(
+@pytest.mark.parametrize("missing_field", ["entry", "exit"])
+async def test_provider_omitting_a_supplied_rule_is_not_blamed_on_user(
     missing_field: str,
-    expected_code: str,
 ) -> None:
     case = _batch([_indicator_payload("technical.macd", "golden_cross")])
     response = case.response
@@ -411,9 +464,25 @@ async def test_provider_missing_one_critical_rule_requests_one_clarification(
 
     outcome = await _compiler(response).compile(_request(case.utterance))
 
-    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
-    assert outcome.diagnostic_code == expected_code
-    assert outcome.clarification is not None
+    assert outcome.status is CompileStatus.UNSUPPORTED
+    assert outcome.diagnostic_code == "candidate_provider_invalid_output"
+    assert outcome.strategy is None
+
+
+@pytest.mark.asyncio
+async def test_unspoken_macd_parameter_uses_declared_catalog_default() -> None:
+    case = _batch([_indicator_payload("technical.macd", "golden_cross")])
+    del case.response["candidates"][0]["entry"][0]["params"]["signal"]  # type: ignore[index]
+    candidates = await _generator(case.response).generate(_request(case.utterance))
+    assert candidates[0].unsupported_code is None
+    capability = MATRIX.resolve_indicator("technical.macd")
+    assert capability is not None
+    expected = next(parameter.default for parameter in capability.parameters
+                    if parameter.name == "signal")
+    leaf = candidates[0].entry[0]
+    assert isinstance(leaf, IndicatorIntent)
+    assert dict(leaf.params)["signal"] == expected
+    assert "/entry/0/params/signal" in candidates[0].defaulted_fields
 
 
 @pytest.mark.asyncio

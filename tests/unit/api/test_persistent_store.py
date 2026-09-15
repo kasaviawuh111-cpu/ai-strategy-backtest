@@ -25,6 +25,7 @@ from ashare_lab.api.store import (
     DraftNotFoundError,
     DraftRevisionStaleError,
     IdempotencyConflictError,
+    InMemoryDraftStore,
     StoreResult,
 )
 from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus
@@ -43,6 +44,30 @@ ROOT = Path(__file__).parents[3]
 NOW = datetime(2026, 9, 6, 7, 0, tzinfo=UTC)
 INPUT = CompileInput("保留策略，滑点0，佣金万三", date(2026, 9, 5), "300059.SZ")
 MEMORY = VerifiedInstrumentMemory("300059.SZ", "eastmoney_mx_finance_data", NOW, "东方财富")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_completed_http_response_is_immutable_and_hash_checked(
+    engine: Engine, persistent: bool,
+) -> None:
+    store = (SQLAlchemyDraftStore(engine, initialize_schema=False)
+             if persistent else InMemoryDraftStore())
+    args = {"scope": "http:create-draft:v1", "key": "mobile-retry", "request_hash": "hash-one"}
+    assert await store.get_http_response(**args) is None
+    payload = '{"message":"原回复","data":{"as_of":"2026-09-06"}}'
+    assert await store.remember_http_response(**args, payload_json=payload) == payload
+    if persistent:
+        store = SQLAlchemyDraftStore(engine, initialize_schema=False)
+    assert await store.get_http_response(**args) == payload
+    repeated = await store.remember_http_response(**args, payload_json='{"message":"不同回复"}')
+    assert repeated == payload
+    with pytest.raises(IdempotencyConflictError):
+        await store.get_http_response(**{**args, "request_hash": "other"})
+    with pytest.raises(IdempotencyConflictError):
+        await store.remember_http_response(
+            **{**args, "request_hash": "other"}, payload_json=payload,
+        )
 
 
 @pytest.fixture

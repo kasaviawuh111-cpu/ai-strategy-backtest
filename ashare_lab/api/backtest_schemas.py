@@ -41,6 +41,9 @@ class BacktestExecutionConfig(CamelApiModel):
         le=1,
     )
     slippage_bps: Decimal = Field(default=Decimal("5"), alias="slippageBps", ge=0, le=1_000)
+    slippage_cny: Decimal = Field(
+        default=Decimal("0"), alias="slippageCny", ge=0, exclude_if=lambda value: not value,
+    )
     allocation_ratio: Decimal = Field(
         default=Decimal("1"),
         alias="allocationRatio",
@@ -52,7 +55,7 @@ class BacktestExecutionConfig(CamelApiModel):
         alias="limitHandling",
     )
     commission_rate: Decimal = Field(
-        default=Decimal("0.0003"),
+        default=Decimal("0.00025"),
         alias="commissionRate",
         ge=0,
     )
@@ -64,7 +67,7 @@ class BacktestExecutionConfig(CamelApiModel):
     retry_unfilled_exits: bool = Field(default=True, alias="retryUnfilledExits")
     max_exit_attempts: int = Field(default=20, alias="maxExitAttempts", ge=1, le=1_000)
     edge_entry_validity_sessions: int = Field(
-        default=3,
+        default=1,
         alias="edgeEntryValiditySessions",
         ge=1,
         le=20,
@@ -96,6 +99,7 @@ class BacktestExecutionConfig(CamelApiModel):
             capacity_mode=self.capacity_mode,
             participation_rate=self.participation_rate,
             slippage_bps=self.slippage_bps,
+            slippage_cny=self.slippage_cny,
             allocation_ratio=self.allocation_ratio,
             limit_handling=self.limit_handling,
             commission_rate=self.commission_rate,

@@ -126,6 +126,7 @@ class AppSettings(BaseSettings):
         "disabled",
         "deepseek_responses",
         "volcengine_web_search",
+        "tencent_web_search",
     ] = "deepseek_responses"
     research_provider_endpoint: AnyHttpUrl | None = None
     research_provider_api_key: SecretStr | None = Field(
@@ -195,6 +196,12 @@ class AppSettings(BaseSettings):
     mx_saas_timeout_seconds: float = Field(default=120.0, ge=1.0, le=120.0)
     provider_indicator_cache_root: Path = Path("var/cache/provider-indicators")
     skill_history_cache_root: Path = Path("var/cache/mx-daily-history")
+    # Local opt-in until phase-one real-model/browser acceptance is complete.
+    minute_grid_enabled: bool = False
+    minute_snapshot_root: Path = Path("var/snapshots/eastmoney-minute")
+    external_minute_root: Path | None = None
+    minute_market_calendar_path: Path = Path("var/market-calendar.json")
+    price_plan_corporate_action_root: Path | None = None
     provider_indicator_cache_ttl_seconds: int = Field(
         default=86_400,
         ge=60,
@@ -228,7 +235,7 @@ class AppSettings(BaseSettings):
     strategy_v2_receipt_ttl_seconds: int = Field(default=900, ge=60, le=86_400)
     strategy_v2_snapshot_max_age_days: int = Field(default=30, ge=1, le=3650)
     strategy_v2_commission_rate: Decimal = Field(
-        default=Decimal("0.0003"),
+        default=Decimal("0.00025"),
         ge=Decimal("0"),
         le=Decimal("0.01"),
     )
@@ -259,6 +266,13 @@ class AppSettings(BaseSettings):
                 value is not None for value in research_values
             ):
                 raise ValueError("research provider requires endpoint, model and API key together")
+        elif self.research_provider_mode == "tencent_web_search":
+            if self.research_provider_api_key is None:
+                raise ValueError("Tencent web search requires a service API KEY")
+            if self.research_provider_endpoint is not None and str(
+                self.research_provider_endpoint
+            ) != "https://api.wsa.cloud.tencent.com/SearchPro":
+                raise ValueError("Tencent search must use the official service API endpoint")
         elif self.research_provider_mode == "volcengine_web_search":
             if self.research_provider_api_key is None:
                 raise ValueError("Volcengine web search requires an API key")

@@ -9,8 +9,12 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ashare_lab.application.compile_strategy import CompileStatus
-from ashare_lab.domain.strategy import StrategySpec
+from ashare_lab.domain.strategy import StrategySpec, canonical_hash
+from ashare_lab.domain.strategy.price_plans import GridPlan
 from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
+from ashare_lab.ports.idea_routing import UnboundIdeaStrategy
+
+from .execution_assessment import ExecutionAssessment
 
 
 class ApiModel(BaseModel):
@@ -114,6 +118,21 @@ class LiveFinanceQueryResponse(ApiModel):
     indicators: str | None = Field(default=None, max_length=2_000)
     tables: tuple[dict[str, Any], ...]
     provenance: LiveMarketProvenancePayload
+
+
+class SkillSeriesDiscoveryRequest(ApiModel):
+    """Ask the Skill for a metric, without a catalog-name admission gate."""
+
+    instrument_id: str = Field(pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$")
+    metric_query: str = Field(min_length=1, max_length=200)
+    start: date
+    end: date
+
+    @model_validator(mode="after")
+    def ordered_dates(self) -> SkillSeriesDiscoveryRequest:
+        if self.start > self.end:
+            raise ValueError("start must not exceed end")
+        return self
 
 
 class LiveScreenedFinanceQueryRequest(ApiModel):
@@ -239,6 +258,9 @@ class IdeaAssetMappingPayload(ApiModel):
 
 
 class IdeaProposalPayload(ApiModel):
+    strategy: StrategySpec | None = None
+    strategy_template: UnboundIdeaStrategy | None = None
+    grid_plan: GridPlan | None = None
     id: str = Field(pattern=r"^idea_[0-9a-f]{12}$")
     title: str = Field(min_length=1, max_length=96)
     hypothesis: str = Field(min_length=1, max_length=512)
@@ -255,7 +277,9 @@ class IdeaProposalPayload(ApiModel):
         pattern=r"^[0-9]{6}\.(SH|SZ|BJ)$",
     )
     instrument_name: str | None = Field(default=None, max_length=64)
-    pairing_reason: str | None = Field(default=None, max_length=160)
+    # Server composes the 240-character inspiration framing with the verified
+    # stock rationale; the output contract must admit both without truncation.
+    pairing_reason: str | None = Field(default=None, max_length=512)
 
     @model_validator(mode="after")
     def require_capabilities_for_bound_proposal(self) -> IdeaProposalPayload:
@@ -265,7 +289,7 @@ class IdeaProposalPayload(ApiModel):
 
 
 class IdeaResearchFactPayload(ApiModel):
-    statement: str = Field(min_length=1, max_length=500)
+    statement: str = Field(min_length=1, max_length=10_000)
     fact_kind: Literal["reported_fact", "inference", "uncertain"]
     source_ids: tuple[str, ...] = Field(max_length=8)
     time_scope: str | None = Field(default=None, max_length=120)
@@ -300,10 +324,12 @@ class IdeaResearchPayload(ApiModel):
 
 class IdeaRoutePayload(ApiModel):
     schema_version: Literal["idea-route.v1"]
-    understanding: str = Field(min_length=1, max_length=240)
+    # Preflight may summarize up to three verified stock rationales plus status.
+    # The model's own generation limits remain separate and unchanged.
+    understanding: str = Field(min_length=1, max_length=2_048)
     hypothesis: str = Field(min_length=1, max_length=320)
     asset_mapping: IdeaAssetMappingPayload
-    proposals: tuple[IdeaProposalPayload, ...] = Field(min_length=2, max_length=3)
+    proposals: tuple[IdeaProposalPayload, ...] = Field(max_length=3)
     provenance: IdeaRouteProvenancePayload | None = None
     research: IdeaResearchPayload | None = None
 
@@ -367,7 +393,7 @@ class BacktestReviewResponse(_BacktestReviewApiModel):
     conclusion: str = Field(min_length=4, max_length=280)
     optimization_candidates: tuple[BacktestOptimizationCandidateView, ...] = Field(
         alias="optimizationCandidates",
-        min_length=2,
+        min_length=0,
         max_length=3,
     )
     model_provenance: BacktestReviewModelProvenance = Field(alias="modelProvenance")
@@ -377,6 +403,12 @@ class BacktestReviewResponse(_BacktestReviewApiModel):
 
 
 class StrategyDraftResponse(ApiModel):
+    execution_assessment: ExecutionAssessment | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    query_diagnostic_code: str | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     draft_id: UUID
     revision: int = Field(ge=1)
     status: CompileStatus
@@ -441,7 +473,20 @@ class StrategyDraftResponse(ApiModel):
             self.suggested_strategy_choice_id,
             self.suggested_strategy_note,
         )
-        if any(item is not None for item in suggested_fields):
+        if self.diagnostic_code in {
+            "semantic_confirmation_required", "execution_prerequisite_required",
+        }:
+            if (self.status is not CompileStatus.NEEDS_CLARIFICATION
+                    or self.suggested_strategy is None
+                    or self.suggested_strategy_hash is None
+                    or self.suggested_strategy_note is None
+                    or self.suggested_strategy_choice_id is not None
+                    or self.idea_route is not None
+                    or self.run_requested or self.refresh_data):
+                raise ValueError("preview clarification must be an isolated non-executable preview")
+            if self.suggested_strategy_hash != canonical_hash(self.suggested_strategy):
+                raise ValueError("preview clarification hash does not match")
+        elif any(item is not None for item in suggested_fields):
             if self.status is not CompileStatus.NEEDS_CLARIFICATION:
                 raise ValueError("suggested strategy must require clarification")
             if any(item is None for item in suggested_fields):
@@ -455,6 +500,10 @@ class StrategyDraftResponse(ApiModel):
         if self.idea_route is not None and self.status is not CompileStatus.NEEDS_CLARIFICATION:
             raise ValueError("idea guidance must require clarification")
         route_codes = {
+            "candidate_data_incomplete",
+            "backtest_data_not_yet_available",
+            "backtest_date_range_invalid",
+            "capability_research_fallback",
             "idea_guidance_required",
             "idea_guidance_execution_invalid",
             "entry_rule_not_recognized",
@@ -465,6 +514,7 @@ class StrategyDraftResponse(ApiModel):
             "ambiguous_volume_direction",
             "ambiguous_boolean_expression",
             "ambiguous_cross_indicator",
+            "numeric_threshold_requires_clarification",
             "data_query_only",
         }
         if self.idea_route is not None and self.diagnostic_code not in route_codes:
@@ -485,6 +535,9 @@ class ClarificationAnswerResponse(ApiModel):
     assistant_message: str = Field(min_length=1, max_length=1_000)
     suggestions: tuple[ClarificationSuggestionPayload, ...] = Field(max_length=3)
     draft: StrategyDraftResponse
+    query_diagnostic_code: str | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     data: ClarificationDataPayload | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -547,6 +600,10 @@ class IndicatorCapability(ApiModel):
     status: Literal["stable", "experimental", "unavailable"]
     display_name: str
     description: str
+    data_source: Literal[
+        "provider_indicator", "skill_ohlcv_python", "skill_numeric_history", "unavailable",
+    ] | None = None
+    formula_summary: str | None = None
     warmup_bars: int = Field(ge=0)
     timeframes: tuple[Literal["1d"], ...]
     evaluation_modes: tuple[Literal["bar_close_confirmed"], ...]
@@ -595,7 +652,22 @@ class RequestLimits(ApiModel):
     max_instrument_context_characters: Literal[32] = 32
 
 
+class SkillDataDiscoveryCapability(ApiModel):
+    """An open query entry is distinct from verified executable history."""
+
+    available: bool
+    metric_scope: Literal["open_ended"] = "open_ended"
+    requires_catalog_indicator: Literal[False] = False
+    endpoint: Literal["/api/v1/market/series-discovery"] = "/api/v1/market/series-discovery"
+    automatic_backtest_binding: bool = False
+    description: str = (
+        "可查询目录外指标；返回实际字段、单位、日期及缺失原因。"
+        "数据发现不等于已通过历史回测的字段口径与可得时间检查。"
+    )
+
+
 class CapabilitiesResponse(ApiModel):
+    available_data_end: date | None = None
     markets: tuple[Literal["CN_A"], ...] = ("CN_A",)
     input_modes: tuple[Literal["natural_language_zh"], ...] = ("natural_language_zh",)
     strategy_scopes: tuple[Literal["single_instrument", "long_only"], ...] = (
@@ -614,6 +686,7 @@ class CapabilitiesResponse(ApiModel):
         "unavailable"
     )
     backtest_execution_available: bool
+    skill_data_discovery: SkillDataDiscoveryCapability | None = None
     limits: RequestLimits
 
 

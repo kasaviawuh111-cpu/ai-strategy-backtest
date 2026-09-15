@@ -69,6 +69,14 @@ class _IdempotencyRecord:
 class DraftStore(Protocol):
     """The same draft lifecycle for isolated tests and persistent local sessions."""
 
+    async def get_http_response(
+        self, *, scope: str, key: str, request_hash: str,
+    ) -> str | None: ...
+
+    async def remember_http_response(
+        self, *, scope: str, key: str, request_hash: str, payload_json: str,
+    ) -> str: ...
+
     async def remember_review(self, review: BacktestReviewResponse) -> None: ...
 
     async def get_review(
@@ -119,7 +127,31 @@ class InMemoryDraftStore:
         self._dialogue_turns: dict[UUID, list[DialogueTurnRecord]] = {}
         self._idempotency: dict[tuple[str, str], _IdempotencyRecord] = {}
         self._reviews: dict[tuple[str, str], BacktestReviewResponse] = {}
+        self._http_responses: dict[tuple[str, str], tuple[str, str]] = {}
         self._lock = asyncio.Lock()
+
+    async def get_http_response(
+        self, *, scope: str, key: str, request_hash: str,
+    ) -> str | None:
+        async with self._lock:
+            record = self._http_responses.get((scope, key))
+            if record is None:
+                return None
+            if record[0] != request_hash:
+                raise IdempotencyConflictError(key)
+            return record[1]
+
+    async def remember_http_response(
+        self, *, scope: str, key: str, request_hash: str, payload_json: str,
+    ) -> str:
+        async with self._lock:
+            record = self._http_responses.get((scope, key))
+            if record is not None:
+                if record[0] != request_hash:
+                    raise IdempotencyConflictError(key)
+                return record[1]
+            self._http_responses[(scope, key)] = (request_hash, payload_json)
+            return payload_json
 
     async def remember_review(self, review: BacktestReviewResponse) -> None:
         async with self._lock:

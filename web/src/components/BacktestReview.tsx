@@ -76,7 +76,7 @@ export function BacktestReview({
             <p>{shortSentence(review.conclusion)}</p>
           </div>
           <div>
-            <h3>待验证的优化候选</h3>
+            {review.optimizationCandidates.length > 0 ? <h3>待验证的优化候选</h3> : null}
             <div className="backtest-review__chips" role="group" aria-label="继续验证">
               {review.optimizationCandidates.slice(0, 3).map((candidate) => (
                 <button

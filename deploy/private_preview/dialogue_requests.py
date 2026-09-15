@@ -1,8 +1,10 @@
-"""Bounded ephemeral polling bridge for model calls behind short HTTP gateways."""
+"""Bounded polling bridge for model calls and real-data preparation."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass, field
 from time import monotonic
 from uuid import UUID, uuid4
@@ -28,6 +30,9 @@ class _Pending:
     lane: str = "strategy"
     client: str = "legacy"
     progress_id: str | None = None
+    request_key: str | None = None
+    request_hash: str | None = None
+    preparation_only: bool = False
     running: bool = False
     task: asyncio.Task[None] | None = None
     response: Response | None = None
@@ -104,17 +109,19 @@ class PreviewDialogueRequests:
             )
             await response(scope, receive, send)
             return
-        model_post = (
+        slow_post = (
             path == "/api/v1/strategy-drafts"
+            or path == "/api/v1/backtest-runs"
+            or path == "/api/v1/backtest-runs/prepare"
             or (
                 path.startswith("/api/v1/strategy-drafts/")
-                and path.endswith("/clarification-answers")
+                and path.endswith(("/clarification-answers", "/revisions"))
             )
             or (path.startswith("/api/v1/backtest-runs/") and path.endswith("/review"))
         )
         if (
             scope.get("method") != "POST"
-            or not model_post
+            or not slow_post
             or Headers(scope=scope).get("prefer") != "respond-async"
         ):
             await self.app(scope, receive, send)
@@ -133,6 +140,45 @@ class PreviewDialogueRequests:
                 return
             if not event.get("more_body", False):
                 break
+        headers = Headers(scope=scope)
+        request_key = headers.get("idempotency-key") or headers.get("x-dialogue-progress-id")
+        fingerprint = hashlib.sha256(json.dumps({
+            "path": path,
+            "query": bytes(scope.get("query_string", b"")).hex(),
+            "parent": headers.get("x-conversation-parent-draft-id"),
+            "body": bytes(body).hex(),
+        }, sort_keys=True).encode()).hexdigest()
+        if request_key:
+            existing = next(((key, r) for key, r in self.records.items()
+                             if r.client == client and r.request_key == request_key), None)
+            if existing is not None:
+                key, record = existing
+                if record.request_hash != fingerprint:
+                    await JSONResponse(
+                        {"code": "idempotency_key_conflict",
+                         "detail": "该请求编号已用于另一条内容，请使用新的请求编号。"},
+                        status_code=409,
+                    )(scope, receive, send)
+                    return
+                # Lookup precedes admission: a retry of accepted work does not
+                # consume another queue slot, even when the queue is now full.
+                await (record.response or self._pending(key, record))(scope, receive, send)
+                return
+        preparation_only = path == "/api/v1/backtest-runs/prepare"
+        if preparation_only and client != "legacy":
+            # A card edit replaces its older read-only check. Browser aborts
+            # cannot cancel an accepted polling task by themselves. Never
+            # cancel actual submissions, saved revisions, or model turns here.
+            for old in self.records.values():
+                if old.client == client and old.preparation_only and old.response is None:
+                    old.response = JSONResponse(
+                        {"code": "backtest_preparation_superseded",
+                         "detail": "参数已更新，已停止旧参数检查，正在检查最新参数。"},
+                        status_code=409,
+                    )
+                    old.updated = monotonic()
+                    if old.task is not None:
+                        old.task.cancel()
         # Reserve before yielding so two arrivals cannot exceed the capacity.
         active = [r for r in self.records.values() if r.response is None and r.lane == lane]
         if len(active) >= self.capacity[lane] or sum(r.client == client for r in active) >= 3:
@@ -144,7 +190,9 @@ class PreviewDialogueRequests:
             return
         key = str(uuid4())
         record = self.records[key] = _Pending(
-            lane=lane, client=client, progress_id=Headers(scope=scope).get("x-dialogue-progress-id")
+            lane=lane, client=client, progress_id=headers.get("x-dialogue-progress-id"),
+            request_key=request_key, request_hash=fingerprint,
+            preparation_only=preparation_only,
         )
         record.task = asyncio.create_task(self._execute(dict(scope), bytes(body), record))
         await self._pending(key, record)(scope, receive, send)

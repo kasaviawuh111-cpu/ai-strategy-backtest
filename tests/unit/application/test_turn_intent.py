@@ -14,6 +14,12 @@ from ashare_lab.application.turn_intent import (
 )
 
 
+@pytest.mark.parametrize("utterance", ["1", "一", "第一个", "选择第二项", "我选第三条", "用１", "第２个"])
+def test_ordinal_choice_requires_visible_options(utterance):
+    assert classify_clarification_turn(utterance, has_options=True) is TurnIntent.SELECT_OPTION
+    assert classify_clarification_turn(utterance, has_options=False) is TurnIntent.UNKNOWN
+
+
 @pytest.mark.parametrize(
     ("utterance", "target"),
     [

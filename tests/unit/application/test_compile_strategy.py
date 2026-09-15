@@ -7,11 +7,17 @@ import pytest
 
 from ashare_lab.adapters.language import RuleBasedCandidateGenerator
 from ashare_lab.adapters.language.rule_based import _ANNOUNCEMENT_EVENT_DEFINITIONS
+from ashare_lab.application.clarification_guidance import (
+    find_missing_numeric_threshold,
+    merge_numeric_threshold_supplement,
+)
 from ashare_lab.application.compile_strategy import (
     CompileOutcome,
     CompileStatus,
     StrategyCompiler,
+    _merge_clarification_answer,
 )
+from ashare_lab.application.turn_intent import TurnIntent
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.events.catalog import EXECUTABLE_EVENT_DEFINITIONS
 from ashare_lab.domain.financials import FinancialMetricId, FinancialUnit
@@ -35,6 +41,24 @@ from ashare_lab.ports.strategy_editing import StrategyEditResult
 ROOT = Path(__file__).parents[3]
 
 
+@pytest.mark.asyncio
+async def test_candidate_identity_choices_do_not_become_executable():
+    from datetime import UTC, datetime
+    from ashare_lab.ports.instrument_resolution import InstrumentNameCandidate
+    choices = (InstrumentNameCandidate("300059.SZ", "东方财富", "eastmoney_security_search", datetime.now(UTC)),)
+    generator = Mock()
+    generator.generate = AsyncMock(return_value=(CandidateAst(
+        instrument_symbol=None, entry=(), exit=(), confidence=0,
+        unsupported_code="instrument_name_ambiguous", instrument_name="东财", instrument_candidates=choices,
+    ),))
+    compiler = StrategyCompiler(generator=generator, catalog=load_catalog_directory(ROOT / "catalogs"),
+                                catalog_id="cn_a.signals", release_version="2026.09.01")
+    result = await compiler.compile(CompileInput(utterance="东财MACD金叉买死叉卖", as_of_date=date(2026, 9, 15)))
+    assert result.status is CompileStatus.NEEDS_CLARIFICATION
+    assert result.instrument_candidates == choices
+    assert result.strategy is None
+
+
 @pytest.fixture
 def compiler() -> StrategyCompiler:
     return StrategyCompiler(
@@ -43,6 +67,29 @@ def compiler() -> StrategyCompiler:
         catalog_id="cn_a.signals",
         release_version="2026.09.01",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label,name,symbol", [
+    ("蓝色 光标", "蓝色光标", "300058.SZ"),
+    ("怡 亚 通", "怡亚通", "002183.SZ"),
+    ("贵\u3000州茅台", "贵州茅台", "600519.SH"),
+    ("蓝色 光标（300058.SZ）", "蓝色光标", "300058.SZ"),
+])
+async def test_identity_lookup_normalizes_spaces_without_changing_name_or_code(
+    compiler: StrategyCompiler, label: str, name: str, symbol: str,
+) -> None:
+    resolver = Mock(return_value=symbol)
+    compiler._instrument_name_resolver = resolver
+    assert await compiler.resolve_instrument_context(label, require_details=True) == symbol
+    resolver.assert_called_once_with(name)
+
+
+@pytest.mark.asyncio
+async def test_spaced_name_code_conflict_is_not_silently_accepted(compiler: StrategyCompiler) -> None:
+    compiler._instrument_name_resolver = Mock(return_value="300058.SZ")
+    with pytest.raises(LookupError, match="instrument_name_code_mismatch"):
+        await compiler.resolve_instrument_context("蓝色 光标（600519.SH）", require_details=True)
 
 
 @pytest.mark.asyncio
@@ -229,6 +276,238 @@ async def test_operator_reading_financial_language_compiles_to_direct_fact_condi
     assert outcome.strategy.entry.unit in {FinancialUnit.PERCENT, FinancialUnit.TIMES}
     assert outcome.strategy.execution.data_capability == "daily_ohlcv_financials"
     assert outcome.strategy.execution.evaluation_frequency == "financial_available_plus_1d_close"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("utterance", "question"),
+    [
+        ("指南针ROE低则买入，死叉卖出", "ROE 低于多少（%）时买入？"),
+        ("净资产收益率低则买入，MACD死叉卖出", "ROE 低于多少（%）时买入？"),
+        ("市盈率偏高时卖出，MACD金叉买入", "市盈率 高于多少（倍）时卖出？"),
+        ("市净率较低就买入，MACD死叉卖出", "市净率 低于多少（倍）时买入？"),
+        ("EPS偏低时买入，MACD死叉卖出", "每股收益 低于多少（元）时买入？"),
+        (
+            "每股经营现金流偏低时买入，MACD死叉卖出",
+            "每股经营现金流 低于多少（元）时买入？",
+        ),
+        (
+            "扣非归母净利润同比偏低时买入，MACD死叉卖出",
+            "扣非归母净利润同比 低于多少（%）时买入？",
+        ),
+    ],
+)
+async def test_qualitative_numeric_rule_asks_only_for_missing_threshold_even_for_model_turn(
+    compiler: StrategyCompiler,
+    utterance: str,
+    question: str,
+) -> None:
+    outcome = await compiler.compile(
+        CompileInput(
+            utterance=utterance,
+            instrument_context="300803.SZ",
+            as_of_date=date(2026, 9, 15),
+            semantic_intent="new_strategy",
+        )
+    )
+
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "numeric_threshold_requires_clarification"
+    assert outcome.clarification == question
+    assert outcome.idea_route is not None
+    assert outcome.idea_route.asset_mapping.instrument_symbol == "300803.SZ"
+    assert outcome.idea_route.proposals == ()
+
+
+@pytest.mark.parametrize(
+    "utterance",
+    [
+        "ROE低于10%买入，MACD死叉卖出",
+        "RSI低于30买入，高于70卖出",
+        "股价低于20日均线买入，MACD死叉卖出",
+        "放量上涨5%买入，缩量卖出",
+        "股息率低则买入，MACD死叉卖出",
+        "SPEED低则买入，MACD死叉卖出",
+        "ROE越低则买入，MACD死叉卖出",
+        "ROE特别低则买入，MACD死叉卖出",
+        "ROE高低则买入，MACD死叉卖出",
+    ],
+)
+def test_complete_or_relative_indicator_comparison_is_not_a_missing_numeric_threshold(
+    utterance: str,
+) -> None:
+    assert find_missing_numeric_threshold(utterance) is None
+
+
+@pytest.mark.parametrize(
+    ("original", "answer"),
+    [
+        ("ROE低则买入，MACD死叉卖出", "10倍"),
+        ("ROE低则买入，MACD死叉卖出", "10元"),
+        ("PE低则买入，MACD死叉卖出", "10%"),
+        ("营业收入低则买入，MACD死叉卖出", "10%"),
+        ("每股收益低则买入，MACD死叉卖出", "10万"),
+        ("每股经营现金流低则买入，MACD死叉卖出", "10亿元"),
+    ],
+)
+def test_numeric_threshold_supplement_rejects_an_incompatible_explicit_unit(
+    original: str,
+    answer: str,
+) -> None:
+    assert merge_numeric_threshold_supplement(original, answer) is None
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "不是10是8",
+        "10%还是8%",
+        "换成600519，ROE低于8%",
+        "ROE低于8%",
+    ],
+)
+def test_numeric_threshold_shortcut_does_not_extract_a_number_from_a_complex_answer(
+    answer: str,
+) -> None:
+    assert merge_numeric_threshold_supplement(
+        "指南针ROE低则买入，MACD死叉卖出",
+        answer,
+    ) is None
+
+
+def test_complex_numeric_answer_falls_back_to_the_contextual_merge() -> None:
+    original = "指南针ROE低则买入，MACD死叉卖出"
+    answer = "换成600519，ROE低于8%"
+
+    merged = _merge_clarification_answer(
+        original,
+        answer,
+        diagnostic_code="numeric_threshold_requires_clarification",
+        model_understood=True,
+    )
+
+    assert f"原请求：{original}" in merged
+    assert f"本轮补充：{answer}" in merged
+    assert "ROE低于600519%" not in merged
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["10%", "10"])
+async def test_numeric_threshold_answer_preserves_stock_and_defaults_bare_death_cross_to_macd(
+    compiler: StrategyCompiler,
+    answer: str,
+) -> None:
+    original = CompileInput(
+        utterance="指南针ROE低则买入，死叉卖出",
+        instrument_context="300803.SZ",
+        as_of_date=date(2026, 9, 15),
+        semantic_intent="new_strategy",
+    )
+    pending = await compiler.compile(original)
+
+    turn = await compiler.answer_clarification(
+        original_input=original,
+        prior_outcome=pending,
+        answer=answer,
+        semantic_intent=TurnIntent.SUPPLEMENT,
+    )
+
+    assert turn.outcome.status is CompileStatus.READY
+    assert turn.revision_changed
+    assert turn.compile_input.utterance == "指南针ROE低于10%则买入，MACD死叉卖出"
+    assert turn.outcome.strategy is not None
+    assert turn.outcome.strategy.instrument.symbol == "300803.SZ"
+    assert isinstance(turn.outcome.strategy.entry, FinancialConditionV1)
+    assert turn.outcome.strategy.entry.metric_id is FinancialMetricId.ROE
+    assert str(turn.outcome.strategy.entry.value) == "10"
+    assert len(turn.outcome.strategy.exit.children) == 1
+    death_cross = turn.outcome.strategy.exit.children[0]
+    assert isinstance(death_cross, IndicatorCondition)
+    assert death_cross.indicator_id == "technical.macd"
+    assert death_cross.trigger == "death_cross"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metric_text", "answer", "merged_metric", "metric_id", "expected_value"),
+    [
+        (
+            "净资产收益率低",
+            "10",
+            "净资产收益率低于10%",
+            FinancialMetricId.ROE,
+            "10",
+        ),
+        (
+            "扣非归母净利润同比低",
+            "10",
+            "扣非归母净利润同比低于10%",
+            FinancialMetricId.DEDUCTED_NET_PROFIT_YOY,
+            "0.1",
+        ),
+        ("EPS低", "1", "EPS低于1元", FinancialMetricId.BASIC_EPS, "1"),
+        ("PE低", "12", "PE低于12倍", FinancialMetricId.PE, "12"),
+        ("PB低", "2倍", "PB低于2倍", FinancialMetricId.PB, "2"),
+    ],
+)
+async def test_financial_threshold_supplement_uses_the_metric_default_unit(
+    compiler: StrategyCompiler,
+    metric_text: str,
+    answer: str,
+    merged_metric: str,
+    metric_id: FinancialMetricId,
+    expected_value: str,
+) -> None:
+    original = CompileInput(
+        utterance=f"指南针{metric_text}则买入，MACD死叉卖出",
+        instrument_context="300803.SZ",
+        as_of_date=date(2026, 9, 15),
+        semantic_intent="new_strategy",
+    )
+    pending = await compiler.compile(original)
+
+    turn = await compiler.answer_clarification(
+        original_input=original,
+        prior_outcome=pending,
+        answer=answer,
+        semantic_intent=TurnIntent.SUPPLEMENT,
+    )
+
+    assert turn.outcome.status is CompileStatus.READY
+    assert merged_metric in turn.compile_input.utterance
+    assert turn.outcome.strategy is not None
+    assert turn.outcome.strategy.instrument.symbol == "300803.SZ"
+    assert isinstance(turn.outcome.strategy.entry, FinancialConditionV1)
+    assert turn.outcome.strategy.entry.metric_id is metric_id
+    assert str(turn.outcome.strategy.entry.value) == expected_value
+
+
+@pytest.mark.asyncio
+async def test_total_currency_threshold_supplement_preserves_an_explicit_scale(
+    compiler: StrategyCompiler,
+) -> None:
+    original = CompileInput(
+        utterance="指南针营业收入低则买入，MACD死叉卖出",
+        instrument_context="300803.SZ",
+        as_of_date=date(2026, 9, 15),
+        semantic_intent="new_strategy",
+    )
+    pending = await compiler.compile(original)
+
+    turn = await compiler.answer_clarification(
+        original_input=original,
+        prior_outcome=pending,
+        answer="10万",
+        semantic_intent=TurnIntent.SUPPLEMENT,
+    )
+
+    assert turn.outcome.status is CompileStatus.READY
+    assert "营业收入低于10万" in turn.compile_input.utterance
+    assert turn.outcome.strategy is not None
+    assert isinstance(turn.outcome.strategy.entry, FinancialConditionV1)
+    assert turn.outcome.strategy.entry.metric_id is FinancialMetricId.REVENUE
+    assert turn.outcome.strategy.entry.unit is FinancialUnit.CNY
+    assert str(turn.outcome.strategy.entry.value) == "100000"
 
 
 @pytest.mark.asyncio
@@ -1685,6 +1964,29 @@ async def test_unsupported_timeframe_identity_does_not_choose_between_two_verifi
 
 
 @pytest.mark.asyncio
+async def test_model_identity_is_independent_of_unsupported_reason() -> None:
+    router = Mock(assess=AsyncMock(return_value=ClarificationDialogueAssessment(
+        reply_kind="preference", acknowledgement_id="respect_preference",
+        natural_reply="股票已确认，策略仍不支持。", instrument_name="东方财富",
+        instrument_selected=True,
+    )))
+    generator = Mock(generate=AsyncMock(side_effect=AssertionError("identity is not compilation")))
+    compiler = StrategyCompiler(
+        generator=generator, catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01",
+        clarification_dialogue_router=router, instrument_name_resolver=lambda name: "300059.SZ",
+    )
+    identity = await compiler.resolve_unsupported_instrument(CompileInput(
+        utterance="东方财富按这个暂不支持的条件试试", as_of_date=date(2026, 9, 4),
+    ), diagnostic_code="no_supported_signal_recognized")
+    assert identity is not None and identity[0] == "300059.SZ"
+    assert identity[1].text == "东方财富"
+    assert router.assess.await_args.args[0].identity_only
+    assert router.assess.await_args.args[0].diagnostic_code == "no_supported_signal_recognized"
+    generator.generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("utterance", "context"), [
     ("东方财富用日线，金叉买，死叉卖。", None),
     ("东方财富用5分钟K线，金叉买，死叉卖。", "300059.SZ"),
@@ -2549,7 +2851,7 @@ async def test_dual_moving_average_is_not_misread_as_price_crossing_one_average(
 
 
 @pytest.mark.asyncio
-async def test_bare_cross_requires_indicator_disambiguation(compiler: StrategyCompiler) -> None:
+async def test_bare_cross_defaults_to_macd_without_indicator_disambiguation(compiler: StrategyCompiler) -> None:
     outcome = await compiler.compile(
         CompileInput(
             utterance="金叉买入，死叉卖出",
@@ -2558,24 +2860,15 @@ async def test_bare_cross_requires_indicator_disambiguation(compiler: StrategyCo
         )
     )
 
-    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
-    assert outcome.diagnostic_code == "ambiguous_cross_indicator"
-    assert outcome.clarification == "‘金叉/死叉’指的是哪一类指标？"
-    assert outcome.idea_route is not None
-    assert outcome.idea_route.asset_mapping.instrument_symbol == "300059.SZ"
-    assert {proposal.title for proposal in outcome.idea_route.proposals} == {
-        "MACD",
-        "KDJ",
-        "5/20 日均线",
-    }
-    assert {
-        (proposal.entry_summary, proposal.exit_summary) for proposal in outcome.idea_route.proposals
-    } == {
-        ("MACD 金叉", "MACD 死叉"),
-        ("KDJ 金叉", "KDJ 死叉"),
-        ("5 日均线上穿 20 日均线", "5 日均线下穿 20 日均线"),
-    }
-    assert all(proposal.hypothesis.strip() for proposal in outcome.idea_route.proposals)
+    assert outcome.status is CompileStatus.READY
+    assert outcome.diagnostic_code is None and outcome.idea_route is None
+    assert outcome.strategy is not None
+    assert outcome.strategy.entry.indicator_id == "technical.macd"
+    assert outcome.strategy.entry.trigger == "golden_cross"
+    assert outcome.strategy.exit.children[0].indicator_id == "technical.macd"
+    assert outcome.strategy.exit.children[0].trigger == "death_cross"
+    assert any(item.path == "/entry/macd/indicator_id" and item.source == "default/catalog_policy"
+               for item in outcome.provenance)
 
 
 @pytest.mark.asyncio

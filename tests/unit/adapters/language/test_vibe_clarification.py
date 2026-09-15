@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
@@ -28,6 +28,155 @@ from ashare_lab.ports.current_fact_research import (
 )
 
 ROOT = Path(__file__).parents[4]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_name,model_name,valid", [
+    ("蓝色 光标", "蓝色光标", True),
+    ("怡 亚 通", "怡亚通", True),
+    ("贵\u3000州茅台", "贵州茅台", True),
+    ("蓝色 光标", "东方财富", False),
+    ("蓝色，光标", "蓝色光标", False),
+    ("蓝色 光标和蓝 色光标", "蓝色光标", False),
+])
+@pytest.mark.parametrize("identity_only", [True, False])
+async def test_stock_identity_whitespace_is_aligned_in_both_dialogue_routes(
+    capability_matrix: CandidateCapabilityMatrix, source_name: str, model_name: str,
+    valid: bool, identity_only: bool,
+) -> None:
+    class Transport:
+        async def generate_json(self, request):
+            return {"reply_kind": "preference", "acknowledgement_id": "respect_preference",
+                    "natural_reply": "股票已识别，尚未回测。", "instrument_name": model_name,
+                    "instrument_selected": True}
+
+    request = replace(_request(), answer=f"换成{source_name}做网格", options=(),
+                      diagnostic_code="edit_target_identity", identity_only=identity_only)
+    result = await VibeClarificationDialogueRouter(
+        Transport(), capability_matrix=capability_matrix,
+    ).assess(request)
+    if valid:
+        assert result is not None and result.instrument_name == source_name
+        assert result.instrument_selected and result.run_requested is None
+    else:
+        assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+async def test_identity_span_repair_uses_current_code_not_historical_name(
+    capability_matrix: CandidateCapabilityMatrix, repair_succeeds: bool,
+) -> None:
+    class Transport:
+        def __init__(self):
+            self.requests = []
+
+        async def generate_json(self, request):
+            self.requests.append(request)
+            return {"reply_kind": "preference", "acknowledgement_id": "respect_preference",
+                    "natural_reply": "已识别股票，尚未回测。", "recommended_option_ids": [],
+                    "instrument_name": "300059.SZ" if repair_succeeds and len(self.requests) == 2 else "东方财富",
+                    "instrument_selected": True}
+
+    transport = Transport()
+    request = replace(_request(), answer="300059.SZ", options=(), identity_only=True)
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(request)
+    assert len(transport.requests) == 2
+    if repair_succeeds:
+        assert result is not None and result.instrument_name == "300059.SZ"
+        assert result.run_requested is None
+    else:
+        assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", [
+    "金叉进场、死叉离场的规则已准备好，尚未开始回测。",
+    "规则已经备好，但还没有执行历史模拟。",
+])
+@pytest.mark.parametrize("tone_verdict", ["supported", "uncertain"])
+async def test_model_reply_review_accepts_semantics_without_keyword_veto(
+    capability_matrix: CandidateCapabilityMatrix, reply: str, tone_verdict: str,
+) -> None:
+    class Transport:
+        def __init__(self) -> None:
+            self.requests: list[CandidateTransportRequest] = []
+
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.requests.append(request)
+            if request.response_schema_name == "dialogue_reply_semantic_review":
+                return {"facts": "supported", "state_and_authority": "supported",
+                        "user_intent_and_tone": tone_verdict}
+            return {"reply_kind": "unclear", "acknowledgement_id": "ask_rephrase",
+                    "natural_reply": reply, "recommended_option_ids": []}
+
+    transport = Transport()
+    context = "已校验MACD金叉买入、死叉卖出。当前仅准备规则，没有启动回测。"
+    request = replace(_request(), answer="金叉进场死叉离场", question="可以核对规则。",
+                      context_summary=context, options=(), response_only=True)
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix, model_semantic_review=True,
+    ).assess(request)
+    assert result is not None and result.natural_reply == reply
+    assert len(transport.requests) == 2
+    review = transport.requests[1]
+    assert review.user_payload is not None
+    assert review.user_payload["reply"] == reply
+    assert review.user_payload["contextSummary"] == context
+    assert review.response_schema_name == "dialogue_reply_semantic_review"
+    assert result.run_requested is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("review_field", "verdict"), [
+    ("facts", "unsupported"),
+    ("facts", "uncertain"),
+    ("state_and_authority", "unsupported"),
+    ("state_and_authority", "uncertain"),
+    ("user_intent_and_tone", "unsupported"),
+    ("state_and_authority", "missing"),
+    ("state_and_authority", "transport_error"),
+])
+async def test_model_reply_review_fails_closed_with_bounded_repair(
+    capability_matrix: CandidateCapabilityMatrix, review_field: str, verdict: str,
+) -> None:
+    # A malformed reviewer envelope gets one format repair per review; a
+    # negative or unavailable review gets no format retry.
+    expected_calls = 6 if verdict == "missing" else 4
+
+    class Transport:
+        def __init__(self) -> None:
+            self.requests: list[CandidateTransportRequest] = []
+
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.requests.append(request)
+            assert len(self.requests) <= expected_calls
+            if request.response_schema_name == "dialogue_reply_semantic_review":
+                if verdict == "transport_error":
+                    raise CandidateTransportError("review unavailable")
+                if verdict == "missing":
+                    return {"facts": "supported"}
+                return {"facts": "supported", "state_and_authority": "supported",
+                        "user_intent_and_tone": "supported", review_field: verdict}
+            return {"reply_kind": "unclear", "acknowledgement_id": "ask_rephrase",
+                    "natural_reply": "已经开始回测，收益一定为正。", "recommended_option_ids": []}
+
+    transport = Transport()
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix, model_semantic_review=True,
+    ).assess(replace(_request(), response_only=True, options=(),
+                     context_summary="尚未运行回测。"))
+    assert result is None
+    assert len(transport.requests) == expected_calls
+    reviews = [request for request in transport.requests
+               if request.response_schema_name == "dialogue_reply_semantic_review"]
+    assert reviews[0].user_payload == reviews[1].user_payload
 
 
 class _RecordingTransport:
@@ -67,6 +216,29 @@ def _request() -> ClarificationDialogueRequest:
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["new_strategy", "data_query", "viewpoint", "safety"])
+async def test_initial_intent_uses_model_decision(
+    capability_matrix: CandidateCapabilityMatrix, intent: str,
+) -> None:
+    transport = _RecordingTransport({"intent": intent})
+    router = VibeClarificationDialogueRouter(transport, capability_matrix=capability_matrix)
+    answer = "东方财富，价格越过过去二十天的最高点就进场。"
+    assert await router.classify_initial(answer, date(2026, 9, 7)) == intent
+    assert len(transport.requests) == 1
+    assert transport.requests[0].utterance == answer
+    assert transport.requests[0].response_schema_name == "initial_dialogue_intent"
+
+
+@pytest.mark.asyncio
+async def test_invalid_initial_intent_does_not_invent_a_data_query(
+    capability_matrix: CandidateCapabilityMatrix,
+) -> None:
+    transport = _RecordingTransport({"intent": "unsupported_type"})
+    router = VibeClarificationDialogueRouter(transport, capability_matrix=capability_matrix)
+    assert await router.classify_initial("价格穿过去就进场", date(2026, 9, 7)) == "unknown"
+
+
 def _identity_request(answer: str) -> ClarificationDialogueRequest:
     return replace(
         _request(), answer=answer, prior_utterance="", question="", options=(),
@@ -74,6 +246,68 @@ def _identity_request(answer: str) -> ClarificationDialogueRequest:
         context_summary="分钟线执行不受支持，只保留原文明确的股票身份。",
         identity_only=True,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity_only", [True, False])
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+async def test_screening_scope_cannot_be_extracted_as_a_security(
+    capability_matrix, identity_only, repair_succeeds,
+):
+    class Transport(_RecordingTransport):
+        async def generate_json(self, request):
+            response = await super().generate_json(request)
+            if repair_succeeds and len(self.requests) == 2:
+                return {**response, "instrument_name": None, "instrument_selected": False}
+            return response
+
+    transport = Transport({
+        "reply_kind": "preference", "acknowledgement_id": "respect_preference",
+        "natural_reply": "顺着水果种植方向准备股票与策略。",
+        "instrument_reference_type": "screening_scope",
+        "instrument_name": "山竹概念股", "instrument_selected": True,
+    })
+    request = replace(_identity_request("山竹概念股交易策略"), identity_only=identity_only)
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(request)
+    assert len(transport.requests) == 2
+    assert transport.requests[0].user_payload == transport.requests[1].user_payload
+    assert "instrument_reference_type" in transport.requests[0].response_schema["required"]
+    assert "screening_scope" in transport.requests[1].system_footer
+    if repair_succeeds:
+        assert result is not None and result.instrument_name is None
+        assert not result.instrument_selected
+    else:
+        assert result is None
+
+
+@pytest.mark.asyncio
+async def test_theme_and_strategy_request_repairs_conflicting_recommendation_route(capability_matrix):
+    class Transport(_RecordingTransport):
+        async def generate_json(self, request):
+            response = await super().generate_json(request)
+            if len(self.requests) == 2:
+                return {**response, "instrument_recommendation_requested": False}
+            return response
+
+    transport = Transport({
+        "reply_kind": "preference", "acknowledgement_id": "respect_preference",
+        "natural_reply": "按水果种植方向准备股票与策略。",
+        "instrument_reference_type": "screening_scope",
+        "instrument_name": None, "instrument_selected": False,
+        "strategy_inspiration": "水果种植公司的网格交易思路",
+        "instrument_recommendation_requested": True,
+    })
+    request = replace(_identity_request("换成水果种植公司的股票和网格策略"), identity_only=False)
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(request)
+    assert result is not None and result.strategy_inspiration == "水果种植公司的网格交易思路"
+    assert not result.instrument_recommendation_requested and not result.instrument_selected
+    assert len(transport.requests) == 2
+    assert "Choose one route" in transport.requests[1].system_footer
+    assert transport.requests[0].user_payload == transport.requests[1].user_payload
 
 
 @pytest.mark.asyncio
@@ -100,17 +334,17 @@ async def test_identity_only_extracts_exact_stock_in_an_unsupported_complete_str
     assert "responseOnly=false 时先判断" not in submitted.system_contract
     assert "IDENTITY ONLY" in submitted.system_footer
     properties = submitted.response_schema["properties"]
-    assert properties["reply_kind"]["enum"] == ["preference"]
+    assert properties["reply_kind"]["enum"] == ["preference", "unclear"]
     assert properties["strategy_inspiration"] == {"type": "null"}
     assert properties["source_ids"]["maxItems"] == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answer", [
-    "不要用东方财富，暂时不选股票。", "东方财富或者贵州茅台，还没想好用哪只。",
+    "不要用东方财富，暂时不选股票。",
     "用5分钟K线回测，股票还没选。",
 ])
-async def test_identity_only_can_leave_negated_multiple_or_missing_stock_unselected(
+async def test_identity_only_can_leave_negated_or_missing_stock_unselected(
     capability_matrix: CandidateCapabilityMatrix, answer: str,
 ) -> None:
     transport = _RecordingTransport({
@@ -123,6 +357,47 @@ async def test_identity_only_can_leave_negated_multiple_or_missing_stock_unselec
     ).assess(_identity_request(answer))
     assert result is not None and not result.instrument_selected and result.instrument_name is None
     assert len(transport.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_identity_only_distinguishes_ambiguous_stocks_from_missing_stock(
+    capability_matrix: CandidateCapabilityMatrix,
+) -> None:
+    reply = "你想用东方财富还是贵州茅台？"
+    transport = _RecordingTransport({
+        "reply_kind": "unclear", "acknowledgement_id": "ask_rephrase",
+        "natural_reply": reply, "instrument_name": None, "instrument_selected": False,
+    })
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(_identity_request("东方财富或者贵州茅台，还没想好用哪只。"))
+    assert result is not None and result.reply_kind == "unclear"
+    assert result.natural_reply == reply and not result.instrument_selected
+    assert len(transport.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_identity_rechecks_absent_pronoun_before_blocking_ideas(capability_matrix):
+    class Transport(_RecordingTransport):
+        async def generate_json(self, request):
+            response = await super().generate_json(request)
+            if len(self.requests) == 2:
+                return {"reply_kind": "preference", "acknowledgement_id": "respect_preference",
+                        "natural_reply": "没有指定股票，保留反弹想法。",
+                        "instrument_name": None, "instrument_selected": False}
+            return response
+    transport = Transport({
+        "reply_kind": "unclear", "acknowledgement_id": "ask_rephrase",
+        "natural_reply": "请告诉我是哪只股票。",
+        "instrument_name": None, "instrument_selected": False,
+    })
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(_identity_request("想抄底，但等它有点反弹再进去"))
+    assert result is not None and result.reply_kind == "preference"
+    assert result.instrument_name is None and not result.instrument_selected
+    assert len(transport.requests) == 2
+    assert "original answer" in transport.requests[1].system_footer
 
 
 @pytest.mark.asyncio
@@ -151,7 +426,8 @@ async def test_identity_only_rejects_inferred_names_and_unrelated_authority(
     result = await VibeClarificationDialogueRouter(
         transport, capability_matrix=capability_matrix,
     ).assess(_identity_request("东方财富用5分钟K线回测。"))
-    assert result is None and len(transport.requests) == 1
+    expected_attempts = 2 if extra.get("instrument_name") == "300059.SZ" else 1
+    assert result is None and len(transport.requests) == expected_attempts
 
 
 @pytest.mark.asyncio
@@ -494,7 +770,33 @@ async def test_ordinary_reply_keeps_its_original_short_length_limit(
     result = await VibeClarificationDialogueRouter(
         transport, capability_matrix=capability_matrix,
     ).assess(_request())
-    assert result is None and len(transport.requests) == 1
+    assert result is None and len(transport.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repaired", [True, False])
+async def test_response_only_schema_failure_repairs_once_and_logs_safe_fields(
+    capability_matrix: CandidateCapabilityMatrix, repaired: bool, caplog: pytest.LogCaptureFixture,
+) -> None:
+    valid = {"reply_kind": "preference", "acknowledgement_id": "respect_preference",
+             "natural_reply": "可以核对下面的买卖规则。"}
+    class Sequence(_RecordingTransport):
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.requests.append(request)
+            return (valid if repaired and len(self.requests) == 2
+                    else {**valid, "reply_kind": "PRIVATE_BAD_VALUE"})
+    transport = Sequence(None)
+    router = VibeClarificationDialogueRouter(transport, capability_matrix=capability_matrix)
+    result = await router.assess(
+        replace(_request(), response_only=True, diagnostic_code="response_only", options=()),
+    )
+    assert len(transport.requests) == 2
+    assert (result is not None) == repaired
+    assert "reply_kind:string_pattern_mismatch" in caplog.text
+    assert "PRIVATE_BAD_VALUE" not in caplog.text
+    assert "request_id=" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -887,6 +1189,36 @@ async def test_style_inspiration_is_non_executable_and_stock_name_must_match_thi
         assert result is not None
         assert result.strategy_inspiration is not None
         assert result.instrument_name == name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [
+    "我想吃屎有交易策略吗", "我是垃圾大王，有什么投资方向",
+])
+async def test_explicit_joke_inspiration_preserves_research_only_boundary(
+    capability_matrix: CandidateCapabilityMatrix, answer: str,
+) -> None:
+    # Stub checks the adapter contract and gates, not real-model classification accuracy.
+    inspiration = "如果是在玩梗找投资灵感，可探索废弃物资源化方向，具体公司业务待核实。"
+    transport = _RecordingTransport({
+        "reply_kind": "preference", "acknowledgement_id": "respect_preference",
+        "natural_reply": "如果是在找交易灵感，可以先探索相关方向，再核实具体公司的业务。",
+        "recommended_option_ids": [], "strategy_inspiration": inspiration,
+    })
+    result = await VibeClarificationDialogueRouter(
+        transport, capability_matrix=capability_matrix,
+    ).assess(replace(
+        _request(), answer=answer, prior_utterance="", question="", options=(),
+        diagnostic_code="conversation_only", context_summary="",
+    ))
+    assert result is not None and result.strategy_inspiration == inspiration
+    assert result.instrument_name is None and result.selected_option_id is None
+    assert not result.run_requested
+    contract = transport.requests[0].system_contract
+    footer = transport.requests[0].system_footer or ""
+    assert "区分纯玩笑与借玩笑明确寻找交易灵感" in contract
+    assert "具体公司必须经过后续真实业务检索与用户确认" in contract
+    assert "Genuine safety-help or harmful-act instructions still take priority" in footer
 
 
 @pytest.mark.asyncio

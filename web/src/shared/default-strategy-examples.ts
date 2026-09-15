@@ -1,16 +1,39 @@
 import type { Instrument } from './api/types'
 
-// Show and submit the same complete rule; dates and capital use normal settings.
-export const DEFAULT_STRATEGY_EXAMPLES: ReadonlyArray<{
+export type StrategyExample = {
+  category: string
   utterance: string
-  instrument: Instrument
-}> = [
+  instrument?: Instrument
+}
+
+// Selection fills the exact displayed sentence; only Send starts a request.
+export const DEFAULT_STRATEGY_EXAMPLES: readonly StrategyExample[] = [
   {
-    utterance: '贵州茅台，收盘价创前20日新高且成交量超过前20日均量1.5倍买入；从持仓后最高收盘价回撤8%或持有满40个交易日卖出。',
-    instrument: { name: '贵州茅台', symbol: '600519.SH', market: 'CN_A', exchange: 'SSE' },
+    category: '历史案例',
+    utterance: '平安银行，KDJ金叉且RSI低于50买入，KDJ死叉卖出。',
+    instrument: { name: '平安银行', symbol: '000001.SZ', market: 'CN_A', exchange: 'SZSE' },
   },
   {
-    utterance: '美的集团，14日RSI从30下方上穿30且当日成交额超过5亿元买入；14日RSI高于55、持仓亏损5%或持有满10个交易日卖出。',
-    instrument: { name: '美的集团', symbol: '000333.SZ', market: 'CN_A', exchange: 'SZSE' },
+    category: '随口一说',
+    utterance: '我讨厌特朗普',
+  },
+  {
+    category: '交易想法',
+    utterance: '东方财富低买高卖',
+    instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' },
+  },
+  {
+    category: '历史案例',
+    utterance: '东方财富，RSI上穿30买入，下穿55卖出。',
+    instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' },
+  },
+  {
+    category: '随口一说',
+    utterance: '我是秦始皇',
+  },
+  {
+    category: '交易想法',
+    utterance: '同花顺网格策略',
+    instrument: { name: '同花顺', symbol: '300033.SZ', market: 'CN_A', exchange: 'SZSE' },
   },
 ]

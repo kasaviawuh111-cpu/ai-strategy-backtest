@@ -127,14 +127,22 @@ class AsyncBacktestSubmissionCoordinator:
                 return None
             if current.state.is_terminal or current.state is BacktestJobState.CANCEL_REQUESTED:
                 return current
+            future = self._futures.get(run_id)
+            cancelled_before_start = future is not None and future.cancel()
             updated = replace(
                 current,
-                state=BacktestJobState.CANCEL_REQUESTED,
-                progress_label="正在取消",
+                state=(BacktestJobState.CANCELLED if cancelled_before_start
+                       else BacktestJobState.CANCEL_REQUESTED),
+                progress_label="已取消" if cancelled_before_start else "正在取消",
                 updated_at=self._clock(),
                 version=current.version + 1,
             )
             self._preparations[run_id] = updated
+            if (cancelled_before_start
+                    and self._run_by_request_fingerprint.get(current.fingerprint) == run_id):
+                # No immutable work item was created. An explicit new request
+                # may retry; the cancelled ID itself remains pollable.
+                self._run_by_request_fingerprint.pop(current.fingerprint)
             return updated
 
     def shutdown(self, *, wait: bool = True) -> None:
@@ -187,16 +195,29 @@ class AsyncBacktestSubmissionCoordinator:
                 updated_at=self._clock(),
                 version=current.version + 1,
             )
+            # A failed acquisition has no immutable result to replay. Keep its
+            # status pollable, but let the next explicit submission retry the
+            # provider instead of permanently replaying this preparation error.
+            if (self._run_store.get(run_id) is None
+                    and self._run_by_request_fingerprint.get(current.fingerprint) == run_id):
+                self._run_by_request_fingerprint.pop(current.fingerprint)
 
     def _lookup_locked(self, run_id: RunId) -> BacktestRunRecord | None:
         persisted = self._run_store.get(run_id)
         if persisted is not None:
             return persisted
-        return self._preparations.get(run_id)
+        preparation = self._preparations.get(run_id)
+        if preparation is not None and preparation.run_id != run_id:
+            # Deduplication can resolve a temporary preparation ID to an
+            # existing run. Poll that run, not its stale preparation snapshot.
+            return self._run_store.get(preparation.run_id) or preparation
+        return preparation
 
     def _report(self, run_id: RunId, future: Future[None]) -> None:
         with self._lock:
             self._futures.pop(run_id, None)
+        if future.cancelled():
+            return
         error = future.exception()
         if error is not None:
             _LOGGER.exception(

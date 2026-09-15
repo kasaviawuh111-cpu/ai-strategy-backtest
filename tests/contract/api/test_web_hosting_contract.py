@@ -30,6 +30,34 @@ def test_unconfigured_app_remains_api_only() -> None:
     assert response.json()["error"]["code"] == "http_404"
 
 
+def test_gallery_samples_are_explicitly_served_without_exposing_other_root_files(
+    tmp_path: Path,
+) -> None:
+    root = _write_web_dist(tmp_path / "dist")
+    payload = '{"schemaVersion":"strategy-gallery-samples.v1","entries":[]}'
+    (root / "strategy-gallery-samples.json").write_text(payload)
+    (root / "build-provenance.json").write_text('{"private":"not public"}')
+    with TestClient(create_app(web_dist_root=root)) as client:
+        response = client.get("/strategy-gallery-samples.json")
+        assert response.status_code == 200
+        assert response.text == payload
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.headers["cache-control"] == "no-cache"
+        assert client.head("/strategy-gallery-samples.json").status_code == 200
+        assert client.get("/build-provenance.json").status_code == 404
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_missing_or_linked_gallery_samples_fail_closed(tmp_path: Path, symlink: bool) -> None:
+    root = _write_web_dist(tmp_path / "dist")
+    if symlink:
+        outside = tmp_path / "outside.json"
+        outside.write_text('{}')
+        (root / "strategy-gallery-samples.json").symlink_to(outside)
+    with TestClient(create_app(web_dist_root=root)) as client:
+        assert client.get("/strategy-gallery-samples.json").status_code == 404
+
+
 def test_configured_app_serves_only_index_and_assets(tmp_path: Path) -> None:
     app = create_app(web_dist_root=_write_web_dist(tmp_path / "dist"))
 

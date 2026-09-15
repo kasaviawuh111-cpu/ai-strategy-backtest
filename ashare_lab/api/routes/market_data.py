@@ -6,12 +6,18 @@ from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, status
 
+from ashare_lab.adapters.market_data.mx_finance_history_format import MxFinanceHistoryDecoder
 from ashare_lab.adapters.market_data.mx_saas import (
     MxSaasProviderAuthError,
     MxSaasProviderDataError,
     MxSaasProviderError,
     MxSaasProviderNoDataError,
     MxSaasProviderUnavailableError,
+)
+from ashare_lab.application.skill_series_discovery import (
+    SkillSeriesDiscovery,
+    SkillSeriesDiscoveryNoHistoryError,
+    SkillSeriesDiscoveryResult,
 )
 from ashare_lab.ports.live_market_data import (
     LiveFinanceDataResult,
@@ -30,11 +36,59 @@ from ..schemas import (
     LiveScreenedFinanceQueryRequest,
     LiveScreenedFinanceQueryResponse,
     LiveSecurityEntityPayload,
+    SkillSeriesDiscoveryRequest,
     error_response_docs,
 )
 
 router = APIRouter(prefix="/api/v1/market", tags=["live-market-data"])
 Container = Annotated[ApiContainer, Depends(get_container)]
+
+
+@router.post(
+    "/series-discovery",
+    response_model=SkillSeriesDiscoveryResult,
+    operation_id="discoverSkillHistoricalSeries",
+    responses=error_response_docs(404, 422, 429, 502, 503, 504),
+)
+async def discover_skill_historical_series(
+    body: SkillSeriesDiscoveryRequest,
+    container: Container,
+) -> SkillSeriesDiscoveryResult:
+    """Discover actual fields, including names outside the executable catalog.
+
+    Discovery does not create a strategy, certify PIT data, or submit a run.
+    The structural diagnostics are returned with the provider evidence rather
+    than recasting a missing series as a strategy-parsing failure.
+    """
+    provider = container.live_finance_data
+    if provider is None:
+        raise ApiProblem(
+            status_code=503, code="live_market_data_unavailable",
+            message="东方财富查数 Skill 尚未配置，暂时无法查询指标历史数据。",
+        )
+    try:
+        return await SkillSeriesDiscovery(provider, decoder=MxFinanceHistoryDecoder()).discover(
+            instrument_id=body.instrument_id, metric_query=body.metric_query,
+            start=body.start, end=body.end,
+        )
+    except (MxSaasProviderAuthError, MxSaasProviderUnavailableError) as exc:
+        raise live_market_data_problem(exc, skill_name="东方财富查数 Skill") from exc
+    except SkillSeriesDiscoveryNoHistoryError as exc:
+        raise ApiProblem(
+            status_code=404, code="skill_series_no_history_after_requery",
+            message="已按指定股票、指标和日期重新查询，仍未取得本次所需的逐日历史数据。",
+        ) from exc
+    except MxSaasProviderNoDataError as exc:
+        raise ApiProblem(
+            status_code=404, code="skill_series_no_results",
+            message="已查询东方财富查数 Skill，但未获得本次指标的匹配历史数据。",
+        ) from exc
+    except MxSaasProviderDataError as exc:
+        problem = live_market_data_problem(exc, skill_name="东方财富查数 Skill")
+        raise ApiProblem(
+            status_code=502, code="skill_series_invalid_response",
+            message=problem.message,
+        ) from exc
 
 
 @router.post(
@@ -57,20 +111,8 @@ async def screen_live_market(
         )
     try:
         result = await provider.screen(query=body.query, asset_type=body.asset_type)
-    except (MxSaasProviderAuthError, MxSaasProviderUnavailableError) as exc:
+    except MxSaasProviderError as exc:
         raise live_market_data_problem(exc, skill_name="东方财富选股 Skill") from exc
-    except MxSaasProviderNoDataError as exc:
-        raise ApiProblem(
-            status_code=404,
-            code="live_market_data_no_results",
-            message="东方财富选股 Skill 未找到符合本次条件的股票。",
-        ) from exc
-    except MxSaasProviderDataError as exc:
-        raise ApiProblem(
-            status_code=502,
-            code="live_market_data_invalid_response",
-            message="东方财富选股 Skill 返回的数据暂时无法解析，本次未生成选股结果。",
-        ) from exc
     return _screen_response(result)
 
 
@@ -97,20 +139,8 @@ async def query_live_finance_data(
             query=body.query,
             indicators=body.indicators,
         )
-    except (MxSaasProviderAuthError, MxSaasProviderUnavailableError) as exc:
+    except MxSaasProviderError as exc:
         raise live_market_data_problem(exc, skill_name="东方财富查数 Skill") from exc
-    except MxSaasProviderNoDataError as exc:
-        raise ApiProblem(
-            status_code=404,
-            code="live_market_data_no_results",
-            message="东方财富查数 Skill 未返回本次查询的匹配数据。",
-        ) from exc
-    except MxSaasProviderDataError as exc:
-        raise ApiProblem(
-            status_code=502,
-            code="live_market_data_invalid_response",
-            message="东方财富查数 Skill 返回的数据暂时无法解析，本次查询未完成。",
-        ) from exc
     return _finance_response(result)
 
 
@@ -146,20 +176,8 @@ async def screen_then_query_live_finance_data(
             asset_type=body.asset_type,
             indicators=body.indicators,
         )
-    except (MxSaasProviderAuthError, MxSaasProviderUnavailableError) as exc:
+    except MxSaasProviderError as exc:
         raise live_market_data_problem(exc, skill_name="东方财富选股/查数流程") from exc
-    except MxSaasProviderNoDataError as exc:
-        raise ApiProblem(
-            status_code=404,
-            code="live_market_data_no_results",
-            message="东方财富选股/查数流程未返回本次查询的匹配数据。",
-        ) from exc
-    except MxSaasProviderDataError as exc:
-        raise ApiProblem(
-            status_code=502,
-            code="live_market_data_invalid_response",
-            message="东方财富选股/查数流程返回的数据暂时无法解析，本次查询未完成。",
-        ) from exc
     return LiveScreenedFinanceQueryResponse(
         screen=_screen_response(result.screen),
         entities=tuple(
@@ -183,7 +201,9 @@ def live_market_data_problem(error: MxSaasProviderError, *, skill_name: str) -> 
         code, http_status, detail = "no_results", 404, "未返回本次查询的匹配数据。"
     elif isinstance(error, MxSaasProviderDataError):
         code, http_status = "invalid_response", 502
-        detail = "返回的数据暂时无法使用，本次查询未完成。"
+        detail = ("服务暂时不稳定，本次查询未完成。"
+                  if error.data_reason == "provider_sql_error" else
+                  "返回的数据暂时无法使用，本次查询未完成。")
     elif error.reason == "read_timeout":
         code, http_status, detail = "read_timeout", 504, "等待响应超时，本次查询未完成。"
     elif error.reason == "connect_timeout":
@@ -197,6 +217,8 @@ def live_market_data_problem(error: MxSaasProviderError, *, skill_name: str) -> 
         and 500 <= error.http_status <= 599
     ):
         code, http_status, detail = "service_unavailable", 502, "服务端暂时异常，请稍后重试。"
+    if error.attempts is not None and error.attempts > 1:
+        detail += f"已自动重试 {error.attempts - 1} 次，仍未成功。请稍等片刻后再试，抱歉让你久等。"
     return ApiProblem(
         status_code=http_status, code=f"live_market_data_{code}", message=f"{skill_name}{detail}",
     )

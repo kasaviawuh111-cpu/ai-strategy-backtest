@@ -41,6 +41,7 @@ def _client(handler: httpx.AsyncBaseTransport) -> MxSaasMarketDataClient:
 @pytest.mark.parametrize("query,symbol", [
     ("dfcf", "300059.SZ"), ("DFCF", "300059.SZ"), ("dongfangcaifu", "300059.SZ"),
     ("gzmt", "600519.SH"), ("THS", "300033.SZ"),
+    ("茅台", "600519.SH"), ("宁德", "300750.SZ"), ("怡 亚 通", "002183.SZ"),
 ])
 def test_instrument_resolver_reuses_packaged_initials_without_provider(
     query: str, symbol: str,
@@ -85,6 +86,107 @@ def test_runtime_instrument_resolver_enables_the_local_directory_by_default(
     monkeypatch.setattr(MxSaasMarketDataClient, "screen", no_provider)
     client = MxSaasMarketDataClient(api_key="test-provider-key")
     assert client.resolve_instrument_name("DFCF") == "300059.SZ"
+
+
+@pytest.mark.parametrize("query,name,symbol", [
+    ("东财", "东方财富", "300059.SZ"),
+    ("茅台", "贵州茅台", "600519.SH"),
+])
+def test_unique_chinese_alias_binds_without_confirmation(
+    query: str, name: str, symbol: str,
+) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        assert request.url.params["keyword"] == query
+        return httpx.Response(200, json={"code": "0", "result": [{
+            "code": symbol[:6], "shortName": name,
+            "market": 1 if symbol.endswith("SH") else 0,
+            "securityTypeName": "沪A" if symbol.endswith("SH") else "深A",
+        }]})
+
+    transport = httpx.MockTransport(handler)
+    search = EastmoneyInstrumentSearch(transport=transport)
+    client = MxSaasMarketDataClient(
+        api_key="test-provider-key", transport=transport, instrument_search=search,
+    )
+    assert client.resolve_instrument_name(query) == symbol
+    assert requests == ["/codetable/search/web"]
+
+
+@pytest.mark.parametrize("query,truncated,multiple", [
+    ("平安", False, True), ("东财", True, False),
+    ("东", False, False), ("3000", False, False),
+])
+def test_alias_autobinding_does_not_choose_from_ambiguous_or_incomplete_matches(
+    query: str, truncated: bool, multiple: bool,
+) -> None:
+    from ashare_lab.adapters.market_data.eastmoney_instrument_search import (
+        InstrumentSearchResult, SearchInstrument,
+    )
+
+    class Search:
+        def resolve_local_name(self, _query: str) -> None:
+            return None
+
+        async def search(self, keyword: str, *, limit: int) -> InstrumentSearchResult:
+            items = (SearchInstrument("000001.SZ", "平安银行", "SZ"),
+                     SearchInstrument("601318.SH", "中国平安", "SH")) if multiple else (
+                SearchInstrument("300059.SZ", "东方财富", "SZ"),
+            )
+            return InstrumentSearchResult(keyword, items, datetime.now(UTC), truncated)
+
+    client = MxSaasMarketDataClient(api_key="test-provider-key", instrument_search=Search())
+    with pytest.raises(InstrumentNameAmbiguous):
+        client.resolve_instrument_name(query)
+
+
+def test_exact_autocomplete_identity_can_bind_without_finance_screening() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/codetable/search/web"
+        return httpx.Response(200, json={"code": "0", "result": [{
+            "code": "300059", "shortName": "东方财富", "market": 0,
+            "securityTypeName": "深A",
+        }]})
+
+    transport = httpx.MockTransport(handler)
+    client = MxSaasMarketDataClient(
+        api_key="test-provider-key", transport=transport,
+        instrument_search=EastmoneyInstrumentSearch(transport=transport),
+    )
+    assert client.resolve_instrument_name("东方财富") == "300059.SZ"
+
+
+@pytest.mark.parametrize("search_failure", ["unavailable", "empty", "invalid"])
+def test_security_autocomplete_failure_retains_existing_provider_fallback(
+    search_failure: str,
+) -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/codetable/search/web":
+            assert "em_api_key" not in request.headers
+            if search_failure == "unavailable":
+                raise httpx.ConnectError("offline")
+            return httpx.Response(200, json={
+                "code": "0" if search_failure == "empty" else "1", "result": [],
+            })
+        assert request.url.path == "/proxy/b/mcp/tool/selectSecurity"
+        return httpx.Response(200, json={"code": 0, "data": {"allResults": {"result": {
+            "columns": [{"field": "code", "displayName": "证券代码"},
+                        {"field": "name", "displayName": "证券简称"}],
+            "dataList": [{"code": "300059", "name": "东方财富"}],
+        }}}})
+
+    transport = httpx.MockTransport(handler)
+    client = MxSaasMarketDataClient(
+        api_key="test-provider-key", transport=transport,
+        instrument_search=EastmoneyInstrumentSearch(transport=transport),
+    )
+    assert client.resolve_instrument_name("东方财富") == "300059.SZ"
+    assert paths == ["/codetable/search/web", "/proxy/b/mcp/tool/selectSecurity"]
 
 
 def test_screen_preserves_provider_columns_rows_and_auditable_response_hash() -> None:
@@ -172,6 +274,28 @@ def test_screen_preserves_actual_subset_sort_and_date_metadata_without_request_e
     assert "查询全部A股" not in str(result.provider_metadata)
     assert "echoed" not in str(result.provider_metadata)
     assert "not-for-model" not in str(result.provider_metadata)
+
+
+def test_screen_preserves_nested_events_without_changing_display_rows() -> None:
+    detail = {"title": "股东增减持计划", "time": "2025-09-08 - 2026-09-08",
+              "full": False, "colHeads": [{"colName": "首次公告日期", "colProp": "notice"}],
+              "data": [{"notice": "2026-09-07", "holder": "测试股东"}]}
+    payload = {"code": 0, "data": {"allResults": {"result": {
+        "columns": [{"key": "code", "title": "代码"},
+                    {"key": "event", "title": "股东增减持计划"}],
+        "dataList": [{"code": "300059", "event": "公告摘要...",
+                      "MTM_EXTRA|event": json.dumps([detail]),
+                      "MTM_EXTRA|undeclared": json.dumps([detail])},
+                     {"code": "600519", "event": "另一摘要", "MTM_EXTRA|event": "invalid"}],
+    }}}}
+    result = asyncio.run(_client(httpx.MockTransport(
+        lambda _: httpx.Response(200, json=payload),
+    )).screen(query="股东增持计划", asset_type="A股"))
+    assert result.rows[0] == {"代码": "300059", "股东增减持计划": "公告摘要..."}
+    assert result.rows[1]["代码"] == "600519"
+    assert result.provider_metadata["event_tables"] == [
+        {"row_index": 0, "source_key": "event", **detail},
+    ]
 
 
 def test_screen_preserves_provider_column_date_context() -> None:
@@ -557,10 +681,11 @@ def test_finance_transport_failure_keeps_safe_cause_and_bounded_retries(failure:
 
 
 def test_indicator_transport_retains_its_safe_call_id(caplog: pytest.LogCaptureFixture) -> None:
-    call_ids: list[str] = []
+    calls: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        call_ids.append(json.loads(request.content)["toolContext"]["callId"])
+        calls.append((request.url.path.rsplit("/", 1)[-1],
+                      json.loads(request.content)["toolContext"]["callId"]))
         raise httpx.ReadTimeout("https://private.invalid/?token=secret", request=request)
 
     with pytest.raises(MxSaasProviderUnavailableError) as caught:
@@ -569,13 +694,53 @@ def test_indicator_transport_retains_its_safe_call_id(caplog: pytest.LogCaptureF
             provider_indicator_name="RSI", value_names=("RSI",),
             start=date(2026, 9, 2), end=date(2026, 9, 3),
         ))
-    assert len(call_ids) == 3
-    assert len(set(call_ids)) == 1
+    finance_ids = [call_id for tool, call_id in calls if tool == "searchData"]
+    screen_ids = [call_id for tool, call_id in calls if tool == "selectSecurity"]
+    # Each channel has its own bounded transport retry loop. Recovery tries
+    # the alternate Skill once; it cannot re-enter the finance channel.
+    assert [tool for tool, _ in calls] == ["searchData"] * 3 + ["selectSecurity"] * 3
+    assert len(set(finance_ids)) == len(set(screen_ids)) == 1
+    assert set(finance_ids).isdisjoint(screen_ids)
     assert re.fullmatch(r"indicator_history_[0-9a-f]{32}", caught.value.call_id or "")
-    assert caught.value.call_id == call_ids[0]
+    assert re.fullmatch(r"screen_[0-9a-f]{32}", screen_ids[0])
+    assert caught.value.call_id == finance_ids[0]
+    assert caught.value.tool == "searchData" and caught.value.reason == "read_timeout"
+    assert caught.value.attempts == 3
+    alternate = caught.value.__cause__
+    assert isinstance(alternate, MxSaasProviderUnavailableError)
+    assert alternate.tool == "selectSecurity" and alternate.call_id == screen_ids[0]
+    assert alternate.reason == "read_timeout" and alternate.attempts == 3
     assert caught.value.call_id in caplog.text
+    assert screen_ids[0] in caplog.text
     assert "private.invalid" not in str(caught.value) + caplog.text
     assert "token=secret" not in str(caught.value) + caplog.text
+
+
+@pytest.mark.parametrize("auth_channel", ["searchData", "selectSecurity"])
+@pytest.mark.parametrize("status", [401, 403])
+def test_indicator_auth_failure_is_terminal_in_its_own_channel(
+    auth_channel: str, status: int,
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        channel = request.url.path.rsplit("/", 1)[-1]
+        calls.append(channel)
+        if channel == auth_channel:
+            return httpx.Response(status, text="private auth response")
+        raise httpx.ReadTimeout("private request detail", request=request)
+
+    with pytest.raises(MxSaasProviderAuthError) as caught:
+        asyncio.run(_client(httpx.MockTransport(handler)).query_indicator_history(
+            instrument_id="300059.SZ", indicator_id="technical.rsi",
+            provider_indicator_name="RSI", value_names=("RSI",),
+            start=date(2026, 9, 2), end=date(2026, 9, 3),
+        ))
+    assert calls == (["searchData"] if auth_channel == "searchData"
+                     else ["searchData"] * 3 + ["selectSecurity"])
+    assert caught.value.tool == auth_channel and caught.value.http_status == status
+    assert caught.value.attempts == 1
+    assert "private" not in str(caught.value)
 
 
 @pytest.mark.parametrize(("payload", "reason"), [
@@ -587,7 +752,7 @@ def test_indicator_transport_retains_its_safe_call_id(caplog: pytest.LogCaptureF
     ({"code": 500, "message": "https://private.invalid/?token=secret"}, "provider_query_rejected"),
     ({"data": {}}, "protocol_tables_missing"),
 ])
-def test_indicator_bad_data_has_safe_reason_without_retry(
+def test_indicator_bad_data_has_safe_reason_and_bounded_cause_specific_retry(
     payload: dict[str, object], reason: str,
 ) -> None:
     calls = 0
@@ -608,7 +773,87 @@ def test_indicator_bad_data_has_safe_reason_without_retry(
     assert re.fullmatch(r"indicator_history_[0-9a-f]{32}", caught.value.call_id or "")
     assert "private.invalid" not in str(caught.value) + caught.value.data_reason
     assert "test-provider-key" not in str(caught.value)
-    assert calls == 1
+    # Query execution errors now retry twice. Identity correction already
+    # retried once in the baseline, but never accepts the wrong security.
+    assert calls == {"provider_query_rejected": 3, "data_security_mismatch": 2}.get(reason, 1)
+
+
+def test_indicator_unknown_validation_failure_retries_exact_query_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    parse_calls = 0
+    queries: list[str] = []
+    valid_payload = {
+        "code": 200,
+        "data": {"searchDataResultDTO": {"dataTableDTOList": [{
+            "entityCodes": ["300059.SZ"],
+            "rawTable": {"rsi": ["42.5"], "headName": ["2026-09-02"]},
+            "fieldSet": [{"returnCode": "rsi", "returnName": "RSI"}],
+        }]}},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        queries.append(str(json.loads(request.content)["query"]))
+        return httpx.Response(200, json=valid_payload)
+
+    original_parser = _provider_indicator_points
+
+    def flaky_parser(**kwargs: object):
+        nonlocal parse_calls
+        parse_calls += 1
+        if parse_calls == 1:
+            raise MxSaasProviderDataError("transient provider shape")
+        return original_parser(**kwargs)
+
+    monkeypatch.setattr(
+        "ashare_lab.adapters.market_data.mx_saas._provider_indicator_points",
+        flaky_parser,
+    )
+
+    result = asyncio.run(_client(httpx.MockTransport(handler)).query_indicator_history(
+        instrument_id="300059.SZ", indicator_id="technical.rsi",
+        provider_indicator_name="RSI", value_names=("RSI",),
+        start=date(2026, 9, 2), end=date(2026, 9, 2),
+    ))
+
+    assert calls == 2
+    assert parse_calls == 2
+    assert queries[0] == queries[1]
+    assert result.points[0].values[0].value == Decimal("42.5")
+
+
+def test_indicator_unknown_validation_failure_stays_fail_closed_after_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"code": 200, "data": {
+            "searchDataResultDTO": {"dataTableDTOList": []},
+        }})
+
+    def always_invalid(**_kwargs: object):
+        raise MxSaasProviderDataError("transient provider shape")
+
+    monkeypatch.setattr(
+        "ashare_lab.adapters.market_data.mx_saas._provider_indicator_points",
+        always_invalid,
+    )
+    with pytest.raises(MxSaasProviderDataError) as caught:
+        asyncio.run(_client(httpx.MockTransport(handler)).query_indicator_history(
+            instrument_id="300059.SZ", indicator_id="technical.rsi",
+            provider_indicator_name="RSI", value_names=("RSI",),
+            start=date(2026, 9, 2), end=date(2026, 9, 2),
+        ))
+
+    assert calls == 2
+    assert caught.value.data_reason == "data_validation_failed"
+    assert isinstance(caught.value.__cause__, MxSaasProviderDataError)
 
 
 def test_non_json_auth_failure_is_not_mistaken_for_bad_data() -> None:
@@ -785,10 +1030,13 @@ def test_indicator_history_uses_provider_kdj_values_without_requesting_ohlcv() -
 
 def test_indicator_mapping_preserves_source_direction_and_rejects_range_dates() -> None:
     parameters = "N=14,N1=6,Dmi=1,AdjustFlag=2,period=1"
-    raw_table = {"headName": ["2026-09-04T15:00:00+08:00"], "pdi": ["20"], "mdi": ["10"]}
+    raw_table = {"headName": ["2026-09-03T15:00:00+08:00", "2026-09-04T15:00:00+08:00"],
+                 "pdi": ["20", "21"], "mdi": ["10", "11"]}
     table = {
         "entityCodes": ["300059.SZ"],
         "rawTable": raw_table,
+        "table": {"headName": ["2026-09-03", "2026-09-04"],
+                  "pdi": ["20.00%", "21.00%"], "mdi": ["10.00%", "11.00%"]},
         "fieldSet": [
             {
                 "returnCode": code,
@@ -806,11 +1054,11 @@ def test_indicator_mapping_preserves_source_direction_and_rejects_range_dates() 
             instrument_id="300059.SZ",
             provider_indicator_name="DMI(14)",
             value_names=("+DI值", "-DI值"),
-            start=date(2026, 9, 4),
+            start=date(2026, 9, 3),
             end=date(2026, 9, 4),
         )
 
-    (point,) = parse()
+    point, _ = parse()
     assert tuple(value.field_name for value in point.values) == ("+DI值", "-DI值")
     assert tuple(value.source_field_name for value in point.values) == ("DMI(+DI值)", "DMI(-DI值)")
     assert all(value.source_unit == "100%" and value.unit == "%" for value in point.values)
@@ -819,7 +1067,7 @@ def test_indicator_mapping_preserves_source_direction_and_rejects_range_dates() 
     assert _field_value(point, "-DI值") == Decimal("10")
 
     raw_table["headName"] = ["2026-08-24至2026-09-04"]
-    with pytest.raises(MxSaasProviderDataError, match="not a daily date axis"):
+    with pytest.raises(MxSaasProviderDataError, match="only non-daily observations"):
         parse()
 
 
@@ -1133,7 +1381,8 @@ def test_condition_history_uses_the_shared_provider_catalog() -> None:
 
     assert "KDJ(9,3,3)指标K值、D值、J值" in str(requests[0]["query"])
     assert result.indicator_id == "technical.kdj"
-    assert tuple(value.field_name for value in result.points[0].values) == (
+    assert tuple(value.field_name for value in result.points[0].values) == ("K值", "D值", "J值")
+    assert tuple(value.source_field_name for value in result.points[0].values) == (
         "KDJ K值",
         "KDJ D值",
         "KDJ J值",

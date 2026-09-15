@@ -6,7 +6,8 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from unittest.mock import AsyncMock
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,11 +20,18 @@ from ashare_lab.adapters.market_data.mx_saas import (
     MxSaasProviderUnavailableError,
 )
 from ashare_lab.api import create_app
+from ashare_lab.api.routes.strategy_drafts import _to_idea_route_payload
 from ashare_lab.api.schemas import StrategyDraftResponse
 from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus, StrategyCompiler
+from ashare_lab.application.turn_intent import TurnIntent
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.strategy import StrategySpec, canonical_hash
-from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
+from ashare_lab.ports.candidate_generation import (
+    CandidateAst,
+    CandidateGroundingEvidence,
+    CompileInput,
+    IndicatorIntent,
+)
 from ashare_lab.ports.clarification_dialogue import (
     ClarificationDialogueAssessment,
     ClarificationDialogueRequest,
@@ -42,8 +50,93 @@ from ashare_lab.ports.live_market_data import (
     LiveScreenedFinanceDataResult,
     LiveSecurityEntity,
 )
+from ashare_lab.ports.strategy_advice import StockRecommendation
 
 ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_candidate_batch_can_select_multiple_independent_drafts(client: TestClient) -> None:
+    batch = client.post("/api/v1/strategy-drafts", json={
+        "utterance": "MACD死叉卖出", "instrument_context": "300059.SZ",
+        "as_of_date": "2026-08-27",
+    }).json()
+    proposals = batch["idea_route"]["proposals"]
+    assert len(proposals) >= 2
+    url = (f"/api/v1/strategy-drafts/{batch['draft_id']}"
+           f"/revisions/{batch['revision']}/clarification-answers")
+    children = []
+    for proposal in proposals[:2]:
+        response = client.post(url, json={"answer": proposal["id"]})
+        assert response.status_code == 200, response.text
+        children.append(response.json()["draft"])
+    assert len({batch["draft_id"], *(child["draft_id"] for child in children)}) == 3
+    assert all(child["revision"] == 1 for child in children)
+    assert all(child["strategy"] is not None for child in children)
+    # Returning to the original batch is repeatable, not a stale revision bypass.
+    again = client.post(url, json={"answer": proposals[0]["id"]})
+    assert again.status_code == 200
+    assert again.json()["draft"]["strategy_hash"] == children[0]["strategy_hash"]
+
+
+@pytest.mark.parametrize("intent", [TurnIntent.CASUAL, TurnIntent.CANCEL, TurnIntent.UNKNOWN])
+def test_report_edit_entry_preserves_strategy_for_model_non_edit_intent(intent: TurnIntent) -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        created = client.post("/api/v1/strategy-drafts", json={
+            "utterance": "300059.SZ RSI低于30买入，RSI高于70卖出",
+            "as_of_date": "2026-08-20",
+        }).json()
+        assert created["status"] == "ready"
+        compiler = app.state.container.compiler
+        compiler.classify_dialogue_intent = AsyncMock(return_value=intent)
+        compiler.edit_current_strategy = AsyncMock(side_effect=AssertionError("not an edit"))
+        compiler.compile = AsyncMock(side_effect=AssertionError("do not replace saved strategy"))
+        compiler.compose_dialogue_response = AsyncMock(return_value="我们先聊聊，策略先不动。")
+        response = client.post("/api/v1/strategy-drafts", headers={
+            "X-Conversation-Parent-Draft-ID": created["draft_id"],
+        }, json={"utterance": "我现在不想谈买卖了", "edit_current_strategy": True,
+                 "as_of_date": "2026-08-20"})
+        assert response.status_code == 201
+        payload = response.json()
+        for field in ("draft_id", "revision", "strategy", "strategy_hash", "status"):
+            assert payload[field] == created[field]
+        assert payload["assistant_message"] == "我们先聊聊，策略先不动。"
+        assert not payload.get("run_requested")
+        compiler.classify_dialogue_intent.assert_awaited_once()
+        compiler.edit_current_strategy.assert_not_awaited()
+        compiler.compile.assert_not_awaited()
+
+
+@pytest.mark.parametrize("explicit_edit", [False, True])
+def test_ready_parent_viewpoint_uses_support_without_editing(explicit_edit: bool) -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        created = client.post("/api/v1/strategy-drafts", json={
+            "utterance": "300059.SZ RSI低于30买入，RSI高于70卖出",
+            "as_of_date": "2026-08-20",
+        }).json()
+        assert created["status"] == "ready"
+        compiler = app.state.container.compiler
+        compiler.classify_dialogue_intent = AsyncMock(return_value=TurnIntent.VIEWPOINT)
+        compiler.edit_current_strategy = AsyncMock(side_effect=AssertionError("not an edit"))
+        compiler.compile = AsyncMock(side_effect=AssertionError("do not replace saved strategy"))
+        compiler.viewpoint_support_turn = AsyncMock(wraps=compiler.viewpoint_support_turn)
+
+        response = client.post("/api/v1/strategy-drafts", headers={
+            "X-Conversation-Parent-Draft-ID": created["draft_id"],
+        }, json={"utterance": "我对最近的新闻感到很失望", "edit_current_strategy": explicit_edit,
+                 "as_of_date": "2026-08-20"})
+
+        assert response.status_code == 201, response.text
+        payload = response.json()
+        for field in ("draft_id", "revision", "strategy", "strategy_hash", "status"):
+            assert payload[field] == created[field]
+        assert not payload.get("run_requested") and not payload.get("refresh_data")
+        # This local fixture has no researcher; it must not invent search success.
+        assert "联网暂未取得" in payload["assistant_message"]
+        compiler.viewpoint_support_turn.assert_awaited_once()
+        compiler.edit_current_strategy.assert_not_awaited()
+        compiler.compile.assert_not_awaited()
 
 
 class _UnexpectedFallback:
@@ -57,8 +150,10 @@ class _ExplodingCompiler:
 
 
 class _RecordingDialogueRouter:
-    def __init__(self, *, explode: bool = False) -> None:
-        self.explode = explode
+    def __init__(
+        self, *, natural_reply: str = "我知道你是在开玩笑，这句先不作为策略条件。",
+    ) -> None:
+        self.natural_reply = natural_reply
         self.requests: list[ClarificationDialogueRequest] = []
 
     async def assess(
@@ -66,12 +161,10 @@ class _RecordingDialogueRouter:
         request: ClarificationDialogueRequest,
     ) -> ClarificationDialogueAssessment | None:
         self.requests.append(request)
-        if self.explode:
-            raise AssertionError("valid supplement must not call dialogue provider")
         return ClarificationDialogueAssessment(
             reply_kind="off_topic",
             acknowledgement_id="light_redirect",
-            natural_reply="我知道你是在开玩笑，这句先不作为策略条件。",
+            natural_reply=self.natural_reply,
             recommended_option_ids=tuple(reversed([item.id for item in request.options])),
         )
 
@@ -363,7 +456,51 @@ def test_idea_guidance_is_typed_and_remains_non_executable() -> None:
     )
 
 
-def test_unbound_viewpoint_guidance_is_exposed_without_guessing_a_stock() -> None:
+def test_idea_route_empty_mapping_rationale_gets_safe_display_fallback() -> None:
+    # The provider is allowed to omit display-only prose. The mapper must still
+    # return a usable route instead of raising a Pydantic validation error.
+    idea = IdeaRoute(
+        understanding="保留当前策略方向。",
+        hypothesis="待继续核对。",
+        asset_mapping=IdeaAssetMapping(instrument_symbol=None, rationale=""),
+        proposals=(),
+    )
+    payload = _to_idea_route_payload(idea)
+    assert payload.asset_mapping.rationale == "保留当前标的和策略方向。"
+
+
+def test_unbound_price_plan_parameters_survive_public_candidate_mapping() -> None:
+    from datetime import date
+    from ashare_lab.domain.strategy import BacktestConfig, CatalogRef, execution_for_price_plan
+    from ashare_lab.domain.strategy.price_plans import ScheduledPlan, ScheduledParameters
+    from ashare_lab.ports.idea_routing import UnboundIdeaStrategy
+
+    plan = ScheduledPlan(parameters=ScheduledParameters(budget_cny=2000))
+    template = UnboundIdeaStrategy(
+        catalog=CatalogRef(catalog_id="cn_a.signals", release_version="2026.09.01"),
+        trading_plan=plan, execution=execution_for_price_plan(plan),
+        backtest=BacktestConfig(start=date(2025, 9, 11), end=date(2026, 9, 11), initial_cash_cny=1000000),
+    )
+    idea = IdeaRoute(
+        understanding="每周定投", hypothesis="待选股的研究方案",
+        asset_mapping=IdeaAssetMapping(instrument_symbol=None, relation="unbound"),
+        proposals=(IdeaProposal(
+            id="idea_0123456789ab", title="每周定投", hypothesis="定期买入",
+            entry_summary="每周买入2000元", exit_summary="暂不设置卖出",
+            suggested_utterance="每周买入2000元，回测近一年",
+            capability_ids=("strategy.scheduled",), assumptions=(), confidence=.75,
+            strategy_template=template,
+        ),),
+    )
+    response = _to_idea_route_payload(idea).model_dump(mode="json")
+    proposal = response["proposals"][0]
+    assert proposal["strategy"] is None
+    assert proposal["strategy_template"] == template.model_dump(mode="json")
+    assert proposal["instrument_symbol"] is None
+
+
+@pytest.mark.asyncio
+async def test_unbound_viewpoint_guidance_is_retained_until_stock_pairing() -> None:
     app = create_app()
     app.state.container = replace(app.state.container, compiler=_UnboundIdeaCompiler())
     with TestClient(app) as idea_client:
@@ -378,9 +515,20 @@ def test_unbound_viewpoint_guidance_is_exposed_without_guessing_a_stock() -> Non
 
     payload: dict[str, Any] = response.json()
     assert response.status_code == 201
-    assert payload["diagnostic_code"] == "idea_guidance_required"
+    assert payload["diagnostic_code"] == "stock_pairing_pending"
     assert payload["strategy"] is None
-    assert payload["idea_route"]["asset_mapping"] == {
+    assert payload["strategy_hash"] is None
+    assert payload["idea_route"] is None
+    assert payload["instrument_suggestion"] is None
+    assert not payload.get("run_requested")
+    StrategyDraftResponse.model_validate(payload)
+    # The public route hides unbound choices, without losing the planning state.
+    stored = await app.state.container.drafts.latest_for_answer(
+        draft_id=UUID(payload["draft_id"]), revision=payload["revision"],
+    )
+    assert stored.outcome.idea_route is not None
+    internal_route = _to_idea_route_payload(stored.outcome.idea_route).model_dump(mode="json")
+    assert internal_route["asset_mapping"] == {
         "instrument_symbol": None,
         "relation": "unbound",
         "rationale": "尚未绑定证券；选择方向后仍需补充具体 A 股。",
@@ -388,16 +536,17 @@ def test_unbound_viewpoint_guidance_is_exposed_without_guessing_a_stock() -> Non
     }
     assert all(
         proposal["instrument_symbol"] is None and proposal["capability_ids"] == []
-        for proposal in payload["idea_route"]["proposals"]
+        for proposal in internal_route["proposals"]
     )
-    StrategyDraftResponse.model_validate(payload)
     # Empty capabilities are only valid for directions awaiting a stock.
-    payload["idea_route"]["proposals"][0]["instrument_symbol"] = "300059.SZ"
+    internal_route["proposals"][0]["instrument_symbol"] = "300059.SZ"
     with pytest.raises(ValidationError, match="bound proposals require"):
-        StrategyDraftResponse.model_validate(payload)
+        StrategyDraftResponse.model_validate({
+            **payload, "diagnostic_code": "idea_guidance_required", "idea_route": internal_route,
+        })
 
 
-def test_bare_cross_api_preserves_instrument_and_clarification_grounding() -> None:
+def test_bare_cross_api_preserves_instrument_and_defaults_to_macd() -> None:
     generator = HybridCandidateGenerator(
         deterministic=RuleBasedCandidateGenerator(),
         bounded_fallback=_UnexpectedFallback(),
@@ -420,14 +569,12 @@ def test_bare_cross_api_preserves_instrument_and_clarification_grounding() -> No
 
     assert response.status_code == 201
     payload: dict[str, Any] = response.json()
-    assert payload["status"] == "needs_clarification"
-    assert payload["diagnostic_code"] == "ambiguous_cross_indicator"
-    assert payload["idea_route"]["asset_mapping"]["instrument_symbol"] == "300459.SZ"
-    assert payload["candidate_grounding"]["matched_spans"] == ["汤姆猫", "汤姆猫金叉"]
-    assert [(item["path"], item["text"]) for item in payload["candidate_grounding"]["spans"]] == [
-        ("/instrument/symbol", "汤姆猫"),
-        ("/clarification", "汤姆猫金叉"),
-    ]
+    assert payload["status"] == "ready"
+    assert payload["diagnostic_code"] is None and payload["idea_route"] is None
+    assert payload["strategy"]["instrument"]["symbol"] == "300459.SZ"
+    assert payload["strategy"]["entry"]["indicator_id"] == "technical.macd"
+    assert payload["strategy"]["exit"]["children"][0]["indicator_id"] == "technical.macd"
+    assert "汤姆猫" in payload["candidate_grounding"]["matched_spans"]
 
 
 def test_instrument_context_rejects_a_different_symbol_named_in_the_utterance(
@@ -514,7 +661,7 @@ def test_boolean_connectives_change_the_strategy_shape_and_hash(client: TestClie
     assert all_response.json()["strategy_hash"] != any_response.json()["strategy_hash"]
 
 
-def test_unsupported_position_aware_exit_and_is_explicit_in_http_contract(
+def test_simultaneous_profit_and_loss_exit_is_invalid_in_http_contract(
     client: TestClient,
 ) -> None:
     response = client.post(
@@ -528,10 +675,11 @@ def test_unsupported_position_aware_exit_and_is_explicit_in_http_contract(
     payload: dict[str, Any] = response.json()
 
     assert response.status_code == 201
-    assert payload["status"] == "unsupported"
+    assert payload["status"] == "invalid"
     assert payload["strategy"] is None
-    assert payload["diagnostic_code"] == "position_aware_exit_and_not_supported"
-    assert "同时满足才卖出" in payload["clarification"]
+    assert payload["strategy_hash"] is None
+    assert payload["diagnostic_code"] == "strategy_validation_failed:ValidationError"
+    assert not payload.get("run_requested")
 
 
 @pytest.mark.parametrize(
@@ -683,8 +831,9 @@ def test_http_draft_clarifies_named_indicators_without_triggers(
     assert payload["status"] == "needs_clarification"
     assert payload["diagnostic_code"] == "indicator_trigger_requires_clarification"
     assert payload["strategy"] is None
-    assert payload["clarification"] is not None
-    assert "不会替你补默认触发规则" in payload["clarification"]
+    assert payload["strategy_hash"] is None
+    assert "触发" in payload["clarification"]
+    assert not payload.get("run_requested")
 
 
 def test_compiler_statuses_are_preserved_as_domain_results(client: TestClient) -> None:
@@ -772,9 +921,17 @@ def test_compiler_statuses_are_preserved_as_domain_results(client: TestClient) -
 def test_idempotency_key_replays_same_create_without_new_draft(
     client: TestClient,
     ready_request: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     headers = {"Idempotency-Key": "draft-mobile-001"}
     first = client.post("/api/v1/strategy-drafts", json=ready_request, headers=headers)
+
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("completed replay must not invoke language processing")
+
+    monkeypatch.setattr(StrategyCompiler, "compile", unexpected)
+    monkeypatch.setattr(StrategyCompiler, "classify_initial_intent", unexpected)
+    monkeypatch.setattr(StrategyCompiler, "compose_ready_response", unexpected)
     second = client.post("/api/v1/strategy-drafts", json=ready_request, headers=headers)
 
     assert first.status_code == second.status_code == 201
@@ -849,7 +1006,7 @@ def test_clarification_answer_reuses_the_server_saved_sentence_and_creates_a_rev
 
     assert response.status_code == 200
     assert payload["reply_kind"] == "accepted"
-    assert "完整" in payload["assistant_message"]
+    assert payload["assistant_message"].strip()
     assert payload["suggestions"] == []
     assert payload["draft"]["draft_id"] == created["draft_id"]
     assert payload["draft"]["revision"] == 2
@@ -871,6 +1028,7 @@ def test_data_lookup_does_not_consume_pending_strategy_and_preserves_query_wordi
                 "as_of_date": "2026-08-20",
             },
         ).json()
+        identity_calls = list(provider.finance_calls)
         query = dialogue_client.post(
             (
                 f"/api/v1/strategy-drafts/{created['draft_id']}"
@@ -878,6 +1036,7 @@ def test_data_lookup_does_not_consume_pending_strategy_and_preserves_query_wordi
             ),
             json={"answer": "东方财富昨天的换手率是多少"},
         )
+        query_calls = list(provider.finance_calls)
         completed = dialogue_client.post(
             (
                 f"/api/v1/strategy-drafts/{created['draft_id']}"
@@ -893,11 +1052,18 @@ def test_data_lookup_does_not_consume_pending_strategy_and_preserves_query_wordi
     assert payload["data"]["kind"] == "finance"
     assert payload["data"]["finance"]["provider"] == "test_finance"
     assert payload["data"]["finance"]["provenance"]["response_sha256"].startswith("sha256:")
-    assert provider.finance_calls == [("东方财富昨天的换手率是多少", "昨天的换手率")]
+    assert identity_calls == [("查询A股300059.SZ的证券代码和股票简称", "证券代码和股票简称")]
+    assert query_calls == [*identity_calls, ("东方财富昨天的换手率是多少", "昨天的换手率")]
     assert provider.screen_calls == []
-    assert "东方财富换手率" in payload["assistant_message"]
-    assert "换手率 2.37%" in payload["assistant_message"]
-    assert "2026-09-02" not in payload["assistant_message"]
+    # This fixture has no model data reviewer; return the actual table without
+    # locally asserting that its date/metric satisfies the user's question.
+    assert "数据已返回" in payload["assistant_message"]
+    assert "2026-09-02" in payload["assistant_message"]
+    assert "换手率(%)=2.37" in payload["assistant_message"]
+    assert payload["data"]["finance"]["tables"][0]["rawTable"] == {
+        "headers": ["日期", "换手率(%)"], "data": [["2026-09-02", 2.37]],
+    }
+    assert "全部满足" not in payload["assistant_message"]
     assert "test_finance" not in payload["assistant_message"]
     assert "不作为历史回测数据" not in payload["assistant_message"]
     assert completed.status_code == 200
@@ -916,6 +1082,7 @@ def test_entity_omitted_data_lookup_reuses_only_the_verified_instrument_context(
                 "as_of_date": "2026-08-20",
             },
         ).json()
+        identity_calls = list(provider.finance_calls)
         response = dialogue_client.post(
             (
                 f"/api/v1/strategy-drafts/{created['draft_id']}"
@@ -925,7 +1092,8 @@ def test_entity_omitted_data_lookup_reuses_only_the_verified_instrument_context(
         )
 
     assert response.status_code == 200
-    assert provider.finance_calls == [("300059.SZ；昨天换手率多少", "昨天换手率")]
+    assert identity_calls == [("查询A股300059.SZ的证券代码和股票简称", "证券代码和股票简称")]
+    assert provider.finance_calls == [*identity_calls, ("300059.SZ；昨天换手率多少", "昨天换手率")]
     assert response.json()["draft"]["revision"] == created["revision"]
 
 
@@ -951,7 +1119,8 @@ def test_entity_omitted_data_lookup_without_verified_context_asks_for_stock() ->
     payload: dict[str, Any] = response.json()
     assert response.status_code == 200
     assert provider.finance_calls == []
-    assert "股票名称或 6 位代码" in payload["assistant_message"]
+    assert "哪只股票" in payload["assistant_message"]
+    assert payload.get("data") is None
     assert payload["draft"]["revision"] == created["revision"]
 
 
@@ -967,6 +1136,7 @@ def test_discovery_query_with_metric_uses_screen_then_finance_without_revising_d
                 "as_of_date": "2026-08-20",
             },
         ).json()
+        identity_calls = list(provider.finance_calls)
         response = dialogue_client.post(
             (
                 f"/api/v1/strategy-drafts/{created['draft_id']}"
@@ -978,21 +1148,23 @@ def test_discovery_query_with_metric_uses_screen_then_finance_without_revising_d
     payload: dict[str, Any] = response.json()
     assert response.status_code == 200
     assert payload["draft"]["revision"] == created["revision"]
+    assert payload["assistant_message"].strip()
+    assert payload["draft"]["diagnostic_code"] == created["diagnostic_code"]
     assert payload["data"]["kind"] == "screened_finance"
     assert payload["data"]["historical_backtest_eligible"] is False
     assert provider.screen_finance_calls == [
         ("上涨的股票", "A股", "近10年的归母净利润")
     ]
     assert provider.screen_calls == []
-    assert provider.finance_calls == []
+    assert provider.finance_calls == identity_calls
 
 
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
-        (MxSaasProviderAuthError("bad credential"), "不是你的问题"),
-        (MxSaasProviderUnavailableError("temporary"), "暂时连不上"),
-        (None, "没有查到匹配数据"),
+        (MxSaasProviderAuthError("bad credential"), "授权失败"),
+        (MxSaasProviderUnavailableError("temporary"), "未完成本次查询"),
+        (None, "没有找到符合条件的结果"),
     ],
 )
 def test_data_lookup_distinguishes_auth_transient_and_empty_results(
@@ -1022,10 +1194,14 @@ def test_data_lookup_distinguishes_auth_transient_and_empty_results(
     assert response.status_code == 200
     assert payload["draft"]["revision"] == created["revision"]
     assert expected in payload["assistant_message"]
+    for field in ("revision", "status", "diagnostic_code", "strategy", "idea_route"):
+        assert payload["draft"][field] == created[field]
+    if error is not None:
+        assert payload["query_diagnostic_code"]
     assert "data" not in payload if error is not None else payload["data"]["kind"] == "finance"
 
 
-def test_clarification_progress_to_missing_stock_asks_once_without_repeated_only_missing(
+def test_clarification_progress_to_missing_stock_retains_rules_when_screener_unconfigured(
     client: TestClient,
 ) -> None:
     created = client.post(
@@ -1049,7 +1225,13 @@ def test_clarification_progress_to_missing_stock_asks_once_without_repeated_only
     assert payload["reply_kind"] == "accepted"
     assert payload["draft"]["status"] == "needs_clarification"
     assert payload["draft"]["diagnostic_code"] == "instrument_required"
-    assert payload["assistant_message"].count("请告诉我想回测哪一只 A 股") == 1
+    assert "暂时无法帮你挑选股票" in payload["assistant_message"]
+    assert "方案已保留" in payload["assistant_message"]
+    assert payload["assistant_message"].count("输入想回测的股票") == 1
+    assert payload["draft"]["revision"] == created["revision"] + 1
+    assert payload["draft"]["strategy"] is None
+    assert payload["draft"]["instrument_suggestion"] is None
+    assert not payload["draft"].get("run_requested")
     assert "接下来只差：我只差" not in payload["assistant_message"]
 
 
@@ -1081,7 +1263,7 @@ def test_complete_strategy_answer_replaces_a_missing_instrument_turn(
     assert created["diagnostic_code"] == "instrument_required"
     assert response.status_code == 200
     assert payload["reply_kind"] == "accepted"
-    assert "新规则" in payload["assistant_message"]
+    assert payload["assistant_message"].strip()
     assert payload["draft"]["revision"] == 2
     assert payload["draft"]["status"] == "ready"
     assert payload["draft"]["strategy_hash"] == fresh["strategy_hash"]
@@ -1178,7 +1360,7 @@ def test_complete_strategy_answer_replaces_a_missing_exit_turn(client: TestClien
     assert created["diagnostic_code"] == "exit_rule_not_recognized"
     assert response.status_code == 200
     assert payload["reply_kind"] == "accepted"
-    assert "新规则" in payload["assistant_message"]
+    assert payload["assistant_message"].strip()
     assert payload["draft"]["status"] == "ready"
     assert payload["draft"]["strategy_hash"] == fresh["strategy_hash"]
     assert payload["draft"]["strategy"]["entry"]["indicator_id"] == "technical.rsi"
@@ -1187,10 +1369,45 @@ def test_complete_strategy_answer_replaces_a_missing_exit_turn(client: TestClien
 
 
 def test_named_partial_strategy_answer_moves_past_the_old_instrument_question() -> None:
+    class InterpretedCandidates:
+        """This HTTP test starts at the model-result boundary, not Chinese parsing."""
+
+        def __init__(self) -> None:
+            self.requests: list[CompileInput] = []
+
+        async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]:
+            if request.semantic_intent is None:
+                # No optional exit suggestions are approved by this fixture;
+                # the user's missing sell side must remain non-executable.
+                return ()
+            self.requests.append(request)
+            assert request.semantic_intent == "new_strategy"
+            if len(self.requests) == 1:
+                assert request.utterance == "MACD金叉买入，MACD死叉卖出"
+                return (CandidateAst(
+                    instrument_symbol=None, confidence=0.95,
+                    entry=(IndicatorIntent("technical.macd", "1.0.0", "golden_cross",
+                                           (("fast", 12), ("slow", 26), ("signal", 9))),),
+                    exit=(IndicatorIntent("technical.macd", "1.0.0", "death_cross",
+                                          (("fast", 12), ("slow", 26), ("signal", 9))),),
+                ),)
+            assert request.utterance == "同花顺放量1.5倍买入"
+            return (CandidateAst(
+                instrument_symbol=None, instrument_name="同花顺", confidence=0.95,
+                entry=(IndicatorIntent("volume.relative", "1.0.0", "gte_multiple",
+                                       (("baseline_period", 20), ("consecutive_days", 3)), 1.5),),
+                exit=(), unsupported_code="exit_rule_not_recognized",
+                grounding_evidence=(CandidateGroundingEvidence(
+                    path="/instrument/name", start=0, end=3, text="同花顺",
+                ),),
+            ),)
+
+    interpreted = InterpretedCandidates()
     generator = HybridCandidateGenerator(
         deterministic=RuleBasedCandidateGenerator(),
-        bounded_fallback=_UnexpectedFallback(),
+        bounded_fallback=interpreted,
         instrument_name_resolver=lambda name: {"同花顺": "300033.SZ"}[name],
+        model_first=True,
     )
     compiler = StrategyCompiler(
         generator=generator,
@@ -1198,6 +1415,8 @@ def test_named_partial_strategy_answer_moves_past_the_old_instrument_question() 
         catalog_id="cn_a.signals",
         release_version="2026.09.01",
     )
+    compiler.classify_initial_intent = AsyncMock(return_value=TurnIntent.NEW_STRATEGY)
+    compiler.classify_dialogue_intent = AsyncMock(return_value=TurnIntent.NEW_STRATEGY)
     app = create_app(compiler=compiler)
     with TestClient(app) as dialogue_client:
         created = dialogue_client.post(
@@ -1221,6 +1440,13 @@ def test_named_partial_strategy_answer_moves_past_the_old_instrument_question() 
     assert payload["draft"]["revision"] == 2
     assert payload["draft"]["status"] == "needs_clarification"
     assert payload["draft"]["diagnostic_code"] == "exit_rule_not_recognized"
+    assert payload["draft"]["strategy"] is None
+    assert not payload["draft"].get("run_requested")
+    assert len(interpreted.requests) == 2
+    assert payload["draft"]["candidate_grounding"]["matched_spans"] == ["同花顺"]
+    assert payload["draft"]["candidate_grounding"]["spans"] == [{
+        "path": "/instrument/symbol", "start": 0, "end": 3, "text": "同花顺",
+    }]
     assert "股票" not in payload["assistant_message"]
     assert "卖" in payload["assistant_message"]
 
@@ -1327,7 +1553,7 @@ def test_unsupported_recompile_does_not_replace_the_valid_clarification_revision
     assert payload["draft"]["status"] == "needs_clarification"
 
 
-def test_dialogue_provider_is_used_only_after_deterministic_recompile_keeps_same_diagnostic() -> (
+def test_off_topic_model_reply_is_not_appended_or_applied_as_a_strategy_change() -> (
     None
 ):
     router = _RecordingDialogueRouter()
@@ -1362,14 +1588,12 @@ def test_dialogue_provider_is_used_only_after_deterministic_recompile_keeps_same
     assert len(router.requests) == 1
     assert router.requests[0].answer == "你好，我是你爸"
     assert router.requests[0].prior_utterance == "东方财富MACD金叉买入"
-    assert unresolved["assistant_message"].startswith("我知道你是在开玩笑，这句先不作为策略条件")
-    assert "什么时候卖" in unresolved["assistant_message"]
-    assert unresolved["assistant_message"].count("只差") <= 1
-    assert "接下来只差：我只差" not in unresolved["assistant_message"]
-    assert "。。" not in unresolved["assistant_message"]
-    assert [item["id"] for item in unresolved["suggestions"]] == [
-        item.id for item in reversed(router.requests[0].options)
-    ]
+    assert unresolved["assistant_message"] == router.natural_reply
+    assert unresolved["suggestions"] == []
+    for field in ("draft_id", "revision", "status", "diagnostic_code", "strategy", "idea_route"):
+        assert unresolved["draft"][field] == created[field]
+    assert unresolved["draft"]["diagnostic_code"] == "exit_rule_not_recognized"
+    assert not unresolved["draft"].get("run_requested")
 
 
 def test_first_turn_conversation_uses_dialogue_provider_before_strategy_translation() -> None:
@@ -1393,12 +1617,20 @@ def test_first_turn_conversation_uses_dialogue_provider_before_strategy_translat
 
     payload: dict[str, Any] = response.json()
     assert response.status_code == 201
-    assert len(router.requests) == 1
+    # Best-effort identity enrichment follows routing. It must neither replace
+    # the conversation reply nor translate it into an executable strategy.
+    assert len(router.requests) == 2
+    assert not router.requests[0].identity_only
+    assert router.requests[1].identity_only
+    assert not router.requests[1].allow_data_query
     assert router.requests[0].answer == "你好，我是你爸"
     assert router.requests[0].prior_utterance == ""
     assert router.requests[0].options == ()
     assert payload["status"] == "needs_clarification"
-    assert payload["diagnostic_code"] == "strategy_rule_incomplete"
+    assert payload["diagnostic_code"] == "conversation_only"
+    assert payload["strategy"] is None
+    assert payload["strategy_hash"] is None
+    assert not payload.get("run_requested")
     assert payload["clarification"].startswith("我知道你是在开玩笑")
     assert payload["clarification"] == "我知道你是在开玩笑，这句先不作为策略条件。"
     assert router.requests[0].question == ""
@@ -1406,7 +1638,7 @@ def test_first_turn_conversation_uses_dialogue_provider_before_strategy_translat
 
 
 def test_first_person_strategy_sentence_is_not_intercepted_as_small_talk() -> None:
-    router = _RecordingDialogueRouter(explode=True)
+    router = _RecordingDialogueRouter(natural_reply="已按你的金叉、死叉规则准备好，可以核对。")
     compiler = StrategyCompiler(
         generator=RuleBasedCandidateGenerator(),
         catalog=load_catalog_directory(ROOT / "catalogs"),
@@ -1426,12 +1658,22 @@ def test_first_person_strategy_sentence_is_not_intercepted_as_small_talk() -> No
         )
 
     assert response.status_code == 201
-    assert response.json()["status"] == "ready"
-    assert router.requests == []
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert len(router.requests) == 1
+    request = router.requests[0]
+    assert request.response_only
+    assert request.diagnostic_code == "response_only"
+    assert request.answer == "我是想MACD金叉买入，死叉卖出"
+    assert payload["assistant_message"] == router.natural_reply
+    assert "golden_cross" in str(payload["strategy"]["entry"])
+    assert "death_cross" in str(payload["strategy"]["exit"])
+    assert not payload.get("run_requested")
 
 
-def test_valid_clarification_supplement_never_calls_dialogue_provider() -> None:
-    router = _RecordingDialogueRouter(explode=True)
+def test_valid_clarification_supplement_uses_response_model_without_changing_rules() -> None:
+    # Even inconsistent response prose cannot replace the validated AST or authorize a run.
+    router = _RecordingDialogueRouter(natural_reply="改成RSI策略，已经开始回测。")
     compiler = StrategyCompiler(
         generator=RuleBasedCandidateGenerator(),
         catalog=load_catalog_directory(ROOT / "catalogs"),
@@ -1458,8 +1700,22 @@ def test_valid_clarification_supplement_never_calls_dialogue_provider() -> None:
         )
 
     assert response.status_code == 200
-    assert response.json()["draft"]["status"] == "ready"
-    assert router.requests == []
+    payload = response.json()
+    draft = payload["draft"]
+    assert draft["status"] == "ready"
+    assert draft["revision"] == created["revision"] + 1
+    assert len(router.requests) == 1
+    request = router.requests[0]
+    assert request.response_only
+    assert request.answer == "MACD死叉卖出"
+    assert request.options == ()
+    assert "golden_cross" in str(draft["strategy"]["entry"])
+    assert "death_cross" in str(draft["strategy"]["exit"])
+    assert "RSI" not in str(draft["strategy"])
+    serialized = StrategySpec.model_validate(draft["strategy"]).model_dump_json()
+    assert serialized in request.context_summary
+    assert not draft.get("run_requested")
+    assert not payload.get("run_requested")
 
 
 def test_clarification_answer_rejects_a_stale_or_missing_revision(client: TestClient) -> None:
@@ -1548,15 +1804,37 @@ def test_revision_rejects_a_share_code_suffix_mismatch(
     _assert_error(response, status_code=422, code="strategy_revision_invalid")
 
 
-@pytest.mark.parametrize("answer", ["用它", "我自己选股票"])
-def test_missing_stock_offers_screened_candidate_and_respects_choice(answer: str) -> None:
+@pytest.mark.parametrize("answer", ["用它", "我自己选股票", None])
+def test_missing_stock_offers_screened_candidate_and_respects_choice(answer: str | None) -> None:
+    class StockAdvisor:
+        async def recommend_stocks(
+            self, query: str, result: LiveMarketDataResult,
+        ) -> tuple[StockRecommendation, ...]:
+            assert "MACD金叉买入，MACD死叉卖出" in query
+            assert result.rows == ({"证券代码": "300059", "证券简称": "东方财富"},)
+            return (StockRecommendation("300059.SZ", "东方财富", "筛选结果包含该 A 股。"),)
+
+        async def advise(self, request: Any) -> None:
+            raise AssertionError("stock choice must not regenerate the user's rules")
+
     provider = _RecordingLiveData()
-    with TestClient(create_app(live_market_data=provider)) as local:
+    with TestClient(create_app(
+        live_market_data=provider, strategy_advisor=StockAdvisor() if answer else None,
+    )) as local:
         created = local.post("/api/v1/strategy-drafts", json={
             "utterance": "MACD金叉买入，MACD死叉卖出", "as_of_date": "2026-09-04",
         }).json()
+        if answer is None:
+            # A screen row alone is not an audited recommendation.
+            assert len(provider.screen_calls) == 1
+            assert created["instrument_suggestion"] is None
+            assert created["strategy"] is None
+            assert not created.get("run_requested")
+            assert "股票筛选结果还未完成核实" in created["clarification"]
+            return
         assert created["instrument_suggestion"]["symbol"] == "300059.SZ"
         assert created["strategy"] is None
+        assert not created.get("run_requested")
         response = local.post(
             f"/api/v1/strategy-drafts/{created['draft_id']}"
             f"/revisions/{created['revision']}/clarification-answers",
@@ -1568,10 +1846,18 @@ def test_missing_stock_offers_screened_candidate_and_respects_choice(answer: str
         if answer == "用它":
             assert draft["status"] == "ready"
             assert draft["strategy"]["instrument"]["symbol"] == "300059.SZ"
+            assert draft["strategy"]["entry"]["indicator_id"] == "technical.macd"
+            assert draft["strategy"]["entry"]["trigger"] == "golden_cross"
+            assert draft["strategy"]["exit"]["op"] == "first_of"
+            assert len(draft["strategy"]["exit"]["children"]) == 1
+            exit_rule = draft["strategy"]["exit"]["children"][0]
+            assert exit_rule["indicator_id"] == "technical.macd"
+            assert exit_rule["trigger"] == "death_cross"
         else:
             assert draft["status"] == "needs_clarification"
             assert draft["instrument_suggestion"] is None
             assert draft["strategy"] is None
+        assert not draft.get("run_requested")
 
 
 def test_optimization_recovers_validated_strategy_after_draft_loss(

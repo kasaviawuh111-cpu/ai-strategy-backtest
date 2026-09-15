@@ -18,7 +18,9 @@ import {
   MINIMUM_INITIAL_CASH_CNY,
   STANDARD_INITIAL_CASH_CNY,
 } from '../config/backtest'
-import { strategySpecFromDraft } from './contract'
+import { strategySpecFromDraft, withEditedStrategySpec } from './contract'
+import { DEFAULT_STRATEGY_EXAMPLES } from '../default-strategy-examples'
+import type { StrategySpecIndicatorCondition } from './types'
 
 type MockRunRecord = {
   run: BacktestRun
@@ -872,9 +874,41 @@ const activitiesForCapital = (
     return { ...activity, quantity: Math.max(100, scaled) }
   })
 
+// Curated UI fixtures, not a second natural-language parser. Every homepage
+// example must preserve its complete semantics in preview mode.
+const homepageExampleDraft = (request: CompileRequest): StrategyDraft | null => {
+  const normalize = (text: string) => text.normalize('NFKC').replace(/[\s，,。.;；]/g, '').toUpperCase()
+  const index = DEFAULT_STRATEGY_EXAMPLES.findIndex(example => normalize(example.utterance) === normalize(request.utterance))
+  const example = DEFAULT_STRATEGY_EXAMPLES[index]
+  if (!example) return null
+  if (!example.instrument || example.category !== '历史案例') {
+    throw new ApiError({ type: 'about:blank', title: '请连接真实服务生成策略', status: 422,
+      detail: '当前界面演示不生成模糊策略候选，请在连接真实服务的页面使用此推荐问。', code: 'preview_example_unavailable' })
+  }
+  const base = makeDraft({ ...request, instrument: example.instrument }, 'rsi')
+  const indicator = (id: string, trigger: string, params: StrategySpecIndicatorCondition['params'], value: number | null = null): StrategySpecIndicatorCondition => ({
+    type: 'indicator_condition', indicator_id: id, definition_version: '1.0.0',
+    timeframe: '1d', evaluation_mode: 'bar_close_confirmed', params, trigger, value,
+  })
+  const kdj = (trigger: string) => indicator('technical.kdj', trigger, { period: 9, k_smoothing: 3, d_smoothing: 3 })
+  const spec = { ...base.strategySpec }
+  if (example.utterance === '平安银行，KDJ金叉且RSI低于50买入，KDJ死叉卖出。') {
+    spec.entry = { type: 'all', children: [kdj('golden_cross'), indicator('technical.rsi', 'below', { period: 14 }, 50)] }
+    spec.exit = { op: 'first_of', children: [kdj('death_cross')] }
+  } else if (example.utterance === '东方财富，RSI上穿30买入，下穿55卖出。') {
+    spec.entry = indicator('technical.rsi', 'crosses_above', { period: 14 }, 30)
+    spec.exit = { op: 'first_of', children: [indicator('technical.rsi', 'crosses_below', { period: 14 }, 55)] }
+  } else {
+    return null
+  }
+  return withEditedStrategySpec({ ...base, title: `${example.category} · 界面演示` }, spec)
+}
+
 export const mockApi = {
   async compile(request: CompileRequest): Promise<CompileResponse> {
     await wait()
+    const example = homepageExampleDraft(request)
+    if (example) return { status: 'compiled', draft: example }
     if (request.utterance.trim().toUpperCase() === 'MACD') {
       return {
         status: 'needs_clarification',
@@ -892,10 +926,10 @@ export const mockApi = {
     if (!kind) {
       throw new ApiError({
         type: 'about:blank',
-        title: '暂时无法识别这条规则',
+        title: '此界面演示未配置这条示例',
         status: 422,
-        detail: '没有识别到当前可执行的技术指标或公告事件。请写清何时买入、何时卖出和回测区间。',
-        code: 'no_supported_signal_recognized',
+        detail: '当前是界面演示模式，未调用模型或真实回测服务。这句话暂未配置演示样例，不代表规则不完整或正式服务不支持；请使用首页示例验收界面，真实解析需在连接服务的页面测试。',
+        code: 'preview_example_unavailable',
       })
     }
     return { status: 'compiled', draft: makeDraft(request, kind) }

@@ -18,6 +18,8 @@ export default defineConfig(({ mode }) => {
     define: {
       'import.meta.env.VITE_USE_MOCK': JSON.stringify('false'),
       'import.meta.env.VITE_API_BASE_URL': JSON.stringify(''),
+      // Live releases use the current calendar, never a replay fixture cutoff.
+      'import.meta.env.VITE_DATA_AS_OF_DATE': JSON.stringify(''),
     },
     plugins: [react()],
   }

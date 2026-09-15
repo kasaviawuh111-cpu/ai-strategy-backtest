@@ -372,6 +372,7 @@ class BacktestExecutionService:
                         ),
                         participation_rate=engine_config.participation_rate,
                         slippage_bps=engine_config.slippage_bps,
+                        slippage_cny=engine_config.slippage_cny,
                         limit_handling=engine_config.limit_handling,
                         allocation_ratio=engine_config.allocation_ratio,
                         capacity_mode=engine_config.capacity_mode,
@@ -702,6 +703,7 @@ def _engine_config(config: dict[str, Any]) -> DailyBacktestConfig:
     return DailyBacktestConfig(
         participation_rate=Decimal(_text(config, "participation_rate")),
         slippage_bps=Decimal(_text(config, "slippage_bps")),
+        slippage_cny=Decimal(str(config.get("slippage_cny", "0"))),
         limit_handling=LimitHandling(_text(config, "limit_handling")),
         allocation_ratio=Decimal(_text(config, "allocation_ratio")),
         retry_unfilled_exits=_boolean(config, "retry_unfilled_exits"),
@@ -831,6 +833,7 @@ def _validate_config_assumptions(
             "execution.v1" if _boolean(config, "run_robustness") else "disabled"
         ),
         "slippage_bps": _text(config, "slippage_bps"),
+        "slippage_cny": str(config.get("slippage_cny", "0")),
         "state_entry_validity_sessions": str(_integer(config, "state_entry_validity_sessions")),
     }
     if assumptions.resolution != "1d":
@@ -873,6 +876,7 @@ def _parse_manifest(value: dict[str, Any]) -> RunManifest:
             price_limit_mode=_text(assumptions, "price_limit_mode"),
             participation_rate=_text(assumptions, "participation_rate"),
             slippage_bps=_text(assumptions, "slippage_bps"),
+            slippage_cny=str(assumptions.get("slippage_cny", "0")),
             commission_rate=_text(assumptions, "commission_rate"),
             minimum_commission_cny=_text(assumptions, "minimum_commission_cny"),
             fee_schedule_version=_text(assumptions, "fee_schedule_version"),

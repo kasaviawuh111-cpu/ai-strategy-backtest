@@ -30,6 +30,62 @@ def _identity_response() -> httpx.Response:
     ]})
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unique", "later_ambiguity", "still_truncated"])
+@pytest.mark.parametrize("old_cache", [False, True])
+async def test_mixed_asset_pages_do_not_make_one_a_share_ambiguous_or_hide_later_stocks(
+    mode: str, old_cache: bool,
+) -> None:
+    from ashare_lab.adapters.market_data.eastmoney_instrument_search import (
+        SearchInstrument, _CacheEntry,
+    )
+
+    pages = []
+    fund = {"securityTypeName": "基金"}
+    stock = {"code": "300059", "shortName": "东方财富", "market": 0, "securityTypeName": "深A"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["pageIndex"])
+        pages.append(page)
+        rows = [stock] + [fund] * 99 if page == 1 else [fund] * 100
+        if page == 2 and mode == "later_ambiguity":
+            rows = [{"code": "601318", "shortName": "中国平安", "market": 1, "securityTypeName": "沪A"}]
+        elif page == 3 and mode == "unique":
+            rows = [fund] * 4
+        return httpx.Response(200, json={"code": "0", "pageIndex": page, "result": rows})
+
+    search = EastmoneyInstrumentSearch(transport=httpx.MockTransport(handler))
+    if old_cache:
+        search._cache["东财"] = _CacheEntry(
+            datetime.now(UTC), (SearchInstrument("300059.SZ", "东方财富", "SZ"),), True,
+        )
+    result = await search.search("东财", limit=3)
+    assert pages == list(range(1, {"unique": 3, "later_ambiguity": 2, "still_truncated": 5}[mode] + 1))
+    assert [item.symbol for item in result.items] == (
+        ["300059.SZ", "601318.SH"] if mode == "later_ambiguity" else ["300059.SZ"]
+    )
+    assert result.has_more is (mode == "still_truncated")
+    count = len(pages)
+    await search.search("东财", limit=3)
+    assert len(pages) == count  # Cached bounded results do not refetch on every keystroke.
+
+
+@pytest.mark.asyncio
+async def test_failed_later_identity_page_cannot_claim_a_unique_complete_result() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["pageIndex"] == "2":
+            raise httpx.ConnectError("page unavailable")
+        return httpx.Response(200, json={"code": "0", "result": [
+            {"code": "300059", "shortName": "东方财富", "market": 0, "securityTypeName": "深A"},
+            *[{"securityTypeName": "基金"}] * 99,
+        ]})
+
+    search = EastmoneyInstrumentSearch(transport=httpx.MockTransport(handler))
+    with pytest.raises(InstrumentSearchUnavailable):
+        await search.search("东财", limit=3)
+    assert "东财" not in search._cache
+
+
 def test_local_resolver_keeps_shared_initials_ambiguous_without_refresh() -> None:
     def no_network(_request: httpx.Request) -> httpx.Response:
         pytest.fail("local resolution must never issue or schedule a network request")
@@ -56,6 +112,29 @@ def test_local_resolver_keeps_shared_initials_ambiguous_without_refresh() -> Non
     assert search.resolve_local_name("unknown_alias") is None
     assert search.resolve_local_name("300059.SH") is None
     assert not search._refresh_tasks
+
+
+@pytest.mark.parametrize("query,days_old,total,ambiguous", [
+    ("中免", 0, 1, False),
+    ("中免", 8, 1, False),
+    ("中免", 0, 2, True),
+    ("中", 0, 1, True),
+    ("6018", 0, 1, True),
+])
+def test_unique_name_fragment_requires_complete_directory_not_recent_timestamp(
+    query: str, days_old: int, total: int, ambiguous: bool,
+) -> None:
+    search = EastmoneyInstrumentSearch()
+    search._directory = InstrumentDirectory(
+        items=(DirectoryInstrument("601888.SH", "中国中免", "SH", "zhongguozhongmian", "zgzm"),),
+        retrieved_at=datetime.now(UTC) - timedelta(days=days_old), reported_total=total,
+        source_url="https://search-codetable.eastmoney.com/codetable/search/web",
+    )
+    if ambiguous:
+        with pytest.raises(InstrumentNameAmbiguous):
+            search.resolve_local_name(query)
+    else:
+        assert search.resolve_local_name(query) == "601888.SH"
 
 
 def test_local_resolver_without_validated_directory_leaves_provider_fallback_available(

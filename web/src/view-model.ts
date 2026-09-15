@@ -1,4 +1,5 @@
 import type {
+  ApiProblem,
   BacktestActivity,
   BacktestSummary,
   CapabilitiesResponse,
@@ -9,6 +10,8 @@ import type {
   StrategySpecExitRule,
 } from './shared/api/types'
 import { DEFAULT_EXECUTION_SETTINGS } from './shared/config/backtest'
+import { conditionalStageCount, gridReviewPresentation, pricePlanSides, pricePlanTitle } from './shared/price-plan'
+import { plainStrategyTitle } from './shared/strategy-title'
 import type {
   BacktestMetrics,
   ChainContext,
@@ -65,6 +68,14 @@ const parameterText = (condition: StrategyCondition): string[] => {
     return [
       `高点回撤阈值 ${condition.thresholdPct}%`,
       '买入后后复权日线收盘高点为基准 · 收盘确认',
+    ]
+  }
+  if (condition.kind === 'minute_protection') {
+    return [
+      ...(condition.takeProfitPct == null ? [] : [`止盈阈值 ${condition.takeProfitPct}%`]),
+      ...(condition.stopLossPct == null ? [] : [`止损阈值 ${condition.stopLossPct}%`]),
+      ...(condition.trailingDrawdownPct == null ? [] : [`高点回撤 ${condition.trailingDrawdownPct}%`]),
+      '原始分钟高低价观察 · 下一分钟委托生效',
     ]
   }
   if (condition.kind === 'financial') {
@@ -152,6 +163,7 @@ const buildExitRule = (
     condition.type !== 'holding_period_exit'
     && condition.type !== 'position_return_exit'
     && condition.type !== 'trailing_drawdown_exit'
+    && condition.type !== 'minute_protection_exit'
   ) {
     return buildConditionRule(condition, leaves, cursor, path)
   }
@@ -161,11 +173,42 @@ const buildExitRule = (
     ? `持有 ${condition.sessions} 个交易日后退出`
     : condition.type === 'position_return_exit'
       ? `${condition.trigger === 'take_profit' ? '止盈' : '止损'} ${condition.threshold_pct}%`
-      : `持仓后高点回撤 ${condition.threshold_pct}% 退出`
+      : condition.type === 'trailing_drawdown_exit'
+        ? `持仓后高点回撤 ${condition.threshold_pct}% 退出`
+        : `分钟保护退出`
   return leafNode(leaf, path, fallbackLabel)
 }
 
-export const strategyRuleTrees = (draft: StrategyDraft) => {
+export const strategyRuleTrees = (draft: Pick<StrategyDraft, 'entry' | 'exit'> & {
+  strategySpec: Pick<StrategyDraft['strategySpec'], 'entry' | 'exit' | 'trading_plan'>
+}) => {
+  if (draft.strategySpec.trading_plan) {
+    const sides = pricePlanSides(draft.strategySpec.trading_plan, draft.strategySpec)
+    const group = (side: 'entry' | 'exit', labels: string[]): StrategyRuleNode => ({
+      kind: 'group', id: side, operator: 'all', label: '交易计划',
+      children: [labels.length ? labels.join('；') : side === 'entry'
+        ? '未设置买入规则；卖出前需有可卖持仓' : '未设置卖出规则'].map((label, i) =>
+        fallbackLeaf(label, '参数与执行口径可在策略设置中核对。', `${side}-${i}`)),
+    })
+    const entry = draft.strategySpec.entry
+      ? buildConditionRule(draft.strategySpec.entry, draft.entry.conditions, { value: 0 }, 'entry-signal')
+      : null
+    const exitCursor = { value: 0 }
+    const exit: StrategyRuleNode | null = draft.strategySpec.exit ? {
+      kind: 'group', id: 'exit-signal', operator: draft.strategySpec.exit.op,
+      label: operatorLabels[draft.strategySpec.exit.op],
+      children: draft.strategySpec.exit.children.map((condition, index) =>
+        buildExitRule(condition, draft.exit.conditions, exitCursor, `exit-signal-${index}`)),
+    } : null
+    const combine = (side: 'entry' | 'exit', labels: string[], signal: StrategyRuleNode | null): StrategyRuleNode => {
+      if (!signal) return group(side, labels)
+      if (!labels.length) return signal
+      return { kind: 'group', id: side, operator: 'any', label: '独立规则',
+        children: [group(side, labels), signal] }
+    }
+    return { entry: combine('entry', sides.entry, entry), exit: combine('exit', sides.exit, exit) }
+  }
+  if (!draft.strategySpec.entry || !draft.strategySpec.exit) throw new Error('买卖规则尚未完整保存')
   const entryCursor = { value: 0 }
   const exitCursor = { value: 0 }
   return {
@@ -184,6 +227,29 @@ export const strategyRuleTrees = (draft: StrategyDraft) => {
         buildExitRule(condition, draft.exit.conditions, exitCursor, `exit-${index}`)),
     } satisfies StrategyRuleNode,
   }
+}
+
+/** Match server source pointers only to the current draft; never guess a rule. */
+export const backtestPreparationFailureReason = (draft: StrategyDraft, problem: ApiProblem): string => {
+  const trees = strategyRuleTrees(draft)
+  const labels = new Map<string, string>()
+  const visit = (node: StrategyRuleNode, leg: string) => {
+    if (node.kind === 'leaf') labels.set(node.id, `${leg}条件「${node.label}」`)
+    else node.children.forEach((child) => visit(child, leg))
+  }
+  visit(trees.entry, '买入')
+  visit(trees.exit, '卖出')
+  const messages = (problem.details ?? []).filter((detail) => [
+    'backtest_condition_unavailable', 'backtest_data_missing', 'backtest_date_unavailable',
+  ].includes(detail.type ?? '')).map((detail) => {
+    const location = detail.location ?? ''
+    const id = /^\/(entry|exit)(\/(children\/\d+|child))*$/.test(location)
+      ? location.slice(1).replaceAll(/\/children\/(\d+)/g, '-$1').replaceAll('/child', '-not')
+      : undefined
+    const label = id ? labels.get(id) : undefined
+    return label ? `${label}：${detail.message}` : detail.message
+  })
+  return [...new Set([...messages, problem.detail])].join('\n')
 }
 
 export const summarizeRule = (rule: StrategyRuleNode): string => {
@@ -270,12 +336,16 @@ const collectSpecIds = (condition: StrategySpecCondition): CollectedSpecIds => {
 }
 
 const strategyIds = (draft: StrategyDraft) => {
+  if (!draft.strategySpec.entry || !draft.strategySpec.exit) return {
+    indicators: [], events: [], documentTextEvents: [],
+  }
   const entry = collectSpecIds(draft.strategySpec.entry)
   const exit = draft.strategySpec.exit.children.reduce((result, condition) => {
     if (
       condition.type === 'holding_period_exit'
       || condition.type === 'position_return_exit'
       || condition.type === 'trailing_drawdown_exit'
+      || condition.type === 'minute_protection_exit'
     ) return result
     const next = collectSpecIds(condition)
     result.indicators.push(...next.indicators)
@@ -328,7 +398,7 @@ export const assessStrategyCapabilities = (
     return {
       canRun: false,
       needsPreparation: false,
-      reason: '暂时读不到后端能力说明，无法确认这条策略能否安全运行。',
+      reason: '暂未取得回测准备状态，策略和参数已保留。',
       eventCodes: ids.events,
       events: ids.events.map((eventCode) => ({
         eventCode,
@@ -376,17 +446,37 @@ export const assessStrategyCapabilities = (
     ))
   const needsPreparation = ids.events.length > 0 && canPrepare && !snapshotBacked
   const canRun = declared && capabilities.backtest_execution_available && canPrepare
-  const unavailableIndicators = ids.indicators
-    .map((id) => indicators.get(id))
-    .filter((item) => item?.status === 'unavailable')
-  const reason = !declared
-    ? unavailableIndicators.length > 0
-      ? unavailableIndicators.map((item) => item!.description).join('\n')
-      : documentTextCatalogUnavailable
+  const conditionReasons = [
+    ...draft.entry.conditions.map((condition) => ({ condition, leg: '买入' })),
+    ...draft.exit.conditions.map((condition) => ({ condition, leg: '卖出' })),
+  ].flatMap(({ condition, leg }) => {
+    const label = `${leg}条件「${condition.label}」`
+    if (condition.kind === 'indicator') {
+      const item = indicators.get(condition.indicatorId)
+      if (item?.status === 'stable' || item?.status === 'experimental') return []
+      return [`${label}：${item?.status === 'unavailable' && item.description
+        ? item.description : '当前尚未提供该指标的回测支持。'}`]
+    }
+    if (condition.kind !== 'event') return []
+    const item = events.get(condition.eventCode)
+    const requirement = condition.documentText ? item?.document_text : item
+    if (!item || (condition.documentText && item.document_text?.catalog_available !== true)) {
+      return [`${label}：${condition.documentText
+        ? '当前不支持用公告完整正文计算这条条件。' : '当前尚未提供这类公告条件的回测支持。'}`]
+    }
+    const available = (requirement?.backtest_available === true && requirement.availability_scope === 'pinned_snapshot')
+      || (requirement?.preparation_available === true && requirement.availability_scope === 'request_preparation')
+    return available ? [] : [`${label}：${condition.documentText
+      ? '缺少可用于回测的完整正文历史数据，目前也无法自动补齐。'
+      : '缺少可用于回测的公告历史数据，目前也无法自动补齐。'}`]
+  })
+  const reason = !capabilities.backtest_execution_available
+    ? '系统暂未准备好执行这次回测，规则和参数已保留，目前不会提交运行。'
+    : conditionReasons.length > 0 ? conditionReasons.join('\n')
+    : !declared
+    ? documentTextCatalogUnavailable
       ? '规则已经由服务端生成，但能力接口没有声明该公告正文词频定义可用于回测。'
       : '规则已经由服务端生成，但能力接口尚未声明全部定义可用于提交回测。'
-    : !capabilities.backtest_execution_available
-      ? '后端当前没有可用的回测执行环境。规则可以查看，但不能提交运行。'
       : !canPrepare
         ? ids.documentTextEvents.length > 0
           ? '公告事件能被识别，但完整正文当前没有固定快照，后端也没有声明可按本次请求准备。'
@@ -500,17 +590,36 @@ export const describeBacktestWindow = (start: string, end: string) => {
  * 对照固定的系统默认成交设置；保存、换股和重新识别不会把已调整项标回默认。
  */
 export const summarizeExecution = (draft: StrategyDraft) => {
+  if (draft.strategySpec.trading_plan) return '按交易计划'
   const keys = Object.keys(DEFAULT_EXECUTION_SETTINGS) as Array<keyof typeof DEFAULT_EXECUTION_SETTINGS>
   const changed = keys.filter((key) => draft.execution[key] !== DEFAULT_EXECUTION_SETTINGS[key]).length
+    + (draft.execution.slippageCny ? 1 : 0)
   return changed === 0 ? '默认' : `已调整 ${changed} 项`
 }
 
 export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
   const rules = strategyRuleTrees(draft)
+  const hybrid = draft.execution.evaluationFrequency === 'daily_close_and_minute_bar'
   const hasEvent = [...draft.entry.conditions, ...draft.exit.conditions]
     .some((condition) => condition.kind === 'event')
+  const entry = draft.strategySpec.entry
+  let entryTriggerNote: string | undefined
+  if (!draft.strategySpec.trading_plan && entry && entry.type !== 'event_condition'
+    && draft.strategySpec.execution.position_policy === 'accumulate_on_new_entry_signal') {
+    const trigger = entry.type === 'indicator_condition' ? entry.trigger : ''
+    entryTriggerNote = trigger === 'golden_cross' ? '金叉触发，持续在上方不重复买入'
+      : trigger === 'death_cross' ? '死叉触发，持续在下方不重复买入'
+      : trigger.includes('crosses_above') ? '上穿触发，持续在上方不重复买入'
+      : trigger.includes('crosses_below') ? '下穿触发，持续在下方不重复买入'
+      : '新满足时买入，持续满足不重复买入'
+  }
   return {
     title: conciseStrategyTitle(draft),
+    pricePlanKind: draft.strategySpec.trading_plan?.kind,
+    hasSequentialPricePlanStages: draft.strategySpec.trading_plan
+      ? conditionalStageCount(draft.strategySpec.trading_plan) > 1 : false,
+    gridReview: draft.strategySpec.trading_plan?.kind === 'grid'
+      ? gridReviewPresentation(draft.strategySpec.trading_plan, draft.strategySpec) : undefined,
     rows: [
     { key: 'entry', label: '买入', value: summarizeCardRule(rules.entry), kind: 'buy' },
     { key: 'exit', label: '卖出', value: summarizeCardRule(rules.exit), kind: 'sell' },
@@ -522,9 +631,10 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
     ],
     strategyHash: draft.strategyHash ?? `${draft.id}@r${draft.revision}`,
     entryRule: rules.entry,
+    entryTriggerNote,
     exitRule: rules.exit,
-    confirmation: hasEvent ? '公告首次可得时间确认' : '日线收盘确认',
-    earliestExecution: hasEvent
+    confirmation: hybrid ? '日线信号收盘确认，分钟保护独立触发' : hasEvent ? '公告首次可得时间确认' : '日线收盘确认',
+    earliestExecution: hybrid ? '日线信号下一市场交易日开盘执行；分钟保护委托下一根生效' : hasEvent
       ? '按 09:15 截止规则选择可用的日线开盘价代理；时间非精确'
       : '下一可交易日使用开盘价代理尝试成交',
     conditionCount: draft.entry.conditions.length + draft.exit.conditions.length,
@@ -533,18 +643,8 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
 }
 
 export function conciseStrategyTitle(draft: StrategyDraft): string {
-  const text = draft.entry.conditions.map((item) => item.label).join(' ')
-  const rsi = /RSI|相对强弱/i.test(text)
-  const breakout = /新高/.test(text)
-  const volume = /成交量|放量|相对量/.test(text)
-  const amount = /成交额/.test(text)
-  const name = rsi ? (/上穿|向上|从下|由下/.test(text) ? 'RSI 回升触发' : /低于|小于/.test(text) ? 'RSI 低位信号' : 'RSI 阈值信号')
-    : breakout ? (volume ? '放量突破新高' : '价格突破新高')
-    : /布林|BOLL/i.test(text) ? '布林带价格信号'
-    : /均线|移动平均/.test(text) ? (/金叉|上穿/.test(text) ? '均线交叉跟随' : '均线趋势信号')
-    : draft.entry.conditions.find((item) => item.kind === 'indicator')?.label.split(/[，,（(]/)[0]?.slice(0, 18)
-      || '事件与条件策略'
-  return `${name}${amount ? ' · 成交额过滤' : ''}`
+  if (draft.strategySpec.trading_plan) return pricePlanTitle(draft.strategySpec.trading_plan)
+  return plainStrategyTitle(draft.entry.conditions, draft.exit.conditions)
 }
 
 export const toBacktestMetrics = (summary: BacktestSummary): BacktestMetrics => {
@@ -557,17 +657,19 @@ export const toBacktestMetrics = (summary: BacktestSummary): BacktestMetrics => 
     total,
     bench,
     excess: benchmarkComparisonStatus === 'comparable' && total != null && bench != null
-      ? total - bench
+      ? ((1 + total / 100) / (1 + bench / 100) - 1) * 100
       : null,
     benchmarkComparisonStatus,
     mdd: percent(summary.maxDrawdown),
     trips: summary.tradeCount,
+    tradeCountSemantics: summary.tradeCountSemantics,
     win: percent(summary.winRate),
     sharpe: summary.sharpeRatio,
     ann: percent(summary.annualizedReturn),
     initialCashCny: summary.initialCashCny,
     finalEquityCny: summary.finalEquityCny,
     interpretation: summary.interpretation,
+    executionNote: summary.executionNote,
     dataRange: summary.dataRange,
     warnings: summary.warnings,
     openShares: null,
@@ -596,7 +698,8 @@ const nearestSeriesIndex = (series: SeriesPoint[], occurredAt: string) => {
   let bestDistance = Number.POSITIVE_INFINITY
   series.forEach((point, index) => {
     const normalized = point.date.length === 7 ? `${point.date}-01` : point.date
-    const pointTime = Date.parse(`${normalized}T00:00:00+08:00`)
+    const pointTime = Date.parse(/[T ]\d{2}:\d{2}/.test(normalized)
+      ? normalized : `${normalized}T00:00:00+08:00`)
     const distance = Math.abs(pointTime - target)
     if (distance < bestDistance) {
       bestDistance = distance
@@ -619,7 +722,7 @@ export const toChartMarks = (
     if (!isMark) return []
     const related = relatedActivities(activities, activity)
     const signal = related.find((candidate) => candidate.kind === 'signal')
-    const order = [...related].reverse().find((candidate) => candidate.kind === 'order'
+    const order = [...related].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)).find((candidate) => candidate.kind === 'order'
       && (!activity.orderId || candidate.orderId === activity.orderId))
     const fill = related.find((candidate) => (candidate.kind === 'fill'
       || candidate.kind === 'partial_fill') && candidate.id === activity.id)
@@ -630,7 +733,7 @@ export const toChartMarks = (
       title: activity.title,
       occurredAt: activity.occurredAt,
       reason: activity.reason,
-      signalAt: signal?.occurredAt ?? null,
+      signalAt: signal?.occurredAt ?? activity.executionDetails?.signalAt ?? null,
       signalReason: signal?.reason ?? null,
       orderAt: order?.occurredAt ?? null,
       fillAt: fill?.occurredAt ?? null,
@@ -672,6 +775,7 @@ export const toTradeRows = (activities: BacktestActivity[]): TradeRow[] =>
     capacityReasonCode: activity.capacityReasonCode,
     timeQuality: activity.timeQuality,
     timeSemantics: activity.timeSemantics,
+    signalAt: activity.executionDetails?.signalAt ?? null,
     signalSemantics: activity.signalSemantics,
     signalValiditySessions: activity.signalValiditySessions,
     attemptNo: activity.attemptNo,
@@ -729,7 +833,8 @@ export const toOrderRows = (trades: TradeRow[]): OrderRow[] => {
   for (const group of groups.values()) {
     const ordered = [...group].sort((left, right) =>
       left.occurredAt.localeCompare(right.occurredAt))
-    const order = [...ordered].reverse().find((item) => item.kind === 'order')
+    // Working-state updates share the order ID; they are not new submissions.
+    const order = ordered.find((item) => item.kind === 'order')
     const chainId = order?.chainId ?? ordered.find((item) => item.chainId)?.chainId ?? null
     const decisionId = order?.decisionId
       ?? ordered.find((item) => item.decisionId)?.decisionId
@@ -761,15 +866,15 @@ export const toOrderRows = (trades: TradeRow[]): OrderRow[] => {
       chainId,
       side: anchor.side,
       status,
-      title: signal?.title ?? anchor.title,
-      signalAt: signal?.occurredAt ?? null,
+      title: order?.orderId?.startsWith('scheduled:') ? '定期计划触发' : signal?.title ?? anchor.title,
+      signalAt: signal?.occurredAt ?? order?.signalAt ?? anchor.signalAt ?? null,
       signalReason: signal?.reason ?? null,
       orderAt: order?.occurredAt ?? null,
       filledAt: filled ? anchor.occurredAt : null,
       orderPrice: order?.price ?? null,
       price: filled ? anchor.price ?? null : null,
       quantity: anchor.quantity ?? null,
-      outcomeNote: filled ? null : anchor.outcomeReason ?? anchor.reason ?? null,
+      outcomeNote: filled ? null : anchor.reason ?? anchor.outcomeReason ?? null,
       timeQuality: anchor.timeQuality,
       timeSemantics: anchor.timeSemantics,
       activities,
@@ -808,7 +913,9 @@ export const secondaryMetric = (metrics: BacktestMetrics) => {
       note: '把整段收益折算成每年',
     }
   }
-  return { value: `${metrics.trips} 回合`, label: '完整买卖', note: '买进又卖出算一次' }
+  return metrics.tradeCountSemantics === 'closed_position_cycles'
+    ? { value: `${metrics.trips} 次`, label: '全部卖出次数', note: '持仓全部卖完算一次，不是成交笔数' }
+    : { value: `${metrics.trips} 回合`, label: '完整买卖', note: '买进又卖出算一次' }
 }
 
 export const toRunEvidence = (summary: BacktestSummary): RunEvidence => ({
@@ -1032,7 +1139,15 @@ export const buildChain = (
   const normalized = [
     `买入：${summarizeRule(rules.entry)}`,
     `卖出：${summarizeRule(rules.exit)}`,
-    `确认：${draft.execution.evaluationFrequency === '1d_close'
+    `确认：${draft.execution.evaluationFrequency === '1m_bar'
+      ? '分钟行情；新触发委托下一根生效'
+      : draft.execution.evaluationFrequency === 'daily_close_and_minute_bar'
+        ? '日线信号收盘确认，分钟保护独立触发；保护委托下一根生效'
+      : draft.execution.evaluationFrequency === 'pre_session_schedule'
+        ? '开盘前已确定的交易计划'
+        : draft.execution.evaluationFrequency === 'server_selected'
+          ? '执行粒度由服务选择，以回测报告为准'
+          : draft.execution.evaluationFrequency === '1d_close'
       ? '日线收盘'
       : draft.execution.evaluationFrequency === 'financial_available_plus_1d_close'
         ? '财务数据首次可得后的日线收盘'
@@ -1052,6 +1167,10 @@ export const buildChain = (
         activity.price != null ? `价格 ¥${activity.price.toFixed(2)}` : null,
         activity.quantity != null ? `数量 ${activity.quantity.toLocaleString('zh-CN')} 股` : null,
         activity.notionalCny != null ? `模拟金额 ¥${activity.notionalCny.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}` : null,
+        typeof activity.executionDetails?.totalFeesCny === 'number'
+          ? `费用合计 ¥${activity.executionDetails.totalFeesCny.toFixed(2)}` : null,
+        typeof activity.executionDetails?.cashDeltaCny === 'number'
+          ? `现金变动 ¥${activity.executionDetails.cashDeltaCny.toFixed(2)}` : null,
         activity.capacityReasonCode ? `容量：${capacityImpact(activity, related)}` : null,
       ].filter(Boolean).join(' · '),
       ref: activityRef(activity),

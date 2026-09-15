@@ -5,11 +5,17 @@ import type {
   BacktestSignalEvidence,
   CapabilitiesResponse,
   StrategyDraft,
+  StrategyParameter,
+  StrategySpecCondition,
+  StrategySpecIndicatorCondition,
 } from './shared/api/types'
 import type { BacktestMetrics, RunEvidence } from './types'
 import { DEFAULT_EXECUTION_SETTINGS } from './shared/config/backtest'
+import { gridReviewPresentation } from './shared/price-plan'
 import {
   assessStrategyCapabilities,
+  conciseStrategyTitle,
+  backtestPreparationFailureReason,
   buildChain,
   secondaryMetric,
   strategyRuleTrees,
@@ -17,10 +23,66 @@ import {
   summarizeRule,
   toChartMarks,
   toOrderRows,
+  toBacktestMetrics,
   toSeries,
   toStrategySummary,
   toTradeRows,
 } from './view-model'
+
+it.each(['entry', 'exit'] as const)('网格组合独立%s不再混入该侧网格条件', (side) => {
+  const spec = { ...draft.strategySpec, trading_plan: { kind: 'grid' as const, parameters: {
+    anchor_mode: 'first_open', spacing_mode: 'cny', spacing: 1, order_shares: 100,
+    min_shares: 0, max_shares: 10000,
+  } }, entry: side === 'entry' ? draft.strategySpec.entry : null,
+  exit: side === 'exit' ? draft.strategySpec.exit : null }
+  const composed = { ...draft, strategySpec: spec }
+  const before = JSON.stringify(composed)
+  const trees = strategyRuleTrees(composed)
+  expect(JSON.stringify(trees[side])).toContain(side === 'entry' ? '年度报告发布' : 'MACD')
+  expect(JSON.stringify(trees[side])).not.toContain('跨一格')
+  expect(JSON.stringify(trees[side === 'entry' ? 'exit' : 'entry'])).toContain('跨一格')
+  const review = gridReviewPresentation(spec.trading_plan, spec)
+  expect(review[side === 'entry' ? 'buy' : 'sell']).toEqual([])
+  expect(JSON.stringify(composed)).toBe(before)
+})
+
+it('组合标题保留每种指标，不把或关系写成且，也不修改策略', () => {
+  for (const operator of ['all', 'any'] as const) {
+    const combined: StrategyDraft = { ...draft, entry: { operator, conditions: [
+      { id: 'kdj', kind: 'indicator', indicatorId: 'technical.kdj', label: 'KDJ 金叉', trigger: '金叉', timeframe: '1d', evaluationMode: 'bar_close_confirmed', parameters: [] },
+      { id: 'rsi', kind: 'indicator', indicatorId: 'technical.rsi', label: 'RSI 低于 50', trigger: '低于', timeframe: '1d', evaluationMode: 'bar_close_confirmed', parameters: [] },
+    ] } }
+    const before = JSON.stringify(combined)
+    expect(conciseStrategyTitle(combined)).toBe('KDJ 金叉且RSI 低于 50时买入，MACD 死叉卖出')
+    expect(JSON.stringify(combined)).toBe(before)
+  }
+})
+
+it('动态指标组合保留可读名称，不降级成其他条件', () => {
+  const combined: StrategyDraft = { ...draft, entry: { operator: 'all', conditions: [
+    { id: 'macd', kind: 'indicator', indicatorId: 'technical.macd', label: 'MACD 金叉', trigger: '金叉', timeframe: '1d', evaluationMode: 'bar_close_confirmed', parameters: [] },
+    { id: 'flow', kind: 'indicator', indicatorId: 'data.numeric', label: '主力资金净流入额高于0元', trigger: '高于', timeframe: '1d', evaluationMode: 'bar_close_confirmed', parameters: [] },
+  ] } }
+  expect(conciseStrategyTitle(combined)).toBe('MACD 金叉且主力资金净流入额高于0元时买入，MACD 死叉卖出')
+})
+
+it('把趋势回踩的买卖条件整合成一句交易意图', () => {
+  const indicator = (id: string, indicatorId: string, label: string, parameters: StrategyParameter[]) => ({ id, kind: 'indicator' as const, indicatorId, label, trigger: label,
+    timeframe: '1d' as const, evaluationMode: 'bar_close_confirmed' as const, parameters })
+  const combined: StrategyDraft = { ...draft,
+    entry: { operator: 'all', conditions: [
+      indicator('trend', 'technical.ma_cross', '20 日均线高于 60 日均线', []),
+      indicator('pullback', 'price.return_pct', '当日涨幅 < 0%', []),
+      indicator('support', 'technical.ma', '价格高于 20 日均线', [{ key: 'period', label: '周期', value: 20, min: 1, max: 500 }]),
+    ] },
+    exit: { operator: 'first_of', conditions: [
+      indicator('break', 'technical.ma', '价格下穿 20 日均线', [{ key: 'period', label: '周期', value: 20, min: 1, max: 500 }]),
+      { id: 'holding', kind: 'holding_period', label: '成交后第 10 个交易日尝试卖出', trigger: '持有期退出', sessions: 10,
+        anchor: 'first_entry_fill', countMode: 'subsequent_trading_sessions', execution: 'target_session_open_proxy' },
+    ] },
+  }
+  expect(conciseStrategyTitle(combined)).toBe('上涨趋势中回踩买入，跌破 20 日线或持有 10 个交易日卖出')
+})
 
 const draft: StrategyDraft = {
   id: 'draft-event',
@@ -77,6 +139,75 @@ const draft: StrategyDraft = {
     backtest: { start: '2024-01-01', end: '2024-12-31', initial_cash_cny: 1_000_000 },
   },
 }
+
+describe('entry trigger annotation', () => {
+  const indicator = (trigger: string): StrategySpecIndicatorCondition => ({
+    type: 'indicator_condition', indicator_id: 'technical.rsi', definition_version: '1.0.0',
+    params: { period: 14 }, timeframe: '1d', evaluation_mode: 'bar_close_confirmed',
+    trigger, value: 30,
+  })
+  const withEntry = (entry: StrategySpecCondition): StrategyDraft => ({
+    ...draft,
+    entry: { operator: 'all', conditions: [] },
+    strategySpec: {
+      ...draft.strategySpec, entry,
+      execution: { ...draft.strategySpec.execution, position_policy: 'accumulate_on_new_entry_signal' },
+    },
+  })
+
+  it.each([
+    ['crosses_above', '上穿'],
+    ['crosses_below', '下穿'],
+    ['golden_cross', '金叉'],
+    ['death_cross', '死叉'],
+  ])('classifies root %s from the final spec', (trigger, direction) => {
+    const entry = indicator(trigger)
+    if (trigger === 'golden_cross' || trigger === 'death_cross') {
+      entry.indicator_id = 'technical.macd'
+      entry.params = { fast: 12, slow: 26, signal: 9 }
+      entry.value = null
+    }
+    expect(toStrategySummary(withEntry(entry)).entryTriggerNote).toMatch(new RegExp(`^${direction}触发`))
+  })
+
+  it('describes states and composite roots as newly satisfied, never as a child crossing', () => {
+    const financial: StrategySpecCondition = {
+      type: 'financial_condition', metric_id: 'financial.roe', definition_version: '1.0.0',
+      report_type: 'annual', period_basis: 'full_year', statement_scope: 'consolidated',
+      revision_policy: 'as_known_at_signal', comparator: 'gt', value: 15, unit: 'PERCENT',
+    }
+    const entries: StrategySpecCondition[] = [
+      indicator('above'), indicator('below'), financial,
+      { type: 'all', children: [indicator('crosses_above'), financial] },
+      { type: 'any', children: [indicator('death_cross'), indicator('below')] },
+      { type: 'not', child: indicator('crosses_above') },
+    ]
+    for (const entry of entries) {
+      const candidate = withEntry(entry)
+      const before = JSON.stringify(candidate)
+      expect(toStrategySummary(candidate).entryTriggerNote, JSON.stringify(entry))
+        .toBe('新满足时买入，持续满足不重复买入')
+      expect(JSON.stringify(candidate)).toBe(before)
+    }
+  })
+
+  it('omits the annotation for legacy policies, root events and every trading-plan kind', () => {
+    for (const policy of ['single_position_no_pyramiding', 'bounded_inventory'] as const) {
+      const candidate = withEntry(indicator('crosses_above'))
+      candidate.strategySpec.execution.position_policy = policy
+      expect(toStrategySummary(candidate).entryTriggerNote, policy).toBeUndefined()
+    }
+    expect(toStrategySummary(withEntry(draft.strategySpec.entry!)).entryTriggerNote).toBeUndefined()
+    for (const kind of ['grid', 'conditional', 'scheduled'] as const) {
+      const candidate = withEntry(indicator('crosses_above'))
+      candidate.strategySpec.trading_plan = { kind, parameters: {
+        anchor_mode: 'first_open', spacing_mode: 'cny', spacing: 1, order_shares: 100,
+        min_shares: 0, max_shares: 10000, rules: [],
+      } }
+      expect(toStrategySummary(candidate).entryTriggerNote, kind).toBeUndefined()
+    }
+  })
+})
 
 const evidence: BacktestSignalEvidence = {
   type: 'event_observation',
@@ -138,6 +269,62 @@ const runEvidence: RunEvidence = {
 }
 
 describe('result view model', () => {
+  it('keeps hybrid timing distinct from daily-only and event confirmation in cards and traces', () => {
+    const hybrid = structuredClone(draft)
+    hybrid.execution.evaluationFrequency = 'daily_close_and_minute_bar'
+    const summary = toStrategySummary(hybrid)
+    expect(summary.confirmation).toContain('分钟保护独立触发')
+    expect(summary.earliestExecution).toContain('下一市场交易日开盘')
+    const chain = buildChain(hybrid, activities, toTradeRows(activities)[0]!)
+    expect(chain.some(node => node.detail.includes('确认：日线信号收盘确认，分钟保护独立触发'))).toBe(true)
+    expect(chain.some(node => node.detail.includes('确认：事件首次可得'))).toBe(false)
+  })
+
+  it('computes excess as compounded relative return rather than point subtraction', () => {
+    const result = toBacktestMetrics({
+      runId: 'run:relative', totalReturn: -0.1049, benchmarkReturn: -0.2694,
+      benchmarkComparisonStatus: 'comparable', annualizedReturn: null,
+      maxDrawdown: -0.1, sharpeRatio: null, winRate: null, tradeCount: 1,
+      initialCashCny: 1000000, finalEquityCny: 895100, interpretation: 'test', warnings: [],
+      dataRange: { start: '2025-01-01', end: '2025-12-31', sessions: 240 },
+    })
+    expect(result.excess).toBeCloseTo(22.5157, 4)
+  })
+
+  it('identifies the original failing sell rule after a position-aware exit', () => {
+    const mixed = structuredClone(draft)
+    mixed.exit.conditions.unshift({
+      id: 'holding', kind: 'holding_period', label: '持有 30 日', trigger: '到期卖出',
+      sessions: 30, anchor: 'first_entry_fill', countMode: 'subsequent_trading_sessions',
+      execution: 'target_session_open_proxy',
+    })
+    mixed.strategySpec.exit!.children.unshift({ type: 'holding_period_exit', sessions: 30,
+      anchor: 'first_entry_fill', count_mode: 'subsequent_trading_sessions', execution: 'target_session_open_proxy' })
+    const reason = backtestPreparationFailureReason(mixed, {
+      type: 'about:blank', title: '请求未完成', status: 422,
+      detail: '请延长区间；本次未启动回测。',
+      details: [{ location: '/exit/children/1', type: 'backtest_condition_unavailable',
+        message: '当前区间没有有效历史指标值。' }],
+    })
+    expect(reason).toBe('卖出条件「MACD 死叉」：当前区间没有有效历史指标值。\n请延长区间；本次未启动回测。')
+    expect(reason).not.toContain('持有 30 日')
+  })
+
+  it('preserves exact data gaps but never guesses a rule from an unknown source pointer', () => {
+    const reason = backtestPreparationFailureReason(draft, {
+      type: 'about:blank', title: '请求未完成', status: 503, detail: '请稍后重新读取。',
+      details: [
+        { location: 'market_history', type: 'backtest_data_missing', message: '取数区间缺少跌停价。' },
+        { location: '/exit/children/99', type: 'backtest_condition_unavailable', message: '未定位到有效历史指标值。' },
+        { location: '/entry', type: 'unknown_internal_type', message: '不要显示内部诊断。' },
+      ],
+    })
+    expect(reason).toBe('取数区间缺少跌停价。\n未定位到有效历史指标值。\n请稍后重新读取。')
+    expect(reason).not.toMatch(/MACD|年度报告|内部诊断/)
+    expect(backtestPreparationFailureReason(draft, {
+      type: 'about:blank', title: '网络错误', status: 0, detail: '连接暂时中断。',
+    })).toBe('连接暂时中断。')
+  })
   it('labels system-default execution settings without counting strategy-owned policies', () => {
     expect(summarizeExecution({ ...draft, execution: {
       ...draft.execution, ...DEFAULT_EXECUTION_SETTINGS,
@@ -160,6 +347,33 @@ describe('result view model', () => {
     expect(summarizeExecution({ ...draft, execution: {
       ...execution, slippageBps: DEFAULT_EXECUTION_SETTINGS.slippageBps,
     } })).toBe('默认')
+  })
+
+  it('counts fixed CNY slippage independently and excludes an explicit zero', () => {
+    const execution = { ...draft.execution, ...DEFAULT_EXECUTION_SETTINGS, slippageCny: 0.02 }
+    expect(summarizeExecution({ ...draft, execution })).toBe('已调整 1 项')
+    expect(summarizeExecution({ ...draft, execution: { ...execution, slippageBps: 0 } }))
+      .toBe('已调整 2 项')
+    expect(summarizeExecution({ ...draft, execution: { ...execution, slippageCny: 0 } }))
+      .toBe('默认')
+  })
+
+  it('preserves minute signal timestamps supplied inside execution details', () => {
+    const signalAt = '2026-09-09T09:31:00+08:00'
+    const events: BacktestActivity[] = [
+      { ...activities[1]!, id: 'minute-order', kind: 'order', orderId: 'minute-1',
+        occurredAt: signalAt, executionDetails: { signalAt } },
+      { ...activities[2]!, id: 'minute-fill', kind: 'fill', orderId: 'minute-1',
+        occurredAt: '2026-09-09T09:32:00+08:00', executionDetails: { signalAt } },
+    ]
+    const rows = toOrderRows(toTradeRows(events))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.signalAt).toBe(signalAt)
+    expect(rows[0]?.filledAt).toBe('2026-09-09T09:32:00+08:00')
+    const minuteDraft = { ...draft, execution: { ...draft.execution, evaluationFrequency: '1m_bar' as const } }
+    const text = JSON.stringify(buildChain(minuteDraft, events, toTradeRows(events)[1]!))
+    expect(text).toContain('分钟行情；新触发委托下一根生效')
+    expect(text).not.toContain('事件首次可得')
   })
 
   it('keeps retry orders in one signal chain as separate broker-style rows', () => {
@@ -224,6 +438,34 @@ describe('result view model', () => {
     expect(toOrderRows(toTradeRows([activities[0]!]))).toEqual([])
   })
 
+  it('keeps the original submission time when an order has later working updates', () => {
+    const events: BacktestActivity[] = [activities[0]!, activities[1]!,
+      { ...activities[1]!, id: 'working-update', occurredAt: '2024-03-15T14:59:00+08:00' },
+      { ...activities[2]!, id: 'partial-late', kind: 'partial_fill', occurredAt: '2024-03-15T14:58:00+08:00' },
+    ]
+    const rows = toOrderRows(toTradeRows(events))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.orderAt).toBe(activities[1]!.occurredAt)
+    expect(rows[0]?.filledAt).toBe('2024-03-15T14:58:00+08:00')
+  })
+
+  it('keeps scheduled fill quantity separate from the cancelled remainder', () => {
+    const scheduled: BacktestActivity[] = [
+      { ...activities[1]!, quantity: null },
+      { ...activities[2]!, id: 'scheduled:partial', kind: 'partial_fill',
+        status: 'partially_filled', quantity: 57 },
+      { ...activities[2]!, id: 'scheduled:cancel', kind: 'expired', status: 'cancelled',
+        occurredAt: '2024-03-15T15:00:00+08:00', quantity: 43, price: null,
+        outcomeReason: 'day_order_expired', executionDetails: {
+          requestedQuantity: 100, filledQuantity: 57, cancelledQuantity: 43,
+        } },
+    ]
+    const rows = toOrderRows(toTradeRows(scheduled))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ status: 'partial', quantity: 57 })
+    expect(rows[0]?.activityIds).toContain('scheduled:cancel')
+  })
+
   it.each([
     ['exit_retry_budget_exhausted', '已达到卖出尝试上限'],
     ['exit_retry_disabled', '成交设置关闭了卖出重试'],
@@ -284,7 +526,7 @@ describe('result view model', () => {
         entry: {
           type: 'all',
           children: [
-            draft.strategySpec.entry,
+            draft.strategySpec.entry!,
             {
               type: 'any',
               children: [
@@ -361,6 +603,9 @@ describe('result view model', () => {
       expect.objectContaining({ key: 'snapshot', state: 'unavailable' }),
     ]))
     expect(status.canRun).toBe(false)
+    expect(status.reason).toContain('买入条件「年度报告发布」')
+    expect(status.reason).toContain('公告历史数据')
+    expect(status.reason).not.toContain('卖出条件')
     expect(status.events[0]).toMatchObject({
       catalog: 'available', preparable: 'unavailable', pinnedSnapshot: 'unavailable',
     })
@@ -624,6 +869,15 @@ describe('result view model', () => {
     expect(mark?.evidence[0]?.provider).toBe('eastmoney')
     expect(mark?.priceLimitImpact).toBe('活动记录未标记涨跌停影响')
     expect(mark?.tPlusOneImpact).toBe('活动记录未标记次日可卖限制')
+  })
+
+  it('locates minute fills on their own timestamp instead of the first point', () => {
+    const series = toSeries(['09:30', '09:31', '09:32'].map(time => ({
+      date: `2026-09-11T${time}:00+08:00`, equity: 100, benchmark: 100, drawdown: 0,
+    })))
+    const marks = toChartMarks(series, [{ ...activities[2]!, kind: 'fill',
+      occurredAt: '2026-09-11T09:32:00+08:00' }])
+    expect(marks[0]?.index).toBe(2)
   })
 
   it('translates execution reason codes into readable price-limit impact', () => {

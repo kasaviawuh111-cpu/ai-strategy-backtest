@@ -41,6 +41,38 @@ from ashare_lab.ports.strategy_advice import (
 ROOT = Path(__file__).parents[4]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('payload,accepted', [
+    ({'industry': '水果种植业', 'query': 'A股主营水果种植，返回代码、主营业务及行业'}, True),
+    ({'industry': None, 'query': None}, False),
+    ({'industry': '水果种植业', 'query': None}, False),
+])
+async def test_industry_expansion_is_explicit_bounded_query(payload, accepted):
+    advisor, transport, _, _ = _data_pairing_fixture(payload)
+    result = await advisor.plan_industry_expansion('山竹相关股票')
+    assert (result is not None) is accepted
+    request = transport.requests[0]
+    assert request.response_schema_name == 'industry_expansion_plan'
+    assert 'JSON' in request.system_contract
+    assert 'JSON' in request.json_object_contract
+    assert '禁止扩展' in request.system_contract
+    assert '不生成股票名称或代码' in request.system_contract
+    if result:
+        assert '山竹' not in result.query
+
+
+@pytest.mark.asyncio
+async def test_industry_expansion_retries_invalid_format_before_success():
+    payload = {'industry': '影视制作', 'query': 'A股主营影视制作，返回代码、主营业务、行业'}
+    advisor, transport, _, _ = _data_pairing_fixture(payload)
+    transport.responses = ['not json', '{', payload]
+    result = await advisor.plan_industry_expansion('甄嬛传概念股交易策略')
+    assert result is not None and result.industry == '影视制作'
+    assert len(transport.requests) == 3
+    assert 'JSON format repair' in transport.requests[1].system_footer
+    assert transport.requests[0].user_payload == transport.requests[1].user_payload
+
+
 def _decode_prompt_tables(value: object) -> object:
     if isinstance(value, dict):
         table = cast(dict[str, object], value)
@@ -93,6 +125,39 @@ def _payload() -> dict[str, object]:
             },
         ],
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict,accepted", [("supported", True), ("unsupported", False)])
+async def test_independent_review_transport_keeps_generation_and_rejection_boundary(
+    verdict: str, accepted: bool,
+) -> None:
+    generator = _Transport([_payload()])
+    reviewer = _Transport([{
+        "facts": verdict, "state_and_authority": "supported",
+        "user_intent_and_tone": "supported",
+    }])
+    matrix = build_candidate_capability_matrix(
+        load_catalog_directory(ROOT / "catalogs"),
+        load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
+    )
+    advisor = VibeVerifiedFactStrategyAdvisor(
+        generator, capability_matrix=matrix,
+        provider_identity=CandidateProviderIdentityView(
+            provider="deepseek", model="deepseek-v4-pro",
+            prompt_version="candidate.prompt.v1", schema_version="candidate.schema.v1",
+        ),
+        model_semantic_review=True, review_transport=reviewer,
+    )
+    result = await advisor.advise(VerifiedFactStrategyAdviceRequest(
+        original_utterance="东方财富现价，再给我两种策略方向",
+        instrument_symbol="300059.SZ", as_of_date=date(2026, 9, 4),
+        verified_facts=("东方财富：最新价=19.15",),
+    ))
+    assert (result is not None) is accepted
+    assert len(generator.requests) == len(reviewer.requests) == 1
+    assert reviewer.requests[0].response_schema_name == "dialogue_reply_semantic_review"
+    assert reviewer.requests[0].utterance == generator.requests[0].utterance
 
 
 @pytest.mark.asyncio
@@ -216,7 +281,7 @@ async def test_incomplete_model_rules_fail_closed_without_blind_retry() -> None:
         (["002594.SZ", "002594"], ["002594.SZ"]),
         (["300308.SZ"], None),
         (["002594.SZ", "300059.SZ", "600519.SH", "000001.SZ"], None),
-        ([], None),
+        ([], []),
     ],
 )
 async def test_stock_ranking_is_model_selected_and_limited_to_verified_entities(
@@ -271,8 +336,9 @@ async def test_stock_ranking_is_model_selected_and_limited_to_verified_entities(
     else:
         assert result is not None
         assert [item.symbol for item in result] == expected
-        assert result[0].name == "比亚迪"
-    assert len(transport.requests) == 1
+        if result:
+            assert result[0].name == "比亚迪"
+    assert len(transport.requests) == (2 if expected is None else 1)
     request = transport.requests[0]
     assert request.response_schema_name == "verified_stock_recommendations"
     assert request.response_schema["additionalProperties"] is False
@@ -297,8 +363,6 @@ async def test_stock_ranking_is_model_selected_and_limited_to_verified_entities(
         "duplicate_proposal",
         "too_many",
         "extra_dsl",
-        "stock_in_introduction",
-        "two_questions",
         "transport",
         "empty",
     ],
@@ -345,8 +409,8 @@ async def test_stock_strategy_pairing_uses_one_model_call_and_only_existing_iden
             "reason": "有成交数据，可以比较超跌后的表现。",
         },
     ]
-    introduction = "借秦始皇的果断劲儿，试试这些进退明确的方向？"
-    payload: dict[str, object] = {"introduction": introduction, "pairs": pairs}
+    understanding = "借秦始皇的果断劲儿，试试这些进退明确的方向？"
+    payload: dict[str, object] = {"pairs": pairs, "data_request": None}
     if failure == "unknown_proposal":
         pairs[0]["proposal_id"] = "idea_unknown"
     elif failure == "unknown_stock":
@@ -359,10 +423,6 @@ async def test_stock_strategy_pairing_uses_one_model_call_and_only_existing_iden
         pairs.append(dict(pairs[0]))
     elif failure == "extra_dsl":
         payload["strategy"] = {"entry": "invented rule"}
-    elif failure == "stock_in_introduction":
-        payload["introduction"] = "可以先试试比亚迪。"
-    elif failure == "two_questions":
-        payload["introduction"] = "想试哪个？要马上开始吗？"
     elif failure == "empty":
         payload["pairs"] = []
     transport = _Transport(
@@ -406,7 +466,7 @@ async def test_stock_strategy_pairing_uses_one_model_call_and_only_existing_iden
         "我是秦始皇",
         screen,
         proposals,
-        understanding="以人物作为策略创作灵感。",
+        understanding=understanding,
     )
 
     if failure:
@@ -417,19 +477,22 @@ async def test_stock_strategy_pairing_uses_one_model_call_and_only_existing_iden
             )
     else:
         assert result is not None
-        assert result.introduction == introduction
+        assert result.introduction == understanding
         assert [(item.proposal_id, item.symbol, item.name) for item in result.pairs] == [
             (proposals[2].id, "002594.SZ", "比亚迪"),
             (proposals[0].id, "300059.SZ", "东方财富"),
             (proposals[1].id, "600519.SH", "贵州茅台"),
         ]
         assert "stock_strategy_pairing_ready pair_count=3 candidates=4 proposals=3" in caplog.text
-    assert introduction not in caplog.text
+    assert understanding not in caplog.text
     assert "我是秦始皇" not in caplog.text
     assert len(transport.requests) == 1
     request = transport.requests[0]
     assert request.response_schema_name == "verified_stock_strategy_pairing"
     assert request.response_schema["additionalProperties"] is False
+    properties = cast(dict[str, object], request.response_schema["properties"])
+    assert "introduction" in properties
+    assert request.response_schema["required"] == ["introduction", "pairs", "data_request"]
     assert request.user_payload is not None
     assert _decode_prompt_tables(request.user_payload["verifiedRows"]) == list(screen.rows)
     assert request.user_payload["existingProposals"] == [
@@ -483,9 +546,77 @@ def _data_pairing_fixture(
     return advisor, transport, screen, proposals
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered", [True, False])
+async def test_stock_reason_repair_reuses_evidence_and_does_not_relax_review(monkeypatch, recovered):
+    from unittest.mock import AsyncMock
+    from ashare_lab.ports.dialogue_progress import progress_sink
+    advisor, transport, screen, _ = _data_pairing_fixture({
+        "recommendations": [{"symbol": "300059.SZ", "reason": "受控测试业务依据。"}],
+    })
+    advisor._model_semantic_review = True
+    review = AsyncMock(side_effect=[False, recovered])
+    monkeypatch.setattr(
+        "ashare_lab.adapters.language.vibe_strategy_advice.review_display_semantics", review,
+    )
+    events = []
+    token = progress_sink.set(lambda stage, message: events.append((stage, message)))
+    try:
+        result = await advisor.recommend_stocks("比较相关业务", screen)
+    finally:
+        progress_sink.reset(token)
+    assert bool(result) is recovered
+    assert review.await_count == 2 and len(transport.requests) == 2
+    assert transport.requests[0].user_payload["verifiedRows"] == transport.requests[1].user_payload["verifiedRows"]
+    assert "沿用已有真实数据" in transport.requests[1].user_payload["repairInstruction"]
+    assert "不是对原查询所有字段的完整回复" in review.await_args.kwargs["response_scope"]
+    assert events == [("stock_recommendation_repair", "选股数据已返回，我正在修正推荐说明，不需要重新查数。")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovered", [True, False])
+async def test_pairing_reason_repair_reuses_data_and_requires_new_review(monkeypatch, recovered):
+    from unittest.mock import AsyncMock
+    advisor, transport, screen, proposals = _data_pairing_fixture({
+        "pairs": [{"proposal_id": "idea_fixture", "symbol": "300059.SZ", "reason": "受控数据说明"}],
+        "data_request": None,
+    })
+    advisor._model_semantic_review = True
+    review = AsyncMock(side_effect=[False, recovered])
+    monkeypatch.setattr("ashare_lab.adapters.language.vibe_strategy_advice.review_display_semantics", review)
+    result = await advisor.pair_stock_strategies("相关业务策略", screen, proposals)
+    assert bool(result) is recovered
+    assert review.await_count == 2 and len(transport.requests) == 2
+    assert transport.requests[0].user_payload["verifiedRows"] == transport.requests[1].user_payload["verifiedRows"]
+    assert transport.requests[1].user_payload["remainingDataRounds"] == 0
+    assert "修正说明" in transport.requests[1].user_payload["dataFeedback"][-1]
+
+
+@pytest.mark.asyncio
+async def test_large_stock_results_compare_all_batches_before_final_selection() -> None:
+    advisor, transport, screen, _ = _data_pairing_fixture({})
+    async def choose_last(request):
+        transport.requests.append(request)
+        return {"recommendations": [{
+            "symbol": request.user_payload["verifiedEntities"][-1]["symbol"],
+            "reason": "依据返回主营业务比较。",
+        }]}
+    transport.generate_json = choose_last
+    rows = tuple({"代码": f"{i:06d}", "名称": f"样本{i}", "主营业务": "研究字段" * 600}
+                 for i in range(1, 102))
+    result = await advisor.recommend_stocks("比较主营业务", replace(screen, rows=rows))
+    assert result is not None and result[0].symbol == "000101.SZ"
+    assert len(transport.requests) > 3
+    counts = [len(request.user_payload["verifiedEntities"]) for request in transport.requests]
+    assert counts[-1] == 2
+    seen = {entity["symbol"] for request in transport.requests
+            for entity in request.user_payload["verifiedEntities"]}
+    assert len(seen) == 101
+    assert len(rows) == 101
+
+
 def _data_request_payload() -> dict[str, object]:
     return {
-        "introduction": "再看一点成交信息，就可以继续比较。",
         "pairs": [],
         "data_request": {
             "symbols": ["300059.SZ"],
@@ -503,7 +634,7 @@ async def test_model_factory_compacts_large_tables_losslessly_below_transport_li
     source: str, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A synthetic wide provider table through real factories, not a public replay."""
-    answer: dict[str, object] = {"introduction": "先比较既有方案。", "pairs": [{
+    answer: dict[str, object] = {"pairs": [{
         "proposal_id": "idea_fixture", "symbol": "300059.SZ", "reason": "观察成交特征。",
     }], "data_request": None}
     if source == "recommendation_screen":
@@ -581,31 +712,44 @@ async def test_model_factory_compacts_large_tables_losslessly_below_transport_li
 
 
 @pytest.mark.asyncio
-async def test_pairing_introduction_keeps_valuation_preference_and_execution_boundary() -> None:
-    understanding = "保留低估值偏好，历史估值条件尚未纳入回测，先给可修改的日线反转方案。"
-    reply = "低估值偏好先保留，历史估值条件尚未纳入回测；下面先给你可修改的日线反转组合。"
+@pytest.mark.parametrize("utterance,understanding", [
+    ("估值过低的股票反转买",
+     "保留低估值偏好，历史估值条件尚未纳入回测，先给可修改的日线反转方案。"),
+    ("我讨厌特朗普",
+     "听起来你对他挺不满的。我先给你几种可修改的买卖规则，你可以按自己的想法调整。"),
+    ("我是秦始皇", "可以借这个角色的果断风格作灵感，下面给你几种进退条件明确的可修改方案。"),
+])
+async def test_pairing_generates_contextual_introduction_instead_of_fixed_upstream_reply(
+    utterance: str, understanding: str,
+) -> None:
+    legacy_reply = "有的，可以顺着这个想法看看相关行业。我把股票和交易思路放在下面，你可以先看看。"
     advisor, transport, screen, proposals = _data_pairing_fixture({
-        "introduction": reply, "pairs": [{
+        "introduction": legacy_reply, "pairs": [{
             "proposal_id": "idea_fixture", "symbol": "300059.SZ",
             "reason": "可以用来观察既有日线规则的研究样本。",
         }], "data_request": None,
     })
     result = await advisor.pair_stock_strategies(
-        "估值过低的股票反转买", screen, proposals, understanding,
+        utterance, screen, proposals, understanding,
     )
-    assert result is not None and result.introduction == reply
+    assert result is not None and result.introduction == legacy_reply
+    assert result.pairs[0].proposal_id == proposals[0].id
     assert len(transport.requests) == 1
     request = transport.requests[0]
     assert request.user_payload is not None
     assert request.user_payload["understanding"] == understanding
-    assert "不能把它缩成只有选股流程或选择问题" in request.system_contract
-    assert "introduction须保留这层边界" in request.system_contract
-    assert "列表首项不是用户已选" in request.system_contract
+    properties = cast(dict[str, object], request.response_schema["properties"])
+    assert "introduction" in properties
+    assert "本次用户原话" in request.system_contract
+    assert "自然亲切" in request.system_contract
+    assert "可能含尚未匹配股票时的旧提示" in request.system_contract
 
 
 @pytest.mark.asyncio
 async def test_pairing_returns_model_data_request_with_unmerged_supplemental_tables() -> None:
-    advisor, transport, screen, proposals = _data_pairing_fixture(_data_request_payload())
+    response = {**_data_request_payload(), "introduction": "丢弃的旧版开场"}
+    advisor, transport, screen, proposals = _data_pairing_fixture(response)
+    understanding = "可以借人物风格作灵感，已有买卖规则保留并可编辑。"
     previous = StockStrategyDataRequest(
         symbols=("300059.SZ",), fields=("最近交易日换手率",), message="fixture",
     )
@@ -616,11 +760,12 @@ async def test_pairing_returns_model_data_request_with_unmerged_supplemental_tab
         provenance=screen.provenance,
     )
     result = await advisor.pair_stock_strategies(
-        "我是秦始皇", screen, proposals, supplemental_results=(supplement,),
+        "我是秦始皇", screen, proposals, understanding, supplemental_results=(supplement,),
         previous_requests=(previous,), remaining_data_rounds=1,
         data_feedback=("换手率已返回，但成交额仍缺失。",),
     )
     assert result is not None and not result.pairs
+    assert result.introduction == understanding
     assert result.data_request == StockStrategyDataRequest(
         symbols=("300059.SZ",), fields=("最近交易日成交额",),
         message="我再补查一下成交额，继续比较这些方向。",

@@ -356,7 +356,7 @@ def test_execution_capacity_mode_defaults_to_point_in_time_volume(
 
     assert response.status_code == 202
     assert submitter.configs[-1].capacity_mode is CapacityMode.POINT_IN_TIME_VOLUME
-    assert submitter.configs[-1].edge_entry_validity_sessions == 3
+    assert submitter.configs[-1].edge_entry_validity_sessions == 1
     assert submitter.configs[-1].event_entry_validity_sessions == 1
     assert submitter.configs[-1].state_entry_validity_sessions == 1
 

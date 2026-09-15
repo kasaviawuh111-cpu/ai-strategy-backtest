@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future
@@ -20,8 +21,10 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+from ashare_lab.domain.strategy.models import JsonScalar
 from ashare_lab.ports.provider_indicator_data import (
     HistoricalIndicatorData,
+    ProviderConditionParameters,
     ProviderIndicatorPoint,
     ProviderIndicatorSeries,
     ProviderIndicatorValue,
@@ -55,15 +58,21 @@ class FileCachedHistoricalIndicatorData:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         persistent_instruments: frozenset[str] | None = None,
         contract_namespace: str | None = None,
+        disk_max_entries: int | None = None,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("provider indicator cache ttl must be positive")
+        if disk_max_entries is not None and (
+            type(disk_max_entries) is not int or disk_max_entries < 1
+        ):
+            raise ValueError("provider indicator disk cache size must be positive")
         self._delegate = delegate
         self._root = root.expanduser().resolve()
         self._ttl = ttl
         self._clock = clock
         self._persistent_instruments = persistent_instruments
         self._contract_namespace = contract_namespace
+        self._disk_max_entries = disk_max_entries
         self._gate = threading.RLock()
         self._inflight: dict[str, Future[ProviderIndicatorSeries]] = {}
 
@@ -77,8 +86,10 @@ class FileCachedHistoricalIndicatorData:
         start: date,
         end: date,
         force_refresh: bool = False,
+        condition_params: Mapping[str, JsonScalar] | None = None,
+        expected_session_dates: tuple[date, ...] | None = None,
     ) -> ProviderIndicatorSeries:
-        request = {
+        request: dict[str, object] = {
             "end": end.isoformat(),
             "indicatorId": indicator_id,
             "instrumentId": instrument_id,
@@ -88,6 +99,10 @@ class FileCachedHistoricalIndicatorData:
         }
         if self._contract_namespace is not None:
             request["contractNamespace"] = self._contract_namespace
+        if condition_params is not None:
+            request["conditionParameters"] = dict(condition_params)
+        if expected_session_dates is not None:
+            request["expectedSessionDates"] = [day.isoformat() for day in expected_session_dates]
         key = _sha256(request)
         persist = (
             self._persistent_instruments is None
@@ -115,18 +130,30 @@ class FileCachedHistoricalIndicatorData:
             return replace(series, cache_status="live")
 
         try:
-            series = await delegate.query_indicator_history(
+            parameter_kwargs: ProviderConditionParameters = {} if condition_params is None else {
+                "condition_params": condition_params,
+            }
+            query = cast(Any, delegate).query_indicator_history
+            series = await query(
                 instrument_id=instrument_id,
                 indicator_id=indicator_id,
                 provider_indicator_name=provider_indicator_name,
                 value_names=value_names,
                 start=start,
                 end=end,
+                **parameter_kwargs,
+                expected_session_dates=expected_session_dates,
             )
             series = replace(series, cache_status=None)
             with self._gate:
                 if persist and self._inflight.get(key) is future:
-                    self._write(key=key, request=request, series=series)
+                    try:
+                        self._write(key=key, request=request, series=series)
+                    except OSError:
+                        # Keep valid data usable when optional disk persistence fails.
+                        logging.getLogger(__name__).warning(
+                            "provider_indicator_cache_write_unavailable",
+                        )
         except BaseException as exc:
             future.set_exception(exc)
             # The owner observes the original exception directly.  Mark the
@@ -163,7 +190,7 @@ class FileCachedHistoricalIndicatorData:
             now = self._clock()
             if now.tzinfo is None or now.utcoffset() is None:
                 raise ValueError("provider indicator cache clock must be timezone-aware")
-            if now - stored_at > self._ttl:
+            if not timedelta(0) <= now - stored_at <= self._ttl:
                 return None
             raw_series_payload = payload.get("series")
             if not isinstance(raw_series_payload, dict):
@@ -193,6 +220,9 @@ class FileCachedHistoricalIndicatorData:
         }
         self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = self._root / f"{key}.json"
+        if (self._disk_max_entries is not None and not path.exists()
+                and sum(1 for _ in self._root.glob('*.json')) >= self._disk_max_entries):
+            return
         temporary = self._root / f".{key}.{uuid4().hex}.tmp"
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
@@ -219,6 +249,7 @@ def _series_payload(series: ProviderIndicatorSeries) -> dict[str, object]:
                         "sourceFieldName": value.source_field_name,
                         "sourceUnit": value.source_unit,
                         "sourceParameters": value.source_parameters,
+                        "unitNormalization": value.unit_normalization,
                         "unit": value.unit,
                         "value": str(value.value),
                     }
@@ -257,6 +288,7 @@ def _series_from_payload(payload: Mapping[str, Any]) -> ProviderIndicatorSeries:
                         source_field_name=value.get("sourceFieldName"),
                         source_unit=value.get("sourceUnit"),
                         source_parameters=value.get("sourceParameters"),
+                        unit_normalization=value.get("unitNormalization"),
                     )
                     for value in cast(list[dict[str, Any]], point["values"])
                 ),

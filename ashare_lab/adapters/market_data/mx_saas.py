@@ -17,16 +17,30 @@ import unicodedata
 from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
 
+from ashare_lab.domain.historical_units import (
+    HistoricalUnitError,
+    UnitFieldEvidence,
+    UnitTableEvidence,
+    canonical_unit,
+    numeric_display_scale,
+    numeric_unit_code,
+    percent_display_scale,
+    unit_definition,
+    unit_scale,
+    unit_text,
+)
 from ashare_lab.domain.market_data import AshareInstrumentCodeError, normalize_a_share_instrument
+from ashare_lab.domain.strategy.models import JsonScalar
+from ashare_lab.ports.dialogue_progress import emit_progress
 from ashare_lab.ports.instrument_resolution import InstrumentNameAmbiguous, InstrumentNameCandidate
 from ashare_lab.ports.live_market_data import (
     LiveFinanceDataResult,
@@ -41,7 +55,11 @@ from ashare_lab.ports.provider_indicator_data import (
     ProviderIndicatorValue,
 )
 
-from .eastmoney_instrument_search import EastmoneyInstrumentSearch
+from .eastmoney_instrument_search import (
+    EastmoneyInstrumentSearch,
+    InstrumentSearchInvalid,
+    InstrumentSearchUnavailable,
+)
 from .mx_indicator_contract import MxIndicatorFieldContract, build_indicator_contract
 
 _SCHEMA_VERSION = "eastmoney-mx.select-security.v1"
@@ -49,6 +67,8 @@ _FINANCE_SCHEMA_VERSION = "eastmoney-mx.search-data.v1"
 _INDICATOR_HISTORY_SCHEMA_VERSION = "eastmoney-mx.provider-indicator-history.v1"
 _DEFAULT_BASE_URL = "https://ai-saas.eastmoney.com"
 _DEFAULT_MAX_ATTEMPTS = 3
+_T = TypeVar("_T")
+_ATTEMPT_LIMIT: ContextVar[int | None] = ContextVar("mx_attempt_limit", default=None)
 # Give a transient provider/connection failure time to recover. Keep retries
 # bounded and at this HTTP layer only, reusing the original read request.
 _RETRY_BASE_BACKOFF_SECONDS = 1.0
@@ -128,6 +148,36 @@ class MxRetryProgress:
     max_retries: int
     recovered: bool = False
     data_incomplete: bool = False
+    failure_reason: str | None = None
+
+
+@contextmanager
+def limit_mx_attempts(limit: int) -> Generator[None]:
+    """A caller owning recovery must not multiply lower-layer HTTP retries."""
+    if limit < 1:
+        raise ValueError("attempt limit must be positive")
+    token = _ATTEMPT_LIMIT.set(min(limit, _ATTEMPT_LIMIT.get() or limit))
+    try:
+        yield
+    finally:
+        _ATTEMPT_LIMIT.reset(token)
+
+
+def mx_retry_message(event: MxRetryProgress) -> str:
+    name = "选股" if event.tool == "selectSecurity" else "查数"
+    if event.recovered:
+        return f"{name}已取得可用结果，正在继续处理。"
+    if event.failure_reason == "provider_sql_error":
+        cause = f"{name}服务暂时不稳定"
+    elif event.failure_reason == "data_no_results":
+        cause = f"这次{name}暂未返回匹配数据"
+    elif event.failure_reason == "no_verified_candidates":
+        cause = "返回的股票暂缺可核实的关联信息"
+    elif event.failure_reason == "provider_query_rejected":
+        cause = f"{name}服务暂未接受这次查询"
+    else:
+        cause = f"这次{name}连接暂时不稳定"
+    return f"{cause}，我正在第 {event.retry_number}/{event.max_retries} 次自动重试，请稍等。"
 
 
 _RETRY_OBSERVER: ContextVar[Callable[[MxRetryProgress], None] | None] = ContextVar(
@@ -146,6 +196,7 @@ def observe_mx_retries(callback: Callable[[MxRetryProgress], None]) -> Generator
 
 
 def _notify_retry_progress(event: MxRetryProgress) -> None:
+    emit_progress("data_recovered" if event.recovered else "data_retry", mx_retry_message(event))
     observer = _RETRY_OBSERVER.get()
     if observer is not None:
         observer(event)
@@ -172,6 +223,7 @@ class MxSaasProviderError(RuntimeError):
         transport_kind: str | None = None,
         attempts: int | None = None,
         call_id: str | None = None,
+        screen_conditions: Mapping[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.tool = tool
@@ -180,6 +232,7 @@ class MxSaasProviderError(RuntimeError):
         self.transport_kind = transport_kind
         self.attempts = attempts
         self.call_id = call_id
+        self.screen_conditions = screen_conditions
 
 
 class MxSaasProviderAuthError(MxSaasProviderError):
@@ -198,7 +251,11 @@ class MxSaasProviderDataError(MxSaasProviderError):
         # Classify only application-owned messages. Raw provider text and
         # dynamic field values never become a diagnostic code or log message.
         message = str(self)
+        if isinstance(self, MxSaasProviderNoDataError):
+            return "data_no_results"
         fixed = {
+            "selection returned no verified candidates": "no_verified_candidates",
+            "real-time market-data provider SQL execution failed": "provider_sql_error",
             "real-time market-data provider returned non-JSON": "protocol_invalid_json",
             "real-time market-data provider returned an invalid payload":
                 "protocol_invalid_payload",
@@ -219,6 +276,14 @@ class MxSaasProviderDataError(MxSaasProviderError):
             "historical indicator value is missing": "data_values_invalid",
             "historical indicator value is not numeric": "data_values_invalid",
             "historical indicator value is not finite": "data_values_invalid",
+            "historical indicator fields are all missing": "data_fields_missing",
+            "historical indicator unit is unconfirmed": "data_unit_unconfirmed",
+            "historical indicator unit is unconfirmed or incompatible":
+                "data_unit_unconfirmed",
+            "historical indicator response contains only non-daily observations":
+                "data_history_unavailable",
+            "historical indicator response contains rows outside the trusted session axis":
+                "data_dates_mismatch",
         }
         if message in fixed:
             return fixed[message]
@@ -231,6 +296,71 @@ class MxSaasProviderNoDataError(MxSaasProviderDataError):
     """The provider answered successfully but selected no usable entity."""
 
 
+class MxSaasProviderSqlError(MxSaasProviderDataError):
+    """The provider explicitly reported SQL execution failure, not missing history."""
+
+
+def mx_failure_reason(error: MxSaasProviderError) -> str:
+    if isinstance(error, MxSaasProviderAuthError):
+        return "authentication_failed"
+    if isinstance(error, MxSaasProviderDataError):
+        return error.data_reason
+    return error.reason or "provider_unavailable"
+
+
+def mx_failure_retryable(error: MxSaasProviderError) -> bool:
+    if isinstance(error, MxSaasProviderAuthError):
+        return False
+    return not (error.http_status is not None and 400 <= error.http_status < 500
+                and not _is_retryable_http_status(error.http_status))
+
+
+def mx_can_switch_channel(error: MxSaasProviderError) -> bool:
+    return mx_failure_retryable(error) and (
+        isinstance(error, MxSaasProviderNoDataError | MxSaasProviderUnavailableError)
+        or mx_failure_reason(error) in {
+            "provider_sql_error", "provider_query_rejected", "protocol_invalid_json",
+            "protocol_invalid_payload", "protocol_tables_missing", "protocol_table_invalid",
+        }
+    )
+
+
+class _MissingIndicatorFieldError(MxSaasProviderDataError):
+    """A requested column is absent, as opposed to returned with wrong metadata."""
+
+
+class _MismatchedIndicatorFieldError(MxSaasProviderDataError):
+    """One identified field failed its contract; a fresh exact query may recover it."""
+
+
+class _UnconfirmedIndicatorUnitError(MxSaasProviderDataError):
+    """The supplied unit cannot be bound; another source may provide evidence."""
+
+
+class _UnexpectedIndicatorSessionsError(MxSaasProviderDataError):
+    """A provider returned rows outside the authoritative market-session axis."""
+
+
+def _require_indicator_sessions(
+    points: tuple[ProviderIndicatorPoint, ...],
+    expected_session_dates: tuple[date, ...] | None,
+) -> None:
+    """Reject extra rows; missing provider values remain valid no-signal days."""
+
+    if expected_session_dates is None:
+        return
+    if (
+        not expected_session_dates
+        or expected_session_dates != tuple(sorted(set(expected_session_dates)))
+    ):
+        raise ValueError("expected indicator sessions must be unique and ascending")
+    expected = set(expected_session_dates)
+    if any(point.session_date not in expected for point in points):
+        raise _UnexpectedIndicatorSessionsError(
+            "historical indicator response contains rows outside the trusted session axis"
+        )
+
+
 @contextmanager
 def _data_error_context(*, tool: MxTool, call_id: str) -> Generator[None, None, None]:
     """Retain safe request correlation when validation fails after HTTP succeeds."""
@@ -238,7 +368,8 @@ def _data_error_context(*, tool: MxTool, call_id: str) -> Generator[None, None, 
         yield
     except MxSaasProviderDataError as exc:
         exc.tool = tool
-        exc.call_id = call_id if _MX_CALL_ID_RE.fullmatch(call_id) else "unknown"
+        if exc.call_id is None:
+            exc.call_id = call_id if _MX_CALL_ID_RE.fullmatch(call_id) else "unknown"
         raise
 
 
@@ -278,12 +409,49 @@ class MxSaasMarketDataClient:
             EastmoneyInstrumentSearch() if transport is None else None
         )
 
+    async def _retry_read(self, operation: Callable[[str], Awaitable[_T]], *, tool: MxTool) -> _T:
+        attempts = min(self._max_attempts, _ATTEMPT_LIMIT.get() or self._max_attempts)
+        call_id = f"{'screen' if tool == 'selectSecurity' else 'finance'}_{uuid4().hex}"
+        for attempt in range(1, attempts + 1):
+            try:
+                with limit_mx_attempts(1):
+                    result = await operation(call_id)
+            except MxSaasProviderError as exc:
+                exc.attempts = attempt
+                reason = mx_failure_reason(exc)
+                retry = attempt < attempts and mx_failure_retryable(exc)
+                _LOGGER.warning(
+                    "MX data read failed: tool=%s call_id=%s reason=%s attempt=%s/%s retry=%s",
+                    tool, exc.call_id or call_id, reason, attempt, attempts, retry,
+                )
+                if not retry:
+                    raise
+                _notify_retry_progress(MxRetryProgress(
+                    tool, call_id, attempt, attempts - 1,
+                    data_incomplete=isinstance(exc, MxSaasProviderDataError), failure_reason=reason,
+                ))
+                await self._sleep_before_retry(attempt)
+                continue
+            if attempt > 1:
+                _notify_retry_progress(MxRetryProgress(
+                    tool, call_id, attempt - 1, attempts - 1, recovered=True,
+                ))
+            return result
+        raise AssertionError("data retry loop exited unexpectedly")
+
     async def screen(self, *, query: str, asset_type: str) -> LiveMarketDataResult:
+        return await self._retry_read(
+            lambda call_id: self._screen_once(query=query, asset_type=asset_type, call_id=call_id),
+            tool="selectSecurity",
+        )
+
+    async def _screen_once(
+        self, *, query: str, asset_type: str, call_id: str,
+    ) -> LiveMarketDataResult:
         cleaned_query = query.strip()
         cleaned_asset_type = asset_type.strip()
         if not cleaned_query or not cleaned_asset_type:
             raise ValueError("query and asset_type must not be blank")
-        call_id = f"screen_{uuid4().hex}"
         payload = {
             "query": cleaned_query,
             "selectType": cleaned_asset_type,
@@ -313,7 +481,8 @@ class MxSaasMarketDataClient:
                     rows = partial_rows
             if not rows:
                 raise MxSaasProviderNoDataError(
-                    "real-time screening provider returned no matching data"
+                    "real-time screening provider returned no matching data",
+                    screen_conditions=_screen_provider_metadata(decoded, None),
                 )
         return LiveMarketDataResult(
             provider="eastmoney_mx_screener",
@@ -330,10 +499,20 @@ class MxSaasMarketDataClient:
         )
 
     async def query_finance(
+        self, *, query: str, indicators: str | None,
+    ) -> LiveFinanceDataResult:
+        return await self._retry_read(
+            lambda call_id: self._query_finance_once(
+                query=query, indicators=indicators, call_id=call_id,
+            ), tool="searchData",
+        )
+
+    async def _query_finance_once(
         self,
         *,
         query: str,
         indicators: str | None,
+        call_id: str,
     ) -> LiveFinanceDataResult:
         """Query current values through the provider's documented data skill.
 
@@ -347,7 +526,6 @@ class MxSaasMarketDataClient:
         if not cleaned_query:
             raise ValueError("query must not be blank")
         provider_query = _query_with_indicator_hint(cleaned_query, cleaned_indicators)
-        call_id = f"finance_{uuid4().hex}"
         payload = {
             "query": provider_query,
             "toolContext": {
@@ -381,6 +559,175 @@ class MxSaasMarketDataClient:
             ),
         )
 
+    async def query_finance_history(
+        self, *, query: str, indicators: str | None,
+        instrument_id: str, start: date, end: date,
+        expected_session_dates: tuple[date, ...] | None = None,
+    ) -> LiveFinanceDataResult:
+        """Project verified ROE/revenue-growth fields using disclosed reports.
+
+        Dispatch is based on the returned source field, not a guessed metric
+        alias. Other metrics keep the existing discovery/validation path.
+        """
+        original = await self.query_finance(query=query, indicators=indicators)
+        matches = [t for t in original.tables if any(
+            cast(Mapping[str, Any], f).get("returnSourceCode") in {"ROETTM", "ROEJQ", "YSTZ"}
+            for f in t.get("fieldSet", []) if isinstance(f, Mapping)
+        )]
+        if not matches:
+            return original
+        try:
+            from ashare_lab.adapters.financial_sources.eastmoney_operator import (
+                EastmoneyOperatorReadingSource,
+            )
+            from ashare_lab.adapters.market_data.report_asof import (
+                DisclosedReportValue,
+                project_disclosed_reports,
+                report_period,
+            )
+            # The old daily values are deliberately discarded. Its date axis
+            # still passes the caller's authoritative session validation.
+            if len(matches) != 1 or (_explicit_entity_codes(matches[0]) | _table_entity_code_values(matches[0])) != {instrument_id[:6]}:
+                raise ValueError("ambiguous report source security")
+            source_fields = [f for f in matches[0]["fieldSet"]
+                             if f.get("returnSourceCode") in {"ROETTM", "ROEJQ", "YSTZ"}]
+            if len(source_fields) != 1:
+                raise ValueError("ambiguous report metric definition")
+            weighted = source_fields[0]["returnSourceCode"] == "ROEJQ"
+            revenue_growth = source_fields[0]["returnSourceCode"] == "YSTZ"
+            if (weighted or revenue_growth) and expected_session_dates is None:
+                raise ValueError("quarterly metric requires authoritative trading sessions")
+            sessions = (list(expected_session_dates) if expected_session_dates is not None
+                        else sorted(date.fromisoformat(d) for d in matches[0]["rawTable"]["headName"]))
+            if any(d < start or d > end for d in sessions):
+                raise ValueError("source dates outside requested history")
+            lookback = start - timedelta(days=550)
+            report_metric = "净资产收益率ROE(加权,报告期)" if weighted else "净资产收益率ROE(TTM,报告期)"
+            report_source = "ROEJQ" if weighted else "ROE_TTM_RPT"
+            if revenue_growth:
+                report_metric, report_source = "营业收入同比增长率(报告期)", "YSTZ"
+            reports = await self.query_finance(
+                query=f"{instrument_id}，{lookback}至{end}，各报告期{report_metric}，列出全部报告期",
+                indicators=report_metric,
+            )
+            candidates = [(t, f) for t in reports.tables for f in t.get("fieldSet", [])
+                          if f.get("returnSourceCode") == report_source]
+            if len(candidates) != 1:
+                raise ValueError("report metric field missing or ambiguous")
+            table, field = candidates[0]
+            if (_explicit_entity_codes(table) | _table_entity_code_values(table)) != {instrument_id[:6]}:
+                raise ValueError("report metric security mismatch")
+            expected_unit = "108:%:%" if weighted else "10802:%:%"
+            if field.get("unitName") != "%" or field.get("unitDesc") != expected_unit:
+                raise ValueError("report metric unit contract changed")
+
+            def fetch_dates():
+                with EastmoneyOperatorReadingSource() as source:
+                    return source.fetch_main_financial_data(instrument_id, retrieved_at=datetime.now(UTC))
+
+            batch = await asyncio.to_thread(fetch_dates)
+            dates: dict[date, tuple[date, date | None]] = {}
+            for row in batch.rows:
+                if row.get("SECUCODE") != instrument_id:
+                    raise ValueError("announcement source security mismatch")
+                period = date.fromisoformat(str(row["REPORT_DATE"])[:10])
+                notice = date.fromisoformat(str(row["NOTICE_DATE"])[:10])
+                update = date.fromisoformat(str(row["UPDATE_DATE"])[:10]) if row.get("UPDATE_DATE") else None
+                if period in dates and dates[period] != (notice, update):
+                    raise ValueError("ambiguous announcement dates")
+                dates[period] = (notice, update)
+            code = field["returnCode"]
+            observations: list[DisclosedReportValue] = []
+            for label, raw in zip(table["rawTable"]["headName"], table["rawTable"][code], strict=True):
+                period = report_period(label)
+                notice, update = dates[period]
+                observations.append(DisclosedReportValue(period, notice, Decimal(str(raw)), update))
+            values, audit = project_disclosed_reports(observations, sessions)
+            normalized_field = {**field, "dateGranularity": "DAY", "unitDesc": "%",
+                                "originalSourceField": dict(field),
+                                "projectionPolicy": "announcement_date_next_trading_session.v1"}
+            transformed = {
+                "entityCodes": [instrument_id], "code": instrument_id,
+                "fieldSet": [normalized_field], "field": normalized_field,
+                "rawTable": {"headName": [d.isoformat() for d in sessions], code: [str(v) for v in values]},
+                "table": {"headName": [d.isoformat() for d in sessions], code: [f"{v}%" for v in values]},
+                "nameMap": {code: field["returnName"]}, "dateGranularity": "DAY",
+                "reportAsOfAudit": list(audit),
+                "sourceResponseHashes": [original.provenance.response_sha256,
+                                         reports.provenance.response_sha256, batch.canonical_rows_sha256],
+                "pitVerified": False,
+            }
+            digest = hashlib.sha256(json.dumps(transformed, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+            return replace(reports, query=query, indicators=indicators, tables=(transformed,),
+                           provenance=replace(reports.provenance, response_sha256="sha256:" + digest))
+        except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+            # Never fall back to the known forward-looking ROETTM values.
+            raise MxSaasProviderNoDataError("disclosed report ROE history could not be verified") from exc
+
+    async def query_current_finance(
+        self, *, query: str, indicators: str | None, asset_type: str = "A股",
+    ) -> LiveFinanceDataResult:
+        """Keep a current lookup's scope while recovering through the other Skill.
+
+        Display values and source metadata are preserved as a current table,
+        never promoted to numeric history or relabelled as a finance response.
+        """
+        try:
+            return await self.query_finance(query=query, indicators=indicators)
+        except MxSaasProviderError as original:
+            if not mx_can_switch_channel(original):
+                raise
+            recovery_id = f"current_lookup_{uuid4().hex}"
+            notify_mx_data_retry(recovery_id)
+            try:
+                result = await self.screen(
+                    query=_query_with_indicator_hint(query, indicators), asset_type=asset_type,
+                )
+            except MxSaasProviderAuthError:
+                raise
+            except MxSaasProviderError as alternate:
+                raise original from alternate
+            entities = screen_security_entities(result)
+            converted = LiveFinanceDataResult(
+                provider=result.provider, query=result.query, indicators=indicators,
+                provenance=result.provenance,
+                tables=({
+                    "title": "当前查询返回数据", "entityCodes": [item.code for item in entities],
+                    "columns": list(result.columns), "rows": [dict(row) for row in result.rows],
+                    "providerMetadata": dict(result.provider_metadata),
+                    "dataScope": "current_query_only",
+                },),
+            )
+            notify_mx_data_retry(recovery_id, recovered=True)
+            return converted
+
+    async def query_finance_via_screen(
+        self, *, query: str, indicators: str | None,
+    ) -> LiveFinanceDataResult:
+        """Reuse genuinely dated screener values through the existing table decoder.
+
+        The tool name is not a data capability boundary. Actual dates, units
+        and identities still come from the response, never from this query.
+        """
+        from .mx_screen_history_format import screen_history_tables
+
+        result = await self.screen(query=_query_with_indicator_hint(query, indicators),
+                                   asset_type="A股")
+        try:
+            tables = screen_history_tables(result)
+        except ValueError as exc:
+            raise MxSaasProviderDataError(
+                "screening provider returned invalid dated columns", tool="selectSecurity",
+            ) from exc
+        if not tables:
+            raise MxSaasProviderNoDataError(
+                "screening provider returned no dated numeric columns", tool="selectSecurity",
+            )
+        return LiveFinanceDataResult(
+            provider=result.provider, query=result.query, indicators=indicators,
+            tables=tables, provenance=result.provenance,
+        )
+
     async def query_indicator_history(
         self,
         *,
@@ -390,11 +737,13 @@ class MxSaasMarketDataClient:
         value_names: tuple[str, ...],
         start: date,
         end: date,
+        condition_params: Mapping[str, JsonScalar] | None = None,
+        expected_session_dates: tuple[date, ...] | None = None,
     ) -> ProviderIndicatorSeries:
         """Fetch provider-calculated daily indicator values for one security.
 
-        This method intentionally never requests OHLCV and never derives the
-        indicator locally.  A response is accepted only when ``rawTable``
+        This method requests the indicator's actual operands, without deriving
+        the indicator locally. A response is accepted only when ``rawTable``
         binds the exact security, requested dates and every requested value.
         """
 
@@ -423,7 +772,8 @@ class MxSaasMarketDataClient:
         )
         contract = (
             build_indicator_contract(
-                cleaned_indicator_id, cleaned_provider_name, cleaned_value_names
+                cleaned_indicator_id, cleaned_provider_name, cleaned_value_names,
+                condition_params=condition_params,
             )
             if self._strict_indicator_contracts
             else None
@@ -441,43 +791,227 @@ class MxSaasMarketDataClient:
                     if adjusted else "只返回逐日数据，不返回区间汇总。"
                 )
             )
-        call_id = f"indicator_history_{uuid4().hex}"
-        response = await self._post(
-            path="/proxy/b/mcp/tool/searchData",
-            payload={
-                "query": query,
-                "toolContext": {
-                    "callId": call_id,
-                    "userInfo": {"userId": "ashare-backtest-service"},
-                },
-            },
-        )
-        raw = response.content
-        with _data_error_context(tool="searchData", call_id=call_id):
-            decoded = _decode_provider_response(response)
-            _raise_for_provider_status(response, decoded, tool="searchData")
-            tables = _finance_tables(decoded)
-            points = _provider_indicator_points(
-                tables=tables,
-                instrument_id=canonical_instrument,
-                provider_indicator_name=cleaned_provider_name,
-                value_names=cleaned_value_names,
-                start=start,
-                end=end,
-                contract=contract,
+        provider = "eastmoney_mx_finance_data"
+        field_recovery_used = False
+
+        async def fetch_validated(
+            request_query: str,
+        ) -> tuple[tuple[ProviderIndicatorPoint, ...], str, str, str]:
+            """Fetch one complete response and validate it before accepting it.
+
+            A provider can occasionally return a successful HTTP response with
+            a transiently incomplete table/field set.  Keep the retry at this
+            boundary so no partial values are ever used and the original query
+            remains auditable.
+            """
+            nonlocal field_recovery_used
+            tables, response_hash, call_id = await self._fetch_indicator_tables(request_query)
+            effective_query = request_query
+            with _data_error_context(tool="searchData", call_id=call_id):
+                try:
+                    fetched_points = _provider_indicator_points(
+                        tables=tables, instrument_id=canonical_instrument,
+                        provider_indicator_name=cleaned_provider_name,
+                        value_names=cleaned_value_names, start=start, end=end, contract=contract,
+                    )
+                except (_MissingIndicatorFieldError, _MismatchedIndicatorFieldError):
+                    if contract is None:
+                        raise
+                    field_recovery_used = True
+                    fetched_points, response_hash, effective_query = (
+                        await self._complete_indicator_fields(
+                            tables=tables, instrument_id=canonical_instrument,
+                            provider_indicator_name=cleaned_provider_name,
+                            value_names=cleaned_value_names, start=start, end=end,
+                            contract=contract, query=request_query,
+                            response_hash=response_hash, call_id=call_id,
+                        )
+                    )
+                _require_indicator_sessions(fetched_points, expected_session_dates)
+            return fetched_points, response_hash, call_id, effective_query
+
+        original_query = query
+        try:
+            points, response_hash, _call_id, query = await fetch_validated(original_query)
+        except (MxSaasProviderNoDataError, MxSaasProviderUnavailableError,
+                _MissingIndicatorFieldError, _MismatchedIndicatorFieldError,
+                _UnexpectedIndicatorSessionsError, _UnconfirmedIndicatorUnitError) as original:
+            # One alternate Skill attempt, not a different strategy or period.
+            # Authentication and corrupt history do not enter this recovery.
+            emit_id = f"indicator_history_{uuid4().hex}"
+            notify_mx_data_retry(emit_id)
+            try:
+                alternate = await self.query_finance_via_screen(query=query, indicators=None)
+                points = _provider_indicator_points(
+                    tables=alternate.tables, instrument_id=canonical_instrument,
+                    provider_indicator_name=cleaned_provider_name,
+                    value_names=cleaned_value_names, start=start, end=end, contract=contract,
+                )
+                _require_indicator_sessions(points, expected_session_dates)
+            except MxSaasProviderAuthError:
+                raise
+            except (MxSaasProviderDataError, MxSaasProviderUnavailableError, ValueError) as exc:
+                # Preserve the actionable original cause for an explicitly
+                # available formula fallback; none of the bad values is adopted.
+                raise original from exc
+            provider = alternate.provider
+            response_hash = alternate.provenance.response_sha256
+            query = alternate.query
+            notify_mx_data_retry(emit_id, recovered=True)
+        except MxSaasProviderDataError as original:
+            # An otherwise successful provider response can be transiently
+            # malformed (for example, an ambiguous field set).  Retry the
+            # exact same query once with a fresh call id. A wrong-stock answer
+            # is discarded completely; retrying never weakens its identity gate.
+            retry_identity = original.data_reason == "data_security_mismatch"
+            if not retry_identity and (
+                field_recovery_used or original.data_reason != "data_validation_failed"
+            ):
+                raise
+            retry_id = f"indicator_history_{uuid4().hex}"
+            notify_mx_data_retry(retry_id)
+            _LOGGER.info(
+                "indicator_history_data_retry call_id=%s retry_event_id=%s reason=%s",
+                original.call_id if original.call_id is not None else "unknown",
+                retry_id,
+                original.data_reason,
+            )
+            try:
+                points, response_hash, _call_id, query = await fetch_validated(original_query)
+            except MxSaasProviderAuthError:
+                raise
+            except (MxSaasProviderError, ValueError) as retry:
+                original.attempts = 2
+                _LOGGER.info(
+                    "indicator_history_data_retry_failed call_id=%s retry_reason=%s",
+                    retry_id,
+                    getattr(retry, "data_reason", type(retry).__name__),
+                )
+                raise original from retry
+            notify_mx_data_retry(retry_id, recovered=True)
+            _LOGGER.info(
+                "indicator_history_data_retry_recovered call_id=%s retry_event_id=%s",
+                original.call_id if original.call_id is not None else "unknown",
+                retry_id,
             )
         return ProviderIndicatorSeries(
-            provider="eastmoney_mx_finance_data",
+            provider=provider,
             instrument_id=canonical_instrument,
             indicator_id=cleaned_indicator_id,
             requested_start=start,
             requested_end=end,
             points=points,
-            response_sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
+            response_sha256=response_hash,
             retrieved_at=self._validated_retrieved_at(),
             schema_version=_INDICATOR_HISTORY_SCHEMA_VERSION,
             query=query,
         )
+
+    async def _fetch_indicator_tables(
+        self, query: str,
+    ) -> tuple[tuple[Mapping[str, Any], ...], str, str]:
+        call_id = f"indicator_history_{uuid4().hex}"
+        response = await self._post(
+            path="/proxy/b/mcp/tool/searchData",
+            payload={"query": query, "toolContext": {
+                "callId": call_id, "userInfo": {"userId": "ashare-backtest-service"},
+            }},
+        )
+        with _data_error_context(tool="searchData", call_id=call_id):
+            decoded = _decode_provider_response(response)
+            _raise_for_provider_status(response, decoded, tool="searchData")
+            tables = _finance_tables(decoded)
+        return tables, "sha256:" + hashlib.sha256(response.content).hexdigest(), call_id
+
+    async def _complete_indicator_fields(
+        self, *, tables: tuple[Mapping[str, Any], ...], instrument_id: str,
+        provider_indicator_name: str, value_names: tuple[str, ...], start: date, end: date,
+        contract: MxIndicatorFieldContract, query: str, response_hash: str, call_id: str,
+    ) -> tuple[tuple[ProviderIndicatorPoint, ...], str, str]:
+        """Requery missing or mis-parameterised operands once; never accept a bad binding."""
+        series: dict[str, tuple[ProviderIndicatorPoint, ...]] = {}
+        sources: dict[str, dict[str, object]] = {
+            name: {"query": query, "responseSha256": response_hash, "callId": call_id}
+            for name in value_names
+        }
+        missing: list[str] = []
+        mismatched: list[str] = []
+        for name in value_names:
+            try:
+                series[name] = _provider_indicator_points(
+                    tables=tables, instrument_id=instrument_id,
+                    provider_indicator_name=provider_indicator_name, value_names=(name,),
+                    start=start, end=end, contract=contract,
+                )
+            except _MissingIndicatorFieldError:
+                missing.append(name)
+            except _MismatchedIndicatorFieldError:
+                missing.append(name)
+                mismatched.append(name)
+        if not series and not mismatched:
+            raise _MissingIndicatorFieldError("historical indicator fields are all missing")
+        expected_dates = (
+            tuple(point.session_date for point in next(iter(series.values()))) if series else None
+        )
+        notify_mx_data_retry(call_id)
+        for name in missing:
+            query_fields = contract.field_query(name, natural=True)
+            if query_fields.startswith("后复权"):
+                query_fields += "，价格复权选后复权，不要前复权或不复权"
+            field_clause = (
+                query_fields if query_fields.startswith("后复权") else "的" + query_fields
+            )
+            supplement_query = (
+                f"查询{instrument_id}在{start.isoformat()}至{end.isoformat()}每个交易日"
+                f"{field_clause}"
+            )
+            extra_tables, extra_hash, extra_call_id = await self._fetch_indicator_tables(
+                supplement_query,
+            )
+            with _data_error_context(tool="searchData", call_id=extra_call_id):
+                series[name] = _provider_indicator_points(
+                    tables=extra_tables, instrument_id=instrument_id,
+                    provider_indicator_name=provider_indicator_name, value_names=(name,),
+                    start=start, end=end, contract=contract,
+                )
+                dates = tuple(point.session_date for point in series[name])
+                if expected_dates is None:
+                    expected_dates = dates
+                elif dates != expected_dates:
+                    raise MxSaasProviderDataError(
+                        "historical indicator response has a different date window"
+                    )
+            sources[name] = {"query": supplement_query, "responseSha256": extra_hash,
+                             "callId": extra_call_id,
+                             "retryReason": "field_parameter_mismatch" if name in mismatched
+                             else "missing_field",
+                             "initialResponse": {
+                                 "query": query, "responseSha256": response_hash, "callId": call_id,
+                             }}
+        # Exact date equality is checked before joining: no position-based pairing,
+        # filling, or substitution of a current snapshot for missing history.
+        assert expected_dates is not None
+        by_date = {name: {point.session_date: point for point in points}
+                   for name, points in series.items()}
+        if any(tuple(points) != expected_dates for points in by_date.values()):
+            raise MxSaasProviderDataError(
+                "historical indicator response has a different date window"
+            )
+        combined = tuple(ProviderIndicatorPoint(
+            session_date=day,
+            observed_at=max(by_date[name][day].observed_at for name in value_names),
+            first_available_at=max(by_date[name][day].first_available_at for name in value_names),
+            values=tuple(replace(
+                by_date[name][day].values[0],
+                source_parameters=json.dumps({
+                    **sources[name],
+                    "fixedParamValue": by_date[name][day].values[0].source_parameters,
+                }, ensure_ascii=False, sort_keys=True),
+            ) for name in value_names),
+        ) for day in expected_dates)
+        manifest = json.dumps(sources, ensure_ascii=False, sort_keys=True)
+        notify_mx_data_retry(call_id, recovered=True)
+        return combined, "sha256:" + hashlib.sha256(manifest.encode()).hexdigest(), manifest
 
     async def query_condition_history(
         self,
@@ -509,6 +1043,7 @@ class MxSaasMarketDataClient:
             value_names=binding.value_names,
             start=start,
             end=end,
+            condition_params=condition.params,
         )
 
     async def screen_then_query_finance(
@@ -561,9 +1096,10 @@ class MxSaasMarketDataClient:
         ) -> LiveFinanceDataResult:
             query = _screened_finance_query(entity_batch, cleaned_indicators)
             async with semaphore:
-                result = await self.query_finance(
+                result = await self.query_current_finance(
                     query=query,
                     indicators=cleaned_indicators,
+                    asset_type=asset_type,
                 )
             _verify_finance_entity_coverage(result.tables, entity_batch)
             return result
@@ -579,11 +1115,11 @@ class MxSaasMarketDataClient:
         )
 
     def resolve_instrument_name(self, name: str) -> str:
-        """Resolve a unique local alias, then an exact provider name if absent.
+        """Resolve a unique local or provider-verified name/Chinese alias.
 
-        A partial match never binds a strategy, even if only one row is found.
-        Asking for containing names also gives an abbreviation its choices in
-        the first lookup; a unique exact match still takes precedence.
+        Only genuinely ambiguous or truncated results require a choice. Reuse
+        security autocomplete before finance screening: common aliases need
+        not be literal substrings of the official security name.
         """
 
         cleaned_name = "".join(name.split())
@@ -593,6 +1129,27 @@ class MxSaasMarketDataClient:
             local_symbol = self._instrument_search.resolve_local_name(cleaned_name)
             if local_symbol is not None:
                 return local_symbol
+            try:
+                identities = (asyncio.run(self._instrument_search.search(cleaned_name, limit=3))
+                              if len(cleaned_name) <= 32 else None)
+            except (InstrumentSearchInvalid, InstrumentSearchUnavailable):
+                # Finance screening remains the existing independent fallback.
+                identities = None
+            if identities is not None and identities.items:
+                exact = tuple(item for item in identities.items
+                              if item.name.casefold() == cleaned_name.casefold())
+                if len(exact) == 1 and not identities.has_more:
+                    return exact[0].symbol
+                if (len(identities.items) == 1 and not identities.has_more
+                        and len(cleaned_name) >= 2
+                        and all("\u4e00" <= char <= "\u9fff" for char in cleaned_name)):
+                    return identities.items[0].symbol
+                raise InstrumentNameAmbiguous(tuple(
+                    InstrumentNameCandidate(
+                        symbol=item.symbol, name=item.name, source=identities.source,
+                        retrieved_at=identities.retrieved_at,
+                    ) for item in identities.items
+                ))
         try:
             result = asyncio.run(
                 self.screen(
@@ -637,6 +1194,7 @@ class MxSaasMarketDataClient:
         return next(iter(matches))
 
     async def _post(self, *, path: str, payload: Mapping[str, Any]) -> httpx.Response:
+        max_attempts = min(self._max_attempts, _ATTEMPT_LIMIT.get() or self._max_attempts)
         tool: MxTool = (
             "selectSecurity" if path == "/proxy/b/mcp/tool/selectSecurity"
             else "searchData" if path == "/proxy/b/mcp/tool/searchData"
@@ -675,7 +1233,7 @@ class MxSaasMarketDataClient:
             follow_redirects=False,
             trust_env=False,
         ) as client:
-            for attempt in range(1, self._max_attempts + 1):
+            for attempt in range(1, max_attempts + 1):
                 try:
                     response = await client.post(
                         f"{self._base_url}{path}",
@@ -689,12 +1247,12 @@ class MxSaasMarketDataClient:
                     transport_kind = _safe_transport_kind(exc)
                     _LOGGER.warning(
                         "MX request interrupted: tool=%s call_id=%s attempt=%s/%s kind=%s retry=%s",
-                        tool, call_id, attempt, self._max_attempts, transport_kind,
-                        attempt < self._max_attempts,
+                        tool, call_id, attempt, max_attempts, transport_kind,
+                        attempt < max_attempts,
                     )
-                    if attempt < self._max_attempts:
+                    if attempt < max_attempts:
                         _notify_retry_progress(MxRetryProgress(
-                            tool, call_id, attempt, self._max_attempts - 1,
+                            tool, call_id, attempt, max_attempts - 1,
                         ))
                         await self._sleep_before_retry(attempt)
                         continue
@@ -712,12 +1270,12 @@ class MxSaasMarketDataClient:
                     _LOGGER.warning(
                         "MX request unavailable: tool=%s call_id=%s attempt=%s/%s "
                         "status=%s retry=%s",
-                        tool, call_id, attempt, self._max_attempts, response.status_code,
-                        attempt < self._max_attempts,
+                        tool, call_id, attempt, max_attempts, response.status_code,
+                        attempt < max_attempts,
                     )
-                    if attempt < self._max_attempts:
+                    if attempt < max_attempts:
                         _notify_retry_progress(MxRetryProgress(
-                            tool, call_id, attempt, self._max_attempts - 1,
+                            tool, call_id, attempt, max_attempts - 1,
                         ))
                         await self._sleep_before_retry(attempt)
                         continue
@@ -740,13 +1298,33 @@ class MxSaasMarketDataClient:
                         tool=tool, reason="http_error", http_status=response.status_code,
                         attempts=attempt, call_id=call_id,
                     )
+                # HTTP 200 can still contain a failed SQL/query or a broken
+                # protocol. Cover direct historical calls as well as wrappers.
+                try:
+                    with _data_error_context(tool=tool, call_id=call_id):
+                        decoded = _decode_provider_response(response)
+                        _raise_for_provider_status(response, decoded, tool=tool)
+                except MxSaasProviderDataError as exc:
+                    exc.attempts = attempt
+                    _LOGGER.warning(
+                        "MX business query failed: tool=%s call_id=%s reason=%s attempt=%s/%s",
+                        tool, call_id, exc.data_reason, attempt, max_attempts,
+                    )
+                    if attempt == max_attempts:
+                        raise
+                    _notify_retry_progress(MxRetryProgress(
+                        tool, call_id, attempt, max_attempts - 1,
+                        data_incomplete=True, failure_reason=exc.data_reason,
+                    ))
+                    await self._sleep_before_retry(attempt)
+                    continue
                 if attempt > 1:
                     _notify_retry_progress(MxRetryProgress(
-                        tool, call_id, attempt - 1, self._max_attempts - 1, recovered=True,
+                        tool, call_id, attempt - 1, max_attempts - 1, recovered=True,
                     ))
                     _LOGGER.info(
                         "MX request recovered: tool=%s call_id=%s attempt=%s/%s",
-                        tool, call_id, attempt, self._max_attempts,
+                        tool, call_id, attempt, max_attempts,
                     )
                 return response
         raise AssertionError("network retry loop exited unexpectedly")
@@ -831,7 +1409,49 @@ def _screen_provider_metadata(
                 ))
                 for column in cast(list[Any], raw_columns) if isinstance(column, Mapping)
             ]
+        event_tables = _screen_event_tables(result)
+        if event_tables:
+            metadata["event_tables"] = event_tables
     return metadata
+
+
+def _screen_event_tables(result: Mapping[str, Any]) -> list[dict[str, object]]:
+    """Preserve declared MTM detail tables separately from abbreviated display cells."""
+    columns = result.get("columns")
+    rows = result.get("dataList")
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return []
+    declared = {
+        column.get("field") or column.get("name") or column.get("key")
+        for column in columns if isinstance(column, Mapping)
+    }
+    details: list[dict[str, object]] = []
+    for row_index, row in enumerate(rows):
+        if not isinstance(row, Mapping):
+            continue
+        for key, value in row.items():
+            if not isinstance(key, str) or not key.startswith("MTM_EXTRA|"):
+                continue
+            source_key = key.removeprefix("MTM_EXTRA|")
+            if source_key not in declared:
+                continue
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except (ValueError, TypeError):
+                    continue
+            if not isinstance(value, list):
+                continue
+            for table in value:
+                if not isinstance(table, Mapping) or not isinstance(table.get("data"), list):
+                    continue
+                details.append({
+                    "row_index": row_index, "source_key": source_key,
+                    **{field: table[field]
+                       for field in ("title", "time", "full", "colHeads", "data")
+                       if field in table},
+                })
+    return details
 
 
 def _screen_condition_metadata(source: Mapping[str, Any]) -> dict[str, object]:
@@ -884,6 +1504,13 @@ def _raise_for_provider_status(
         )
     if response.is_error:
         raise MxSaasProviderUnavailableError("real-time market-data provider returned an error")
+    message = _provider_message(decoded)
+    # Attribute SQL only when the provider explicitly reports its failure;
+    # never echo raw SQL, error text, credentials or user data into the UI.
+    if message and re.search(r"\bsql\b|sql语句|SQL执行", message, re.I) and re.search(
+        r"error|fail|exception|错误|失败|异常|无法执行", message, re.I,
+    ):
+        raise MxSaasProviderSqlError("real-time market-data provider SQL execution failed")
     if code not in _SUCCESS_STATUS_VALUES or status not in _SUCCESS_STATUS_VALUES:
         raise MxSaasProviderDataError("real-time market-data provider rejected the request")
     if decoded.get("success") is False:
@@ -891,7 +1518,6 @@ def _raise_for_provider_status(
     data = decoded.get("data")
     if isinstance(data, Mapping) and cast(Mapping[str, Any], data).get("success") is False:
         raise MxSaasProviderDataError("real-time market-data provider rejected the request")
-    message = _provider_message(decoded)
     if message is not None and any(marker in message for marker in _PARTIAL_RESULT_MARKERS):
         raise MxSaasProviderDataError(
             "real-time market-data provider returned a partial business result"
@@ -935,6 +1561,23 @@ def _provider_indicator_points(
         if instrument_id[:6] in _explicit_entity_codes(table)
         or instrument_id[:6] in _table_entity_code_values(table)
     )
+    if not matching_tables:
+        raise MxSaasProviderDataError(
+            "historical indicator response does not bind exactly one requested security"
+        )
+    if contract is not None:
+        # The supplier also appends unrelated current quotes and range totals.
+        # Only requested operands choose the date axis; unrelated columns must
+        # not hide an otherwise valid historical response.
+        relevant_tables = tuple(table for table in matching_tables if any(
+            isinstance(field, Mapping) and any(
+                (contract.recognizes_field(name, cast(Mapping[str, object], field))
+                 or contract.bind_field(name, cast(Mapping[str, object], field)))
+                for name in value_names
+            ) for field in table.get("fieldSet", [])
+        ))
+        if relevant_tables:
+            matching_tables = relevant_tables
     table = _unique_longest_historical_table(matching_tables)
     if table is None:
         raise MxSaasProviderDataError(
@@ -984,42 +1627,71 @@ def _provider_indicator_points(
             )
         )
         if len(candidates) != 1:
-            raise MxSaasProviderDataError(
+            present_codes = tuple(
+                field_code
+                for field_code, (_field_name, aliases, _unit) in field_metadata.items()
+                if (
+                _provider_field_matches(
+                    requested_token=requested_token, indicator_token=indicator_token,
+                    aliases=aliases,
+                ) or (contract is not None and contract.recognizes_field(
+                    requested_name, field_definitions.get(field_code, {}),
+                )))
+            )
+            error_class = (
+                _MissingIndicatorFieldError if not candidates and not present_codes
+                else _MismatchedIndicatorFieldError
+                if not candidates and len(present_codes) == 1 and contract is not None
+                else MxSaasProviderDataError
+            )
+            # Record the failed operand, not the provider payload. A generic
+            # binding error otherwise hides which member of a compound rule
+            # failed, making a safe, parameter-preserving repair impossible.
+            _LOGGER.info(
+                "indicator_field_binding_failed indicator_id=%s operand=%s "
+                "accepted_columns=%d recognized_columns=%d error_class=%s",
+                contract.indicator_id if contract is not None else "uncontracted",
+                requested_name, len(candidates), len(present_codes), error_class.__name__,
+            )
+            raise error_class(
                 f"historical indicator field {requested_name!r} is missing or ambiguous"
             )
         binding = candidates[0]
         used_codes.add(binding[0])
         bindings.append((requested_name, *binding))
 
+    normalized_fields = {
+        field_code: _provider_normalized_values(
+            tables=matching_tables, table=table, dates=dates, field_code=field_code,
+            definition=field_definitions[field_code], source_unit=source_unit,
+            strict=contract is not None,
+            price_contract=(contract is not None
+                            and contract.indicator_id in {"technical.ma", "technical.ma_cross"}),
+            raw_unit_contract=(contract.raw_unit_for(name, field_definitions[field_code])
+                               if contract is not None else None),
+        )
+        for name, field_code, _source_name, source_unit in bindings
+    }
     points_by_date: dict[date, ProviderIndicatorPoint] = {}
     for row_index, session_date in enumerate(dates):
         if session_date < start or session_date > end:
             continue
         values: list[ProviderIndicatorValue] = []
         for requested_name, field_code, source_field_name, source_unit in bindings:
-            raw_values = raw_table.get(field_code)
-            if not isinstance(raw_values, list):
-                raise MxSaasProviderDataError(
-                    "historical indicator value count does not match session dates"
-                )
-            typed_raw_values = cast(list[object], raw_values)
-            if len(typed_raw_values) != len(dates):
-                raise MxSaasProviderDataError(
-                    "historical indicator value count does not match session dates"
-                )
-            value = _provider_decimal(typed_raw_values[row_index])
+            normalized_values, normalized_unit, normalization = normalized_fields[field_code]
             source_parameters = field_definitions[field_code].get("fixedParamValue")
             values.append(
                 ProviderIndicatorValue(
                     field_code=field_code,
                     field_name=requested_name,
-                    value=value,
-                    unit="%" if source_unit == "100%" else source_unit,
+                    value=normalized_values[row_index],
+                    unit=normalized_unit,
                     source_field_name=source_field_name,
                     source_unit=source_unit,
                     source_parameters=(
                         source_parameters if isinstance(source_parameters, str) else None
                     ),
+                    unit_normalization=normalization,
                 )
             )
         observed_at = datetime.combine(session_date, time(15, 0), tzinfo=_SHANGHAI)
@@ -1034,6 +1706,99 @@ def _provider_indicator_points(
             "historical indicator provider returned no values in requested range"
         )
     return tuple(points_by_date[item] for item in sorted(points_by_date))
+
+
+def _provider_normalized_values(
+    *, tables: tuple[Mapping[str, Any], ...], table: Mapping[str, Any],
+    dates: tuple[date, ...], field_code: str, definition: Mapping[str, Any],
+    source_unit: str | None, strict: bool, price_contract: bool,
+    raw_unit_contract: str | None = None,
+) -> tuple[tuple[Decimal, ...], str | None, str | None]:
+    raw_values = cast(Mapping[str, Any], table["rawTable"]).get(field_code)
+    if not isinstance(raw_values, list):
+        raise MxSaasProviderDataError(
+            "historical indicator value count does not match session dates"
+        )
+    raw_values = cast(list[object], raw_values)
+    if len(raw_values) != len(dates):
+        raise MxSaasProviderDataError(
+            "historical indicator value count does not match session dates"
+        )
+    values = tuple(_provider_decimal(value) for value in raw_values)
+    metadata = dict(definition)
+    has_label = source_unit is not None or (
+        isinstance(metadata.get("unit"), str) and numeric_unit_code(metadata) is None
+    )
+    unit_basis = "returned_unit_metadata"
+    if not has_label:
+        # Field identity and parameters were already bound by the contract.
+        # Numeric unit=1 alone says nothing about the metric's dimension.
+        if raw_unit_contract is not None and numeric_unit_code(metadata) == 1:
+            metadata["unitName"] = raw_unit_contract
+            unit_basis = "verified_field_raw_unit_1_contract"
+        elif not strict:
+            # Explicitly non-strict legacy parsing is not the live named profile.
+            return values, source_unit, None
+        else:
+            raise _UnconfirmedIndicatorUnitError("historical indicator unit is unconfirmed")
+    field = UnitFieldEvidence(
+        metadata_json=json.dumps([metadata], ensure_ascii=False), unit=source_unit,
+        return_code=field_code, values=values,
+    )
+    # Same-date compound merges do not retain a formatted table. Use the
+    # operand's actual display evidence, never a different field or a rendering
+    # manufactured from the raw values we are trying to verify.
+    display_sources = [source for source in tables if (
+        isinstance(source.get("rawTable"), Mapping)
+        and field_code in cast(Mapping[str, Any], source["rawTable"])
+        and isinstance(source.get("table"), Mapping)
+        and tuple(_provider_session_date(day) for day in
+                  cast(Mapping[str, Any], source["rawTable"]).get("headName", [])) == dates
+    )]
+    proof: dict[str, object] = {
+        "basis": unit_basis,
+        "sourceMetadata": {key: definition[key] for key in ("unit", "unitName", "unitDesc")
+                           if key in definition},
+    }
+    try:
+        target = canonical_unit(field)
+        expected_unit = "元" if price_contract else {
+            "AMOUNT": "元", "CLOSE": "元", "OPEN": "元", "HIGH": "元", "LOW": "元",
+            "VOLUME": "股",
+        }.get(str(metadata.get("returnSourceCode")))
+        if expected_unit is not None and target != expected_unit:
+            raise HistoricalUnitError("unit_mismatch")
+        scale_proofs: list[tuple[Decimal, tuple[dict[str, str], ...], int]] = []
+        for source in display_sources or [table]:
+            evidence = UnitTableEvidence(
+                metadata_json=json.dumps(source, ensure_ascii=False), dates=dates,
+            )
+            scale = unit_scale(evidence, field, target)
+            samples: tuple[dict[str, str], ...] = ()
+            count = 0
+            if any(unit_text(str(value)) == "100%" for value in (
+                metadata.get("unitName"), metadata.get("unitDesc"), source_unit,
+            )):
+                _, samples, count = percent_display_scale(evidence, field)
+            elif numeric_unit_code(metadata) not in (None, Decimal(1)):
+                _, samples, count = numeric_display_scale(
+                    evidence, field, unit_definition(target)[0],
+                )
+            scale_proofs.append((scale, samples, count))
+        if len({item[0] for item in scale_proofs}) != 1:
+            raise HistoricalUnitError("unit_unconfirmed")
+        scale, samples, count = scale_proofs[0]
+    except HistoricalUnitError as exc:
+        raise _UnconfirmedIndicatorUnitError(
+            "historical indicator unit is unconfirmed or incompatible"
+        ) from exc
+    proof.update({"canonicalUnit": target, "scale": str(scale)})
+    if samples:
+        proof.update({"displaySamples": samples, "verifiedDisplayCount": count})
+    return (
+        tuple(value * scale for value in values), target,
+        json.dumps(proof, ensure_ascii=False, sort_keys=True),
+    )
 
 
 def _unique_longest_historical_table(
@@ -1191,6 +1956,12 @@ def _provider_session_date(value: object) -> date:
     if not isinstance(value, str):
         raise MxSaasProviderDataError("historical indicator session date is invalid")
     value = value.strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}\s*(?:至|到|~|—| - )\s*\d{4}-\d{2}-\d{2}", value):
+        # A valid interval label is evidence of missing DAILY observations,
+        # not a corrupt daily value. Retry another Skill; never broadcast it.
+        raise MxSaasProviderNoDataError(
+            "historical indicator response contains only non-daily observations"
+        )
     # A range summary such as '2026-08-24至2026-09-04' is not a daily observation.
     if re.fullmatch(
         r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)?",

@@ -1,5 +1,9 @@
 import { ApiError } from './types'
+import { INDICATOR_NAMES } from '../indicator-labels'
+import { pricePlanTitle, pricePlanExecution } from '../price-plan'
 import { DEFAULT_EXECUTION_SETTINGS } from '../config/backtest'
+import { plainStrategyTitle } from '../strategy-title'
+import { strategyRuleTrees, summarizeRule } from '../../view-model'
 import type {
   BacktestOptimizationCandidate,
   BacktestReviewResponse,
@@ -38,6 +42,8 @@ import type {
   StrategySpecPositionReturnExit,
   StrategySpecTrailingDrawdownExit,
   StrategyTrailingDrawdownCondition,
+  StrategySpecMinuteProtectionExit,
+  StrategyMinuteProtectionCondition,
 } from './types'
 
 const EXECUTION_SETTING_KEYS = {
@@ -48,6 +54,7 @@ const EXECUTION_SETTING_KEYS = {
   commissionRate: 'commission_rate',
   minimumCommissionCny: 'minimum_commission_cny',
   slippageBps: 'slippage_bps',
+  slippageCny: 'slippage_cny',
   retryUnfilledExits: 'retry_unfilled_exits',
   maxExitAttempts: 'max_exit_attempts',
   warmupCalendarDays: 'warmup_calendar_days',
@@ -57,7 +64,7 @@ const EXECUTION_SETTING_KEYS = {
 
 export type LiveExecutionSettings = {
   [K in keyof ExecutionSettings as typeof EXECUTION_SETTING_KEYS[K]]?:
-    ExecutionSettings[K] | (ExecutionSettings[K] extends number ? string : never) | null
+    ExecutionSettings[K] | (NonNullable<ExecutionSettings[K]> extends number ? string : never) | null
 }
 
 export const toLiveExecutionSettings = (
@@ -74,9 +81,10 @@ const fromLiveExecutionSettings = (
   (Object.keys(EXECUTION_SETTING_KEYS) as Array<keyof ExecutionSettings>).flatMap(key => {
     const raw = settings?.[EXECUTION_SETTING_KEYS[key]]
     if (raw == null) return []
-    const value = typeof DEFAULT_EXECUTION_SETTINGS[key] === 'number'
+    const defaultValue = key === 'slippageCny' ? 0 : DEFAULT_EXECUTION_SETTINGS[key]
+    const value = typeof defaultValue === 'number'
       && typeof raw === 'string' && raw.trim() ? Number(raw) : raw
-    if (typeof value !== typeof DEFAULT_EXECUTION_SETTINGS[key]
+    if (typeof value !== typeof defaultValue
       || (typeof value === 'number' && !Number.isFinite(value))) {
       throw new ApiError({ type: 'about:blank', title: '成交设置返回格式有误', status: 502,
         detail: '服务返回的成交设置无法读取，请重试；尚未执行新回测。',
@@ -109,6 +117,7 @@ export type LiveBacktestBody = {
     capacityMode: 'point_in_time_volume' | 'unlimited'
     participationRate: number
     slippageBps: number
+    slippageCny?: number
     allocationRatio: number
     limitHandling: 'wait_for_unlock' | 'strict_no_fill_at_limit' | 'allow_limit_volume'
     commissionRate: number
@@ -183,6 +192,13 @@ export type LiveDraftResponse = {
   strategy_hash: string | null
   clarification: string | null
   diagnostic_code: string | null
+  execution_assessment?: {
+    status: 'executable' | 'research_degraded' | 'understood_not_executable' | 'temporarily_unavailable'
+    message: string
+    missing: string[]
+    interpreted_strategy: StrategySpec | null
+    strategy_hash: string | null
+  } | null
   provenance: Array<{ path: string; source: string }>
   candidate_provenance: CandidateProvenanceItem | null
   candidate_grounding: CandidateGroundingPayload | null
@@ -224,6 +240,7 @@ const FALLBACK_EVENT_LABELS: Record<string, string> = {
 }
 
 const readableIdentifier = (value: string): string => {
+  if (INDICATOR_NAMES[value]) return INDICATOR_NAMES[value]
   const leaf = value.split('.').at(-1) ?? value
   if (/^(macd|rsi|ema|ma|kdj|cci|bbi|obv)$/i.test(leaf)) return leaf.toUpperCase()
   return leaf.replaceAll('_', ' ')
@@ -232,6 +249,12 @@ const readableIdentifier = (value: string): string => {
 export const triggerFallback = (trigger: string): string => ({
   golden_cross: '金叉',
   death_cross: '死叉',
+  k_crosses_above_d: 'K 线上穿 D 线',
+  k_crosses_below_d: 'K 线下穿 D 线',
+  k_above: 'K 值高于',
+  k_below: 'K 值低于',
+  j_above: 'J 值高于',
+  j_below: 'J 值低于',
   published: '首次发布',
   above: '高于',
   below: '低于',
@@ -253,7 +276,35 @@ export const triggerFallback = (trigger: string): string => ({
   bullish: '底背离',
   turns_up: '转强',
   turns_down: '转弱',
-} as Record<string, string>)[trigger] ?? trigger.replaceAll('_', ' ')
+  crosses_above_zero: '上穿零轴',
+  crosses_below_zero: '下穿零轴',
+  fast_above_slow: '快线高于慢线',
+  fast_below_slow: '快线低于慢线',
+  price_crosses_above_upper: '价格上穿上轨',
+  price_crosses_below_upper: '价格下穿上轨',
+  price_crosses_above_middle: '价格上穿中轨',
+  price_crosses_below_middle: '价格下穿中轨',
+  price_crosses_above_lower: '价格上穿下轨',
+  price_crosses_below_lower: '价格下穿下轨',
+  price_above_upper: '价格高于上轨',
+  price_below_lower: '价格低于下轨',
+  surge_up: '放量上涨',
+  surge_down: '放量下跌',
+  rising: '上升',
+  falling: '下降',
+  uptrend: '上涨趋势',
+  downtrend: '下跌趋势',
+  range: '震荡区间',
+  plus_crosses_above_minus: '+DI 上穿 −DI',
+  plus_crosses_below_minus: '+DI 下穿 −DI',
+  plus_above_minus: '+DI 高于 −DI',
+  plus_below_minus: '+DI 低于 −DI',
+} as Record<string, string>)[trigger] ?? '未识别条件（待补充说明）'
+
+export const seriesCompareTriggerLabel = (trigger: string): string => ({
+  crosses_above: '上穿',
+  crosses_below: '下穿',
+} as Record<string, string>)[trigger] ?? triggerFallback(trigger)
 
 const indicatorCapability = (capabilities: CapabilitiesResponse | undefined, id: string) =>
   capabilities?.indicators.find((item) => item.indicator_id === id)
@@ -271,19 +322,33 @@ const parameterDefinition = (
 const numericBoundary = (value: number | null | undefined, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? value : fallback
 
+export const STRATEGY_RETRY_MESSAGE = '策略方案没有完整生成。点一下“重新生成”即可继续，不用重新输入。'
+const STRATEGY_CONNECTION_RETRY_MESSAGE = '刚才的连接中断了。点一下“重新生成”即可继续，不用重新输入。'
+const STRATEGY_SERVICE_UNAVAILABLE_MESSAGE = '策略服务暂时无法使用，刚才的内容已经保留。'
+const retryableProviderDiagnostics = new Set([
+  'candidate_provider_rate_limited',
+  'candidate_provider_service_unavailable',
+  'candidate_provider_timeout',
+  'candidate_provider_connection_failed',
+  'candidate_provider_invalid_response',
+  'candidate_provider_incomplete_response',
+  'candidate_provider_unavailable',
+  'candidate_provider_invalid_output',
+])
+
 const diagnosticMessages: Record<string, string> = {
-  candidate_provider_authentication_failed: '模型服务鉴权失败，本次请求未完成，请检查服务端模型配置。',
-  candidate_provider_permission_denied: '模型服务拒绝访问，本次请求未完成，请检查服务端账户权限。',
-  candidate_provider_insufficient_balance: 'DeepSeek 账户余额不足，本次模型请求未完成，请检查服务端账户余额。',
-  candidate_provider_billing_restricted: '模型服务账户计费受限，本次请求未完成，请检查服务端计费状态。',
-  candidate_provider_rate_limited: '模型服务请求频率受限，本次请求未完成，请稍后重试。',
-  candidate_provider_service_unavailable: '模型服务暂时不可用，本次请求未完成，请稍后重试。',
-  candidate_provider_timeout: '策略生成模型请求超时，本次未生成策略。请原样重试。',
-  candidate_provider_connection_failed: '模型服务连接未完成或中断，本次请求未完成，请稍后重试。',
-  candidate_provider_invalid_response: '模型返回的格式无效，本次请求未完成，请重试。',
-  candidate_provider_incomplete_response: '模型响应未完整返回，本次请求未完成，请重试。',
-  candidate_provider_unavailable: '策略生成模型服务调用未完成，请稍后原样重试。',
-  candidate_provider_invalid_output: '这次策略解析未通过结构或条件校验，尚未生成可回测结果。',
+  candidate_provider_authentication_failed: STRATEGY_SERVICE_UNAVAILABLE_MESSAGE,
+  candidate_provider_permission_denied: STRATEGY_SERVICE_UNAVAILABLE_MESSAGE,
+  candidate_provider_insufficient_balance: STRATEGY_SERVICE_UNAVAILABLE_MESSAGE,
+  candidate_provider_billing_restricted: STRATEGY_SERVICE_UNAVAILABLE_MESSAGE,
+  candidate_provider_rate_limited: STRATEGY_CONNECTION_RETRY_MESSAGE,
+  candidate_provider_service_unavailable: STRATEGY_CONNECTION_RETRY_MESSAGE,
+  candidate_provider_timeout: STRATEGY_CONNECTION_RETRY_MESSAGE,
+  candidate_provider_connection_failed: STRATEGY_CONNECTION_RETRY_MESSAGE,
+  candidate_provider_invalid_response: STRATEGY_RETRY_MESSAGE,
+  candidate_provider_incomplete_response: STRATEGY_RETRY_MESSAGE,
+  candidate_provider_unavailable: STRATEGY_RETRY_MESSAGE,
+  candidate_provider_invalid_output: STRATEGY_RETRY_MESSAGE,
   'template_not_published/big_drop_rebound': '“大跌反弹”会按选股模板处理，当前模板尚未发布，暂时不能执行回测。',
   previous_session_limit_up_capability_unavailable: '已理解为“前一交易日涨停、下一交易日买入”，但这个信号还缺逐证券逐交易日的涨停价/涨停状态，以及 DSL 的前一交易日引用；不能用单日涨 10% 替代。“做个短线”也没有说清卖出方式，请补充持有天数、止盈止损或技术卖出条件。原话会保留，系统不会猜。',
   event_catalog_not_published: '这类事件尚未进入可执行目录，请改用已支持的定期报告事件。',
@@ -337,8 +402,12 @@ const shanghaiCalendarDate = (now: Date): string => {
   return `${value('year')}-${value('month')}-${value('day')}`
 }
 
+let serverDataEnd: string | undefined
+export const setAvailableDataEnd = (value?: string | null) => {
+  serverDataEnd = value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined
+}
 export const dataAsOfDate = (now = new Date()) =>
-  import.meta.env.VITE_DATA_AS_OF_DATE?.trim() || shanghaiCalendarDate(now)
+  serverDataEnd || import.meta.env.VITE_DATA_AS_OF_DATE?.trim() || shanghaiCalendarDate(now)
 
 /** Only server references cross the conversation boundary, never browser report facts. */
 export const toLiveBacktestReferences = (
@@ -375,17 +444,44 @@ export const toLiveCompileBody = (
   }
 }
 
+/** Reuse the settings/workflow rule tree; prose never changes comparison boundaries. */
+export const ideaProposalTitle = (proposal: IdeaRoute['proposals'][number]): string => {
+  if (!/^可修改策略方向\s*\d+$/.test(proposal.title)) return proposal.title
+  const rules = proposal.strategy ?? proposal.strategy_template
+  if (rules?.trading_plan) return pricePlanTitle(rules.trading_plan)
+  const names = [...new Set(proposal.capability_ids.map(id => INDICATOR_NAMES[id]).filter(Boolean))]
+  return names.length ? `${names.join(' / ')}策略` : proposal.title
+}
+
+export const ideaProposalRuleSummaries = (
+  proposal: IdeaRoute['proposals'][number],
+  capabilities?: CapabilitiesResponse,
+): { entry: string; exit: string } => {
+  const rules = proposal.strategy ?? proposal.strategy_template
+  if (!rules || (!rules.trading_plan && (!rules.entry || !rules.exit))) {
+    return { entry: proposal.entry_summary, exit: proposal.exit_summary }
+  }
+  const trees = strategyRuleTrees({
+    strategySpec: rules,
+    entry: toLeg(rules.entry, 'entry', capabilities),
+    exit: toExitLeg(rules.exit?.children ?? [], capabilities, rules.exit?.op),
+  })
+  return { entry: summarizeRule(trees.entry), exit: summarizeRule(trees.exit) }
+}
+
 const clarificationProposalDescription = (
   diagnosticCode: string,
   proposal: IdeaRoute['proposals'][number],
+  capabilities?: CapabilitiesResponse,
 ): string => {
+  const rules = ideaProposalRuleSummaries(proposal, capabilities)
   if (diagnosticCode === 'entry_rule_not_recognized') {
-    return `买入：${proposal.entry_summary}`
+    return `买入：${rules.entry}`
   }
   if (diagnosticCode === 'exit_rule_not_recognized') {
-    return `卖出：${proposal.exit_summary}`
+    return `卖出：${rules.exit}`
   }
-  return `买入：${proposal.entry_summary}；卖出：${proposal.exit_summary}`
+  return `买入：${rules.entry}；卖出：${rules.exit}`
 }
 
 const instrumentClarificationCodes = new Set([
@@ -480,15 +576,40 @@ export const fromLiveDraftResponse = (
     }
   }
   const diagnosticCode = response.diagnostic_code ?? 'strategy_clarification'
+  // A persisted failed generation is still a conversation, not a lost request.
+  // Keep its revision so the next reply carries the original stock and rules.
+  if (diagnosticCode.startsWith('candidate_provider_') && diagnosticMessages[diagnosticCode]
+    && !responseIdeaRoute && !response.execution_assessment) {
+    return {
+      status: 'needs_clarification', ...executionState,
+      ...(response.is_strategy_edit ? { isStrategyEdit: true } : {}),
+      draftId: response.draft_id, revision: response.revision,
+      clarification: {
+        id: diagnosticCode,
+        question: diagnosticMessages[diagnosticCode],
+        reason: '',
+        choices: retryableProviderDiagnostics.has(diagnosticCode) ? [{
+          id: 'retry-strategy-generation',
+          label: '重新生成',
+          description: '继续处理刚才的内容',
+          action: 'submit_clarification',
+          suggestedUtterance: input.utterance,
+        }] : [],
+        recognized: recognizedFragments(input),
+      },
+    }
+  }
   const asksForInstrument = instrumentClarificationCodes.has(diagnosticCode)
-  if (response.status === 'needs_clarification' || asksForInstrument || responseIdeaRoute) {
+  if (response.status === 'needs_clarification' || asksForInstrument || responseIdeaRoute
+    || response.execution_assessment) {
     const ideaRoute = responseIdeaRoute
-    if (ideaRoute && ideaRoute.proposals.length < 2) {
+    if (ideaRoute && ideaRoute.proposals.length < 1
+      && !(diagnosticCode === 'capability_research_fallback' && ideaRoute.research?.sources.length)) {
       throw new ApiError({
         type: 'about:blank',
         title: '观点引导信息不完整',
         status: 502,
-        detail: '服务没有返回至少两个可供选择的完整策略方向，请稍后重试。',
+        detail: '服务没有返回可供选择的完整策略方向，请稍后重试。',
         code: 'idea_route_invalid',
       })
     }
@@ -508,7 +629,8 @@ export const fromLiveDraftResponse = (
       data: currentData,
       clarification: {
         id: diagnosticCode,
-        question: response.clarification
+        executionAssessment: response.execution_assessment ?? undefined,
+        question: response.clarification ?? response.execution_assessment?.message
           ?? (asksForInstrument
             ? canUseCurrentInstrument
               ? `请确认使用当前股票“${input.instrument.name}”，或直接输入其他股票名称或 6 位证券代码。`
@@ -521,7 +643,7 @@ export const fromLiveDraftResponse = (
             ? '买入条件我不能替你定——填哪个都是我在替你决定什么时候进场。'
           : diagnosticCode === 'exit_rule_not_recognized'
             ? '卖出条件我不能替你定——什么时候离场得你说了算。'
-          : response.clarification
+          : response.clarification || response.execution_assessment
           ? ''
           : asksForInstrument
           ? '前面的买卖条件我已经记住了，还需要补上回测标的。'
@@ -549,8 +671,8 @@ export const fromLiveDraftResponse = (
           )
           return {
             id: proposal.id,
-            label: proposal.title,
-            description: clarificationProposalDescription(diagnosticCode, proposal),
+            label: ideaProposalTitle(proposal),
+            description: clarificationProposalDescription(diagnosticCode, proposal, capabilities),
             action: 'replace_and_compile' as const,
             suggestedUtterance: proposal.suggested_utterance,
             instrumentSymbol: proposalSymbol,
@@ -575,7 +697,13 @@ export const fromLiveDraftResponse = (
         instrumentSuggestions: response.instrument_suggestions ?? undefined,
         backtestReview: response.backtest_review ?? undefined,
         ideaRoute,
-        provisionalDraft: response.suggested_strategy && response.suggested_strategy_hash
+        provisionalDraft: response.execution_assessment?.interpreted_strategy
+          && response.execution_assessment.strategy_hash
+          ? toDraft({ ...response,
+              strategy: response.execution_assessment.interpreted_strategy,
+              strategy_hash: response.execution_assessment.strategy_hash,
+            }, input, capabilities)
+          : response.suggested_strategy && response.suggested_strategy_hash
           ? toDraft({
               ...response,
               strategy: response.suggested_strategy,
@@ -702,6 +830,8 @@ export const mergeLiveRevision = (
       commissionRate: editedDraft.execution.commissionRate,
       minimumCommissionCny: editedDraft.execution.minimumCommissionCny,
       slippageBps: editedDraft.execution.slippageBps,
+      ...(editedDraft.execution.slippageCny !== undefined
+        ? { slippageCny: editedDraft.execution.slippageCny } : {}),
       retryUnfilledExits: editedDraft.execution.retryUnfilledExits,
       maxExitAttempts: editedDraft.execution.maxExitAttempts,
       warmupCalendarDays: editedDraft.execution.warmupCalendarDays,
@@ -749,7 +879,7 @@ export const withEditedStrategySpec = (draft: StrategyDraft, strategySpec: Strat
   capabilities?: CapabilitiesResponse): StrategyDraft => ({
   ...draft, strategySpec,
   entry: toLeg(strategySpec.entry, 'entry', capabilities),
-  exit: toExitLeg(strategySpec.exit.children, capabilities, strategySpec.exit.op),
+  exit: toExitLeg(strategySpec.exit?.children ?? [], capabilities, strategySpec.exit?.op),
 })
 
 export const toLiveBacktestBody = (
@@ -760,6 +890,7 @@ export const toLiveBacktestBody = (
     capacityMode: draft.execution.capacityMode,
     participationRate: draft.execution.participationRate,
     slippageBps: draft.execution.slippageBps,
+    ...(draft.execution.slippageCny !== undefined ? { slippageCny: draft.execution.slippageCny } : {}),
     allocationRatio: draft.execution.allocationRatio,
     limitHandling: draft.execution.priceLimitMode,
     commissionRate: draft.execution.commissionRate,
@@ -769,6 +900,16 @@ export const toLiveBacktestBody = (
     warmupCalendarDays: draft.execution.warmupCalendarDays,
     settlementExtensionDays: draft.execution.settlementExtensionDays,
     runRobustness: draft.execution.runRobustness,
+    ...(draft.strategySpec.trading_plan ? {
+      slippageBps: Number(draft.strategySpec.trading_plan.parameters.slippage_bps),
+      ...(draft.strategySpec.trading_plan.parameters.slippage_cny !== undefined
+        ? { slippageCny: Number(draft.strategySpec.trading_plan.parameters.slippage_cny) } : {}),
+      commissionRate: Number(draft.strategySpec.trading_plan.parameters.commission_rate),
+      minimumCommissionCny: Number(draft.strategySpec.trading_plan.parameters.minimum_commission_cny),
+      allocationRatio: 1,
+      limitHandling: 'strict_no_fill_at_limit' as const,
+      runRobustness: false,
+    } : {}),
     ...(options.refreshData ? { refreshData: true } : {}),
   },
 })
@@ -780,13 +921,14 @@ function toDraft(
 ): StrategyDraft {
   const strategy = response.strategy as StrategySpec
   const entry = toLeg(strategy.entry, 'entry', capabilities)
-  const exit = toExitLeg(strategy.exit.children, capabilities, strategy.exit.op)
+  const exit = toExitLeg(strategy.exit?.children ?? [], capabilities, strategy.exit?.op)
   return {
     id: response.draft_id,
     revision: response.revision,
     strategyHash: response.strategy_hash,
     sourceText: input.utterance,
-    title: strategyTitle([...entry.conditions, ...exit.conditions]),
+    title: strategy.trading_plan ? pricePlanTitle(strategy.trading_plan)
+      : plainStrategyTitle(entry.conditions, exit.conditions),
     instrument: instrumentFrom(strategy, input.instrument, response.candidate_grounding,
       response.verified_instrument),
     confidence: null,
@@ -807,17 +949,32 @@ function toDraft(
       initialCashCny: strategy.backtest.initial_cash_cny,
     },
     assumptions: [
-      ...(strategy.execution.data_capability === 'daily_ohlcv_events'
+      ...(strategy.trading_plan?.kind === 'scheduled' && response.provenance?.some(item =>
+        item.path === '/trading_plan/parameters/budget_cny' && item.source.startsWith('default/'))
+        ? [`未指定单次金额，暂按${strategy.trading_plan.parameters.budget_cny}元含费预算建议；可修改，不保证足够买入最低申报股数`]
+        : []),
+      ...(strategy.trading_plan
+        ? [strategy.trading_plan.kind === 'scheduled'
+          ? `开盘前确定交易计划，在指定交易日${strategy.trading_plan.parameters.at === 'close' ? '收盘' : '开盘'}尝试撮合；不代表真实逐笔成交`
+          : strategy.trading_plan.parameters.observation === 'minute_bar'
+            ? '按分钟行情回放；新触发委托最早下一根K线生效，OHLC撮合不代表真实逐笔成交'
+            : strategy.trading_plan.kind === 'grid' && strategy.trading_plan.parameters.observation == null
+              ? '执行粒度由回测服务结合可用数据确定，实际口径以报告为准；当前尚未确认分钟数据可用'
+              : '日线收盘确认信号，下一交易日使用开盘价代理；记录时间不代表真实逐笔成交']
+        : strategy.execution.evaluation_frequency === 'daily_close_and_minute_bar'
+        ? ['日线条件收盘后确认，下一交易日开盘尝试建仓；持仓后分钟保护在完成K线确认，新委托下一分钟生效']
+        : strategy.execution.data_capability === 'daily_ohlcv_events'
         ? [
             '事件按首次可获得时间确认，不倒填公告日期',
             '事件首次可得后按 09:15 截止规则选择可用的日线开盘价代理；记录时间不代表真实逐笔成交',
           ]
         : ['日线收盘确认信号，下一交易日使用开盘价代理；记录时间不代表真实逐笔成交']),
       '遵守 A 股 T+1；当天买入的股票下一交易日才可卖出',
-      '按回测设置的资金比例投入，未投入的资金继续保留',
+      strategy.trading_plan ? '按交易计划的股数或金额委托，受资金、底仓和持仓上限限制'
+        : '按回测设置的资金比例投入，未投入的资金继续保留',
       '涨停买入或跌停卖出时等待开板；仅日线数据无法证明开板则保守记为未成交',
     ],
-    warnings: [],
+    warnings: response.execution_assessment ? [response.execution_assessment.message] : [],
     strategySpec: strategy,
   }
 }
@@ -842,10 +999,11 @@ function instrumentFrom(
 }
 
 function toLeg(
-  condition: StrategySpecCondition,
+  condition: StrategySpecCondition | null,
   prefix: string,
   capabilities?: CapabilitiesResponse,
 ): StrategyLeg {
+  if (!condition) return { operator: 'all', conditions: [] }
   const operator = condition.type === 'all' || condition.type === 'any' ? condition.type : 'all'
   return { operator, conditions: flattenConditions(condition, prefix, capabilities) }
 }
@@ -865,6 +1023,7 @@ function toExitLeg(
       }
       if (condition.type === 'position_return_exit') return [toUiPositionReturn(condition, id)]
       if (condition.type === 'trailing_drawdown_exit') return [toUiTrailingDrawdown(condition, id)]
+      if (condition.type === 'minute_protection_exit') return [toUiMinuteProtection(condition, id)]
       return flattenConditions(condition, id, capabilities)
     }),
   }
@@ -898,7 +1057,12 @@ function toUiCondition(
 ): StrategyIndicatorCondition {
   const capability = indicatorCapability(capabilities, condition.indicator_id)
   const trigger = triggerDefinition(capability?.trigger_definitions, condition.trigger)
-  const name = capability?.display_name ?? readableIdentifier(condition.indicator_id)
+  const isSeriesCompare = condition.indicator_id === 'provider.series_compare'
+  const genericMetric = condition.indicator_id === 'provider.numeric'
+    && typeof condition.params.metric_query === 'string' ? condition.params.metric_query : undefined
+  const genericUnit = (condition.indicator_id === 'provider.numeric' || isSeriesCompare)
+    && typeof condition.params.unit === 'string' ? condition.params.unit : undefined
+  const name = genericMetric || capability?.display_name || readableIdentifier(condition.indicator_id)
   const parameters: StrategyParameter[] = Object.entries(condition.params)
     .filter((entry): entry is [string, number] => typeof entry[1] === 'number')
     .filter(([key]) => !(condition.indicator_id === 'volume.relative'
@@ -915,19 +1079,23 @@ function toUiCondition(
         unit: definition?.unit ?? undefined,
       }
     })
-  if (condition.value != null) {
+  if (!isSeriesCompare && condition.value != null) {
     parameters.push({
       key: '$value',
       label: trigger?.display_name ? `${trigger.display_name}阈值` : `${triggerFallback(condition.trigger)}阈值`,
       value: condition.value,
       min: numericBoundary(trigger?.minimum, -1_000_000_000),
       max: numericBoundary(trigger?.maximum, 1_000_000_000),
-      unit: trigger?.unit ?? indicatorValueUnit(condition.indicator_id),
+      unit: genericUnit ?? trigger?.unit ?? indicatorValueUnit(condition.indicator_id),
     })
   }
   const triggerName = trigger?.display_name ?? triggerFallback(condition.trigger)
+  const seriesLabel = isSeriesCompare
+    ? `${String(condition.params.left_metric_query || '待填写左侧指标')} ${seriesCompareTriggerLabel(condition.trigger)} ${String(condition.params.right_metric_query || '待填写右侧指标')}${genericUnit ? `（共同单位：${genericUnit}）` : ''}`
+    : null
   const conditionOrder = conditionOrderLabel(condition)
-  const thresholdUnit = trigger?.unit ?? indicatorValueUnit(condition.indicator_id)
+  const breakoutLabel = donchianLabel(condition)
+  const thresholdUnit = genericUnit ?? trigger?.unit ?? indicatorValueUnit(condition.indicator_id)
   const thresholdLabel = condition.value != null && Number.isFinite(condition.value)
     ? `${name} ${triggerName} ${formatConditionValue(condition.value)}${thresholdUnit ?? ''}`
     : null
@@ -935,12 +1103,17 @@ function toUiCondition(
     id,
     kind: 'indicator',
     indicatorId: condition.indicator_id,
-    label: conditionOrder
+    label: breakoutLabel ?? seriesLabel
+      ?? conditionOrder
       ?? explicitWindowLabel(condition, triggerName)
       ?? movingAverageLabel(condition, triggerName)
       ?? thresholdLabel
       ?? `${name} ${triggerName}`,
-    trigger: conditionOrder
+    trigger: breakoutLabel
+      ? `${breakoutLabel}，以收盘价确认；统计窗口不含当天。`
+      : seriesLabel
+      ? `日线收盘确认：${seriesLabel}`
+      : conditionOrder
       ? `日线收盘确认：${conditionOrder}`
       : trigger?.description ?? `${name}：${triggerName}`,
     timeframe: condition.timeframe,
@@ -1022,6 +1195,10 @@ function parameterLabel(indicatorId: string, key: string): string {
     signal: '信号线',
     period: '周期',
     fast_period: '快线周期',
+    k_period: 'K 线周期',
+    d_period: 'D 线平滑周期',
+    k_smoothing: 'K 值平滑周期',
+    d_smoothing: 'D 值平滑周期',
     slow_period: '慢线周期',
     lookback: '观察周期',
     average_period: '平均周期',
@@ -1030,7 +1207,45 @@ function parameterLabel(indicatorId: string, key: string): string {
     consecutive_days: '连续天数',
     consecutive_sessions: '连续天数',
     max_spacing: '最大间隔',
-  } as Record<string, string>)[key] ?? readableIdentifier(key)
+    price_field: '价格口径',
+    stddev_multiplier: '标准差倍数',
+    constant: '计算常数',
+    period_1: '第一均线周期',
+    period_2: '第二均线周期',
+    period_3: '第三均线周期',
+    period_4: '第四均线周期',
+    days: '连续天数',
+    volume_multiple: '成交量倍数',
+    return_threshold_pct: '涨跌幅阈值',
+    left_bars: '左侧确认根数',
+    right_bars: '右侧确认根数',
+    min_separation: '最小间隔根数',
+    max_separation: '最大间隔根数',
+    price_threshold_pct: '价格变化阈值',
+    obv_threshold_adv: 'OBV 变化阈值',
+    average_volume_period: '平均成交量周期',
+    short_period: '短周期',
+    long_period: '长周期',
+    slope_lookback: '斜率观察周期',
+    adx_period: 'ADX 周期',
+    adx_threshold: 'ADX 阈值',
+    confirmation_days: '确认天数',
+    stability_bars: '稳定预热根数',
+    annualization_sessions: '年化交易日数',
+  } as Record<string, string>)[key] ?? '未命名参数（待补充说明）'
+}
+
+function donchianLabel(condition: StrategySpecIndicatorCondition): string | null {
+  if (condition.indicator_id !== 'technical.donchian') return null
+  const period = condition.params.period
+  if (typeof period !== 'number') return null
+  const window = `前 ${period} 个交易日`
+  return ({
+    price_crosses_above_upper: `突破${window}最高价`,
+    price_crosses_below_lower: `跌破${window}最低价`,
+    price_above_upper: `高于${window}最高价`,
+    price_below_lower: `低于${window}最低价`,
+  } as Record<string, string>)[condition.trigger] ?? null
 }
 
 function movingAverageLabel(
@@ -1142,8 +1357,8 @@ function toUiHoldingPeriod(
   return {
     id,
     kind: 'holding_period',
-    label: `实际买入成交后第 ${condition.sessions} 个交易日卖出`,
-    trigger: `从首次买入成交后的下一交易日起计，第 ${condition.sessions} 个 A 股交易日使用开盘价代理尝试卖出`,
+    label: `成交后第 ${condition.sessions} 个交易日尝试卖出`,
+    trigger: `首次买入成交日不计数，从下一市场交易日起计，第 ${condition.sessions} 个交易日使用开盘价代理尝试卖出；停牌日仍计数，实际成交受停牌、涨跌停等约束`,
     sessions: condition.sessions,
     anchor: condition.anchor,
     countMode: condition.count_mode,
@@ -1191,26 +1406,50 @@ function toUiTrailingDrawdown(
   }
 }
 
+function toUiMinuteProtection(
+  condition: StrategySpecMinuteProtectionExit,
+  id: string,
+): StrategyMinuteProtectionCondition {
+  const parts = [
+    condition.take_profit_pct == null ? null : `止盈 ${condition.take_profit_pct}%`,
+    condition.stop_loss_pct == null ? null : `止损 ${condition.stop_loss_pct}%`,
+    condition.trailing_drawdown_pct == null ? null : `高点回撤 ${condition.trailing_drawdown_pct}%`,
+  ].filter((item): item is string => item != null)
+  const anchors = [
+    condition.take_profit_pct != null || condition.stop_loss_pct != null
+      ? '固定止盈止损以实际买入的不含费加权成本为基准' : null,
+    condition.trailing_drawdown_pct != null ? '移动止盈跟踪本轮持仓的分钟最高价' : null,
+  ].filter((item): item is string => item != null)
+  return {
+    id, kind: 'minute_protection', label: `分钟保护：${parts.join(' / ')}`,
+    trigger: `${anchors.join('；')}。完成分钟K线后观察高低价，新委托下一分钟生效。同根触及止盈和止损时，开盘已满足的一项优先；否则按止损处理并标记先后不明。`,
+    takeProfitPct: condition.take_profit_pct,
+    stopLossPct: condition.stop_loss_pct,
+    trailingDrawdownPct: condition.trailing_drawdown_pct,
+    limitPriceCny: condition.limit_price_cny,
+    anchor: condition.anchor, observation: condition.observation,
+    execution: condition.execution, editable: false,
+  }
+}
+
 function readableEventCode(eventCode: string): string {
   const leaf = eventCode.split('.').at(-1) ?? eventCode
   return leaf.replace(/_published$/, '').replaceAll('_', ' ')
 }
 
-function strategyTitle(conditions: StrategyCondition[]): string {
-  const names = [...new Set(conditions.map((condition) => {
-    if (condition.kind === 'holding_period') return '持有期退出'
-    if (condition.kind === 'position_return') return condition.exitTrigger === 'take_profit' ? '止盈' : '止损'
-    if (condition.kind === 'trailing_drawdown') return '移动止盈'
-    if (condition.kind === 'event') {
-      return condition.label.split('正文')[0]?.replace(/发布$/, '') || readableEventCode(condition.eventCode)
-    }
-    if (condition.kind === 'financial') return financialMetricLabel(condition.metricId)
-    return readableIdentifier(condition.indicatorId)
-  }))]
-  return `${names.join(' + ')} 规则 · 日线`
-}
-
 function applyDraftEdits(strategy: StrategySpec, draft: StrategyDraft): StrategySpec {
+  if (strategy.trading_plan) return {
+    ...strategy,
+    execution: strategy.entry || strategy.exit ? strategy.execution : pricePlanExecution(strategy.trading_plan),
+    entry: strategy.entry ? applyLegEdits(strategy.entry, draft.entry.conditions) : null,
+    exit: strategy.exit ? { ...strategy.exit,
+      children: applyConditionList(strategy.exit.children, draft.exit.conditions) } : null,
+    trading_plan: { ...strategy.trading_plan,
+      parameters: { ...strategy.trading_plan.parameters, initial_cash_cny: draft.backtest.initialCashCny } },
+    backtest: { start: draft.backtest.start, end: draft.backtest.end,
+      initial_cash_cny: draft.backtest.initialCashCny },
+  }
+  if (!strategy.entry || !strategy.exit) throw new Error('买卖规则尚未完整保存')
   return {
     ...strategy,
     entry: applyLegEdits(strategy.entry, draft.entry.conditions),
@@ -1274,6 +1513,7 @@ function applyConditionList(
       node.type === 'holding_period_exit'
       || node.type === 'position_return_exit'
       || node.type === 'trailing_drawdown_exit'
+      || node.type === 'minute_protection_exit'
     ) {
       cursor += 1
       return node
@@ -1294,6 +1534,7 @@ function applyIndicatorEdit(
       key,
       typeof value === 'number' ? (parameterValues.get(key) ?? value) : value,
     ])),
-    value: parameterValues.get('$value') ?? condition.value,
+    value: condition.indicator_id === 'provider.series_compare'
+      ? null : parameterValues.get('$value') ?? condition.value,
   }
 }

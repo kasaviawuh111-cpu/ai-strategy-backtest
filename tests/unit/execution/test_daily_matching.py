@@ -131,6 +131,20 @@ def test_next_session_open_fills_with_separate_conservative_slippage() -> None:
     assert result.capacity_reason_code == "capacity_previous_session_volume_proxy"
 
 
+@pytest.mark.parametrize(("side", "ohlc", "slippage_cny", "expected"), [
+    (OrderSide.BUY, ("10", "10", "9", "9.5"), "0", "10"),
+    (OrderSide.SELL, ("10", "11", "10", "10.5"), "0", "10"),
+    (OrderSide.BUY, ("10", "10.2", "9.8", "10"), "1", "10.2"),
+    (OrderSide.SELL, ("10", "10.2", "9.8", "10"), "100", "9.8"),
+])
+def test_daily_market_friction_is_bounded_by_the_actual_bar(side, ohlc, slippage_cny, expected):
+    result = match(make_bar(*ohlc), order=make_order(side),
+                   slippage_bps=Decimal(5), slippage_cny=Decimal(slippage_cny))
+    assert result.outcome is MatchOutcome.FILLED
+    assert result.price.amount == Decimal(expected)
+    assert result.filled_at == dt(9, 30)
+
+
 def test_one_price_limit_up_is_not_filled_by_default_even_when_volume_exists() -> None:
     result = match(make_bar("12", "12", "12", "12"))
 
@@ -270,7 +284,7 @@ def test_missing_point_in_time_capacity_fails_closed() -> None:
 
 def test_unlimited_capacity_requires_an_explicit_mode() -> None:
     result = match(
-        make_bar("10", "10", "10", "10", volume=0),
+        make_bar("10", "10", "10", "10", volume=1),
         capacity_mode=CapacityMode.UNLIMITED,
         point_in_time_volume=None,
     )
@@ -278,6 +292,18 @@ def test_unlimited_capacity_requires_an_explicit_mode() -> None:
     assert result.outcome is MatchOutcome.FILLED
     assert result.quantity == Quantity(1000)
     assert result.capacity_reason_code == "capacity_unlimited_explicit"
+
+
+@pytest.mark.parametrize("side", [OrderSide.BUY, OrderSide.SELL])
+@pytest.mark.parametrize("mode", list(CapacityMode))
+def test_zero_session_volume_never_creates_a_fill_even_with_unlimited_capacity(side, mode):
+    overrides = {"order": make_order(side), "capacity_mode": mode}
+    if mode is CapacityMode.UNLIMITED:
+        overrides["point_in_time_volume"] = None
+    result = match(make_bar("10", "10", "10", "10", volume=0), **overrides)
+    assert result.outcome is MatchOutcome.NO_FILL
+    assert result.reason_code == "no_market_trades"
+    assert result.quantity.value == 0 and result.price is None
 
 
 def test_unlimited_capacity_rejects_a_conflicting_volume_observation() -> None:

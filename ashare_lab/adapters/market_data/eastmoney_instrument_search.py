@@ -32,6 +32,7 @@ from .a_share_directory import load as load_directory
 
 _URL = "https://search-codetable.eastmoney.com/codetable/search/web"
 _PAGE_SIZE = 100
+_MAX_IDENTITY_PAGES = 5
 _FRESH_AGE = timedelta(days=1)
 _MAX_AGE = timedelta(days=7)
 _MAX_CACHE_ENTRIES = 128
@@ -77,6 +78,7 @@ class _CacheEntry:
     retrieved_at: datetime
     items: tuple[SearchInstrument, ...]
     has_more: bool
+    pages_fetched: int = 1
 
 
 def parse_a_share_identities(payload: object) -> tuple[tuple[SearchInstrument, ...], bool]:
@@ -207,7 +209,10 @@ class EastmoneyInstrumentSearch:
                         if symbol in items and items[symbol] != item:
                             raise ValueError("conflicting cached identity")
                         items[symbol] = item
-                    entry = _CacheEntry(retrieved_at, tuple(items.values()), more)
+                    pages = record.get("pages_fetched", 1)
+                    if type(pages) is not int or not 1 <= pages <= _MAX_IDENTITY_PAGES:
+                        continue
+                    entry = _CacheEntry(retrieved_at, tuple(items.values()), more, pages)
                     previous = self._cache.get(key)
                     if previous is None or previous.retrieved_at < retrieved_at:
                         self._cache[key] = entry
@@ -224,7 +229,10 @@ class EastmoneyInstrumentSearch:
         Reuse the validated in-memory directory used by autocomplete. Its
         acquisition time is identity evidence, not historical tradability.
         ``None`` means the existing provider resolver may try an unlisted name.
-        Ambiguous aliases and partial matches must be confirmed by the user.
+        A unique Chinese name fragment in a complete directory may bind, just
+        like a complete name. Directory age does not create name ambiguity;
+        current instrument details and historical tradability are checked later.
+        Ambiguous names and partial codes still cannot bind automatically.
         """
         self._read_directory()
         directory = self._directory
@@ -234,6 +242,12 @@ class EastmoneyInstrumentSearch:
         if len(exact) == 1:
             return exact[0].symbol
         matches = exact or directory.search(query)
+        name_fragment = "".join(query.split())
+        if (not exact and len(matches) == 1 and len(name_fragment) >= 2
+                and all("\u4e00" <= char <= "\u9fff" for char in name_fragment)
+                and name_fragment in matches[0].name
+                and directory.reported_total == len(directory.items)):
+            return matches[0].symbol
         if matches:
             raise InstrumentNameAmbiguous(tuple(
                 InstrumentNameCandidate(
@@ -253,7 +267,8 @@ class EastmoneyInstrumentSearch:
             while True:
                 payload = json.dumps({"version": 1, "entries": [
                     {"query": key, "retrieved_at": entry.retrieved_at.isoformat(),
-                     "items": [asdict(item) for item in entry.items], "has_more": entry.has_more}
+                     "items": [asdict(item) for item in entry.items], "has_more": entry.has_more,
+                     "pages_fetched": entry.pages_fetched}
                     for key, entry in self._cache.items()
                 ]}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 if len(payload) <= _MAX_CACHE_BYTES:
@@ -277,6 +292,9 @@ class EastmoneyInstrumentSearch:
                     temporary.unlink(missing_ok=True)
 
     async def _fetch_and_store(self, keyword: str, key: str) -> _CacheEntry:
+        identities: dict[str, SearchInstrument] = {}
+        more = False
+        pages_fetched = 0
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(15, connect=10), transport=self._transport,
@@ -284,18 +302,33 @@ class EastmoneyInstrumentSearch:
                 # HTTP 200 with a business-level 404 "Path mismatch".
                 headers={"Accept": "*/*"},
             ) as client:
-                response = await client.get(_URL, params={
-                    "client": "web", "clientType": "webSuggest", "clientVersion": "lastest",
-                    "keyword": keyword, "pageIndex": 1, "pageSize": _PAGE_SIZE,
-                })
-                response.raise_for_status()
+                for page in range(1, _MAX_IDENTITY_PAGES + 1):
+                    response = await client.get(_URL, params={
+                        "client": "web", "clientType": "webSuggest", "clientVersion": "lastest",
+                        "keyword": keyword, "pageIndex": page, "pageSize": _PAGE_SIZE,
+                    })
+                    response.raise_for_status()
+                    try:
+                        payload = response.json()
+                        if (isinstance(payload, Mapping) and "pageIndex" in payload
+                                and payload["pageIndex"] != page):
+                            raise InstrumentSearchInvalid("search page mismatch")
+                        items, more = parse_a_share_identities(payload)
+                    except ValueError as exc:
+                        raise InstrumentSearchInvalid("search JSON invalid") from exc
+                    for item in items:
+                        if item.symbol in identities and identities[item.symbol] != item:
+                            raise InstrumentSearchInvalid("conflicting security names across pages")
+                        identities[item.symbol] = item
+                    pages_fetched = page
+                    # A full mixed-asset page may contain only one A share and
+                    # many funds/bonds. Check later pages before calling that
+                    # identity ambiguous. Real ambiguity needs no extra fetch.
+                    if not more or len(identities) > 1:
+                        break
         except httpx.HTTPError as exc:
             raise InstrumentSearchUnavailable("security search unavailable") from exc
-        try:
-            items, more = parse_a_share_identities(response.json())
-        except ValueError as exc:
-            raise InstrumentSearchInvalid("search JSON invalid") from exc
-        entry = _CacheEntry(self._clock(), items, more)
+        entry = _CacheEntry(self._clock(), tuple(identities.values()), more, pages_fetched)
         self._cache[key] = entry
         self._cache.move_to_end(key)
         while len(self._cache) > _MAX_CACHE_ENTRIES:
@@ -367,6 +400,11 @@ class EastmoneyInstrumentSearch:
         if cached is None or self._clock() - cached.retrieved_at > _FRESH_AGE:
             self._read_cache()
             cached = self._cache.get(key)
+        if (cached is not None and cached.has_more and len(cached.items) <= 1
+                and cached.pages_fetched == 1):
+            # Upgrade old first-page-only caches once. Truncated five-page
+            # lookups remain bounded and cannot be mistaken for unique matches.
+            cached = await self._fetch_and_store(keyword, key)
         age = self._clock() - cached.retrieved_at if cached else None
         # A newer full directory supersedes older keyword/alias results.
         # Its date describes identity lookup only, never historical tradability.

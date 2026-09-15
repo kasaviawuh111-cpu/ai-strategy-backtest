@@ -372,7 +372,7 @@
       "evaluation_modes": ["bar_close_confirmed"],
       "parameters": [
         {"name": "baseline_period", "value_type": "integer", "required": true, "default": 20, "minimum": 1, "maximum": 1000},
-        {"name": "consecutive_days", "value_type": "integer", "required": true, "default": 3, "minimum": 1, "maximum": 100}
+        {"name": "consecutive_days", "value_type": "integer", "required": false, "default": 3, "minimum": 1, "maximum": 100}
       ],
       "parameter_relations": [],
       "triggers": [

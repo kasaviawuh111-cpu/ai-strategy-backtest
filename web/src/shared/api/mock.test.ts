@@ -1,5 +1,6 @@
 import { mockApi } from './mock'
 import type { CompileRequest } from './types'
+import { DEFAULT_STRATEGY_EXAMPLES } from '../default-strategy-examples'
 
 const request = (utterance: string): CompileRequest => ({
   utterance,
@@ -12,6 +13,29 @@ const request = (utterance: string): CompileRequest => ({
 })
 
 describe('mock API trust boundary', () => {
+  it.each(DEFAULT_STRATEGY_EXAMPLES)('preserves the complete homepage example: $category', async example => {
+    if (!example.instrument || example.category !== '历史案例') {
+      await expect(mockApi.compile(request(example.utterance))).rejects.toMatchObject({ problem: { code: 'preview_example_unavailable' } })
+      return
+    }
+    const result = await mockApi.compile({ utterance: example.utterance, instrument: example.instrument })
+    expect(result.status).toBe('compiled')
+    if (result.status !== 'compiled') throw new Error('homepage example must work in preview')
+    expect(result.draft.instrument.symbol).toBe(example.instrument.symbol)
+    expect(result.draft.sourceText).toBe(example.utterance)
+    const spec = result.draft.strategySpec
+    if (example.utterance.includes('KDJ')) {
+      expect(spec.entry).toMatchObject({ type: 'all', children: [
+        { indicator_id: 'technical.kdj', trigger: 'golden_cross' },
+        { indicator_id: 'technical.rsi', trigger: 'below', value: 50 },
+      ] })
+      expect(spec.exit?.children).toMatchObject([{ indicator_id: 'technical.kdj', trigger: 'death_cross' }])
+      expect(result.draft.entry.conditions).toHaveLength(2)
+    } else {
+      expect(spec.entry).toMatchObject({ indicator_id: 'technical.rsi', trigger: 'crosses_above', value: 30 })
+      expect(spec.exit?.children).toMatchObject([{ indicator_id: 'technical.rsi', trigger: 'crosses_below', value: 55 }])
+    }
+  })
   it('keeps the default Mock draft, result, series, and activities inside the one-year window', async () => {
     const outcome = await mockApi.compile(request('东方财富 MACD 金叉买入，死叉卖出'))
     expect(outcome.status).toBe('compiled')
@@ -92,7 +116,7 @@ describe('mock API trust boundary', () => {
     expect(outcome.draft.entry.conditions).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'event' }),
     ]))
-    expect(outcome.draft.strategySpec.exit.children).toEqual([
+    expect(outcome.draft.strategySpec.exit!.children).toEqual([
       expect.objectContaining({
         type: 'indicator_condition', indicator_id: 'technical.ma', trigger: 'price_crosses_below',
       }),
@@ -126,21 +150,21 @@ describe('mock API trust boundary', () => {
     await expect(mockApi.compile(request('火星逆行时满仓，月圆时卖出'))).rejects.toMatchObject({
       problem: {
         status: 422,
-        code: 'no_supported_signal_recognized',
-        detail: '没有识别到当前可执行的技术指标或公告事件。请写清何时买入、何时卖出和回测区间。',
+        code: 'preview_example_unavailable',
+        detail: expect.stringContaining('当前是界面演示模式'),
       },
     })
   })
 
   it('rejects event families without current acquisition coverage', async () => {
     await expect(mockApi.compile(request('季报发布后买入，MACD 死叉卖出'))).rejects.toMatchObject({
-      problem: { code: 'no_supported_signal_recognized' },
+      problem: { code: 'preview_example_unavailable' },
     })
     await expect(mockApi.compile(request('业务许可获批后买入，MACD 死叉卖出'))).rejects.toMatchObject({
-      problem: { code: 'no_supported_signal_recognized' },
+      problem: { code: 'preview_example_unavailable' },
     })
     await expect(mockApi.compile(request('半年度报告发布后买入，MACD 死叉卖出'))).rejects.toMatchObject({
-      problem: { code: 'no_supported_signal_recognized' },
+      problem: { code: 'preview_example_unavailable' },
     })
   })
 

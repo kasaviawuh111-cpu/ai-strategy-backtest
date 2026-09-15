@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from ashare_lab.domain.market_data import DataSnapshotRef
@@ -28,15 +29,16 @@ class ExecutionAssumptions:
     minimum_commission_cny: str
     fee_schedule_version: str
     market_rule_version: str
+    slippage_cny: str = "0"
     opening_auction_policy: str = (
         "cn.a_share.daily.published_open_proxy.latency_1s.cutoff_0915."
         "recorded_0930.not_exact.day_order.v2"
     )
     entry_signal_validity_policy: str = (
         "cn.a_share.daily.entry_signal_validity.edge_event_state.composite_fail_closed."
-        "event_revision_unavailable_one_attempt.retryable_day_orders.v3"
+        "default_one_attempt.persistent_account_exits.v4"
     )
-    edge_entry_validity_sessions: str = "3"
+    edge_entry_validity_sessions: str = "1"
     event_entry_validity_sessions: str = "1"
     state_entry_validity_sessions: str = "1"
     capacity_mode: str = "point_in_time_volume"
@@ -80,6 +82,7 @@ class ExecutionAssumptions:
             "resolution": self.resolution,
             "rights_issue_policy": self.rights_issue_policy,
             "slippage_bps": self.slippage_bps,
+            **({"slippage_cny": self.slippage_cny} if Decimal(self.slippage_cny) else {}),
             "state_entry_validity_sessions": self.state_entry_validity_sessions,
         }
 

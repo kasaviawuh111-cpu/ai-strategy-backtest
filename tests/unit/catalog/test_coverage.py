@@ -42,9 +42,9 @@ def test_metric_family_and_status_counts_are_explicit() -> None:
         "fundamental_valuation": 50,
     }
     assert Counter(item.status for item in snapshot.metrics) == {
-        "stable": 36,
+        "stable": 37,
         "research_only": 74,
-        "unavailable": 72,
+        "unavailable": 71,
     }
 
 
@@ -57,6 +57,7 @@ def test_only_authoritative_runtime_indicators_are_stable() -> None:
     assert stable_ids == {
         "amount.average",
         "market.amount",
+        "market.turnover_rate",
         "market.volume",
         "price.amplitude",
         "price.close",

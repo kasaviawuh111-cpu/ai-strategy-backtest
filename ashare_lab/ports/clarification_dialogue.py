@@ -76,6 +76,7 @@ class ClarificationDialogueAssessment:
     instrument_selected: bool = False
     selected_option_id: str | None = None
     requires_new_data: bool = False
+    instrument_recommendation_requested: bool = False
     run_requested: bool | None = None
     run_request_evidence: str | None = None
 

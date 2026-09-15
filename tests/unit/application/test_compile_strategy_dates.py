@@ -32,6 +32,28 @@ def compiler() -> StrategyCompiler:
 
 
 @pytest.mark.asyncio
+async def test_weekly_import_anchor_does_not_follow_monday_clock():
+    imported = [date(2026, 9, 11)]
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(),
+        catalog=load_catalog_directory(ROOT / 'catalogs'),
+        catalog_id='cn_a.signals', release_version='2026.09.01',
+        trusted_date_provider=lambda: date(2026, 9, 21),
+        backtest_anchor_date=lambda: imported[0],
+    )
+    request = CompileInput(utterance='MACD金叉买入，死叉卖出，近一年',
+                           instrument_context='300059.SZ', as_of_date=date(2026, 9, 21))
+    first = await compiler.compile(request)
+    assert first.strategy is not None
+    assert first.strategy.backtest.end == date(2026, 9, 11)
+    assert first.strategy.backtest.start == date(2025, 9, 11)
+    imported[0] = date(2026, 9, 18)
+    second = await compiler.compile(request)
+    assert second.strategy is not None
+    assert second.strategy.backtest.end == date(2026, 9, 18)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "utterance",
     [

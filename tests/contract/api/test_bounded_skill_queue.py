@@ -14,7 +14,10 @@ from ashare_lab.adapters.market_data.mx_daily_history import MxDailyHistoryClien
 from ashare_lab.adapters.persistence.backtest_runs import InMemoryBacktestRunStore
 from ashare_lab.api import create_app
 from ashare_lab.application.backtest_submission import BacktestRunConfig
-from ashare_lab.application.skill_backtest_service import SkillBacktestService
+from ashare_lab.application.skill_backtest_service import (
+    SkillBacktestService,
+    SkillCandidatePreparation,
+)
 from ashare_lab.domain.shared import RunId
 from ashare_lab.domain.strategy import StrategySpec
 from ashare_lab.ports.backtest_runs import BacktestJobState, BacktestRunRecord, CreateRunResult
@@ -56,6 +59,13 @@ def test_full_skill_queue_is_retryable_http_failure_and_never_strands_a_queued_r
     load = AsyncMock(side_effect=AssertionError("data lookup is forbidden in admission tests"))
 
     class BlockedSkillService(SkillBacktestService):
+        async def prepare_candidate(
+            self, strategy: StrategySpec, config: BacktestRunConfig,
+        ) -> SkillCandidatePreparation:
+            # Admission is the subject here; real preparation is covered by
+            # the preflight HTTP contracts and service data-readiness tests.
+            return cast(SkillCandidatePreparation, object())
+
         def execute(self, run_id: RunId) -> BacktestRunRecord:
             seen.append(run_id)
             self.store.transition(
@@ -90,7 +100,7 @@ def test_full_skill_queue_is_retryable_http_failure_and_never_strands_a_queued_r
             response = client.post("/api/v1/backtest-runs", json=payload)
             assert response.status_code == 503
             assert response.json()["error"]["code"] == "backtest_queue_full"
-            assert "本次未开始取数或回测，请稍后重试" in response.json()["error"]["message"]
+            assert "本次尚未启动回测，请稍后重试" in response.json()["error"]["message"]
             rejected = store.get(store.created[-1])
             assert rejected is not None and rejected.state is BacktestJobState.FAILED
             assert rejected.error_code == "backtest_queue_full" and rejected.progress_percent == 0

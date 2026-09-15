@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -167,6 +168,85 @@ def test_generic_threshold_condition_uses_provider_value() -> None:
     assert timeline[1] is not None and timeline[1].left_value == Decimal("2.6")
 
 
+def _with_units(
+    series: ProviderIndicatorSeries, units: dict[str, str | None],
+) -> ProviderIndicatorSeries:
+    return replace(series, points=tuple(
+        replace(point, values=tuple(replace(value, unit=units[value.field_name])
+                                    for value in point.values))
+        for point in series.points
+    ))
+
+
+@pytest.mark.parametrize("right_unit", ["元", "万股", "%"])
+def test_field_comparison_rejects_incompatible_dimension_or_unconverted_scale(
+    right_unit: str,
+) -> None:
+    condition = IndicatorCondition(
+        indicator_id="market.volume", definition_version="1.0.0",
+        params={"baseline_period": 20}, trigger="gte_multiple", value=1.5,
+    )
+    series = _with_units(_field_series(
+        indicator_id="market.volume", rows=({"成交量": "200", "20日平均成交量": "100"},),
+    ), {"成交量": "股", "20日平均成交量": right_unit})
+    with pytest.raises(ProviderSignalRuntimeError, match="incompatible units"):
+        evaluate_provider_indicator_aligned(condition, series, (START,))
+
+
+@pytest.mark.parametrize("right_unit", ["股", None])
+def test_field_comparison_accepts_equal_canonical_units_without_inventing_legacy_units(
+    right_unit: str | None,
+) -> None:
+    condition = IndicatorCondition(
+        indicator_id="market.volume", definition_version="1.0.0",
+        params={"baseline_period": 20}, trigger="gte_multiple", value=1.5,
+    )
+    series = _with_units(_field_series(
+        indicator_id="market.volume", rows=({"成交量": "200", "20日平均成交量": "100"},),
+    ), {"成交量": "股", "20日平均成交量": right_unit})
+    (fact,) = evaluate_provider_indicator_aligned(condition, series, (START,))
+    assert fact is not None and fact.triggered
+    assert (fact.left_value, fact.right_value) == (Decimal(200), Decimal(150))
+    assert series.points[0].values[1].unit == right_unit
+
+
+def test_previous_field_comparison_rejects_a_unit_change_between_sessions() -> None:
+    series = _field_series(indicator_id="technical.obv", rows=({"OBV值": "100"}, {"OBV值": "200"}))
+    series = replace(series, points=tuple(
+        replace(point, values=(replace(point.values[0], unit=unit),))
+        for point, unit in zip(series.points, ("股", "元"), strict=True)
+    ))
+    condition = IndicatorCondition(
+        indicator_id="technical.obv", definition_version="1.0.0", trigger="rising",
+    )
+    with pytest.raises(ProviderSignalRuntimeError, match="incompatible units"):
+        evaluate_provider_indicator_aligned(
+            condition, series, tuple(p.session_date for p in series.points),
+        )
+
+
+def test_independent_and_conditions_can_use_different_units() -> None:
+    price = IndicatorCondition(
+        indicator_id="technical.ma", definition_version="1.0.0", trigger="price_above",
+        params={"period": 20, "price_field": "close"},
+    )
+    volume = IndicatorCondition(
+        indicator_id="market.volume", definition_version="1.0.0", trigger="gte_multiple",
+        params={"baseline_period": 20}, value=1.5,
+    )
+    prices = _with_units(_field_series(
+        indicator_id="technical.ma", rows=({"收盘价": "20", "20日MA简单移动平均": "18"},),
+    ), {"收盘价": "元", "20日MA简单移动平均": "人民币元"})
+    volumes = _with_units(_field_series(
+        indicator_id="market.volume", rows=({"成交量": "200", "20日平均成交量": "100"},),
+    ), {"成交量": "股", "20日平均成交量": "股"})
+    (fact,) = evaluate_provider_condition_tree_aligned(
+        AllCondition(children=(price, volume)),
+        {"$.children[0]": prices, "$.children[1]": volumes}, (START,),
+    )
+    assert fact is not None and fact.triggered
+
+
 def test_provider_runtime_combines_multiple_provider_fields() -> None:
     condition = IndicatorCondition(
         indicator_id="volume.price_confirmation",
@@ -181,8 +261,8 @@ def test_provider_runtime_combines_multiple_provider_fields() -> None:
     series = _field_series(
         indicator_id="volume.price_confirmation",
         rows=(
-            {"相对成交量": "1.6", "当日涨跌幅": "2.9"},
-            {"相对成交量": "1.7", "当日涨跌幅": "3.1"},
+            {"成交量": "160", "前20日平均成交量": "100", "当日涨跌幅": "2.9"},
+            {"成交量": "170", "前20日平均成交量": "100", "当日涨跌幅": "3.1"},
         ),
     )
 
@@ -192,6 +272,30 @@ def test_provider_runtime_combines_multiple_provider_fields() -> None:
 
     assert [item.triggered for item in timeline if item is not None] == [False, True]
     assert timeline[1] is not None and " AND " in timeline[1].reason
+
+
+@pytest.mark.parametrize("trigger,change", [("surge_up", "3"), ("surge_down", "-3")])
+def test_volume_price_confirmation_uses_exact_average_and_preserves_price_direction(
+    trigger: str, change: str,
+) -> None:
+    condition = IndicatorCondition(
+        indicator_id="volume.price_confirmation", definition_version="1.0.0",
+        params={"baseline_period": 15, "volume_multiple": 2, "return_threshold_pct": 3},
+        trigger=trigger,
+    )
+    series = _field_series(indicator_id="volume.price_confirmation", rows=(
+        {"成交量": "200", "前15日平均成交量": "100", "当日涨跌幅": change},
+        {"成交量": "199", "前15日平均成交量": "100", "当日涨跌幅": change},
+        {"成交量": "200", "前15日平均成交量": "100", "当日涨跌幅": "0"},
+        {"成交量": "200", "前15日平均成交量": "0", "当日涨跌幅": change},
+        {"成交量": "0", "前15日平均成交量": "100", "当日涨跌幅": change},
+    ))
+    timeline = evaluate_provider_indicator_aligned(
+        condition, series, tuple(point.session_date for point in series.points),
+    )
+    assert [None if fact is None else fact.triggered for fact in timeline] == [
+        True, False, False, None, None,
+    ]
 
 
 def test_previous_provider_value_and_consecutive_sessions_are_supported() -> None:
@@ -224,9 +328,9 @@ def test_previous_provider_value_and_consecutive_sessions_are_supported() -> Non
     volume_series = _field_series(
         indicator_id="volume.relative",
         rows=(
-            {"量比": "1.6"},
-            {"量比": "1.7"},
-            {"量比": "1.4"},
+            {"成交量": "160", "前20日平均成交量": "100"},
+            {"成交量": "170", "前20日平均成交量": "100"},
+            {"成交量": "140", "前20日平均成交量": "100"},
         ),
     )
     volume = evaluate_provider_indicator_aligned(
@@ -237,6 +341,46 @@ def test_previous_provider_value_and_consecutive_sessions_are_supported() -> Non
     assert volume[0] is None
     assert volume[1] is not None and volume[1].triggered is True
     assert volume[2] is not None and volume[2].triggered is False
+
+
+@pytest.mark.parametrize("current,average", [("100", "0"), ("100", "-1"), ("0", "100")])
+@pytest.mark.parametrize("trigger", ["gt_multiple", "lte_multiple"])
+def test_relative_volume_invalid_operands_remain_unavailable_and_break_streak(
+    current: str, average: str, trigger: str,
+) -> None:
+    condition = IndicatorCondition(
+        indicator_id="volume.relative", definition_version="1.0.0",
+        params={"baseline_period": 20, "consecutive_days": 2}, trigger=trigger, value=1.5,
+    )
+    series = _field_series(indicator_id="volume.relative", rows=(
+        {"成交量": "160", "前20日平均成交量": "100"},
+        {"成交量": current, "前20日平均成交量": average},
+        {"成交量": "170", "前20日平均成交量": "100"},
+    ))
+    sessions = tuple(point.session_date for point in series.points)
+    timeline = evaluate_provider_indicator_aligned(condition, series, sessions)
+    assert timeline[1] is None
+    assert timeline[0] is not None and timeline[2] is not None
+    consecutive = evaluate_provider_indicator_aligned(
+        condition.model_copy(update={"trigger": "consecutive_gte_multiple"}), series, sessions,
+    )
+    assert consecutive == (None, None, None)
+
+
+def test_rolling_high_provider_threshold_uses_strict_comparison_not_boolean_flag() -> None:
+    condition = IndicatorCondition(
+        indicator_id="price.rolling_high", definition_version="1.0.0",
+        params={"period": 20, "price_field": "close"}, trigger="new_high",
+    )
+    series = _field_series(indicator_id="price.rolling_high", rows=(
+        {"收盘价": "100", "前20日最高收盘价": "100"},
+        {"收盘价": "101", "前20日最高收盘价": "100"},
+        {"收盘价": "99", "前20日最高收盘价": "100"},
+    ))
+    timeline = evaluate_provider_indicator_aligned(
+        condition, series, tuple(point.session_date for point in series.points),
+    )
+    assert [fact.triggered for fact in timeline if fact is not None] == [False, True, False]
 
 
 def test_provider_condition_tree_combines_all_any_and_not_without_formulas() -> None:

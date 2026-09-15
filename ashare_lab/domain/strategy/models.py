@@ -19,6 +19,9 @@ from ashare_lab.domain.financials import (
     FinancialUnit,
 )
 
+from .price_plans import PricePlan
+from .independent_plans import IndependentPlanPair
+
 type JsonScalar = str | int | float | bool
 
 
@@ -216,8 +219,29 @@ class FirstOfExit(FrozenModel):
     op: Literal["first_of", "all"] = "first_of"
     children: tuple[ExitRule, ...] = Field(min_length=1, max_length=16)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_equivalent_exit_shape(cls, value: object) -> object:
+        # A single rule is an OR group of one. Do not change its parameters,
+        # and leave conflicting or unknown fields for normal validation.
+        if not isinstance(value, dict) or "op" in value:
+            return value
+        kind = value.get("type")
+        if not isinstance(kind, str):
+            return value
+        if kind == "first_of":
+            return {"op": "first_of", **{key: item for key, item in value.items() if key != "type"}}
+        if kind in {"indicator_condition", "financial_condition", "event_condition",
+                    "holding_period_exit", "position_return_exit", "trailing_drawdown_exit", "minute_protection_exit"}:
+            return {"op": "first_of", "children": [value]}
+        return value
+
     @model_validator(mode="after")
     def position_aware_rules_are_unique(self) -> FirstOfExit:
+        minute_rules = [child for child in self.children if isinstance(child, MinuteProtectionExit)]
+        if minute_rules:
+            if len(minute_rules) != 1 or self.op != "first_of":
+                raise ValueError("分钟保护须为一个first_of退出节点，不能与日线条件同时满足")
         count = sum(isinstance(child, HoldingPeriodExit) for child in self.children)
         if count > 1:
             raise ValueError("exit may contain at most one holding-period rule")
@@ -226,6 +250,14 @@ class FirstOfExit(FrozenModel):
         ]
         if len(return_keys) != len(set(return_keys)):
             raise ValueError("exit may contain at most one take-profit and one stop-loss rule")
+        # PositionReturnExit fixes the same first-entry anchor and daily-close
+        # observation, with strictly positive thresholds. One return cannot be
+        # both >= a profit threshold and <= a negative loss threshold at once.
+        if self.op == "all" and set(return_keys) == {"take_profit", "stop_loss"}:
+            raise ValueError(
+                "all exit cannot require both take-profit and stop-loss "
+                "on the same entry-anchored closing return"
+            )
         trailing_count = sum(isinstance(child, TrailingDrawdownExit) for child in self.children)
         if trailing_count > 1:
             raise ValueError("exit may contain at most one trailing-drawdown rule")
@@ -280,6 +312,26 @@ class TrailingDrawdownExit(FrozenModel):
         return value
 
 
+class MinuteProtectionExit(FrozenModel):
+    """Observe raw minute H/L against fee-exclusive weighted acquisition cost."""
+
+    type: Literal["minute_protection_exit"] = "minute_protection_exit"
+    take_profit_pct: Decimal | None = Field(default=None, gt=0, le=10_000, allow_inf_nan=False)
+    stop_loss_pct: Decimal | None = Field(default=None, gt=0, lt=100, allow_inf_nan=False)
+    trailing_drawdown_pct: Decimal | None = Field(default=None, gt=0, lt=100, allow_inf_nan=False)
+    limit_price_cny: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    anchor: Literal["fee_exclusive_weighted_acquisition_cost"] = "fee_exclusive_weighted_acquisition_cost"
+    observation: Literal["raw_minute_high_low"] = "raw_minute_high_low"
+    execution: Literal["next_bar_order_activation"] = "next_bar_order_activation"
+
+    @model_validator(mode="after")
+    def has_protection(self) -> MinuteProtectionExit:
+        if (self.take_profit_pct is None and self.stop_loss_pct is None
+                and self.trailing_drawdown_pct is None):
+            raise ValueError("分钟保护至少需要止盈或止损阈值")
+        return self
+
+
 type ExitRule = Annotated[
     IndicatorCondition
     | FinancialCondition
@@ -289,6 +341,7 @@ type ExitRule = Annotated[
     | NotCondition
     | HoldingPeriodExit
     | PositionReturnExit
+    | MinuteProtectionExit
     | TrailingDrawdownExit,
     Field(discriminator="type"),
 ]
@@ -311,8 +364,68 @@ class DailyExecutionPolicy(FrozenModel):
         "financial_available_plus_1d_close",
         "event_financial_available_plus_1d_close",
     ] = "1d_close"
-    position_policy: Literal["single_position_no_pyramiding"] = "single_position_no_pyramiding"
+    position_policy: Literal[
+        "single_position_no_pyramiding", "bounded_inventory", "accumulate_on_new_entry_signal",
+    ] = "single_position_no_pyramiding"
     t_plus_one: Literal[True] = True
+
+
+class PricePlanExecutionPolicy(FrozenModel):
+    timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
+    entry_policy: Literal["next_bar_order_activation", "scheduled_session_open", "scheduled_session_close", "server_selected_grid"]
+    exit_policy: Literal["next_bar_order_activation", "scheduled_session_open", "scheduled_session_close", "server_selected_grid"]
+    data_capability: Literal["minute_ohlcv", "daily_ohlcv", "server_selected"]
+    execution_resolution: Literal["1m", "1d", "server_selected"]
+    evaluation_frequency: Literal["1m_bar", "1d_close", "pre_session_schedule", "server_selected"]
+    position_policy: Literal["bounded_inventory"] = "bounded_inventory"
+    t_plus_one: Literal[True] = True
+
+
+class HybridExecutionPolicy(FrozenModel):
+    timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
+    entry_policy: Literal["next_market_session_open"] = "next_market_session_open"
+    exit_policy: Literal["daily_signal_open_or_next_minute_activation"] = "daily_signal_open_or_next_minute_activation"
+    data_capability: Literal[
+        "daily_and_minute_ohlcv", "daily_and_minute_ohlcv_events",
+        "daily_and_minute_ohlcv_financials", "daily_and_minute_ohlcv_events_financials",
+    ] = "daily_and_minute_ohlcv"
+    execution_resolution: Literal["1m"] = "1m"
+    evaluation_frequency: Literal["daily_close_and_minute_bar"] = "daily_close_and_minute_bar"
+    position_policy: Literal["single_position_no_pyramiding", "accumulate_on_new_entry_signal"] = "single_position_no_pyramiding"
+    t_plus_one: Literal[True] = True
+
+
+class ComposedExecutionPolicy(FrozenModel):
+    """Explicit declaration for independent signal and inventory-plan legs."""
+    timezone: Literal["Asia/Shanghai"] = "Asia/Shanghai"
+    entry_policy: Literal["composed_entry_leg"] = "composed_entry_leg"
+    exit_policy: Literal["composed_exit_leg"] = "composed_exit_leg"
+    data_capability: Literal[
+        "daily_and_minute_ohlcv", "daily_and_minute_ohlcv_events",
+        "daily_and_minute_ohlcv_financials", "daily_and_minute_ohlcv_events_financials",
+    ] = "daily_and_minute_ohlcv"
+    execution_resolution: Literal["1m"] = "1m"
+    evaluation_frequency: Literal["daily_close_and_minute_bar"] = "daily_close_and_minute_bar"
+    position_policy: Literal["bounded_inventory"] = "bounded_inventory"
+    t_plus_one: Literal[True] = True
+
+
+def execution_for_price_plan(plan: PricePlan) -> DailyExecutionPolicy | PricePlanExecutionPolicy:
+    params = plan.parameters
+    if plan.kind == "scheduled":
+        policy = "scheduled_session_close" if params.at == "close" else "scheduled_session_open"
+        if params.exit_rules:
+            return PricePlanExecutionPolicy(entry_policy=policy, exit_policy="next_bar_order_activation",
+                data_capability="minute_ohlcv", execution_resolution="1m", evaluation_frequency="1m_bar")
+        return PricePlanExecutionPolicy(entry_policy=policy, exit_policy=policy,
+            data_capability="daily_ohlcv", execution_resolution="1d", evaluation_frequency="pre_session_schedule")
+    if params.observation == "minute_bar":
+        return PricePlanExecutionPolicy(entry_policy="next_bar_order_activation", exit_policy="next_bar_order_activation",
+            data_capability="minute_ohlcv", execution_resolution="1m", evaluation_frequency="1m_bar")
+    if plan.kind == "grid" and params.observation is None:
+        return PricePlanExecutionPolicy(entry_policy="server_selected_grid", exit_policy="server_selected_grid",
+            data_capability="server_selected", execution_resolution="server_selected", evaluation_frequency="server_selected")
+    return DailyExecutionPolicy(position_policy="bounded_inventory")
 
 
 class BacktestConfig(FrozenModel):
@@ -331,28 +444,60 @@ class StrategySpec(FrozenModel):
     schema_version: Literal["strategy.v1"] = "strategy.v1"
     catalog: CatalogRef
     instrument: Instrument
-    entry: Condition
-    exit: FirstOfExit
-    execution: DailyExecutionPolicy = Field(default_factory=DailyExecutionPolicy)
+    entry: Condition | None = None
+    exit: FirstOfExit | None = None
+    trading_plan: PricePlan | None = Field(default=None, exclude_if=lambda value: value is None)
+    independent_plans: IndependentPlanPair | None = Field(default=None, exclude_if=lambda value: value is None)
+    execution: DailyExecutionPolicy | PricePlanExecutionPolicy | HybridExecutionPolicy | ComposedExecutionPolicy = Field(default_factory=DailyExecutionPolicy)
     backtest: BacktestConfig
 
     @model_validator(mode="after")
     def expression_is_bounded(self) -> StrategySpec:
+        if self.independent_plans is not None:
+            if self.trading_plan is not None or self.entry is not None or self.exit is not None:
+                raise ValueError('双计划与其他买卖规则不能重复声明所有权')
+            if not isinstance(self.execution, ComposedExecutionPolicy):
+                raise ValueError('双计划须显式声明组合执行')
+            if self.backtest.initial_cash_cny != self.independent_plans.entry_plan.parameters.initial_cash_cny:
+                raise ValueError('双计划与回测初始资金必须一致')
+            return self
+        plan = getattr(self, "trading_plan", None)
+        composed = plan is not None and (self.entry is not None or self.exit is not None)
+        if plan is not None:
+            if self.backtest.initial_cash_cny != plan.parameters.initial_cash_cny:
+                raise ValueError("交易计划与回测初始资金必须一致")
+            # Read existing saved v1 records without changing their hashes;
+            # newly compiled plans use the exact plan-derived declaration.
+            if not composed and self.execution not in (DailyExecutionPolicy(position_policy="bounded_inventory"), execution_for_price_plan(plan)):
+                raise ValueError("交易计划执行声明与实际计划不一致")
+            if not composed:
+                return self
+        if composed and not isinstance(self.execution, ComposedExecutionPolicy):
+            raise ValueError("独立买卖组合须显式声明组合执行，不能沿用整套计划的执行声明")
+        if not composed and self.execution.position_policy not in {
+            "single_position_no_pyramiding", "accumulate_on_new_entry_signal",
+        }:
+            raise ValueError("指标策略须声明不加仓或按新信号加仓")
+        if not composed and (self.entry is None or self.exit is None):
+            raise ValueError("指标策略须有完整买卖条件")
+        exit_children = self.exit.children if self.exit is not None else ()
         exit_conditions = tuple(
             child
-            for child in self.exit.children
+            for child in exit_children
             if not isinstance(
                 child,
-                (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit),
+                (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit, MinuteProtectionExit),
             )
         )
-        roots: tuple[Condition, ...] = (self.entry, *exit_conditions)
+        roots: tuple[Condition, ...] = (
+            *((self.entry,) if self.entry is not None else ()), *exit_conditions,
+        )
         node_count = (
             sum(_condition_size(root) for root in roots)
-            + len(self.exit.children)
+            + len(exit_children)
             - len(exit_conditions)
         )
-        max_depth = max(_condition_depth(root) for root in roots)
+        max_depth = max((_condition_depth(root) for root in roots), default=0)
         if node_count > 64:
             raise ValueError("strategy condition tree exceeds 64 nodes")
         if max_depth > 8:
@@ -368,6 +513,17 @@ class StrategySpec(FrozenModel):
             if has_financials
             else ("daily_ohlcv", "1d_close")
         )
+        has_minute = any(isinstance(child, MinuteProtectionExit) for child in exit_children)
+        if composed:
+            expected_execution = (expected_execution[0].replace("daily_ohlcv", "daily_and_minute_ohlcv"),
+                                  "daily_close_and_minute_bar")
+        elif has_minute:
+            expected_execution = (expected_execution[0].replace("daily_ohlcv", "daily_and_minute_ohlcv"),
+                                  "daily_close_and_minute_bar")
+            if not isinstance(self.execution, HybridExecutionPolicy):
+                raise ValueError("分钟保护须声明日线信号与分钟执行，不能回退日线")
+        elif isinstance(self.execution, HybridExecutionPolicy):
+            raise ValueError("混合执行声明须包含分钟保护规则")
         if (
             self.execution.data_capability,
             self.execution.evaluation_frequency,
@@ -418,11 +574,12 @@ def iter_indicator_conditions(spec: StrategySpec) -> Iterator[IndicatorCondition
         for child in _children(condition):
             yield from walk(child)
 
-    yield from walk(spec.entry)
-    for exit_condition in spec.exit.children:
+    if spec.entry is not None:
+        yield from walk(spec.entry)
+    for exit_condition in spec.exit.children if spec.exit is not None else ():
         if not isinstance(
             exit_condition,
-            (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit),
+            (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit, MinuteProtectionExit),
         ):
             yield from walk(exit_condition)
 
@@ -437,11 +594,12 @@ def iter_event_conditions(spec: StrategySpec) -> Iterator[EventCondition]:
         for child in _children(condition):
             yield from walk(child)
 
-    yield from walk(spec.entry)
-    for exit_condition in spec.exit.children:
+    if spec.entry is not None:
+        yield from walk(spec.entry)
+    for exit_condition in spec.exit.children if spec.exit is not None else ():
         if not isinstance(
             exit_condition,
-            (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit),
+            (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit, MinuteProtectionExit),
         ):
             yield from walk(exit_condition)
 
@@ -456,11 +614,12 @@ def iter_financial_conditions(spec: StrategySpec) -> Iterator[FinancialCondition
         for child in _children(condition):
             yield from walk(child)
 
-    yield from walk(spec.entry)
-    for exit_condition in spec.exit.children:
+    if spec.entry is not None:
+        yield from walk(spec.entry)
+    for exit_condition in spec.exit.children if spec.exit is not None else ():
         if not isinstance(
             exit_condition,
-            (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit),
+            (HoldingPeriodExit, PositionReturnExit, TrailingDrawdownExit, MinuteProtectionExit),
         ):
             yield from walk(exit_condition)
 
@@ -468,19 +627,19 @@ def iter_financial_conditions(spec: StrategySpec) -> Iterator[FinancialCondition
 def iter_holding_period_exits(spec: StrategySpec) -> Iterator[HoldingPeriodExit]:
     """Yield the bounded position-aware exit rules in document order."""
 
-    for exit_rule in spec.exit.children:
+    for exit_rule in spec.exit.children if spec.exit else ():
         if isinstance(exit_rule, HoldingPeriodExit):
             yield exit_rule
 
 
 def iter_position_return_exits(spec: StrategySpec) -> Iterator[PositionReturnExit]:
-    for exit_rule in spec.exit.children:
+    for exit_rule in spec.exit.children if spec.exit else ():
         if isinstance(exit_rule, PositionReturnExit):
             yield exit_rule
 
 
 def iter_trailing_drawdown_exits(spec: StrategySpec) -> Iterator[TrailingDrawdownExit]:
-    for exit_rule in spec.exit.children:
+    for exit_rule in spec.exit.children if spec.exit else ():
         if isinstance(exit_rule, TrailingDrawdownExit):
             yield exit_rule
 

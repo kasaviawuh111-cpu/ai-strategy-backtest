@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections import Counter
@@ -28,6 +29,7 @@ from ashare_lab.application.backtest_submission import (
     FinancialDataUnavailableError,
     validate_a_share_backtest_range,
 )
+from ashare_lab.application.execution_feedback import execution_capability_feedback
 from ashare_lab.application.result_views import (
     RESULT_HASH_SCHEMA_VERSION,
     calculate_result_bundle_hash,
@@ -42,7 +44,11 @@ from ashare_lab.domain.strategy import (
     strategy_requires_events,
     validate_strategy_against_catalog,
 )
-from ashare_lab.ports.backtest_review import BacktestReviewRequest, EvidenceGrade
+from ashare_lab.ports.backtest_review import (
+    BacktestReviewContentError,
+    BacktestReviewRequest,
+    EvidenceGrade,
+)
 from ashare_lab.ports.backtest_runs import (
     BacktestJobState,
     BacktestQueueFullError,
@@ -52,6 +58,7 @@ from ashare_lab.ports.backtest_runs import (
 )
 from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 
+from ..backtest_preflight import preflight_backtest_strategy
 from ..backtest_review_schemas import BacktestReviewResponse
 from ..backtest_schemas import (
     BacktestCancelResponse,
@@ -88,6 +95,12 @@ RunIdPath = Annotated[
 ]
 
 
+def _execution_capability_problem(reason: str) -> ApiProblem:
+    code, message = execution_capability_feedback(reason)
+    return ApiProblem(status_code=503 if code == "minute_execution_unavailable" else 422,
+        code=code, message=message + "本次未启动回测。")
+
+
 @router.post(
     "",
     response_model=BacktestRunCreatedResponse,
@@ -95,7 +108,7 @@ RunIdPath = Annotated[
     operation_id="createBacktestRun",
     responses=error_response_docs(413, 422, 500, 503),
 )
-def create_backtest_run(
+async def create_backtest_run(
     body: BacktestRunRequest,
     response: Response,
     container: Container,
@@ -104,6 +117,7 @@ def create_backtest_run(
     validate_idempotency_key(idempotency_key)
     submitter, _store = _require_runtime(container)
     # Import here: the service also consumes API result schemas at module load.
+    from ashare_lab.application.minute_grid_plan import MinuteGridCapabilityError
     from ashare_lab.application.skill_backtest_service import SkillBacktestService
 
     if body.config.refresh_data and not isinstance(submitter, SkillBacktestService):
@@ -122,6 +136,8 @@ def create_backtest_run(
         validate_a_share_backtest_range(body.strategy.backtest.start, body.strategy.backtest.end)
         normalize_a_share_instrument(body.strategy.instrument.symbol)
         validate_strategy_against_catalog(body.strategy, container.catalog)
+        if isinstance(submitter, SkillBacktestService):
+            submitter.validate_execution_capability(body.strategy)
         if document_text_event_codes and not (
             document_text_event_codes.issubset(container.event_document_text_backtest_codes)
             or document_text_event_codes.issubset(container.event_document_text_preparable_codes)
@@ -137,12 +153,22 @@ def create_backtest_run(
                     "event strategy requires either code-level acquisition coverage "
                     "in a pinned snapshot or an explicit request-preparation capability"
                 )
-        result = submitter.submit(body.strategy, body.config.to_application_config())
+        config = await preflight_backtest_strategy(
+            strategy=body.strategy, config=body.config.to_application_config(), container=container,
+        )
+        if isinstance(submitter, SkillBacktestService):
+            result = await asyncio.to_thread(
+                submitter.submit, body.strategy, config, prepared_inputs=True,
+            )
+        else:
+            result = await asyncio.to_thread(submitter.submit, body.strategy, config)
+    except MinuteGridCapabilityError as exc:
+        raise _execution_capability_problem(str(exc)) from exc
     except BacktestQueueFullError as exc:
         raise ApiProblem(
             status_code=503,
             code="backtest_queue_full",
-            message="当前回测队列已满，本次未开始取数或回测，请稍后重试。",
+            message="当前回测队列已满，本次尚未启动回测，请稍后重试。",
         ) from exc
     except BacktestDateRangeError as exc:
         raise ApiProblem(
@@ -193,6 +219,44 @@ def create_backtest_run(
     set_idempotency_replayed(response, replayed=result.replayed)
     payload = BacktestRunStatusResponse.from_record(result.record).model_dump()
     return BacktestRunCreatedResponse.model_validate({**payload, "replayed": result.replayed})
+
+
+@router.post(
+    "/prepare", response_model=dict[str, bool], operation_id="prepareBacktestRun",
+    responses=error_response_docs(413, 422, 500, 503),
+)
+async def prepare_backtest_run(
+    body: BacktestRunRequest, container: Container,
+) -> dict[str, bool]:
+    """Check the exact edited card without saving it or creating a run."""
+    submitter, _store = _require_runtime(container)
+    from ashare_lab.application.minute_grid_plan import MinuteGridCapabilityError
+    from ashare_lab.application.skill_backtest_service import SkillBacktestService
+
+    if body.config.refresh_data and not isinstance(submitter, SkillBacktestService):
+        raise ApiProblem(
+            status_code=422, code="data_refresh_unavailable",
+            message="当前回测数据通道不支持强制重新取数，本次未执行。",
+        )
+    try:
+        validate_a_share_backtest_range(body.strategy.backtest.start, body.strategy.backtest.end)
+        normalize_a_share_instrument(body.strategy.instrument.symbol)
+        validate_strategy_against_catalog(body.strategy, container.catalog)
+    except (BacktestDateRangeError, AshareInstrumentCodeError,
+            DomainValidationError, StrategyCatalogError) as exc:
+        raise ApiProblem(
+            status_code=422, code="backtest_submission_invalid",
+            message="当前股票、日期或指标参数不满足回测要求。请检查设置；本次未启动回测。",
+        ) from exc
+    if isinstance(submitter, SkillBacktestService):
+        try:
+            submitter.validate_execution_capability(body.strategy)
+        except MinuteGridCapabilityError as exc:
+            raise _execution_capability_problem(str(exc)) from exc
+    await preflight_backtest_strategy(
+        strategy=body.strategy, config=body.config.to_application_config(), container=container,
+    )
+    return {"ready": True}
 
 
 @router.get(
@@ -285,7 +349,7 @@ def get_backtest_trades(
     "/{run_id}/review",
     response_model=BacktestReviewResponse,
     operation_id="reviewBacktestRun",
-    responses=error_response_docs(404, 409, 422, 500, 503),
+    responses=error_response_docs(404, 409, 422, 500, 502, 503),
 )
 async def review_backtest_run(
     run_id: RunIdPath,
@@ -378,24 +442,33 @@ async def build_backtest_review(
         report_references["historyScope"],
     )
     evidence_grade, evidence_reasons = _review_evidence_gate(bundle)
-    model_review = await advisor.review(
-        BacktestReviewRequest(
-            run_id=run_id,
-            instrument_symbol=strategy.instrument.symbol,
-            as_of_date=strategy.backtest.end,
-            strategy_payload=cast(
-                Mapping[str, object],
-                strategy.model_dump(mode="json"),
-            ),
-            result_facts=_verified_review_facts(record, bundle),
-            evidence_grade=evidence_grade,
-            evidence_reasons=evidence_reasons,
-            user_request=user_request,
-            completed_runs=completed_runs,
-            exposed_proposals=exposed_proposals,
-            report_references=report_references,
-        )
+    review_request = BacktestReviewRequest(
+        run_id=run_id,
+        instrument_symbol=strategy.instrument.symbol,
+        as_of_date=strategy.backtest.end,
+        strategy_payload=cast(
+            Mapping[str, object],
+            strategy.model_dump(mode="json"),
+        ),
+        result_facts=_verified_review_facts(record, bundle),
+        evidence_grade=evidence_grade,
+        evidence_reasons=evidence_reasons,
+        user_request=user_request,
+        completed_runs=completed_runs,
+        exposed_proposals=exposed_proposals,
+        report_references=report_references,
     )
+    try:
+        model_review = await advisor.review(review_request)
+    except BacktestReviewContentError as exc:
+        raise ApiProblem(
+            status_code=502,
+            code="backtest_review_content_invalid",
+            message=(
+                "AI 解读内容尚未通过核对，暂不展示这次解读，可重试 AI 分析；"
+                "已完成的回测结果与指标不受影响，无需重新回测。"
+            ),
+        ) from exc
     if model_review is None:
         raise _backtest_review_model_unavailable()
 
@@ -439,7 +512,7 @@ async def build_backtest_review(
                 "modelSuggested": True,
             }
         )
-    if len(candidates) < 2:
+    if len(candidates) < 2 and strategy.trading_plan is None:
         raise ApiProblem(
             status_code=503,
             code="backtest_review_candidates_unavailable",
@@ -695,9 +768,15 @@ def _verified_review_facts(
     facts: dict[str, object] = {
         "runFingerprint": record.fingerprint,
         "summary": bundle.summary.model_dump(mode="json", by_alias=True),
-        "audit": bundle.audit.model_dump(mode="json", by_alias=True),
+        "audit": bundle.audit.model_dump(
+            mode="json", by_alias=True, exclude={"skill_numeric_sources", "price_plan_ledger", "signal_adjustment_source"},
+        ),
         "activityCounts": dict(sorted(activity_counts.items())),
         "activityStatusCounts": dict(sorted(status_counts.items())),
+        "executedOrderCount": activity_counts["fill"] + activity_counts["partial_fill"],
+        "unfilledReasons": dict(Counter(
+            item.reason for item in bundle.activities if item.kind == "unfilled" and item.reason
+        )),
         "executionCosts": _execution_cost_facts(record.config_json),
         "dataSource": _data_source_facts(bundle),
         "robustness": (
@@ -712,9 +791,14 @@ def _verified_review_facts(
     elif bundle.summary.data_provenance is not None:
         provenance = bundle.summary.data_provenance
         facts["benchmarkDefinition"] = {
-            "type": "same_instrument_buy_and_hold",
+            "type": ("same_first_buy_allocation_hold" if bundle.audit.price_plan_ledger is not None
+                     else "same_instrument_buy_and_hold"),
             "instrumentId": provenance.instrument_id,
-            "description": "同一只股票同期买入并持有，不是股票指数。",
+            "description": ("复用交易计划实际初始建仓（没有时取首笔买入）的日期、股数、"
+                            "成交成本与剩余现金，"
+                            "此后不交易，用于衡量后续网格交易的相对贡献。"
+                            if bundle.audit.price_plan_ledger is not None
+                            else "同一只股票同期买入并持有，不是股票指数。"),
         }
         facts["providerIndicatorEvidence"] = {
             "providers": [provenance.provider],
@@ -890,8 +974,8 @@ def _backtest_data_request_unsupported() -> ApiProblem:
         status_code=422,
         code="backtest_data_request_unsupported",
         message=(
-            "The requested instrument, date range, or data capability is not supported "
-            "by the configured backtest data sources"
+            "当前数据源不支持本次股票、回测区间或所需的数据能力。"
+            "请核对股票和区间，或补齐对应数据；无需重新描述买卖规则。本次未启动回测。"
         ),
     )
 
@@ -900,7 +984,7 @@ def _backtest_data_not_yet_available() -> ApiProblem:
     return ApiProblem(
         status_code=422,
         code="backtest_data_not_yet_available",
-        message="Backtest end exceeds the latest stable completed A-share daily data date",
+        message="数据尚未更新，请选择可用日期。原买卖规则已保留，本次未启动回测。",
     )
 
 
@@ -908,7 +992,7 @@ def _backtest_data_temporarily_unavailable() -> ApiProblem:
     return ApiProblem(
         status_code=503,
         code="backtest_data_temporarily_unavailable",
-        message="Historical backtest data is temporarily unavailable; retry later",
+        message="本次历史数据暂未准备完成，请稍后重试；无需重新描述买卖规则。本次未启动回测。",
     )
 
 
@@ -917,8 +1001,8 @@ def _event_document_text_data_unavailable() -> ApiProblem:
         status_code=422,
         code="event_document_text_data_unavailable",
         message=(
-            "The requested report text is not available as a complete frozen document "
-            "for this backtest"
+            "本次回测缺少可核验的完整报告正文快照，无法计算正文条件。"
+            "请补齐正文数据后重试；不会用标题代替正文，无需重新描述买卖规则。本次未启动回测。"
         ),
     )
 

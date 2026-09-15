@@ -50,8 +50,8 @@ function RuleNode({ node, compact = false }: { node: StrategyRuleNode; compact?:
       <div className={`rule-leaf rule-leaf--${node.tone}`}>
         <b>{node.label}</b>
         {!compact ? <span>{node.detail}</span> : null}
-        {!compact && node.parameters.length > 0 ? (
-          <small>{node.parameters.join(' · ')}</small>
+        {node.parameters.length > 0 ? (
+          <small>参数：{node.parameters.join(' · ')}</small>
         ) : null}
       </div>
     );
@@ -74,10 +74,12 @@ export function RuleTree({ node, compact = false }: { node: StrategyRuleNode; co
 
 /** 策略确认卡：首层只保留买入、卖出、区间；本金与高级成交设置下沉。 */
 export function StrategyCard(
-  { instrument, strategy, onEditRow, onOpenMore, onRun, isStarting, isLocked, settled, editableAfterRun = false, canStart = true, disabledReason, error, executionSummary, stockEditor }:
+  { instrument, strategy, onEditRow, onOpenMore, onRun, isStarting, isLocked, settled, editableAfterRun = false, canStart = true, checkingSettings = false, disabledReason, blockedLabel, error, executionSummary, stockEditor, onRetryConnection, retryLabel = '重新检查连接' }:
   { instrument: Instrument; strategy: StrategySummary;
     onEditRow: (key: EditableRow['key'], path?: string) => void; onOpenMore: () => void; onRun: () => void;
-    isStarting?: boolean; isLocked?: boolean; settled?: string; editableAfterRun?: boolean; canStart?: boolean; disabledReason?: string; error?: string;
+    isStarting?: boolean; isLocked?: boolean; settled?: string; editableAfterRun?: boolean; canStart?: boolean; checkingSettings?: boolean; disabledReason?: string; blockedLabel?: string; error?: string;
+    onRetryConnection?: () => void;
+    retryLabel?: string;
     /** 当前成交设置的一句话后果，由 view-model 的 summarizeExecution 生成。 */
     executionSummary?: string; stockEditor?: InlineStockEditorActions },
 ) {
@@ -114,7 +116,25 @@ export function StrategyCard(
           </button>
         </div>
         <div className="condition-sections">
+          {strategy.gridReview ? <dl className="grid-review-facts grid-review-anchor">
+            <div><dt>基准价</dt><dd>{strategy.gridReview.anchor}</dd></div>
+            {strategy.gridReview.initialization ? <div><dt>建仓计划</dt><dd>{strategy.gridReview.initialization}</dd></div> : null}
+            <div className="grid-review-edit-row"><dt>参数调整</dt><dd>
+              <button type="button" className="grid-review-edit" disabled={fieldsLocked}
+                onClick={() => onEditRow('entry')}><span>修改网格参数</span><Chevron /></button>
+            </dd></div>
+          </dl> : null}
           {strategy.rows.map((row) => {
+            if (strategy.gridReview && (row.key === 'entry' || row.key === 'exit')
+              && (row.key === 'entry' ? strategy.gridReview.buy : strategy.gridReview.sell).length > 0) {
+              const facts = row.key === 'entry' ? strategy.gridReview.buy : strategy.gridReview.sell;
+              return <section className={`condition-section ${row.kind}`} key={row.key} aria-label={`${row.label}条件`}>
+                <header className="condition-heading"><span className="lb">{row.label}</span></header>
+                <dl className="grid-review-facts">
+                  {facts.map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}
+                </dl>
+              </section>;
+            }
             const root = row.key === 'entry' ? strategy.entryRule : row.key === 'exit' ? strategy.exitRule : null;
             // first_of with a single market-condition group delegates to that group.
             // Do not label an ALL group as OR just because the exit envelope is first_of.
@@ -125,14 +145,26 @@ export function StrategyCard(
               const operator = node.kind === 'group' ? node.operator : 'all';
               return <section className={`condition-section ${row.kind}`} key={row.key} aria-label={`${row.label}条件`}>
                 <header className="condition-heading"><span className="lb">{row.label}</span>
-                  <button type="button" className="condition-relation" disabled={fieldsLocked}
+                  {strategy.pricePlanKind !== 'grid' && <button type="button" className="condition-relation" disabled={fieldsLocked}
                     onClick={() => onEditRow(row.key, node.id)}>
-                    {children.length > 1 ? operator === 'all' ? `全部满足才${row.label}（且）`
+                    {strategy.pricePlanKind ? strategy.pricePlanKind === 'scheduled' ? '按日历安排 · 休市顺延'
+                      : strategy.pricePlanKind === 'conditional' && !strategy.hasSequentialPricePlanStages
+                        ? row.value.startsWith('建仓：') ? '区间开始时建仓'
+                          : row.value.startsWith('期初已有') ? '已有底仓' : '满足条件时触发'
+                        : '按编号阶段执行 · 同组先触发者生效'
+                      : children.length > 1 ? operator === 'all' ? `全部满足才${row.label}（且）`
                       : operator === 'not' ? '不满足以下条件' : `任一触发就${row.label}（或）` : '满足条件时触发'}<Chevron />
-                  </button>
+                  </button>}
                 </header>
-                <div className="erows">
-                  {children.map((child) => <button key={child.id} type="button" className="erow"
+                {row.key === 'entry' && strategy.entryTriggerNote ? (
+                  <p className="condition-trigger-note">{strategy.entryTriggerNote}</p>
+                ) : null}
+                <div className={`erows${strategy.pricePlanKind === 'grid' ? ' erows--readonly' : ''}`}>
+                  {children.map((child) => strategy.pricePlanKind === 'grid'
+                    ? <div key={child.id} className="erow">
+                      <div className="val"><RuleTree node={child} compact /></div>
+                    </div>
+                    : <button key={child.id} type="button" className="erow"
                     disabled={fieldsLocked} onClick={() => onEditRow(row.key, child.id)}>
                     <div className="val"><RuleTree node={child} compact /></div><Chevron />
                   </button>)}
@@ -160,12 +192,17 @@ export function StrategyCard(
       </div>
       <CardFoot settled={settled} actions={[
         {
-          label: isStarting ? '正在创建任务' : isLocked ? '回测运行中' : canStart ? '开始回测' : '请检查设置',
+          label: isStarting ? '正在准备回测' : checkingSettings ? '检查设置中' : isLocked ? '回测运行中' : canStart ? '开始回测' : blockedLabel ?? '请检查设置',
           onClick: onRun,
           disabled: isLocked || stockEditing || !canStart,
         },
+        ...(!canStart && onRetryConnection ? [{
+          label: checkingSettings ? '正在重新检查' : retryLabel,
+          onClick: onRetryConnection,
+          disabled: isLocked || stockEditing || checkingSettings,
+        }] : []),
       ]} />
-      {!canStart && disabledReason ? <div className="card-note">{disabledReason}</div> : null}
+      {!canStart && disabledReason ? <div className="card-note" role="status" aria-live="polite">{disabledReason}</div> : null}
       {error ? <div className="card-error" role="alert">{error}</div> : null}
     </section>
   );
@@ -256,7 +293,7 @@ export function ResultCard(
 
 /** 空 / 失败 / 拒绝态卡（SPEC 4.10）：说清缺什么 + 给下一步 */
 export function FailureCard(
-  { state, onAction }: { state: FailureState; onAction?: (index: number) => void },
+  { state, onAction }: { state: FailureState; onAction?: (action: FailureState['actions'][number]['action']) => void },
 ) {
   const statusLabel: Record<FailureState['status'], string> = {
     proved: '已验证',
@@ -283,11 +320,11 @@ export function FailureCard(
           {state.reason}
         </p>
         {state.runId ? (
-          <Notice tone="info">任务编号 <code>{state.runId}</code>，报给工程时带上这个就够了。</Notice>
+          <Notice tone="info">问题编号 <code>{state.runId}</code>，反馈问题时可附上。</Notice>
         ) : null}
       </div>
-      <CardFoot actions={state.actions.map((label, i) => ({
-        label, mute: i > 0, onClick: onAction ? () => onAction(i) : undefined,
+      <CardFoot actions={state.actions.map(({ label, action }, i) => ({
+        label, mute: i > 0, onClick: onAction ? () => onAction(action) : undefined,
       }))} />
     </section>
   );

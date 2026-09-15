@@ -182,7 +182,7 @@ def request(
     )
 
 
-def test_flat_price_benchmark_is_funded_and_includes_fees_and_slippage() -> None:
+def test_flat_price_benchmark_includes_fees_and_clips_slippage_to_bar() -> None:
     source_bars = (
         bar(PREVIOUS, "10"),
         bar(START, "10"),
@@ -201,7 +201,7 @@ def test_flat_price_benchmark_is_funded_and_includes_fees_and_slippage() -> None
 
     fill = result.entry_fill
     assert fill is not None
-    assert fill.price == Price(Decimal("10.01"))
+    assert fill.price == Price(Decimal("10"))
     assert fill.quantity.value % 100 == 0
     assert fill.fees.total.amount > 0
     assert result.initial_cash == Money(Decimal("10000"))
@@ -294,8 +294,8 @@ def test_benchmark_pre_open_quantity_is_invariant_to_the_future_open() -> None:
     assert baseline_order.submitted_at == datetime(2025, 1, 2, 9, 29, tzinfo=TZ)
     assert baseline_order.quantity == counterfactual_order.quantity
     assert baseline.entry_fill is not None and counterfactual.entry_fill is not None
-    assert baseline.entry_fill.price == Price(Decimal("10.01"))
-    assert counterfactual.entry_fill.price == Price(Decimal("20.01"))
+    assert baseline.entry_fill.price == Price(Decimal("10"))
+    assert counterfactual.entry_fill.price == Price(Decimal("20"))
 
 
 def test_benchmark_pre_open_sizing_reserves_upper_limit_notional_fees_and_slippage() -> None:
@@ -374,7 +374,9 @@ def test_missing_prior_bar_fails_closed_then_retries_with_known_proxy() -> None:
 
 
 def test_unlimited_capacity_only_works_when_explicitly_selected() -> None:
-    source_bars = (bar(START, "10", volume=0),)
+    # Unlimited removes the volume participation cap, not the requirement
+    # that the session actually traded.
+    source_bars = (bar(START, "10", volume=1),)
     result = run_funded_buy_and_hold(
         request(
             source_bars,

@@ -58,11 +58,23 @@ class StockRecommendation:
 
 @runtime_checkable
 class StockRecommendationAdvisor(Protocol):
+    """An empty tuple means no evidenced match; None means recommendation processing failed."""
     async def recommend_stocks(
         self,
         query: str,
         result: LiveMarketDataResult,
     ) -> tuple[StockRecommendation, ...] | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class IndustryExpansion:
+    industry: str
+    query: str
+
+
+@runtime_checkable
+class IndustryExpansionAdvisor(Protocol):
+    async def plan_industry_expansion(self, utterance: str) -> IndustryExpansion | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +85,7 @@ class QueryDataReview:
     evidence: tuple[str, ...]
     retry_query: str | None
     message: str
+    strategy_requested: bool = False
 
 
 @runtime_checkable

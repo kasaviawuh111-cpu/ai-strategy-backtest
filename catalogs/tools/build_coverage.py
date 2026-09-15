@@ -458,7 +458,10 @@ STABLE_IMPLEMENTATIONS = {
 }
 
 STABLE_FORMULAS = {
-    "technical.ma": "SMA_t(n)=sum(close[t-n+1:t])/n；触发器比较价格与同周期均线。",
+    "technical.ma": (
+        "SMA_t(n)=sum(price_field[t-n+1:t])/n，price_field 默认 close；"
+        "触发器比较同一价格字段与同周期均线。"
+    ),
     "technical.ema": "EMA 使用首值播种递推，alpha=2/(period+1)；满 period 根后才允许产生值。",
     "technical.ma_cross": (
         "分别计算 fast_period 与 slow_period 的简单移动平均线，并判断快线上穿或下穿慢线。"
@@ -479,7 +482,12 @@ STABLE_FORMULAS = {
     "technical.ema_bias": "EMA 乖离率=100*(price/EMA(period)-1)，默认 period=28。",
     "price.close": "直接比较规范日线的不复权收盘价与人民币固定阈值；信号收盘确认。",
     "price.return_pct": "区间涨跌幅=100*(price_t/price_(t-period)-1)，数值单位为百分点。",
-    "price.rolling_high": "当日价格严格高于此前 period 个完整交易日的最高价；窗口排除当日。",
+    "price.rolling_high": (
+        "new_high 判断当日 price_field 严格高于此前 period 根日线同一 price_field 的最大值，"
+        "窗口排除当日，相等不触发；不要求上一日未触发。"
+        "price_field=close（默认）比较当日收盘价与此前最高收盘价；"
+        "price_field=high 比较当日最高价与此前最高价，不能表达当日收盘价与此前 high 的比较。"
+    ),
     "price.consecutive_up": "连续比较相邻收盘价；收盘价严格上涨累计一天，平盘或下跌归零。",
     "price.opening_gap": (
         "跳空高开为 open_t > high_(t-1)；跳空低开为 open_t < low_(t-1)。"
@@ -496,6 +504,10 @@ STABLE_FORMULAS = {
     "volume.relative": (
         "RVOL=当日成交量/此前 baseline_period 个正成交量交易日均量；基线排除当日，"
         "停牌或零成交量日不进入样本且不触发。"
+        "gt_multiple/gte_multiple/lte_multiple 分别判断当日 RVOL > / >= / <= value，"
+        "不使用 consecutive_days；该共享参数即使保留目录默认值3，也不增加连续多日条件。"
+        "仅 consecutive_gte_multiple 使用 consecutive_days，要求最近 consecutive_days "
+        "个有效 RVOL 观测均 >= value。各触发器都使用 baseline_period 计算均量基线。"
     ),
     "volume.price_confirmation": (
         "放量大涨/大跌要求 RVOL 达到 volume_multiple，且相对前一有效交易日收盘涨跌幅"
@@ -525,7 +537,12 @@ STABLE_FORMULAS = {
         "Williams %R=-100*(HH-close)/(HH-LL)，零振幅为-50，输出范围[-100,0]。"
     ),
     "technical.donchian": (
-        "唐奇安上/下轨为此前 period 根有效日线 high 最大值/low 最小值，窗口排除当日。"
+        "唐奇安上/下轨为此前 period 根日线 high 最大值/low 最小值，窗口排除当日；"
+        "被比较的当日价格始终为 close，不支持 price_field 参数。"
+        "price_above_upper/price_below_lower 分别判断当日 close > 上轨/close < 下轨。"
+        "price_crosses_above_upper 还要求前一日 close <= 前一日上轨；"
+        "price_crosses_below_lower 还要求前一日 close >= 前一日下轨。"
+        "前一日轨道按前一日此前 period 根日线计算，不复用当日轨道。"
     ),
     "technical.return_stddev": ("最近 period 个简单日收益率百分点的总体标准差(ddof=0)。"),
     "technical.historical_volatility": (
@@ -927,7 +944,7 @@ def _triggers(metric_id: str) -> list[str]:
     if metric_id == "market.volume":
         return ["gte_multiple", "lte_multiple"]
     if metric_id == "volume.relative":
-        return ["gte_multiple", "lte_multiple", "consecutive_gte_multiple"]
+        return ["gte_multiple", "lte_multiple", "consecutive_gte_multiple", "gt_multiple"]
     if metric_id == "volume.price_confirmation":
         return ["surge_up", "surge_down"]
     if metric_id == "volume.price_divergence":

@@ -8,7 +8,7 @@ from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from enum import StrEnum
 
 from ashare_lab.domain.market_data import DailyBar, InstrumentSession, TradingStatus
-from ashare_lab.domain.orders import Order, OrderSide, OrderStatus
+from ashare_lab.domain.orders import Order, OrderSide, OrderStatus, OrderType
 from ashare_lab.domain.shared import DomainValidationError, Price, Quantity, require_aware
 
 
@@ -103,6 +103,7 @@ class DailyBarMatchRequest:
     opening_price_proxy_at: datetime
     participation_rate: Decimal = Decimal("0.05")
     slippage_bps: Decimal = Decimal("0")
+    slippage_cny: Decimal = Decimal("0")
     limit_handling: LimitHandling = LimitHandling.WAIT_FOR_UNLOCK
     capacity_mode: CapacityMode = CapacityMode.POINT_IN_TIME_VOLUME
     point_in_time_volume: PointInTimeVolume | None = None
@@ -115,6 +116,8 @@ class DailyBarMatchRequest:
             raise DomainValidationError("participation_rate must be in (0, 1]")
         if not Decimal("0") <= self.slippage_bps <= Decimal("1000"):
             raise DomainValidationError("slippage_bps must be in [0, 1000]")
+        if not self.slippage_cny.is_finite() or self.slippage_cny < 0:
+            raise DomainValidationError("slippage_cny must be finite and non-negative")
         if self.capacity_mode is CapacityMode.UNLIMITED:
             if self.point_in_time_volume is not None:
                 raise DomainValidationError(
@@ -200,10 +203,16 @@ class DailyBarMatchingModel:
             return cls._no_fill("fill_not_yet_eligible")
         if request.session.status is not TradingStatus.TRADING:
             return cls._no_fill(f"security_{request.session.status.value}")
+        # A retrospective zero-trade session cannot contain an execution.
+        # This is an existence check, not same-day volume used to size an
+        # opening order. Unlimited capacity relaxes participation, not trading.
+        if request.bar.volume.value == 0:
+            return cls._no_fill("no_market_trades")
         adverse_limit = cls._adverse_limit(request)
         fill_time = request.opening_price_proxy_at
         time_quality = ExecutionTimeQuality.DAILY_BAR_OPEN_PROXY
         base_price = request.bar.open
+        intrabar_limit = False
         if adverse_limit is not None:
             if request.limit_handling is LimitHandling.ALLOW_LIMIT_VOLUME:
                 if request.bar.available_at > order.valid_until:
@@ -216,12 +225,47 @@ class DailyBarMatchingModel:
             else:
                 return cls._no_fill(cls._daily_limit_reason(request, adverse_limit))
 
-        fill_price = cls.price_with_slippage(
-            base_price,
-            side=order.side,
-            slippage_bps=request.slippage_bps,
-            tick=request.session.price_tick,
-        )
+        if order.order_type is OrderType.LIMIT:
+            # Reuse the phase-one limit convention used by scheduled/price
+            # plans. Import here because bar_prices shares our friction helper.
+            from ashare_lab.domain.execution.bar_prices import BarPrices, match_bar_price
+
+            if ((request.session.upper_limit is not None
+                 and order.limit_price.amount > request.session.upper_limit.amount)
+                    or (request.session.lower_limit is not None
+                        and order.limit_price.amount < request.session.lower_limit.amount)):
+                return cls._no_fill("limit_outside_daily_price_band")
+            intrabar_limit = (
+                base_price.amount > order.limit_price.amount if order.side is OrderSide.BUY
+                else base_price.amount < order.limit_price.amount
+            )
+            if intrabar_limit:
+                # H/L does not identify a fill time. Do not use a whole day's
+                # range to fill a short-lived order, or label the touch 09:30.
+                if request.bar.available_at > order.valid_until:
+                    return cls._no_fill("bar_available_after_order_expiry")
+                fill_time = request.bar.available_at
+                time_quality = ExecutionTimeQuality.DAILY_BAR_AVAILABLE_AT_PROXY
+            amount = match_bar_price(
+                BarPrices(request.bar.open.amount, request.bar.high.amount,
+                          request.bar.low.amount, request.bar.close.amount),
+                side=order.side, limit=order.limit_price.amount,
+                slippage_bps=request.slippage_bps, slippage_cny=request.slippage_cny,
+                tick=request.session.price_tick,
+            )
+            if amount is None:
+                return cls._no_fill("limit_not_reached")
+            fill_price = Price(amount)
+        else:
+            fill_price = cls.price_with_slippage(
+                base_price,
+                side=order.side,
+                slippage_bps=request.slippage_bps,
+                slippage_cny=request.slippage_cny,
+                tick=request.session.price_tick,
+                price_floor=request.bar.low.amount,
+                price_ceiling=request.bar.high.amount,
+            )
         # A price-limit session cannot trade outside its exchange band.  In the
         # explicit optimistic mode, execution friction is already represented by
         # queue/volume participation; adverse price slippage is capped at the
@@ -257,7 +301,8 @@ class DailyBarMatchingModel:
         outcome = MatchOutcome.FILLED if quantity == remaining else MatchOutcome.PARTIALLY_FILLED
         return MatchResult(
             outcome=outcome,
-            reason_code="matched_at_limit" if adverse_limit is not None else "matched_at_open",
+            reason_code=("matched_at_limit" if adverse_limit is not None else
+                         "matched_intrabar_limit" if intrabar_limit else "matched_at_open"),
             quantity=Quantity(quantity),
             price=fill_price,
             filled_at=fill_time,
@@ -314,12 +359,24 @@ class DailyBarMatchingModel:
         side: OrderSide,
         slippage_bps: Decimal,
         tick: Decimal,
+        slippage_cny: Decimal = Decimal("0"),
+        price_floor: Decimal | None = None,
+        price_ceiling: Decimal | None = None,
     ) -> Price:
         direction = Decimal("1") if side is OrderSide.BUY else Decimal("-1")
-        raw = price.amount * (Decimal("1") + direction * slippage_bps / Decimal("10000"))
+        raw = (price.amount * (Decimal("1") + direction * slippage_bps / Decimal("10000"))
+               + direction * slippage_cny)
         rounding = ROUND_UP if side is OrderSide.BUY else ROUND_DOWN
         ticks = (raw / tick).to_integral_value(rounding=rounding)
-        return Price(ticks * tick, price.currency)
+        amount = ticks * tick
+        # Apply observed-bar bounds before constructing a positive Price. Even
+        # extreme fixed-yuan friction must clip, not fail on an intermediate
+        # negative value. Callers without bar evidence keep the raw utility.
+        if price_floor is not None:
+            amount = max(price_floor, amount)
+        if price_ceiling is not None:
+            amount = min(price_ceiling, amount)
+        return Price(amount, price.currency)
 
     @staticmethod
     def _no_fill(reason_code: str) -> MatchResult:

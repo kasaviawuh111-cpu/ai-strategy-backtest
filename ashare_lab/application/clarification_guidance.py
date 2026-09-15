@@ -18,11 +18,50 @@ _ACTION_RE = re.compile(r"(?<!超)(?:买入|卖出|买进|卖掉|(?<!购)买|卖
 _ENTRY_ACTION_RE = re.compile(r"(?:买入|买进|(?<!购)买)")
 _EXIT_ACTION_RE = re.compile(r"(?:卖出|卖掉|卖)")
 _INDICATOR_RE = re.compile(
-    r"(?:MACD|RSI|KDJ|CCI|OBV|BBI|EMA|均线|布林|成交量|量比|金叉|死叉)",
+    r"(?:MACD|RSI|KDJ|CCI|OBV|BBI|EMA|ROE|净资产收益率|"
+    r"市盈率|市净率|市销率|毛利率|净利率|资产负债率|"
+    r"均线|布林|成交量|量比|金叉|死叉)",
     re.IGNORECASE,
 )
 _CROSS_RE = re.compile(r"(?:金叉|死叉)")
 _EVENT_RE = re.compile(r"(?:公告|报告|年报|季报|业绩预告|业绩快报|回购|增持|减持)")
+
+_NUMERIC_METRICS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    # Keep this family aligned with the deterministic financial parser. A
+    # focused threshold question must never advertise an alias that cannot be
+    # compiled after the user supplies the number.
+    (re.compile(r"(?:营业总?收入|营收).{0,8}(?:同比|增长率)"), "", "%"),
+    (re.compile(r"扣非(?:归母)?净利润.{0,8}(?:同比|增长率)"), "", "%"),
+    (re.compile(r"(?<!扣非)(?:归母)?净利润.{0,8}(?:同比|增长率)"), "", "%"),
+    (re.compile(r"每股经营现金流"), "", "元"),
+    (re.compile(r"每股净资产"), "", "元"),
+    (re.compile(r"(?:每股收益|(?<![a-z])eps(?![a-z]))", re.I), "每股收益", "元"),
+    (re.compile(r"每股资本公积"), "", "元"),
+    (re.compile(r"每股未分配利润"), "", "元"),
+    (re.compile(r"(?:营业总?收入|营收)"), "", "元"),
+    (re.compile(r"扣非(?:归母)?净利润"), "", "元"),
+    (re.compile(r"(?<!扣非)(?:归母)?净利润"), "", "元"),
+    (re.compile(r"毛利率"), "", "%"),
+    (re.compile(r"净利率"), "", "%"),
+    (re.compile(r"(?<![a-z])roe(?![a-z])|净资产收益率", re.I), "ROE", "%"),
+    (re.compile(r"(?<![a-z])rota(?![a-z])|总资产报酬率", re.I), "总资产报酬率", "%"),
+    (re.compile(r"总资产周转率"), "", "倍"),
+    (re.compile(r"存货周转率"), "", "倍"),
+    (re.compile(r"应收账款周转率"), "", "倍"),
+    (re.compile(r"(?:市盈率|(?<![a-z])pe(?![a-z]))", re.I), "市盈率", "倍"),
+    (re.compile(r"(?:市净率|(?<![a-z])pb(?![a-z]))", re.I), "市净率", "倍"),
+    (re.compile(r"(?:市销率|(?<![a-z])ps(?![a-z]))", re.I), "市销率", "倍"),
+    (re.compile(r"(?:市现率|(?<![a-z])pcf(?![a-z]))", re.I), "市现率", "倍"),
+)
+_QUALITATIVE_THRESHOLD_RE = re.compile(
+    r"^\s*(?:(?:比较|相对|偏|较|很)?(?P<direction>高|低)(?:于)?)"
+    r"(?P<connector>则|时|就)?\s*$"
+)
+_NUMERIC_ANSWER_RE = re.compile(
+    r"\s*(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*"
+    r"(?P<unit>(?:万|亿)(?:元)?|[%％倍元])?\s*"
+    r"[,，。；;!！?？]?\s*"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +69,129 @@ class ClarificationGuidance:
     question: str
     route: IdeaRoute
     grounding: tuple[CandidateGroundingEvidence, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MissingNumericThreshold:
+    """One qualitative numeric rule whose executable threshold is absent."""
+
+    metric_label: str
+    default_unit: str
+    direction: str
+    action: str
+    qualifier_start: int
+    qualifier_end: int
+    connector: str
+    allows_currency_scale: bool
+
+
+def find_missing_numeric_threshold(utterance: str) -> MissingNumericThreshold | None:
+    """Find a financial comparison such as ``ROE低则买入`` without guessing a value."""
+
+    for clause in _action_clauses(utterance):
+        action_match = next(reversed(tuple(_ACTION_RE.finditer(clause.text))), None)
+        if action_match is None:
+            continue
+        body = clause.text[: action_match.start()]
+        metric_matches = [
+            (match, label or match.group(), unit)
+            for pattern, label, unit in _NUMERIC_METRICS
+            if (match := pattern.search(body)) is not None
+        ]
+        if not metric_matches:
+            continue
+        # Prefer the last metric in a clause, but keep the most specific alias
+        # when two patterns end at the same place.  For example,
+        # ``扣非归母净利润同比`` also contains the shorter
+        # ``净利润同比`` alias; the focused question must retain the former.
+        metric, label, unit = max(
+            metric_matches,
+            key=lambda item: (item[0].end(), -item[0].start()),
+        )
+        comparison = body[metric.end() :]
+        # An explicit number belongs to the user and should continue through
+        # the normal parser/catalog gates, even when the wording is unusual.
+        if re.search(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)", comparison):
+            continue
+        qualitative = _QUALITATIVE_THRESHOLD_RE.search(comparison)
+        if qualitative is None:
+            continue
+        action = "买入" if clause.side == "entry" else "卖出"
+        return MissingNumericThreshold(
+            metric_label=label,
+            default_unit=unit,
+            direction=qualitative.group("direction"),
+            action=action,
+            qualifier_start=clause.start + metric.end() + qualitative.start(),
+            qualifier_end=clause.start + metric.end() + qualitative.end(),
+            connector=qualitative.group("connector") or "",
+            allows_currency_scale=(
+                unit == "元"
+                and re.search(r"(?:每股|(?<![a-z])eps(?![a-z]))", metric.group(), re.I)
+                is None
+            ),
+        )
+    return None
+
+
+def missing_numeric_threshold_question(utterance: str) -> str | None:
+    missing = find_missing_numeric_threshold(utterance)
+    if missing is None:
+        return None
+    relation = "低于" if missing.direction == "低" else "高于"
+    unit = f"（{missing.default_unit}）" if missing.default_unit else ""
+    return f"{missing.metric_label} {relation}多少{unit}时{missing.action}？"
+
+
+def merge_numeric_threshold_supplement(original: str, answer: str) -> str | None:
+    """Fill only the missing threshold and retain every other original rule."""
+
+    missing = find_missing_numeric_threshold(original)
+    # The shortcut is safe only for a single slot value.  Corrections,
+    # multiple numbers, stock changes and full strategy sentences must go
+    # through the existing contextual/model merge instead of donating their
+    # first number to this threshold.
+    supplied = _NUMERIC_ANSWER_RE.fullmatch(answer)
+    if missing is None or supplied is None:
+        return None
+    value = supplied.group("value")
+    supplied_unit = supplied.group("unit")
+    if supplied_unit is not None and not _numeric_unit_is_compatible(
+        supplied_unit,
+        missing,
+    ):
+        # Do not silently turn a percentage into yuan/times (or vice versa).
+        # Returning ``None`` keeps the original missing-slot clarification in
+        # charge and lets the user correct the unit explicitly.
+        return None
+    unit = supplied_unit or missing.default_unit
+    relation = "低于" if missing.direction == "低" else "高于"
+    replacement = f"{relation}{value}{unit}{missing.connector}"
+    merged = original[: missing.qualifier_start] + replacement + original[missing.qualifier_end :]
+    # The product default is MACD only when the cross has no explicit technical
+    # subject. Do not override KDJ/MA/EMA or any named context.
+    if not re.search(r"(?:MACD|KDJ|DIF|DEA|EMA|MA\d*|均线)", merged, re.I):
+        merged = re.sub(
+            r"(?<![A-Za-z一-鿿])死叉(?=(?:时)?(?:卖出|卖掉|卖))",
+            "MACD死叉",
+            merged,
+            count=1,
+            flags=re.I,
+        )
+    return merged
+
+
+def _numeric_unit_is_compatible(supplied: str, missing: MissingNumericThreshold) -> bool:
+    expected = missing.default_unit
+    if expected == "%":
+        return supplied in {"%", "％"}
+    if expected == "倍":
+        return supplied == "倍"
+    if expected == "元":
+        if supplied == "元":
+            return True
+        return missing.allows_currency_scale and supplied in {"万", "万元", "亿", "亿元"}
+    return supplied == expected
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +410,25 @@ def build_clarification_guidance(
         )
         question = "‘金叉/死叉’指的是哪一类指标？"
         choices = _cross_family_choices(entry_cross, exit_cross)
+    elif diagnostic_code == "numeric_threshold_requires_clarification":
+        missing = find_missing_numeric_threshold(original)
+        question = missing_numeric_threshold_question(original)
+        if missing is None or question is None:
+            return None
+        cross_note = (
+            "未写指标主语的‘死叉’仍按当前默认保留为 MACD 死叉；"
+            if re.search(
+                r"(?<![A-Za-z一-鿿])死叉(?=(?:时)?(?:卖出|卖掉|卖))", original,
+            ) and not re.search(
+                r"(?:MACD|KDJ|DIF|DEA|EMA|MA\d*|均线)", original, re.I,
+            )
+            else ""
+        )
+        reason = (
+            f"已保留当前股票和其他买卖规则；{cross_note}"
+            f"现在只缺 {missing.metric_label}‘{missing.direction}’的可执行数值。"
+        )
+        choices = ()
     elif diagnostic_code == "strategy_rule_incomplete":
         reason = (
             f"你提到了“{evidence}”，但还没有把它和买卖时点连起来。"

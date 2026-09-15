@@ -11,6 +11,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ashare_lab.adapters.language import RuleBasedCandidateGenerator
+from ashare_lab.adapters.language.inspiration_stock_selection import InspirationStockSelector
+from ashare_lab.adapters.language.openai_compatible import OpenAICompatibleCandidateTransport
 from ashare_lab.adapters.language.vibe_candidates import (
     CandidateCapabilityMatrix,
     HybridCandidateGenerator,
@@ -19,6 +21,7 @@ from ashare_lab.adapters.language.vibe_candidates import (
 )
 from ashare_lab.adapters.language.vibe_clarification import VibeClarificationDialogueRouter
 from ashare_lab.adapters.language.vibe_ideas import VibeIdeaRouter
+from ashare_lab.adapters.language.vibe_strategy_advice import VibeVerifiedFactStrategyAdvisor
 from ashare_lab.adapters.language.vibe_strategy_editing import VibeStrategyEditor
 from ashare_lab.application.compile_strategy import (
     DEFAULT_INITIAL_CASH_CNY,
@@ -32,17 +35,20 @@ from ashare_lab.domain.catalog import (
     load_coverage_catalog_directory,
 )
 from ashare_lab.domain.signals.runtime import validate_stable_indicator_evaluator_catalog
+from ashare_lab.domain.signals.skill_numeric import SKILL_COMPARISON_IDS
 from ashare_lab.domain.strategy import CatalogRef
 from ashare_lab.ports.backtest_review import BacktestReviewAdvisor
 from ashare_lab.ports.backtest_runs import BacktestRunStore
 from ashare_lab.ports.current_fact_research import CurrentFactResearcher
 from ashare_lab.ports.live_market_data import LiveFinanceData, LiveMarketData
 from ashare_lab.ports.strategy_advice import VerifiedFactStrategyAdvisor
+from ashare_lab.adapters.language.generation_preflight import GenerationMarketContextLoader
 
 from .container import ApiContainer, BacktestSubmitter
 from .errors import install_exception_handlers
 from .middleware import RequestContextMiddleware
 from .routes.backtest_runs import router as backtest_runs_router
+from .routes.grid_backtests import router as grid_backtests_router
 from .routes.instruments import router as instruments_router
 from .routes.market_data import router as market_data_router
 from .routes.portfolio_reviews import router as portfolio_reviews_router
@@ -107,7 +113,16 @@ def create_app(
         Path(catalog_root) if catalog_root is not None else _default_catalog_root()
     )
     selected_catalog = catalog or load_catalog_directory(selected_catalog_root)
-    validate_stable_indicator_evaluator_catalog(selected_catalog)
+    # This provider-backed operator has its own numeric evaluator, not an
+    # invented OHLCV formula. Only the actually composed service can enable it.
+    formula_catalog = selected_catalog
+    if getattr(backtest_submission, "numeric_series_enabled", False):
+        formula_catalog = selected_catalog.model_copy(update={
+            "indicators": tuple(
+                item for item in selected_catalog.indicators if item.id not in SKILL_COMPARISON_IDS
+            ),
+        })
+    validate_stable_indicator_evaluator_catalog(formula_catalog)
     selected_coverage_catalog = coverage_catalog or load_coverage_catalog_directory(
         selected_catalog_root / "coverage"
     )
@@ -178,6 +193,7 @@ def create_app(
     app.include_router(system_router)
     app.include_router(strategy_drafts_router)
     app.include_router(backtest_runs_router)
+    app.include_router(grid_backtests_router)
     app.include_router(strategy_v2_router)
     app.include_router(market_data_router)
     app.include_router(instruments_router)
@@ -196,17 +212,27 @@ def build_hybrid_candidate_compiler(
     *,
     candidate_transport: IdentifiedCandidateJsonTransport,
     idea_transport: IdentifiedCandidateJsonTransport | None = None,
+    idea_repair_transport: IdentifiedCandidateJsonTransport | None = None,
     capability_matrix: CandidateCapabilityMatrix,
     idea_capability_matrix: CandidateCapabilityMatrix | None = None,
-    backtest_anchor_date: date | None = None,
+    backtest_anchor_date: date | Callable[[], date | None] | None = None,
     instrument_name_resolver: Callable[[str], str] | None = None,
     researcher: CurrentFactResearcher | None = None,
     idea_direct_dsl: bool = False,
     candidate_repair_invalid_output: bool = False,
+    candidate_model_semantic_review: bool = False,
+    inspiration_market_data: LiveMarketData | None = None,
+    generation_market_context_loader: GenerationMarketContextLoader | None = None,
 ) -> StrategyCompiler:
     """Compose provider-first interpretation with deterministic offline compatibility."""
 
     selected_idea_transport = idea_transport or candidate_transport
+    # A configured planner must not send review/repair to a disabled extractor.
+    selected_review_transport = (
+        candidate_transport if candidate_transport.identity.provider != "disabled"
+        else selected_idea_transport
+    )
+    selected_idea_repair_transport = idea_repair_transport or selected_review_transport
     manifest = next(
         (item for item in catalog.manifests if item.catalog_id == "cn_a.signals"),
         catalog.manifests[0],
@@ -220,6 +246,8 @@ def build_hybrid_candidate_compiler(
                 capability_matrix=capability_matrix,
                 provider_identity=candidate_transport.identity,
                 repair_invalid_output=candidate_repair_invalid_output,
+                model_semantic_review=candidate_model_semantic_review,
+                instrument_name_resolver=instrument_name_resolver,
             ),
             instrument_name_resolver=instrument_name_resolver,
             model_first=candidate_transport.identity.provider != "disabled",
@@ -227,13 +255,32 @@ def build_hybrid_candidate_compiler(
         backtest_anchor_date=backtest_anchor_date,
         idea_router=VibeIdeaRouter(
             selected_idea_transport,
+            market_context_loader=generation_market_context_loader,
+            review_transport=selected_review_transport,
+            model_semantic_review=(
+                candidate_model_semantic_review
+                or isinstance(selected_idea_transport, OpenAICompatibleCandidateTransport)
+            ),
             capability_matrix=idea_capability_matrix or capability_matrix,
             provider_identity=selected_idea_transport.identity,
-            repair_transport=(candidate_transport if candidate_repair_invalid_output else None),
+            repair_transport=(
+                selected_idea_repair_transport if candidate_repair_invalid_output else None
+            ),
             repair_provider_identity=(
-                candidate_transport.identity if candidate_repair_invalid_output else None
+                selected_idea_repair_transport.identity if candidate_repair_invalid_output else None
             ),
             researcher=researcher,
+            stock_selector=(InspirationStockSelector(
+                transport=selected_review_transport,
+                matrix=idea_capability_matrix or capability_matrix,
+                provider=inspiration_market_data,
+                advisor=VibeVerifiedFactStrategyAdvisor(
+                    selected_review_transport,
+                    capability_matrix=idea_capability_matrix or capability_matrix,
+                    provider_identity=selected_review_transport.identity,
+                    model_semantic_review=candidate_model_semantic_review,
+                ),
+            ) if inspiration_market_data is not None else None),
             strategy_catalog=(
                 CatalogRef(
                     catalog_id=manifest.catalog_id,
@@ -248,12 +295,17 @@ def build_hybrid_candidate_compiler(
         clarification_dialogue_router=VibeClarificationDialogueRouter(
             candidate_transport,
             capability_matrix=capability_matrix,
-        ),
+            model_semantic_review=True,
+        ) if candidate_transport.identity.provider != "disabled" else None,
         instrument_name_resolver=instrument_name_resolver,
+        current_fact_researcher=researcher,
         strategy_editor=VibeStrategyEditor(
             candidate_transport,
-            capability_matrix=idea_capability_matrix or capability_matrix,
+            resolve_pending_intent=True,
+            catalog=catalog,
+            capability_matrix=capability_matrix,
             provider_identity=candidate_transport.identity,
+            model_semantic_review=True,
         ) if candidate_transport.identity.provider != "disabled" else None,
     )
 
@@ -262,11 +314,12 @@ def _compiler_for_generator(
     catalog: CatalogSnapshot,
     generator: RuleBasedCandidateGenerator | HybridCandidateGenerator,
     *,
-    backtest_anchor_date: date | None = None,
+    backtest_anchor_date: date | Callable[[], date | None] | None = None,
     idea_router: VibeIdeaRouter | None = None,
     clarification_dialogue_router: VibeClarificationDialogueRouter | None = None,
     instrument_name_resolver: Callable[[str], str] | None = None,
     strategy_editor: VibeStrategyEditor | None = None,
+    current_fact_researcher: CurrentFactResearcher | None = None,
 ) -> StrategyCompiler:
     manifest = next(
         (item for item in catalog.manifests if item.catalog_id == "cn_a.signals"),
@@ -282,6 +335,7 @@ def _compiler_for_generator(
         clarification_dialogue_router=clarification_dialogue_router,
         instrument_name_resolver=instrument_name_resolver,
         strategy_editor=strategy_editor,
+        current_fact_researcher=current_fact_researcher,
     )
 
 

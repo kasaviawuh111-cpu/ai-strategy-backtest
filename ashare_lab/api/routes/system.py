@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends
 
+from ashare_lab.application.skill_indicator_routes import SkillIndicatorRoute
 from ashare_lab.domain.events import EXECUTABLE_EVENT_DEFINITIONS
 from ashare_lab.domain.events.catalog import DOCUMENT_TEXT_EVENT_CODES
 
@@ -24,6 +25,7 @@ from ..schemas import (
     IndicatorTriggerCapability,
     ReadinessResponse,
     RequestLimits,
+    SkillDataDiscoveryCapability,
     VersionResponse,
     error_response_docs,
 )
@@ -136,9 +138,17 @@ async def capabilities(container: Container) -> CapabilitiesResponse:
         )
     )
     return CapabilitiesResponse(
+        available_data_end=(container.backtest_submission.available_data_end()
+                            if callable(getattr(container.backtest_submission, "available_data_end", None)) else None),
         indicators=indicators,
         events=events,
         backtest_execution_available=container.backtest_execution_available,
+        skill_data_discovery=SkillDataDiscoveryCapability(
+            available=container.live_finance_data is not None,
+            automatic_backtest_binding=bool(getattr(
+                container.backtest_submission, "numeric_series_enabled", False,
+            )),
+        ),
         event_backtest_available=container.event_backtest_available,
         event_preparation_available=container.event_preparation_available,
         event_availability_scope=container.event_availability_scope,
@@ -193,9 +203,13 @@ def _indicator_capabilities(container: ApiContainer) -> tuple[IndicatorCapabilit
     unavailable_reasons = getattr(
         container.backtest_submission, "indicator_unavailable_reasons", {}
     )
+    indicator_routes = cast(Mapping[str, SkillIndicatorRoute], getattr(
+        container.backtest_submission, "indicator_routes", {},
+    ))
     for indicator_id in sorted(executable):
         definition = executable[indicator_id]
         metadata = coverage[indicator_id]
+        route = indicator_routes.get(indicator_id)
         if {item.name for item in definition.parameters} != set(metadata.parameters):
             raise _indicator_catalog_mismatch(f"parameter definitions drifted for {indicator_id}")
         if {item.id for item in definition.triggers} != set(metadata.triggers):
@@ -211,6 +225,8 @@ def _indicator_capabilities(container: ApiContainer) -> tuple[IndicatorCapabilit
                     f"{unavailable_reasons[indicator_id]}"
                     if indicator_id in unavailable_reasons else metadata.description
                 ),
+                data_source=None if route is None else route.source,
+                formula_summary=None if route is None else route.formula_summary,
                 warmup_bars=definition.warmup_bars,
                 timeframes=definition.timeframes,
                 evaluation_modes=definition.evaluation_modes,

@@ -100,6 +100,7 @@ def capture_corporate_action_entitlement(
         share_sellable_date=share_sellable_date,
         status=CorporateActionEntitlementStatus.CAPTURED,
         captured_at=captured_at,
+        record_lots=tuple(lot for lot in state.lots if lot.instrument_id == action.instrument_id),
     )
     entry = _entry(
         state,
@@ -185,6 +186,23 @@ def accrue_corporate_action(
         status=CorporateActionEntitlementStatus.ACCRUED,
         accrued_at=accrued_at,
     )
+    lots_after = state.lots
+    if action.action_type is CorporateActionKind.SHARE_DISTRIBUTION and entitlement.share_delta > 0:
+        multiplier = Decimal(entitlement.entitled_quantity.value + entitlement.share_delta) / entitlement.entitled_quantity.value
+        current = {lot.opened_by_fill_id: lot for lot in state.lots}
+        allocated = {}
+        for source in entitlement.record_lots:
+            lot = current.get(source.opened_by_fill_id)
+            if lot is None or lot.remaining_quantity != source.remaining_quantity:
+                raise UnsupportedCorporateActionError("bonus_principal_requires_record_inventory_at_ex_date")
+            principal = lot.acquisition_principal
+            allocated[lot.opened_by_fill_id] = (None if principal is None else
+                Money(principal.amount * (multiplier - 1) / multiplier))
+        lots_after = tuple(replace(lot, acquisition_principal=(None if lot.acquisition_principal is None
+            else Money(lot.acquisition_principal.amount - allocated[lot.opened_by_fill_id].amount)))
+            if lot.opened_by_fill_id in allocated else lot for lot in state.lots)
+        updated = replace(updated, share_principals=tuple(allocated[lot.opened_by_fill_id]
+            for lot in entitlement.record_lots))
     entitlements = _replace_entitlement(state, index, updated)
     postings: tuple[LedgerPosting, ...] = ()
     if entitlement.cash_amount.amount > 0:
@@ -210,11 +228,11 @@ def accrue_corporate_action(
         phase=CorporateActionPhase.ACCRUAL,
         occurred_at=accrued_at,
         cash_after=state.cash,
-        lots_after=state.lots,
+        lots_after=lots_after,
         entitlements_after=entitlements,
         postings=postings,
     )
-    return _state(state, entitlements=entitlements, entry=entry)
+    return _state(state, lots=lots_after, entitlements=entitlements, entry=entry)
 
 
 def settle_corporate_action(
@@ -259,18 +277,29 @@ def settle_corporate_action(
     elif action.action_type is CorporateActionKind.SHARE_DISTRIBUTION:
         if entitlement.share_delta > 0:
             assert entitlement.share_sellable_date is not None
-            lots_after = (
-                *state.lots,
-                PositionLot(
-                    opened_by_fill_id=_corporate_lot_id(action),
+            if not entitlement.record_lots:
+                raise UnsupportedCorporateActionError("share_distribution_missing_registration_lots")
+            credited = []
+            for lot_index, source_lot in enumerate(entitlement.record_lots):
+                delta = (Decimal(source_lot.remaining_quantity.value) * entitlement.share_delta
+                         / entitlement.entitled_quantity.value)
+                if delta != delta.to_integral_value():
+                    raise UnsupportedCorporateActionError("share_distribution_requires_fractional_lot_allocation_policy")
+                if not delta:
+                    continue
+                lot_digest = hashlib.sha256(source_lot.opened_by_fill_id.value.encode()).hexdigest()[:24]
+                credited.append(PositionLot(
+                    opened_by_fill_id=FillId(f"{_corporate_lot_id(action).value}:{lot_digest}"),
                     instrument_id=action.instrument_id,
-                    acquired_at=settled_at,
-                    acquired_on=settled_at.astimezone(_SHANGHAI).date(),
-                    sellable_on=entitlement.share_sellable_date,
-                    remaining_quantity=Quantity(entitlement.share_delta),
+                    acquired_at=source_lot.acquired_at,
+                    acquired_on=source_lot.acquired_on,
+                    sellable_on=max(source_lot.sellable_on, entitlement.share_sellable_date),
+                    remaining_quantity=Quantity(int(delta)),
                     cost_basis=Money.zero(state.cash.currency),
-                ),
-            )
+                    acquisition_principal=(entitlement.share_principals[lot_index]
+                        if entitlement.share_principals else None),
+                ))
+            lots_after = (*state.lots, *credited)
     elif action.action_type in {
         CorporateActionKind.STOCK_SPLIT,
         CorporateActionKind.REVERSE_SPLIT,
@@ -288,16 +317,20 @@ def settle_corporate_action(
         other_lots = tuple(lot for lot in state.lots if lot.instrument_id != action.instrument_id)
         if target > 0:
             assert entitlement.share_sellable_date is not None
-            transformed = PositionLot(
-                opened_by_fill_id=_corporate_lot_id(action),
-                instrument_id=action.instrument_id,
-                acquired_at=settled_at,
-                acquired_on=settled_at.astimezone(_SHANGHAI).date(),
-                sellable_on=entitlement.share_sellable_date,
-                remaining_quantity=Quantity(target),
-                cost_basis=state.position_cost(action.instrument_id),
-            )
-            lots_after = (*other_lots, transformed)
+            transformed = []
+            for lot in state.lots:
+                if lot.instrument_id != action.instrument_id:
+                    continue
+                allocated = Decimal(lot.remaining_quantity.value) * Decimal(target) / Decimal(current.value)
+                if allocated != allocated.to_integral_value() or allocated <= 0:
+                    raise UnsupportedCorporateActionError("split_requires_fractional_lot_allocation_policy")
+                transformed.append(replace(
+                    lot, remaining_quantity=Quantity(int(allocated)),
+                    sellable_on=max(lot.sellable_on, entitlement.share_sellable_date),
+                ))
+            # Preserve acquisition dates and principal for FIFO/holding-period
+            # rules. A split is not a new discretionary purchase.
+            lots_after = (*other_lots, *transformed)
 
     updated = replace(
         entitlement,

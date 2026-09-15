@@ -19,12 +19,13 @@ _TREES = {
     "contracts": {".py", ".json"},
     "alembic": {".py", ".mako"},
     "deploy/private_preview": {".py"},
-    "web/dist": {".html", ".js", ".css", ".svg", ".png", ".ico", ".woff", ".woff2"},
+    "web/dist": {".html", ".js", ".css", ".json", ".svg", ".png", ".ico", ".woff", ".woff2"},
 }
 _SKIP_DIRS = {"__pycache__", "tests", "test-results", "cache", "logs", "node_modules"}
 _DIRECTORY = "ashare_lab/resources/a_share_directory.json"
 _SCRIPT = "scripts/prepare_private_preview_bundle.py"
 _DOCKERFILE = "deploy/private_preview/Dockerfile"
+_DEPLOYMENT_GUIDES = ("deploy/private_preview/full-data.env.example", "deploy/private_preview/README.md")
 
 
 class BundleError(RuntimeError):
@@ -54,7 +55,7 @@ def _tree_files(root: Path, suffixes: set[str]) -> list[Path]:
 
 
 def _source_files(repository: Path) -> dict[str, Path]:
-    selected = {name: repository / name for name in (*_ROOT_FILES, _DIRECTORY, _SCRIPT)}
+    selected = {name: repository / name for name in (*_ROOT_FILES, _DIRECTORY, _SCRIPT, *_DEPLOYMENT_GUIDES)}
     selected["Dockerfile"] = repository / _DOCKERFILE
     for name, suffixes in _TREES.items():
         root = repository / name
@@ -74,6 +75,17 @@ def _source_files(repository: Path) -> dict[str, Path]:
 
 
 def _validate_web(files: dict[str, Path]) -> None:
+    provenance_path = files.get("web/dist/build-provenance.json")
+    source_root = next((path.parents[2] for name, path in files.items() if name == "web/dist/index.html"), None)
+    if provenance_path is not None and source_root is not None and (source_root / "web/src").is_dir():
+        provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        if provenance.get("schemaVersion") != "ashare-lab.web-build-provenance.v1":
+            raise BundleError("web/dist build provenance has an unsupported schema")
+        expected = _web_source_digest(source_root)
+        if provenance.get("sourceDigest") != expected:
+            raise BundleError("web/dist was not built from the current web source tree")
+    elif (source_root / "web/src").is_dir() if source_root is not None else False:
+        raise BundleError("web/dist is missing build-provenance.json; rebuild the Live web bundle")
     javascript = b"\n".join(
         path.read_bytes() for name, path in files.items()
         if name.startswith("web/dist/") and path.suffix == ".js"
@@ -97,6 +109,25 @@ def _validate_web(files: dict[str, Path]) -> None:
                 f"web/dist is missing required preview marker {marker.decode('ascii')}; "
                 "rebuild with VITE_PRIVATE_PREVIEW=true before preparing the bundle"
             )
+
+
+def _web_source_digest(repository: Path) -> str:
+    """Hash the source inputs that can change the deployed web application."""
+    paths = [
+        path for root in (repository / "web/src",)
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and not path.is_symlink()
+    ]
+    paths.extend(
+        repository / name
+        for name in ("web/package.json", "web/tsconfig.json", "web/tsconfig.app.json", "web/vite.same-origin.config.ts")
+        if (repository / name).is_file()
+    )
+    records = [
+        {"path": path.relative_to(repository).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        for path in sorted(paths)
+    ]
+    return hashlib.sha256(json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
 def _validate_directory(path: Path) -> dict[str, object]:
@@ -142,6 +173,13 @@ def prepare_bundle(*, repository: Path, output: Path) -> dict[str, object]:
         destination = output / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
+        # COPY keeps host modes while the container runs as uid 10001.
+        # Only allowlisted, credential-free bundle copies become world-readable.
+        destination.chmod(0o644)
+        for parent_dir in destination.parents:
+            if parent_dir == output.parent:
+                break
+            parent_dir.chmod(0o755)
     copied = {name: output / name for name in sources}
     if _manifest_files(copied) != files or _manifest_files(sources) != files:
         raise BundleError("Sources changed while copying; incomplete output must not be deployed")
@@ -162,6 +200,7 @@ def prepare_bundle(*, repository: Path, output: Path) -> dict[str, object]:
     (output / "source-manifest.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    (output / "source-manifest.json").chmod(0o644)
     return metadata
 
 

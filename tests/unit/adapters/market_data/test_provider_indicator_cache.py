@@ -90,6 +90,43 @@ def test_cache_reuses_validated_provider_series_across_instances(tmp_path: Path)
     assert len(tuple(tmp_path.glob("*.json"))) == 1
 
 
+@pytest.mark.asyncio
+async def test_disk_failure_does_not_discard_valid_indicator_or_break_waiters(
+    tmp_path, monkeypatch, caplog,
+):
+    provider = _Provider()
+    cached = FileCachedHistoricalIndicatorData(provider, root=tmp_path)
+
+    def fail_write(**kwargs):
+        raise OSError("private disk detail")
+
+    monkeypatch.setattr(cached, "_write", fail_write)
+    first, joined = await asyncio.gather(_query(cached), _query(cached))
+    assert first == joined
+    assert first.points[0].values[0].value == Decimal("21.5")
+    assert first.cache_status == "live"
+    assert provider.calls == 1
+    assert "provider_indicator_cache_write_unavailable" in caplog.text
+    assert "private disk detail" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_disk_admission_limit_does_not_block_live_results(tmp_path):
+    provider = _Provider()
+    first = FileCachedHistoricalIndicatorData(provider, root=tmp_path, disk_max_entries=1,
+                                             contract_namespace="first")
+    await _query(first)
+    second = FileCachedHistoricalIndicatorData(provider, root=tmp_path, disk_max_entries=1,
+                                              contract_namespace="second")
+    result = await _query(second)
+    assert result.cache_status == "live" and provider.calls == 2
+    assert len(list(tmp_path.glob('*.json'))) == 1
+    # An existing entry can still be refreshed at capacity.
+    refreshed = await _query(first, force_refresh=True)
+    assert refreshed.cache_status == "forced" and provider.calls == 3
+    assert len(list(tmp_path.glob('*.json'))) == 1
+
+
 def test_cache_only_instance_reuses_validated_file_without_live_delegate(
     tmp_path: Path,
 ) -> None:

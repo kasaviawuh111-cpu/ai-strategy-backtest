@@ -23,16 +23,32 @@ const metrics = (changes: Partial<BacktestMetrics>): BacktestMetrics => ({
 })
 
 describe('numericResultConclusion', () => {
+  it('keeps the conclusion short while the report renders the detailed execution note separately', () => {
+    const note = '本次没有成交；12次定投因单次预算不足而跳过。可在策略设置调整单次预算后重新回测。'
+    const text = numericResultConclusion(metrics({ total: 0, bench: null, excess: null,
+      trips: 0, tradeCountSemantics: 'closed_position_cycles',
+      benchmarkComparisonStatus: 'strategy_entry_not_filled', executionNote: note }))
+    expect(text).toBe('策略收益 0.00%，本次没有已成交买入，无法比较超额收益。')
+    expect(text).not.toContain('不代表没有成交')
+  })
+
+  it('does not contradict the no-buy result for legacy plans without an execution note', () => {
+    expect(numericResultConclusion(metrics({ total: 0, bench: null, excess: null,
+      trips: 0, tradeCountSemantics: 'closed_position_cycles',
+      benchmarkComparisonStatus: 'strategy_entry_not_filled' }))).toBe(
+      '策略收益 0.00%，本次没有已成交买入，无法比较超额收益。',
+    )
+  })
   it('states both losses and the exact number of percentage points saved', () => {
     expect(numericResultConclusion(metrics({}))).toBe(
-      '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，相对少亏 36.69 个百分点。',
+      '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，复合相对少亏 36.69%。',
     )
   })
 
   it.each([
-    [{ total: 12, bench: 8, excess: 4 }, '策略盈利 12.00%，同样的钱买入后一直持有盈利 8.00%，相对领先 4.00 个百分点。'],
-    [{ total: 5, bench: 8, excess: -3 }, '策略盈利 5.00%，同样的钱买入后一直持有盈利 8.00%，相对落后 3.00 个百分点。'],
-    [{ total: -10, bench: -3, excess: -7 }, '策略亏损 10.00%，同样的钱买入后一直持有亏损 3.00%，相对多亏 7.00 个百分点。'],
+    [{ total: 12, bench: 8, excess: 4 }, '策略盈利 12.00%，同样的钱买入后一直持有盈利 8.00%，复合相对领先 4.00%。'],
+    [{ total: 5, bench: 8, excess: -3 }, '策略盈利 5.00%，同样的钱买入后一直持有盈利 8.00%，复合相对落后 3.00%。'],
+    [{ total: -10, bench: -3, excess: -7 }, '策略亏损 10.00%，同样的钱买入后一直持有亏损 3.00%，复合相对多亏 7.00%。'],
   ])('keeps comparisons numeric for %#', (changes, expected) => {
     expect(numericResultConclusion(metrics(changes))).toBe(expected)
   })

@@ -70,6 +70,7 @@ class FundedBuyAndHoldConfig:
     initial_cash: Money
     participation_rate: Decimal = Decimal("0.05")
     slippage_bps: Decimal = Decimal("5")
+    slippage_cny: Decimal = Decimal("0")
     limit_handling: LimitHandling = LimitHandling.WAIT_FOR_UNLOCK
     allocation_ratio: Decimal = Decimal("1")
     capacity_mode: CapacityMode = CapacityMode.POINT_IN_TIME_VOLUME
@@ -81,6 +82,8 @@ class FundedBuyAndHoldConfig:
             raise FundedBenchmarkInputError("participation_rate must be in (0, 1]")
         if not Decimal("0") <= self.slippage_bps <= Decimal("1000"):
             raise FundedBenchmarkInputError("slippage_bps must be in [0, 1000]")
+        if not self.slippage_cny.is_finite() or self.slippage_cny < 0:
+            raise FundedBenchmarkInputError("slippage_cny must be finite and non-negative")
         if not Decimal("0") < self.allocation_ratio <= Decimal("1"):
             raise FundedBenchmarkInputError("allocation_ratio must be in (0, 1]")
         if type(self.limit_handling) is not LimitHandling:
@@ -309,6 +312,7 @@ def _attempt_entry(
             opening_price_proxy_at=open_at,
             participation_rate=request.config.participation_rate,
             slippage_bps=request.config.slippage_bps,
+            slippage_cny=request.config.slippage_cny,
             limit_handling=request.config.limit_handling,
             capacity_mode=request.config.capacity_mode,
             point_in_time_volume=point_in_time_volume,

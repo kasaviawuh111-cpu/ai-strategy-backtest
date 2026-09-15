@@ -16,6 +16,7 @@ from ashare_lab.application.pre_open_sizing import (
     PRE_OPEN_BUY_SIZING_UPPER_LIMIT_UNAVAILABLE,
     size_pre_open_buy,
 )
+from ashare_lab.application.minute_price_rebase import MinutePriceRebase
 from ashare_lab.domain.analytics import (
     BacktestMetrics,
     EquityPoint,
@@ -97,7 +98,7 @@ OPENING_AUCTION_POLICY = (
 )
 ENTRY_SIGNAL_VALIDITY_POLICY = (
     "cn.a_share.daily.entry_signal_validity.edge_event_state.composite_fail_closed."
-    "event_revision_unavailable_one_attempt.retryable_day_orders.v3"
+    "default_one_attempt.persistent_account_exits.explicit_new_entry_occurrences.v5"
 )
 MAX_ENTRY_VALIDITY_SESSIONS = 20
 
@@ -162,12 +163,13 @@ class EntrySignalSemantics(StrEnum):
 class DailyBacktestConfig:
     participation_rate: Decimal = Decimal("0.05")
     slippage_bps: Decimal = Decimal("5")
+    slippage_cny: Decimal = Decimal("0")
     limit_handling: LimitHandling = LimitHandling.WAIT_FOR_UNLOCK
     allocation_ratio: Decimal = Decimal("1")
     retry_unfilled_exits: bool = True
     max_exit_attempts: int = 20
     capacity_mode: CapacityMode = CapacityMode.POINT_IN_TIME_VOLUME
-    edge_entry_validity_sessions: int = 3
+    edge_entry_validity_sessions: int = 1
     event_entry_validity_sessions: int = 1
     state_entry_validity_sessions: int = 1
 
@@ -178,6 +180,8 @@ class DailyBacktestConfig:
             raise DailyBacktestInputError("allocation_ratio must be in (0, 1]")
         if self.slippage_bps < 0:
             raise DailyBacktestInputError("slippage_bps cannot be negative")
+        if not self.slippage_cny.is_finite() or self.slippage_cny < 0:
+            raise DailyBacktestInputError("slippage_cny must be finite and non-negative")
         if self.max_exit_attempts < 1:
             raise DailyBacktestInputError("max_exit_attempts must be positive")
         entry_validities = (
@@ -234,6 +238,10 @@ class DailyBacktestInput:
     # equity path. New production runs must use ``benchmark_equity`` plus the
     # explicit pre-entry ``benchmark_initial_equity``.
     benchmark_close: tuple[tuple[date, Decimal], ...] = ()
+    # None preserves the legacy adjusted-price path. An explicit tuple uses
+    # raw prices and source ex-date factors for risk anchors, including an
+    # explicitly sourced no-actions interval represented by ().
+    risk_price_rebases: tuple[MinutePriceRebase, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,12 +308,24 @@ class _IdSequence:
 
 
 def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
-    if request.strategy.exit.op == "all":
-        raise ValueError("ALL exit groups require the skill daily-close execution engine")
     """Run Strategy DSL v1 through signals, orders, matching, lots and ledger."""
-
+    from ashare_lab.domain.strategy import HybridExecutionPolicy
+    if isinstance(request.strategy.execution, HybridExecutionPolicy):
+        raise DailyBacktestInputError("minute_protection_requires_hybrid_executor")
     bars, signal_bars, sessions, first_trade_index = _validate_and_select_inputs(request)
     instrument_id = InstrumentId(request.strategy.instrument.symbol)
+    risk_rebases = {item.ex_date: item for item in request.risk_price_rebases or ()}
+    if len(risk_rebases) != len(request.risk_price_rebases or ()) or any(
+        item.instrument_id != instrument_id for item in risk_rebases.values()
+    ):
+        raise DailyBacktestInputError("risk price rebases must be unique and match the security")
+    if request.risk_price_rebases is not None:
+        ex_dates = {action.ex_date for action in request.corporate_actions}
+        if any(day not in ex_dates for day in risk_rebases) or any(
+            request.strategy.backtest.start <= day <= request.strategy.backtest.end and day not in risk_rebases
+            for day in ex_dates
+        ):
+            raise DailyBacktestInputError("risk price rebases must cover source corporate actions")
     market_exit_condition = _exit_condition(request.strategy)
     entry_timeline, exit_timeline = _select_signal_timelines(
         request,
@@ -313,8 +333,18 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         signal_bars=signal_bars,
         market_exit_condition=market_exit_condition,
     )
+    from ashare_lab.application.entry_occurrences import ACCUMULATE_ON_NEW_ENTRY, entry_occurrences
+    accumulate = request.strategy.execution.position_policy == ACCUMULATE_ON_NEW_ENTRY
+    entry_order_timeline = (entry_occurrences(entry_timeline, condition=request.strategy.entry)
+                            if accumulate else entry_timeline)
     holding_exit = _holding_period_exit(request.strategy)
     position_risk_exits = _position_risk_exits(request.strategy)
+    combined_account_exit = request.strategy.exit.op == "all" and bool(holding_exit is not None or position_risk_exits)
+    market_exit_timeline = exit_timeline
+    if combined_account_exit:
+        # Only the close-confirmed conjunction may queue a sell. Neither the
+        # market child nor opening-time maturity is an independent exit.
+        exit_timeline = (None,) * len(exit_timeline)
     session_by_date = {item.session_date: item for item in sessions}
     if request.benchmark_equity and request.benchmark_close:
         raise DailyBacktestInputError(
@@ -387,11 +417,20 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         )
         decision_cutoff = auction_accept_at - DECISION_PROCESSING_LATENCY
         preopen = opening_price_proxy_at - timedelta(microseconds=1)
+        rebase = risk_rebases.get(bar.session_date)
+        if rebase is not None:
+            if rebase.available_at > preopen:
+                raise DailyBacktestInputError("risk price rebase was not known before open")
+            if risk_anchor_adjusted_price is not None:
+                risk_anchor_adjusted_price *= rebase.factor
+            if risk_peak_adjusted_close is not None:
+                risk_peak_adjusted_close *= rebase.factor
         entry_fact = entry_timeline[index]
         exit_fact = exit_timeline[index]
         holding_exit_fact: SignalFact | None = None
         if (
             holding_exit is not None
+            and not combined_account_exit
             and holding_anchor_fill is not None
             and holding_exit_target_index == index
             and not holding_exit_emitted
@@ -433,7 +472,7 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         if pending is None:
             position_at_open = _economic_position_quantity(portfolio, instrument_id)
             available_entry = _consume_latest_available_signal(
-                entry_timeline,
+                entry_order_timeline,
                 handled_entry_indices,
                 start_index=first_trade_index,
                 up_to_index=index,
@@ -448,17 +487,11 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
                 cutoff=decision_cutoff,
                 inclusive=True,
             )
-            open_fact = (
-                available_entry
-                if position_at_open == 0
-                else _first_available_exit(
-                    available_exit,
-                    holding_exit_fact,
-                    queued_risk_exit,
-                )
-            )
+            position_exit = (_first_available_exit(available_exit, holding_exit_fact, queued_risk_exit)
+                             if position_at_open > 0 else None)
+            open_fact = position_exit or (available_entry if position_at_open == 0 or accumulate else None)
             if open_fact is not None:
-                side = OrderSide.BUY if position_at_open == 0 else OrderSide.SELL
+                side = OrderSide.SELL if position_exit is not None else OrderSide.BUY
                 pending = _new_decision(
                     decisions,
                     ids,
@@ -475,31 +508,67 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         if pending is not None:
             assert isinstance(pending, _PendingDecision)
             decision = decisions[pending.decision_index]
-            if decision.side is OrderSide.BUY and available_exit_for_cancellation is None:
-                available_exit_for_cancellation = _consume_latest_available_signal(
-                    exit_timeline,
-                    handled_exit_indices,
-                    start_index=first_trade_index,
-                    up_to_index=index,
-                    cutoff=decision_cutoff,
-                    inclusive=True,
+            replacement_exit: SignalFact | None = None
+            cancelling_exit: SignalFact | None = None
+            if decision.side is OrderSide.BUY:
+                if available_exit_for_cancellation is None:
+                    available_exit_for_cancellation = _consume_latest_available_signal(
+                        exit_timeline,
+                        handled_exit_indices,
+                        start_index=first_trade_index,
+                        up_to_index=index,
+                        cutoff=decision_cutoff,
+                        inclusive=True,
+                    )
+                current_market_exit = (
+                    available_exit_for_cancellation
+                    if available_exit_for_cancellation is not None
+                    and _signal_is_not_older(
+                        available_exit_for_cancellation,
+                        than=decision.signal,
+                    )
+                    else None
                 )
-            if (
-                decision.side is OrderSide.BUY
-                and available_exit_for_cancellation is not None
-                and _signal_is_not_older(
-                    available_exit_for_cancellation,
-                    than=decision.signal,
-                )
-            ):
+                if _economic_position_quantity(portfolio, instrument_id) > 0:
+                    replacement_exit = _first_available_exit(
+                        current_market_exit,
+                        holding_exit_fact,
+                        queued_risk_exit,
+                    )
+                cancelling_exit = replacement_exit or current_market_exit
+            if cancelling_exit is not None:
                 decisions[pending.decision_index] = replace(
                     decision,
                     status=DecisionStatus.CANCELLED,
                     outcome_reason=(
                         "opposite_exit_signal_invalidated_entry:"
-                        f"{available_exit_for_cancellation.condition_ref}"
+                        f"{cancelling_exit.condition_ref}"
                     ),
                 )
+                pending = None
+                if replacement_exit is not None:
+                    pending = _new_decision(
+                        decisions,
+                        ids,
+                        OrderSide.SELL,
+                        replacement_exit,
+                        config=request.config,
+                        entry_condition=request.strategy.entry,
+                    )
+                    if replacement_exit is queued_risk_exit:
+                        queued_risk_exit = None
+
+        if pending is not None:
+            assert isinstance(pending, _PendingDecision)
+            decision = decisions[pending.decision_index]
+            if (decision.signal.available_at + DECISION_PROCESSING_LATENCY <= auction_accept_at
+                    and session.status is not TradingStatus.TRADING
+                    and not _is_persistent_account_exit(decision)):
+                # An unavailable target session consumes an ordinary signal;
+                # only an activated account exit carries its remaining shares.
+                decisions[pending.decision_index] = replace(
+                    decision, status=DecisionStatus.UNFILLED,
+                    outcome_reason="security_not_trading")
                 pending = None
 
         if pending is not None:
@@ -544,7 +613,20 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
                             open_trade_date = fill.trading_date
                         if holding_exit is not None and holding_anchor_fill is None:
                             holding_anchor_fill = fill
-                            holding_exit_target_index = index + holding_exit.sessions
+                            target_day = fill.trading_date
+                            maturity_reached = True
+                            for _ in range(holding_exit.sessions):
+                                if target_day >= request.strategy.backtest.end:
+                                    maturity_reached = False
+                                    break
+                                target_day = request.calendar.next_session(target_day)
+                            if not maturity_reached or target_day > request.strategy.backtest.end:
+                                holding_exit_target_index = None
+                            else:
+                                holding_exit_target_index = next((i for i, candidate in enumerate(bars)
+                                    if candidate.session_date == target_day), None)
+                                if holding_exit_target_index is None:
+                                    raise DailyBacktestInputError("holding target market session has no security data")
                             holding_exit_emitted = False
                         if position_risk_exits and risk_anchor_fill is None:
                             risk_anchor_fill = fill
@@ -636,10 +718,54 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         except UnsupportedCorporateActionError as exc:
             raise DailyBacktestInputError(str(exc)) from exc
 
+        if (combined_account_exit and queued_risk_exit is None
+                and (pending is None
+                     or decisions[pending.decision_index].side is OrderSide.BUY)
+                and _economic_position_quantity(portfolio, instrument_id) > 0
+                and bar.volume.value > 0):
+            close_at = max(bar.available_at, _session_close(bar.session_date))
+            market_fact = market_exit_timeline[index]
+            market_ready = (market_exit_condition is None or market_fact is not None
+                            and market_fact.triggered and market_fact.available_at <= close_at)
+            facts = [market_fact] if market_ready and market_fact is not None else []
+            ready = market_ready
+            if holding_exit is not None:
+                mature = (holding_anchor_fill is not None and holding_exit_target_index is not None
+                          and index >= holding_exit_target_index)
+                ready = ready and mature
+                if mature:
+                    facts.append(_holding_period_signal(rule=holding_exit, anchor_fill=holding_anchor_fill,
+                        target_session_date=bar.session_date, available_at=close_at))
+            # Evaluate every risk child against this same close. Do not retain
+            # yesterday's true stop/profit condition while waiting on another.
+            for rule in position_risk_exits:
+                if risk_anchor_fill is None or risk_anchor_adjusted_price is None or risk_peak_adjusted_close is None:
+                    ready = False
+                    continue
+                fact, risk_peak_adjusted_close = _position_risk_signal(
+                    rules=(rule,), anchor_fill=risk_anchor_fill,
+                    anchor_adjusted_price=risk_anchor_adjusted_price,
+                    previous_peak_adjusted_close=risk_peak_adjusted_close, signal_bar=signal_bars[index],
+                    raw_rebased=request.risk_price_rebases is not None)
+                if fact is None:
+                    ready = False
+                else:
+                    facts.append(fact)
+            if ready and facts:
+                queued_risk_exit = replace(facts[0], condition_ref="all:account_and_market",
+                    observed_at=close_at, available_at=close_at,
+                    reason="本交易日全部退出条件同时成立；收盘确认后最早下一交易日开盘尝试卖出。",
+                    left_value=None, right_value=None, children=tuple(facts),
+                    evidence=tuple({(item.evidence_type, item.evidence_id, item.source_event_id): item
+                                    for fact in facts for item in fact.evidence}.values()))
+                triggered_signals.append(queued_risk_exit)
+
         if (
             position_risk_exits
+            and not combined_account_exit
             and queued_risk_exit is None
-            and pending is None
+            and (pending is None
+                 or decisions[pending.decision_index].side is OrderSide.BUY)
             and _economic_position_quantity(portfolio, instrument_id) > 0
             and risk_anchor_fill is not None
             and risk_anchor_adjusted_price is not None
@@ -654,6 +780,7 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
                 anchor_adjusted_price=risk_anchor_adjusted_price,
                 previous_peak_adjusted_close=risk_peak_adjusted_close,
                 signal_bar=signal_bars[index],
+                raw_rebased=request.risk_price_rebases is not None,
             )
             if queued_risk_exit is not None:
                 triggered_signals.append(queued_risk_exit)
@@ -670,7 +797,7 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
         final_quantity = _economic_position_quantity(portfolio, instrument_id)
         final_cutoff = max(bars[-1].available_at, _session_close(bars[-1].session_date))
         final_entry = _consume_latest_available_signal(
-            entry_timeline,
+            entry_order_timeline,
             handled_entry_indices,
             start_index=first_trade_index,
             up_to_index=len(bars) - 1,
@@ -685,13 +812,11 @@ def run_daily_backtest(request: DailyBacktestInput) -> DailyBacktestResult:
             cutoff=final_cutoff,
             inclusive=True,
         )
-        final_fact = (
-            final_entry
-            if final_quantity == 0
-            else _first_available_exit(final_exit, queued_risk_exit)
-        )
+        final_position_exit = (_first_available_exit(final_exit, queued_risk_exit)
+                               if final_quantity > 0 else None)
+        final_fact = final_position_exit or (final_entry if final_quantity == 0 or accumulate else None)
         if final_fact is not None:
-            side = OrderSide.BUY if final_quantity == 0 else OrderSide.SELL
+            side = OrderSide.SELL if final_position_exit is not None else OrderSide.BUY
             pending = _new_decision(
                 decisions,
                 ids,
@@ -812,11 +937,17 @@ def _attempt_decision(
             bar.open,
             side=decision.side,
             slippage_bps=request.config.slippage_bps,
+            slippage_cny=request.config.slippage_cny,
             tick=session.price_tick,
+            price_floor=bar.low.amount,
+            price_ceiling=bar.high.amount,
         )
         quantity = portfolio.sellable_quantity(instrument_id, bar.session_date)
         if quantity.value == 0:
-            return portfolio, decision, None, None, True
+            retry = _is_persistent_account_exit(decision) and request.config.retry_unfilled_exits
+            return (portfolio, replace(decision,
+                status=DecisionStatus.RETRYING if retry else DecisionStatus.UNFILLED,
+                outcome_reason="insufficient_sellable_quantity"), None, None, retry)
         limit_price = session.lower_limit or expected_price
     if quantity.value == 0:
         return (
@@ -867,6 +998,7 @@ def _attempt_decision(
             opening_price_proxy_at=open_at,
             participation_rate=request.config.participation_rate,
             slippage_bps=request.config.slippage_bps,
+            slippage_cny=request.config.slippage_cny,
             limit_handling=request.config.limit_handling,
             capacity_mode=request.config.capacity_mode,
             point_in_time_volume=point_in_time_volume,
@@ -926,10 +1058,11 @@ def _attempt_decision(
     attempts = decision.attempts + 1
     still_positioned = _economic_position_quantity(portfolio, instrument_id) > 0
     should_retry_exit = (
-        decision.side is OrderSide.SELL
+        _is_persistent_account_exit(decision)
         and still_positioned
         and request.config.retry_unfilled_exits
-        and attempts < request.config.max_exit_attempts
+        and (decision.signal.condition_ref.startswith("holding_period_exit:")
+             or attempts < request.config.max_exit_attempts)
     )
     should_retry_entry = (
         decision.side is OrderSide.BUY
@@ -972,6 +1105,14 @@ def _attempt_decision(
         fill_record,
         should_retry,
     )
+
+
+def _is_persistent_account_exit(decision: DailyStrategyDecision) -> bool:
+    """Distinguish activated position exits from one-shot market signals."""
+    return decision.side is OrderSide.SELL and decision.signal.condition_ref.startswith((
+        "holding_period_exit:", "position_return_exit:", "trailing_drawdown_exit:",
+        "all:account_and_market",
+    ))
 
 
 def _new_decision(
@@ -1233,7 +1374,9 @@ def _exit_condition(strategy: StrategySpec) -> Condition | None:
     )
     if not children:
         return None
-    return children[0] if len(children) == 1 else AnyCondition(children=children)
+    if len(children) == 1:
+        return children[0]
+    return AllCondition(children=children) if strategy.exit.op == "all" else AnyCondition(children=children)
 
 
 def _holding_period_exit(strategy: StrategySpec) -> HoldingPeriodExit | None:
@@ -1260,10 +1403,12 @@ def _position_risk_signal(
     anchor_adjusted_price: Decimal,
     previous_peak_adjusted_close: Decimal,
     signal_bar: DailyBar,
+    raw_rebased: bool = False,
 ) -> tuple[SignalFact | None, Decimal]:
     """Evaluate close-confirmed position exits without using the signal-bar close to fill."""
 
-    if signal_bar.price_basis is not PriceBasis.BACK_ADJUSTED:
+    expected_basis = PriceBasis.UNADJUSTED if raw_rebased else PriceBasis.BACK_ADJUSTED
+    if signal_bar.price_basis is not expected_basis:
         raise DailyBacktestInputError("position risk exits require back-adjusted signal bars")
     if signal_bar.volume.value == 0:
         return None, previous_peak_adjusted_close
@@ -1312,7 +1457,7 @@ def _position_risk_signal(
                 triggered=True,
                 observed_at=observed_at,
                 available_at=available_at,
-                reason=reason,
+                reason=reason.replace("adjusted", "source-rebased raw") if raw_rebased else reason,
                 left_value=left_value,
                 right_value=right_value,
                 evidence=(
@@ -1431,7 +1576,8 @@ def _validate_and_select_inputs(
     if not trade_indices:
         raise DailyBacktestInputError("no bars fall inside the strategy backtest period")
 
-    if _position_risk_exits(request.strategy) and request.signal_bars is None:
+    if (_position_risk_exits(request.strategy) and request.signal_bars is None
+            and request.risk_price_rebases is None):
         raise DailyBacktestInputError(
             "position risk exits require explicit back-adjusted signal bars"
         )
@@ -1446,8 +1592,9 @@ def _validate_and_select_inputs(
         for index in range(len(signal_bars) - 1)
     ):
         raise DailyBacktestInputError("signal bars must be strictly date ordered")
+    expected_signal_basis = PriceBasis.UNADJUSTED if request.risk_price_rebases is not None else PriceBasis.BACK_ADJUSTED
     if request.signal_bars is not None and any(
-        bar.price_basis is not PriceBasis.BACK_ADJUSTED for bar in signal_bars
+        bar.price_basis is not expected_signal_basis for bar in signal_bars
     ):
         raise DailyBacktestInputError("explicit signal bars must be back-adjusted")
     execution_keys = tuple((bar.instrument_id, bar.session_date) for bar in all_bars)
@@ -1555,16 +1702,28 @@ def _validate_provider_timeline(
             raise DailyBacktestInputError(
                 f"provider {label} signal uses an observation from the future"
             )
-        if not fact.evidence or any(
-            item.evidence_type != "provider_indicator"
-            or item.provider is None
-            or item.raw_response_sha256 is None
-            for item in fact.evidence
-        ):
+        if not fact.evidence or any(not _is_auditable_signal_evidence(item)
+                                    for item in fact.evidence):
             raise DailyBacktestInputError(
-                f"provider {label} signal is missing exact provider provenance"
+                f"provider {label} signal is missing auditable source provenance"
             )
     return timeline
+
+
+def _is_auditable_signal_evidence(item: SignalEvidence) -> bool:
+    if item.provider is None or item.raw_response_sha256 is None:
+        return False
+    if item.evidence_type == "provider_indicator":
+        return True
+    if item.evidence_type == "skill_numeric_history":
+        return item.validation_status == "provider_history_bound"
+    return (
+        item.evidence_type == "skill_ohlcv_derived_indicator"
+        and item.validation_status in {
+            "local_formula_on_provider_ohlcv",
+            "local_formula_on_point_in_time_rebases",
+        }
+    )
 
 
 def _safe_run_key(value: str) -> str:

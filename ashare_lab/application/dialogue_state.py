@@ -124,7 +124,8 @@ class DialogueState:
     def available_option_ids(self) -> tuple[str, ...]:
         """Return only option IDs actually emitted by the current compiler outcome."""
 
-        if self.outcome.status is not CompileStatus.NEEDS_CLARIFICATION:
+        if (self.outcome.status is not CompileStatus.NEEDS_CLARIFICATION
+                or self.outcome.diagnostic_code == "candidate_data_not_ready"):
             return ()
         option_ids: list[str] = []
         if self.outcome.idea_route is not None:

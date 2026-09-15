@@ -1,0 +1,3 @@
+.numeric-field{display:inline-flex;flex-direction:column;align-items:flex-end;max-width:150px;min-width:0}
+.numeric-field-error{display:block;margin-top:4px;max-width:100%;color:var(--color-warn);font-size:13px;line-height:1.4;overflow-wrap:anywhere;text-align:right}
+.numeric-field .settings-input[aria-invalid="true"]{border-color:var(--color-warn)}

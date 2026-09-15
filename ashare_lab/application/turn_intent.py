@@ -173,7 +173,7 @@ _OBVIOUS_LIFESTYLE_RE = re.compile(
     re.IGNORECASE,
 )
 _CANCEL_RE = re.compile(r"^(?:算了|取消|不做了|不测了)$")
-_ORDINAL_RE = re.compile(r"^(?:选\s*)?(?P<value>[123１２３一二三])$")
+_ORDINAL_RE = re.compile(r"^(?:我?选|选择|用)?\s*(?:第)?\s*(?P<value>[123１２３一二三])\s*(?:个|项|条)?$")
 _CHANGE_INSTRUMENT_PREFIX_RE = re.compile(
     r"^(?:标的改为|股票改为|改成|换成)\s*",
     re.IGNORECASE,

@@ -1,0 +1,20 @@
+// Display names only: never change catalog identifiers or execution semantics.
+export const INDICATOR_NAMES: Record<string, string> = {
+  'technical.macd': 'MACD', 'technical.ma': '均线', 'technical.rsi': 'RSI',
+  'market.volume': '成交量', 'technical.ema': 'EMA', 'technical.ma_cross': '均线交叉',
+  'technical.bollinger': '布林带', 'technical.kdj': 'KDJ', 'technical.cci': 'CCI',
+  'technical.bbi': 'BBI 多空指标', 'technical.ema_bias': 'EMA 乖离率',
+  'price.close': '收盘价', 'price.return_pct': '涨跌幅', 'price.rolling_high': '阶段新高',
+  'price.consecutive_up': '连续上涨', 'price.amplitude': '振幅',
+  'market.amount': '成交额', 'market.turnover_rate': '换手率',
+  'amount.average': '平均成交额', 'volume.relative': '相对成交量',
+  'volume.price_confirmation': '量价确认', 'technical.obv': 'OBV 能量潮',
+  'volume.price_divergence': '量价背离', 'technical.trend_regime': '趋势状态',
+  'price.true_range': '真实波幅', 'technical.atr': 'ATR 平均真实波幅',
+  'technical.natr': 'NATR 标准化波幅', 'technical.adx': 'ADX 趋势强度',
+  'technical.dmi': 'DMI 动向指标', 'technical.bias': '乖离率',
+  'technical.roc': 'ROC 变动率', 'technical.momentum': '动量',
+  'technical.stochastic': '随机指标', 'technical.williams_r': '威廉指标',
+  'technical.donchian': '区间突破', 'technical.return_stddev': '收益率标准差',
+  'technical.historical_volatility': '历史波动率',
+}

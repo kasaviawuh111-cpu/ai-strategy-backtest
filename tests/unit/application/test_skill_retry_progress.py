@@ -118,8 +118,8 @@ def test_real_adapter_retry_updates_original_running_record_then_recovers_in_sam
         assert recovered is not None
         assert len(observed) == 1
         retry = observed[0]
-        assert "自动重试（1/2）" in retry.progress_label
-        assert "原方案已保留" in retry.progress_label
+        assert "正在重新获取数据，请稍等片刻" in retry.progress_label
+        assert "你的策略已保留" in retry.progress_label
         assert "已恢复" in recovered.progress_label
         assert "继续" in recovered.progress_label
         assert result.tables == (_TABLE,)
@@ -171,8 +171,8 @@ def test_three_read_interruptions_fail_only_after_two_visible_retries_on_origina
         assert len(set(requests)) == 1
         assert delays == [1.0, 2.0]
         assert len(observed) == 2
-        for retry_number, snapshot in enumerate(observed, start=1):
-            assert f"自动重试（{retry_number}/2）" in snapshot.progress_label
+        for snapshot in observed:
+            assert "正在重新获取数据，请稍等片刻" in snapshot.progress_label
             assert snapshot.state is BacktestJobState.RUNNING_DATA
             assert snapshot.progress_percent == 10
             assert snapshot.error_code is None
@@ -237,7 +237,7 @@ def test_parallel_read_recovery_does_not_hide_another_pending_retry(
         asyncio.run(run_parallel_requests())
         assert len(after_first_recovery) == 1
         pending = after_first_recovery[0]
-        assert "自动重试" in pending.progress_label
+        assert "正在重新获取数据" in pending.progress_label
         assert "已恢复" not in pending.progress_label
         recovered = store.get(original.run_id)
         assert recovered is not None

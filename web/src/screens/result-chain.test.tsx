@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 
 import type { StrategyDraft } from '../shared/api/types'
 import type {
@@ -11,14 +11,17 @@ import type {
   TradeRow,
 } from '../types'
 import { ExecutionDetailsScreen, ReportScreen } from './index'
+import { mockApi } from '../shared/api/mock'
 
-const draft = {
-  entry: { conditions: [{ kind: 'event' }] },
-  execution: {
-    priceLimitMode: 'wait_for_unlock', tPlusOne: true, slippageBps: 5,
-    commissionRate: 0.0003, minimumCommissionCny: 5,
-  },
-} as StrategyDraft
+let draft: StrategyDraft
+beforeAll(async () => {
+  const outcome = await mockApi.compile({
+    utterance: '东方财富，发布年报后买入，MACD死叉卖出。',
+    instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' },
+  })
+  if (outcome.status !== 'compiled') throw new Error('expected complete event fixture')
+  draft = outcome.draft
+})
 
 const metrics: BacktestMetrics = {
   total: -2.54, bench: -39.23, excess: 36.69, benchmarkComparisonStatus: 'comparable', mdd: -58.19, trips: 1,
@@ -79,6 +82,37 @@ const runEvidence: RunEvidence = {
 }
 
 describe('current report screen', () => {
+  it('summarizes 100 unfilled orders without flooding the list and keeps every order recoverable', async () => {
+    const user = userEvent.setup()
+    const failures: TradeRow[] = Array.from({ length: 100 }, (_, i) => ({
+      ...trades[1]!, id: `no-fill:${i}`, orderId: `order:${i}`, kind: 'no_fill',
+      title: '网格买入', reason: '可用资金不足以支付本次委托及费用。',
+      outcomeReason: 'insufficient_cash_including_fees', price: null,
+    }))
+    const { container } = render(<ReportScreen open onBack={vi.fn()} metrics={metrics} series={series} marks={[]}
+      trades={failures} evidence={runEvidence} onOpenExecution={vi.fn()} />)
+    expect(container.querySelectorAll('.order-row')).toHaveLength(0)
+    await user.click(screen.getByText('100 笔尚无成交，查看原因汇总'))
+    expect(screen.getByText('可用资金不足以支付本次委托及费用。 · 100 笔')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: '查看全部委托（100笔）' }))
+    expect(container.querySelectorAll('.order-row')).toHaveLength(20)
+    await user.click(screen.getByRole('button', { name: '再看 20 笔 · 还剩 80 笔' }))
+    expect(container.querySelectorAll('.order-row')).toHaveLength(40)
+    await user.click(screen.getByRole('button', { name: '只看有成交的委托' }))
+    expect(container.querySelectorAll('.order-row')).toHaveLength(0)
+  })
+
+  it('keeps a partial fill visible when its remaining quantity expires', () => {
+    const activity: TradeRow = { ...trades[1]!, kind: 'partial_fill', orderId: 'partial:1', quantity: 100 }
+    const { container } = render(<ReportScreen open onBack={vi.fn()} metrics={metrics} series={series} marks={[]}
+      trades={[activity, { ...activity, id: 'cancel:1', kind: 'expired', quantity: 200,
+        occurredAt: '2024-03-15T15:00:00+08:00', reason: '当日未成交余量已撤销' }]}
+      evidence={runEvidence} onOpenExecution={vi.fn()} />)
+    expect(container.querySelectorAll('.order-row')).toHaveLength(1)
+    expect(container.querySelector('.order-status--partial')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /查看全部委托/ })).not.toBeInTheDocument()
+  })
+
   it('puts one conclusion and the key metrics first without showing capital or secondary tabs', () => {
     const { container } = render(<ReportScreen open onBack={vi.fn()} metrics={{
       ...metrics,
@@ -88,11 +122,11 @@ describe('current report screen', () => {
       ],
     }}
       series={series} marks={[mark]} trades={trades} evidence={runEvidence}
-      onOpenChain={vi.fn()} onOpenExecution={vi.fn()} mode="mock" />)
+      onOpenExecution={vi.fn()} mode="mock" />)
 
     expect(screen.queryByText('界面预览')).not.toBeInTheDocument()
     expect(screen.getByRole('heading', {
-      name: '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，相对少亏 36.69 个百分点。',
+      name: '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，复合相对少亏 36.69%。',
     })).toBeInTheDocument()
     for (const label of ['策略总收益', '超额收益', '最大回撤', '完整买卖']) {
       expect(screen.getByText(label)).toBeInTheDocument()
@@ -134,6 +168,20 @@ describe('current report screen', () => {
     expect(screen.getAllByText('1 个交易日内 · 最多 1 次尝试')).toHaveLength(3)
   })
 
+  it('explains the first-opening-order capacity proxy separately from later orders', () => {
+    render(<ExecutionDetailsScreen open onBack={vi.fn()} draft={draft}
+      trades={trades} evidence={{
+        ...runEvidence,
+        executionAssumptions: {
+          capacity: 'first_completed_minute_volume_for_opening_order_else_previous_completed_minute_volume:0.05',
+        },
+      }} mode="live" />)
+
+    expect(screen.getByText(
+      '首笔开盘委托按首根完整分钟成交量，后续按上一已完成分钟成交量 × 5%',
+    )).toBeVisible()
+  })
+
   it('shows trusted date fallback without making estimated or unverified time tradable', () => {
     const timingTrades: TradeRow[] = [{
       ...trades[0]!,
@@ -162,22 +210,23 @@ describe('current report screen', () => {
     expect(screen.queryByText(/不可用于严格回测/)).not.toBeInTheDocument()
   })
 
-  it('passes the backend execution-time quality into the causal trace instead of claiming an exact open fill', async () => {
+  it('keeps order selection inside the report and highlights its chart mark without opening a trace', async () => {
     const user = userEvent.setup()
-    const onOpenChain = vi.fn()
     render(<ReportScreen open onBack={vi.fn()} metrics={metrics}
       series={series} marks={[mark]} trades={trades} evidence={runEvidence}
-      onOpenChain={onOpenChain} onOpenExecution={vi.fn()} mode="live" />)
+      onOpenExecution={vi.fn()} mode="live" />)
 
     expect(screen.getByRole('button', { name: /买入成交.*回车键/ })).toHaveTextContent('B')
     expect(screen.getAllByTitle('已记录模拟成交').length).toBeGreaterThan(0)
     expect(screen.queryByTitle('按委托数量全部成交')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /买入 年度报告首次可得 已成/ }))
-    expect(onOpenChain).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'fill:1',
-      timeQuality: 'daily_bar_open_proxy',
-      timeSemantics: expect.stringContaining('不代表已观测到该时刻的真实成交'),
-    }))
+    expect(screen.getByRole('button', { name: /买入 年度报告首次可得 已成/ }))
+      .toHaveAttribute('aria-current', 'true')
+    expect(screen.getByRole('button', { name: /买入成交.*回车键/ }))
+      .toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('heading', { name: '回测报告' })).toBeVisible()
+    expect(document.querySelector('#pg-chain')).toBeNull()
+    expect(screen.queryByText(/点行看轨迹/)).not.toBeInTheDocument()
     expect(screen.queryByText(/09:25/)).not.toBeInTheDocument()
   })
 
@@ -188,9 +237,25 @@ describe('current report screen', () => {
         ...runEvidence,
         producerSnapshotSchemaVersion: 'ashare-lab.composite-research-snapshot.v1',
       }}
-      onOpenChain={vi.fn()} onOpenExecution={vi.fn()} mode="live" />)
+      onOpenExecution={vi.fn()} mode="live" />)
 
     expect(screen.getByText('身份不完整')).toBeInTheDocument()
+    expect(screen.queryByText('身份已记录')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['mx-share-input.v1', 'mx-share:', true], ['mx-share-input.v1', 'mx-share:', false],
+    ['price-plan-input.v1', 'price-plan-input:', true], ['price-plan-input.v1', 'price-plan-input:', false],
+  ] as const)('distinguishes input data identity from release acceptance: %s %s %s', (schema, prefix, valid) => {
+    render(<ReportScreen open onBack={vi.fn()} metrics={metrics}
+      series={series} marks={[mark]} trades={trades}
+      evidence={{ ...runEvidence, dataSchemaVersion: schema,
+        snapshotId: `${prefix}${'a'.repeat(64)}`,
+        snapshotChecksum: `sha256:${(valid ? 'a' : 'b').repeat(64)}`,
+        producerSnapshotId: null, producerSnapshotSchemaVersion: null,
+        gitSha: `${'c'.repeat(40)}+dirty`,
+      }} onOpenExecution={vi.fn()} mode="live" />)
+    expect(screen.getByText(valid ? '数据版本已记录' : '身份不完整')).toBeInTheDocument()
     expect(screen.queryByText('身份已记录')).not.toBeInTheDocument()
   })
 
@@ -201,7 +266,7 @@ describe('current report screen', () => {
         ...runEvidence,
         dataSchemaVersion: 'ashare-lab.composite-research-snapshot.v2',
       }}
-      onOpenChain={vi.fn()} onOpenExecution={vi.fn()} mode="live" />)
+      onOpenExecution={vi.fn()} mode="live" />)
 
     expect(screen.getByText('身份不完整')).toBeInTheDocument()
     expect(screen.queryByText('身份已记录')).not.toBeInTheDocument()
@@ -222,7 +287,7 @@ describe('current report screen', () => {
   ])('does not mark the run identity complete without a valid %s', (_label, override) => {
     render(<ReportScreen open onBack={vi.fn()} metrics={metrics}
       series={series} marks={[mark]} trades={trades}
-      evidence={{ ...runEvidence, ...override }} onOpenChain={vi.fn()}
+      evidence={{ ...runEvidence, ...override }}
       onOpenExecution={vi.fn()} mode="live" />)
 
     expect(screen.getByText('身份不完整')).toBeInTheDocument()
@@ -232,7 +297,7 @@ describe('current report screen', () => {
   it('gives an actionable explanation when there are no trades', () => {
     render(<ReportScreen open onBack={vi.fn()} metrics={{ ...metrics, trips: 0 }}
       series={series} marks={[]} trades={[]} evidence={runEvidence}
-      onOpenChain={vi.fn()} onOpenExecution={vi.fn()} mode="live" />)
+      onOpenExecution={vi.fn()} mode="live" />)
 
     expect(screen.getByRole('heading', { name: /完整买卖 0 回合/ })).toBeInTheDocument()
     expect(screen.getByText(/请延长回测区间/)).toBeInTheDocument()
@@ -249,11 +314,26 @@ describe('current report screen', () => {
     }])).flat()
     render(<ReportScreen open onBack={vi.fn()} metrics={metrics}
       series={series} marks={[mark]} trades={manyTrades} evidence={runEvidence}
-      onOpenChain={vi.fn()} onOpenExecution={vi.fn()} mode="live" />)
+      onOpenExecution={vi.fn()} mode="live" />)
 
     expect(screen.getByText('活动 20')).toBeInTheDocument()
     expect(screen.queryByText('活动 21')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: /再看 5 笔/ }))
     expect(screen.getByText('活动 25')).toBeInTheDocument()
   })
+})
+
+it('keeps execution warnings out of chat and at the bottom of the report', async () => {
+  const { ResultCard } = await import('../components/SummaryCards')
+  const note = '区间内发生除权除息，相关固定价位已同步调整。'
+  const withNote = { ...metrics, executionNote: note }
+  const chat = render(<ResultCard metrics={withNote} onOpenReport={vi.fn()} />)
+  expect(screen.queryByText(note)).not.toBeInTheDocument()
+  chat.unmount()
+  const report = render(<ReportScreen open onBack={vi.fn()} metrics={withNote}
+    series={series} marks={[mark]} trades={trades} evidence={runEvidence}
+    onOpenExecution={vi.fn()} mode="mock" />)
+  expect(report.container.querySelector('.report-summary')).not.toHaveTextContent(note)
+  expect(report.container.querySelector('.report-flow')?.lastElementChild).toHaveClass('report-risk')
+  expect(screen.getByText(note)).toBeInTheDocument()
 })

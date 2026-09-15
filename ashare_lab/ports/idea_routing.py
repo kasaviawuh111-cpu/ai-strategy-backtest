@@ -11,31 +11,67 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from ashare_lab.domain.strategy import (
     BacktestConfig,
     CatalogRef,
     DailyExecutionPolicy,
+    ComposedExecutionPolicy,
     FirstOfExit,
+    HybridExecutionPolicy,
     Instrument,
+    PricePlanExecutionPolicy,
     StrategySpec,
 )
 from ashare_lab.domain.strategy.models import Condition
+from ashare_lab.domain.strategy.price_plans import PricePlan
+from ashare_lab.domain.strategy.independent_plans import IndependentPlanPair
 from ashare_lab.ports.candidate_generation import CompileInput
 from ashare_lab.ports.current_fact_research import CurrentFactResearchResult
 from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
+from ashare_lab.ports.live_market_data import LiveMarketDataResult
 
 
 class IdeaResearchUnavailableError(RuntimeError):
     """A current-affairs idea could not obtain source-backed web research."""
 
 
+class IdeaStockSelectionUnavailableError(RuntimeError):
+    """No verified security was found before strategy generation."""
+
+    def __init__(
+        self, message: str, *, stage: Literal["planning", "selection"] = "selection",
+        reason: str = "unknown", attempts: int = 1,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.reason = reason
+        self.attempts = attempts
+
+
+@dataclass(frozen=True, slots=True)
+class IdeaStockSelection:
+    symbol: str
+    name: str
+    reason: str
+    framing: str
+    evidence: LiveMarketDataResult | None = None
+    alternatives: tuple[IdeaStockSelection, ...] = ()
+
+
+class IdeaStockSelector(Protocol):
+    async def select(
+        self, request: CompileInput, research: CurrentFactResearchResult | None,
+    ) -> IdeaStockSelection | None: ...
+
+
 class IdeaGenerationError(RuntimeError):
     """Sanitized stage of an unsuccessful model-authored idea batch."""
 
     def __init__(
-        self, stage: Literal["transport", "schema", "execution"], *, timed_out: bool = False,
+        self, stage: Literal["transport", "schema", "execution", "explanation"],
+        *, timed_out: bool = False,
     ) -> None:
         super().__init__(stage)
         self.stage = stage
@@ -47,15 +83,37 @@ class UnboundIdeaStrategy(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     catalog: CatalogRef
-    entry: Condition
-    exit: FirstOfExit
-    execution: DailyExecutionPolicy
+    entry: Condition | None = None
+    exit: FirstOfExit | None = None
+    trading_plan: PricePlan | None = None
+    independent_plans: IndependentPlanPair | None = None
+    execution: DailyExecutionPolicy | PricePlanExecutionPolicy | HybridExecutionPolicy | ComposedExecutionPolicy
     backtest: BacktestConfig
+
+    @model_validator(mode="after")
+    def complete_rules(self) -> UnboundIdeaStrategy:
+        if self.independent_plans is not None:
+            if self.trading_plan is not None or self.entry is not None or self.exit is not None:
+                raise ValueError('双计划与其他买卖规则不能重复声明所有权')
+            if not isinstance(self.execution, ComposedExecutionPolicy):
+                raise ValueError('双计划须显式声明组合执行')
+            if self.backtest.initial_cash_cny != self.independent_plans.entry_plan.parameters.initial_cash_cny:
+                raise ValueError('双计划与回测初始资金必须一致')
+            return self
+        if self.trading_plan is not None:
+            if ((self.entry is not None or self.exit is not None)
+                    and not isinstance(self.execution, ComposedExecutionPolicy)):
+                raise ValueError("独立买卖组合须保留组合执行声明")
+        elif self.entry is None or self.exit is None:
+            raise ValueError("待选股票的策略仍须保留完整买卖规则")
+        return self
 
     def bind(self, symbol: str) -> StrategySpec:
         return StrategySpec(
             catalog=self.catalog, instrument=Instrument(symbol=symbol),
-            entry=self.entry, exit=self.exit, execution=self.execution, backtest=self.backtest,
+            entry=self.entry, exit=self.exit, trading_plan=self.trading_plan,
+            independent_plans=self.independent_plans,
+            execution=self.execution, backtest=self.backtest,
         )
 
 
@@ -88,9 +146,9 @@ class IdeaProposal:
     """A compiler-validated guidance card the user may choose.
 
     ``capability_ids`` and ``instrument_symbol`` are server-derived.  Provider
-    text cannot populate either field authoritatively.  ``strategy`` is an
-    internal, Catalog-gated payload and is intentionally omitted by the HTTP
-    mapper.
+    text cannot populate either field authoritatively. ``strategy`` is a
+    Catalog-gated proposal exposed for inspection; selecting it and creating
+    a runnable draft still require the normal server-side flow.
     """
 
     id: str

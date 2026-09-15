@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -13,6 +14,7 @@ from ashare_lab.adapters.market_data.instrument_name_chain import (
 from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
+from ashare_lab.ports.clarification_dialogue import ClarificationDialogueAssessment
 
 ROOT = Path(__file__).resolve().parents[4]
 
@@ -61,6 +63,62 @@ async def test_standalone_company_name_is_resolved_before_rule_parsing() -> None
     assert candidate.instrument_symbol == "300033.SZ"
     assert candidate.grounding_evidence[0].path == "/instrument/symbol"
     assert candidate.grounding_evidence[0].text == "同花顺"
+
+
+@pytest.mark.asyncio
+async def test_missing_roe_threshold_keeps_resolved_company_and_asks_only_for_value() -> None:
+    generator = Mock(
+        generate=AsyncMock(wraps=RuleBasedCandidateGenerator().generate),
+    )
+    dialogue = Mock(assess=AsyncMock(return_value=ClarificationDialogueAssessment(
+        reply_kind="preference",
+        acknowledgement_id="respect_preference",
+        natural_reply="已核对股票。",
+        instrument_name="指南针",
+        instrument_selected=True,
+    )))
+    compiler = StrategyCompiler(
+        generator=generator,
+        catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals",
+        release_version="2026.09.01",
+        clarification_dialogue_router=dialogue,
+        instrument_name_resolver=lambda name: {"指南针": "300803.SZ"}[name],
+    )
+
+    request = CompileInput(
+        utterance="指南针ROE低则买入，死叉卖出",
+        instrument_context=None,
+        as_of_date=date(2026, 9, 15),
+        semantic_intent="new_strategy",
+    )
+    initial = await compiler.compile(request)
+    effective, outcome = await compiler.recover_unsupported_identity(request, initial)
+
+    assert effective.instrument_context == "300803.SZ"
+    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
+    assert outcome.diagnostic_code == "numeric_threshold_requires_clarification"
+    assert outcome.clarification == "ROE 低于多少（%）时买入？"
+    assert outcome.idea_route is not None
+    assert outcome.idea_route.asset_mapping.instrument_symbol == "300803.SZ"
+    assert any(
+        item.path == "/instrument/symbol" and item.text == "指南针"
+        for item in outcome.candidate_grounding
+    )
+    assert "哪一只" not in outcome.clarification and "股票" not in outcome.clarification
+    generator.generate.assert_not_awaited()
+    assert dialogue.assess.await_args.args[0].identity_only
+
+    completed = await compiler.answer_clarification(
+        original_input=effective,
+        prior_outcome=outcome,
+        answer="10%",
+    )
+
+    assert completed.outcome.status is CompileStatus.READY
+    assert completed.compile_input.utterance == "指南针ROE低于10%则买入，MACD死叉卖出"
+    assert completed.outcome.strategy is not None
+    assert completed.outcome.strategy.instrument.symbol == "300803.SZ"
 
 
 @pytest.mark.asyncio
@@ -320,7 +378,7 @@ async def test_instrument_clarification_accepts_partial_rule_without_forgetting_
 
 
 @pytest.mark.asyncio
-async def test_resolved_company_bare_crosses_offer_three_catalog_validated_families() -> None:
+async def test_resolved_company_bare_crosses_keep_stock_and_default_to_macd() -> None:
     generator = HybridCandidateGenerator(
         deterministic=RuleBasedCandidateGenerator(),
         bounded_fallback=_UnexpectedFallback(),
@@ -341,32 +399,15 @@ async def test_resolved_company_bare_crosses_offer_three_catalog_validated_famil
         )
     )
 
-    assert outcome.status is CompileStatus.NEEDS_CLARIFICATION
-    assert outcome.diagnostic_code == "ambiguous_cross_indicator"
-    assert outcome.idea_route is not None
-    assert outcome.idea_route.asset_mapping.instrument_symbol == "300459.SZ"
-    assert len(outcome.idea_route.proposals) == 3
-    assert {proposal.title for proposal in outcome.idea_route.proposals} == {
-        "MACD",
-        "KDJ",
-        "5/20 日均线",
-    }
-    assert [(item.path, item.text) for item in outcome.candidate_grounding] == [
-        ("/instrument/symbol", "汤姆猫"),
-        ("/clarification", "汤姆猫金叉"),
-    ]
-
-    for proposal in outcome.idea_route.proposals:
-        compiled = await compiler.compile(
-            CompileInput(
-                utterance=proposal.suggested_utterance,
-                instrument_context="300459.SZ",
-                as_of_date=date(2026, 8, 20),
-            )
-        )
-        assert compiled.status is CompileStatus.READY, proposal.suggested_utterance
-        assert compiled.strategy is not None
-        assert compiled.strategy.instrument.symbol == "300459.SZ"
+    assert outcome.status is CompileStatus.READY
+    assert outcome.idea_route is None and outcome.diagnostic_code is None
+    assert outcome.strategy.instrument.symbol == "300459.SZ"
+    assert outcome.strategy.entry.indicator_id == "technical.macd"
+    assert outcome.strategy.entry.trigger == "golden_cross"
+    assert outcome.strategy.exit.children[0].indicator_id == "technical.macd"
+    assert outcome.strategy.exit.children[0].trigger == "death_cross"
+    assert any(item.path == "/instrument/symbol" and item.text == "汤姆猫"
+               for item in outcome.candidate_grounding)
 
 
 @pytest.mark.asyncio

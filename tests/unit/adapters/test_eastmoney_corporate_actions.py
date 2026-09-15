@@ -25,6 +25,56 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 CAPTURED_AT = datetime(2025, 1, 10, 9, 0, tzinfo=SHANGHAI)
 
 
+@pytest.mark.parametrize('mutation', [None, 'amount', 'date', 'total', 'nature', 'unknown', 'foreign'])
+def test_ambiguous_incentive_requires_matching_economic_evidence(mutation):
+    from types import SimpleNamespace
+    from ashare_lab.adapters.market_data.eastmoney_corporate_actions import _matches_incentive_issuance
+    row = dict(END_DATE='2025-01-02', CHANGE_REASON='其他变动原因,自主行权',
+               LIMITED_ASHARES_CHANGE=100, LISTED_ASHARES_CHANGE=0,
+               TOTAL_SHARES_CHANGE=110, TOTAL_SHARES=1110, H_FREESHARE_CHANGE=10)
+    text = ('股票来源：公司向激励对象定向发行的本公司A股普通股。'
+            '2025年1月2日，本次股份完成登记手续。\n股本总数 1,010 100 1,110')
+    if mutation == 'amount': row['LIMITED_ASHARES_CHANGE'] = 99
+    if mutation == 'date': row['END_DATE'] = '2025-01-03'
+    if mutation == 'total': row['TOTAL_SHARES'] = 1111
+    if mutation == 'nature': text = text.replace('向激励对象定向发行', '向全体股东送股')
+    if mutation == 'unknown': row['CHANGE_REASON'] += ',神秘调整'
+    if mutation == 'foreign': row['H_FREESHARE_CHANGE'] = 11
+    observation = SimpleNamespace(validation_status='validated',
+        title='限制性股票激励计划归属结果暨股份上市公告', attributes={'document_text': text})
+    assert _matches_incentive_issuance(row, observation) is (mutation is None)
+
+
+def test_dividend_main_paginated_settlement_preserves_source() -> None:
+    from ashare_lab.domain.shared import InstrumentId
+    from ashare_lab.adapters.market_data.eastmoney_corporate_actions import _bonus_cash_pay_date
+
+    requested = []
+
+    def handler(request):
+        requested.append(dict(request.url.params))
+        number = int(request.url.params['p'])
+        row = {
+            'SECUCODE': '300059.SZ', 'SECURITY_CODE': '300059',
+            'ASSIGN_PROGRESS': '董事会预案' if number == 1 else '实施方案',
+            'EQUITY_RECORD_DATE': '2025-01-02', 'EX_DIVIDEND_DATE': '2025-01-03',
+            'PAY_CASH_DATE': '2025-01-05' if number == 1 else '2025-01-04',
+        }
+        return httpx.Response(200, json={'success': True, 'code': 0,
+            'result': {'count': 2, 'pages': 2, 'data': [row]}})
+
+    with EastmoneyCorporateActionReferenceAdapter(
+        transport=httpx.MockTransport(handler), page_size=1,
+    ) as adapter:
+        result = adapter._fetch_dividend_main(InstrumentId('300059.SZ'))
+    assert [p['p'] for p in requested] == ['1', '2']
+    assert result.dataset == 'RPT_F10_DIVIDEND_MAIN'
+    assert len(result.pages) == 2
+    assert result.pages[0].payload['result']['data'][0]['ASSIGN_PROGRESS'] == '董事会预案'
+    assert _bonus_cash_pay_date(result.rows, digits='300059',
+        record_date=date(2025, 1, 2), ex_date=date(2025, 1, 3))[0] == date(2025, 1, 4)
+
+
 def test_normalizes_current_bse_920_code_for_public_corporate_action_queries() -> None:
     instrument, digits, prefixed = _normalize_symbol("920001.bj")
 
@@ -333,6 +383,29 @@ def _prepare(transport: httpx.MockTransport):
         )
 
 
+def test_prepare_uses_dividend_main_when_bonus_endpoint_is_unavailable() -> None:
+    original = _transport()
+    requested = []
+
+    def handler(request):
+        if request.url.path.endswith('/BonusFinancing/PageAjax'):
+            return httpx.Response(503)
+        if request.url.params.get('type') == 'RPT_F10_DIVIDEND_MAIN':
+            requested.append(str(request.url))
+            return httpx.Response(200, json=_success_page(
+                _bonus_payload()['fhyx'], pages=1, count=1,
+            ))
+        return original.handle_request(request)
+
+    result = _prepare(httpx.MockTransport(handler))
+    cash = next(a for a in result.corporate_actions
+                if a.action_type is CorporateActionKind.CASH_DIVIDEND)
+    assert cash.cash_pay_date == date(2025, 1, 4)
+    assert len(requested) == 1
+    assert any(c.as_dict()['dataset'] == 'RPT_F10_DIVIDEND_MAIN'
+               for c in result.query_collections)
+
+
 def test_builds_paginated_cash_share_and_negative_split_proof() -> None:
     result = _prepare(_transport(dividend_rows=[_dividend_row(), _no_distribution_row()]))
 
@@ -412,6 +485,8 @@ def test_normalizes_complete_rights_terms_from_filtered_dataset() -> None:
     "reason",
     [
         "首发限售股份上市",
+        "其他限售股上市",
+        "其他限售股份上市",
         "网下配售股份上市",
         "战略配售上市",
         "自主行权",
@@ -689,3 +764,14 @@ def test_query_page_payloads_are_json_safe() -> None:
     assert "rawPayload" in encoded
     assert isinstance(payload["queryCollections"], list)
     assert payload["queryCollections"]
+def test_limited_only_capital_increase_requires_reconciled_counts():
+    from ashare_lab.adapters.market_data.eastmoney_corporate_actions import _limited_only_capital_increase
+    row = dict(TOTAL_SHARES_CHANGE=505289, TOTAL_SHARES=463179293,
+               TOTAL_A_SHARES=463179293, LISTED_A_SHARES=462674004,
+               LIMITED_A_SHARES=505289, LISTED_ASHARES_CHANGE=0,
+               LIMITED_ASHARES_CHANGE=505289)
+    assert _limited_only_capital_increase(row)
+    for patch in ({'LISTED_ASHARES_CHANGE': 100}, {'TOTAL_A_SHARES': None},
+                  {'LIMITED_ASHARES_CHANGE': 505288}, {'H_FREESHARE_CHANGE': 1},
+                  {'TOTAL_SHARES': 463179294}, {'TOTAL_SHARES_CHANGE': 'NaN'}):
+        assert not _limited_only_capital_increase({**row, **patch})

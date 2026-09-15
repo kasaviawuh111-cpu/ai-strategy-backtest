@@ -36,6 +36,7 @@ class PriceBasis(StrEnum):
 
     UNADJUSTED = "unadjusted"
     BACK_ADJUSTED = "back_adjusted"
+    DYNAMIC_FRONT_ADJUSTED = "dynamic_front_adjusted"
 
 
 class Board(StrEnum):

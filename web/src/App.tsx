@@ -4,24 +4,28 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { FailureCard, ResultCard, RunningCard, StrategyCard } from './components/SummaryCards'
 import { BacktestReview } from './components/BacktestReview'
 import { StrategySlotComposer } from './components/StrategySlotComposer'
+import { StrategyExamples } from './components/StrategyExamples'
+import { StrategyGallery } from './components/StrategyGallery'
+import { UsageGuide } from './components/UsageGuide'
 import { ModelReasoning } from './components/ModelReasoning'
 import { ColumnResizer } from './components/ColumnResizer'
 import { useStoredColumnWidths } from './components/column-widths'
 import { Proposals, type ProposalItem } from './components/Proposals'
+import { gridComparisonTitles, gridProposalPresentation } from './shared/price-plan'
 import {
   BackIcon, Bubble, Chip, Chips, DayDivider, Notice, Say, ThinkBlock,
   ThinkingStream, Turn,
 } from './components/primitives'
-import { ChainScreen, ExecutionDetailsScreen, ExecutionEntry, ParamsScreen, ReportBody } from './screens'
+import { ExecutionDetailsScreen, ExecutionEntry, ParamsScreen, ReportBody } from './screens'
 import { apiMode, backtestApi, instrumentApi, strategyApi, systemApi } from './shared/api/client'
 import type { DialogueProgressEvent, DialogueProgressObserver, PreviewPollRecovery } from './shared/api/client'
-import { fromBacktestOptimizationCandidate, toLiveBacktestBody, toLiveRevisionBody } from './shared/api/contract'
+import { STRATEGY_RETRY_MESSAGE, fromBacktestOptimizationCandidate, ideaProposalRuleSummaries, ideaProposalTitle, toLiveBacktestBody, toLiveRevisionBody } from './shared/api/contract'
 import { ApiError } from './shared/api/types'
 import type {
-  BacktestActivity,
   BacktestOptimizationCandidate,
   BacktestReviewResponse,
   BacktestRun,
+  CapabilitiesResponse,
   Clarification,
   ClarificationData,
   ClarificationSuggestion,
@@ -37,21 +41,20 @@ import {
 } from './shared/config/backtest'
 import { validateBacktestDates } from './shared/backtest-date-validation'
 import { DEFAULT_INSTRUMENT, toAshareInstrument } from './shared/instrument-context'
-import { DEFAULT_STRATEGY_EXAMPLES } from './shared/default-strategy-examples'
+import type { StrategyExample } from './shared/default-strategy-examples'
+import {
+  readRecentBacktests, loadCompletedReports, persistCompletedReports, MAX_RECENT_BACKTESTS,
+  type CompletedReportSnapshot,
+} from './shared/recent-backtests'
 import type {
-  BacktestMetrics,
-  ChartMark,
   EditableRow,
   FailureState,
   Instrument,
-  RunEvidence,
-  SeriesPoint,
   StrategySummary,
-  TradeRow,
 } from './types'
 import {
-  buildChain,
   assessStrategyCapabilities,
+  backtestPreparationFailureReason,
   summarizeExecution,
   summarizeRule,
   strategyRuleTrees,
@@ -65,7 +68,9 @@ import {
 } from './view-model'
 import './styles/app.css'
 
-type Overlay = 'params' | 'execution' | 'chain'
+type Overlay = 'params' | 'execution'
+type WorkspaceView = 'chat' | 'detail' | 'gallery'
+const isGalleryLocation = () => window.location.hash === '#strategies'
 
 const executableRuleText = (draft: StrategyDraft): string => {
   const rules = toStrategySummary(draft).rows.slice(0, 2)
@@ -86,22 +91,24 @@ type ClarificationTarget = {
   executionContext?: Partial<ExecutionSettings>
 }
 
-type JourneySnapshot = {
-  id: string
+type UnrunDraftSnapshot = {
+  draft: StrategyDraft
+  baseline?: StrategyDraft
+  submittedText?: string
+  fromPanelEdit: boolean
+  messages: ClarificationMessage[]
+  reviewOpen: boolean
+}
+
+type JourneySnapshot = CompletedReportSnapshot & {
   utterance: string
   fromPanelEdit?: boolean
-  draft: StrategyDraft
-  instrument: Instrument
-  strategy: StrategySummary
-  metrics: BacktestMetrics
-  series: SeriesPoint[]
-  marks: ChartMark[]
-  trades: TradeRow[]
-  evidence: RunEvidence
-  activities: BacktestActivity[]
   clarificationMessages: ClarificationMessage[]
-  review?: BacktestReviewResponse
 }
+
+const historyJourney = (snapshot: CompletedReportSnapshot): JourneySnapshot => ({
+  ...snapshot, utterance: '', clarificationMessages: [],
+})
 
 /**
  * 策略名。必须由「编译出来的策略」推导，不能用用户第一句原话：
@@ -141,11 +148,17 @@ const ENTRY_ACTION = /(?:买入|买进|建仓|开仓|低吸|抄底)/
 const EXIT_ACTION = /(?:卖出|卖掉|退出|平仓|清仓|止盈|止损)/
 
 /**
- * 观点候选只能展示服务端给出的完整买卖句。标题或假设本身不是规则，
- * 前端也不把“趋势确认”之类抽象方向补成可执行语句。
+ * Structured plans may intentionally contain only one side (for example DCA).
+ * Displaying a server plan is not execution approval. Text-only suggestions
+ * still need a complete buy/sell sentence; never invent the missing rules.
  */
 const isCompleteIdeaProposal = (proposal: IdeaRouteProposal): boolean => {
   const utterance = proposal.suggested_utterance.trim()
+  const plan = (proposal.strategy ?? proposal.strategy_template)?.trading_plan ?? proposal.grid_plan
+  if (plan && utterance) {
+    if (plan.kind === 'grid' || plan.kind === 'scheduled') return true
+    if (plan.kind === 'conditional') return Array.isArray(plan.parameters.rules) && plan.parameters.rules.length > 0
+  }
   return Boolean(
     proposal.entry_summary.trim()
     && proposal.exit_summary.trim()
@@ -193,19 +206,26 @@ const ideaProposalCards = (
   clarification: Clarification | undefined,
   target: ClarificationTarget | undefined,
   suggestions: ClarificationSuggestion[],
+  capabilities?: CapabilitiesResponse,
 ): ProposalItem[] => {
   if (!clarification?.ideaRoute) return []
-  return orderedIdeaProposals(clarification, suggestions).map((proposal) => ({
+  const proposals = orderedIdeaProposals(clarification, suggestions)
+  const plans = proposals.map(proposal => proposal.grid_plan ?? proposal.strategy?.trading_plan ?? proposal.strategy_template?.trading_plan)
+  const comparisonTitles = gridComparisonTitles(plans)
+  return proposals.map((proposal, index) => {
+    const plan = plans[index]
+    return ({
     id: proposal.id,
     title: proposal.pairing_reason
-      ? `${proposal.instrument_name ?? proposal.instrument_symbol} · ${proposal.title}`
-      : proposal.title,
+      ? `${proposal.instrument_name ?? proposal.instrument_symbol} · ${ideaProposalTitle(proposal)}`
+      : ideaProposalTitle(proposal),
     paired: Boolean(proposal.pairing_reason),
     detail: proposal.pairing_reason ?? undefined,
     instrument: ideaProposalInstrument(clarification, target, proposal),
-    entry: proposal.entry_summary,
-    exit: proposal.exit_summary,
-  }))
+    ...ideaProposalRuleSummaries(proposal, capabilities),
+    ...(plan?.kind === 'grid' ? gridProposalPresentation(plan, comparisonTitles[index],
+      proposal.strategy ?? proposal.strategy_template ?? undefined) : {}),
+  })})
 }
 
 const clarificationAnswerMessage = (
@@ -397,8 +417,21 @@ function CurrentDataResult({
 // The server returns one complete model reply; choices remain separate UI controls.
 const clarificationMessage = (clarification: Clarification): string => clarification.question
 
+const hasConfirmedIdeaInstrument = (clarification: Clarification | undefined): boolean => {
+  const route = clarification?.ideaRoute
+  const symbol = route?.asset_mapping.instrument_symbol
+  return Boolean(symbol && route?.proposals.length
+    && route.proposals.every(proposal => proposal.instrument_symbol === symbol))
+}
+
 const clarificationPlaceholder = (clarification: Clarification | undefined): string => {
   if (!clarification) return '说出什么时候买、什么时候卖'
+  if (clarification.id === 'candidate_data_not_ready'
+    || clarification.id === 'capability_research_fallback'
+    || clarification.id === 'semantic_confirmation_required') {
+    return '可以继续讨论策略，无需重复输入'
+  }
+  if (hasConfirmedIdeaInstrument(clarification)) return '选个方案，或说说你想怎么调整'
   if (clarification.instrumentSuggestions?.length) return '也可以输入你想用的股票'
   if (isInstrumentClarification(clarification)) return '输入股票名称或 6 位代码'
   if (clarification.id === 'entry_rule_not_recognized') return '补充什么时候买入'
@@ -440,21 +473,16 @@ const compileRecoveryMessage = (error: unknown): string => {
   const contextMessage = contextRecoveryMessage(error)
   if (contextMessage) return contextMessage
   const code = errorCode(error)?.toLowerCase() ?? ''
-  if (code === 'api_timeout') {
-    return '这次识别等待超时了，请原样再发一次。'
-  }
-  if (code === 'api_network_unavailable') {
-    return '这次没有连上本地回测服务，请确认后端仍在运行后原样重试。'
-  }
+  if (code === 'api_timeout' || code === 'api_network_unavailable'
+    || code.startsWith('candidate_provider_')) return STRATEGY_RETRY_MESSAGE
   if (code === 'skill_indicator_unavailable' || code.startsWith('live_market_data_')) {
     return errorMessage(error)
   }
-  if (code.startsWith('candidate_provider_')) return errorMessage(error)
   if (code === 'previous_session_limit_up_capability_unavailable') {
-    return '我已理解你想用“前一交易日涨停”作为买入条件。当前回测还不能可靠执行这个信号，也不会用单日涨 10% 代替。请在下方改用“价格突破”、“涨跌幅”或“MACD / 均线”条件，并说清卖出方式。'
+    return '已理解“前一交易日涨停”这一条件，所需的历史涨停状态与执行支持尚未齐备。原要求已保留，本次未开始回测。'
   }
   if (code.includes('document_text')) {
-    return '我已理解你想用报告正文作为条件，但当前固定数据还不能审计这段正文。系统不会用公告标题代替，也不会猜测词频。请在下方改用价格、涨跌幅或技术指标条件。'
+    return '已理解使用报告正文作为条件，所需的历史正文数据尚未齐备。原要求已保留，本次未开始回测。'
   }
   if (
     code.includes('no_candidate')
@@ -470,6 +498,23 @@ const compileRecoveryMessage = (error: unknown): string => {
   return `策略生成请求未完成：${errorMessage(error)}`
 }
 
+const compileFailurePlaceholder = (error: unknown): string => {
+  const code = errorCode(error) ?? ''
+  if (code === 'candidate_provider_connection_failed' || code === 'candidate_provider_timeout') {
+    return '你的输入和已有策略已保留'
+  }
+  if (code.startsWith('candidate_provider_') || code === 'api_timeout'
+    || code === 'api_network_unavailable' || code.startsWith('preview_')) {
+    return '你的输入和已有策略已保留'
+  }
+  if (code === 'entry_rule_not_recognized') return '补充什么时候买入'
+  if (code === 'exit_rule_not_recognized') return '补充什么时候卖出'
+  if (code === 'strategy_rule_incomplete' || code === 'no_supported_signal_recognized') {
+    return '补充完整规则，或直接换一种说法'
+  }
+  return '原话已保留，可查看提示后继续'
+}
+
 const errorMessage = (error: unknown) => {
   const contextMessage = contextRecoveryMessage(error)
   if (contextMessage) return contextMessage
@@ -483,42 +528,43 @@ const errorMessage = (error: unknown) => {
 const errorCode = (error: unknown) => error instanceof ApiError ? error.problem.code : undefined
 
 const backtestFailureMessage = (run: BacktestRun): string => {
-  // Only the indicator stage identifies the exact Skill. History preparation
-  // can call both screening and finance lookup, so do not guess its origin.
-  const source = run.progressLabel.includes('获取东方财富指标')
-    ? '东方财富查数 Skill'
-    : '东方财富选股/查数流程'
   switch (run.error) {
     case 'skill_mx_auth_failed':
     case 'skill_mx_read_timeout':
     case 'skill_mx_connect_timeout':
     case 'skill_mx_transport_error':
     case 'skill_mx_http_error':
-    case 'skill_mx_no_data':
-      // These labels are built by the server from safe tool/reason/status
-      // fields, never from provider response prose or exception messages.
-      return run.progressLabel
     case 'skill_MxSaasProviderAuthError':
-      return `${source}授权失败，本次回测未完成。`
     case 'skill_MxSaasProviderUnavailableError':
-      return `${source}连接失败，请稍后重试。`
+      return '这次没能取到回测所需的行情，暂时无法计算结果。你的策略和设置已保留，可以稍后重试。'
+    case 'skill_mx_no_data':
     case 'skill_MxSaasProviderNoDataError':
-      return `${source}未返回本次回测所需的数据。`
+      return '暂时没有这段时间的完整行情，无法计算回测结果。你的策略和设置已保留，可以稍后重试。'
     case 'skill_MxSaasProviderDataError':
-      // This label is classified by the backend, not provider prose. Preserve
-      // the distinction between incomplete provider tables and invalid values.
-      return run.progressLabel && !run.progressLabel.includes('MxSaasProviderDataError')
-        ? run.progressLabel
-        : `${source}返回的数据未通过本次回测的数据检查，回测已停止。`
     case 'skill_MxDailyHistoryError':
-      return '东方财富历史数据读取或检查失败，本次回测未完成。'
+      return '这次取到的行情或指标还无法用于计算，没有生成回测结果。你的策略和设置已保留，可以稍后重试。'
     case 'skill_history_fields_missing':
     case 'skill_history_before_listing':
     case 'skill_history_dates_mismatch':
     case 'skill_history_validation_failed':
+    case 'minute_data_unavailable':
+    case 'minute_execution_unavailable':
+    case 'grid_execution_unavailable':
+    case 'grid_latest_quote_unavailable':
+    case 'grid_parameters_unavailable':
+    case 'opening_holdings_data_unavailable':
+    case 'opening_holdings_exceed_equity':
+    case 'condition_reference_unavailable':
+    case 'condition_cost_unavailable':
+    case 'execution_capability_unavailable':
+    case 'scheduled_execution_unavailable':
+    case 'corporate_action_data_unavailable':
+    case 'market_calendar_unavailable':
+    case 'daily_execution_data_unavailable':
       return run.progressLabel
     default:
-      return run.error ?? '后台没有返回具体失败原因。'
+      return run.progressLabel && run.progressLabel !== run.error
+        ? run.progressLabel : '本次回测未完成，原规则与设置已保留。'
   }
 }
 
@@ -528,9 +574,33 @@ const failureFor = (
   fallbackTitle: string,
   instrument: ApiInstrument,
   runId?: string,
+  failureCode?: string | null,
 ): FailureState => {
-  const code = errorCode(error) ?? (error instanceof Error ? error.message : '')
+  // A terminal job returns a machine code separately from its user-facing reason.
+  // Never classify that job by its translated prose.
+  const code = failureCode ?? errorCode(error) ?? (error instanceof Error ? error.message : '')
   const normalized = code.toLowerCase()
+
+  if (normalized === 'skill_history_before_listing') {
+    return {
+      key: 'history_range_invalid', status: 'unavailable', title: '请调整回测区间',
+      reason: errorMessage(error), actions: [{ label: '修改回测区间', action: 'edit_range' }], runId,
+    }
+  }
+  if (['grid_parameters_unavailable', 'grid_buy_quantity_invalid', 'opening_holdings_exceed_equity',
+    'condition_reference_unavailable'].includes(normalized)) {
+    return {
+      key: 'execution_settings_invalid', status: 'unavailable', title: '请检查策略设置',
+      reason: errorMessage(error), actions: [{ label: '检查策略设置', action: 'edit_settings' }], runId,
+    }
+  }
+  if (['minute_execution_unavailable', 'grid_execution_unavailable',
+    'scheduled_execution_unavailable'].includes(normalized)) {
+    return {
+      key: 'capability_unavailable', status: 'unavailable', title: '当前执行方式暂不支持',
+      reason: errorMessage(error), actions: [{ label: '查看与修改规则', action: 'edit_rules' }], runId,
+    }
+  }
 
   if (normalized === 'skill_indicator_unavailable') {
     return {
@@ -538,7 +608,7 @@ const failureFor = (
       status: 'unavailable',
       title: '历史指标数据暂不可用',
       reason: errorMessage(error),
-      actions: ['修改规则', '使用技术示例'],
+      actions: [{ label: '修改规则', action: 'edit_rules' }, { label: '使用技术示例', action: 'use_example' }],
       runId,
     }
   }
@@ -548,7 +618,7 @@ const failureFor = (
       status: 'rejected',
       title: '缺少股票',
       reason: `请使用当前股票“${instrument.name} ${instrument.symbol}”，或返回股票页后再试。`,
-      actions: [`使用${instrument.name}`, '修改规则'],
+      actions: [{ label: '检查股票与规则', action: 'edit_rules' }],
     }
   }
   if (
@@ -560,7 +630,7 @@ const failureFor = (
       status: 'partial',
       title: '缺少报告正文数据',
       reason: `${errorMessage(error)} 系统不会用公告标题代替正文，也不会猜测词频。请补齐可校验的报告正文快照后再运行。`,
-      actions: ['修改规则', '使用技术示例'],
+      actions: [{ label: '修改规则', action: 'edit_rules' }, { label: '使用技术示例', action: 'use_example' }],
       runId,
     }
   }
@@ -573,10 +643,11 @@ const failureFor = (
   ) {
     return {
       key: 'unsupported_strategy',
-      status: 'rejected',
-      title: '无法识别这条策略',
-      reason: '没有识别到当前可执行的技术指标或公告事件。请写清何时买入、何时卖出和回测区间，或先使用页面示例。',
-      actions: ['修改规则', '使用技术示例'],
+      status: 'unavailable',
+      title: '策略暂不可执行',
+      reason: errorMessage(error),
+      actions: [{ label: '修改规则', action: 'edit_rules' }, { label: '使用技术示例', action: 'use_example' }],
+      runId,
     }
   }
   if (
@@ -590,7 +661,7 @@ const failureFor = (
       status: 'unavailable',
       title: '暂时无法回测',
       reason: errorMessage(error),
-      actions: ['修改规则', '使用技术示例'],
+      actions: [{ label: '修改规则', action: 'edit_rules' }, { label: '使用技术示例', action: 'use_example' }],
       runId,
     }
   }
@@ -604,7 +675,7 @@ const failureFor = (
       status: 'unavailable',
       title: '事件时间质量不足',
       reason: '目前无法证明事件在历史上的精确首次可得时间。为避免偷看未来数据，本次不触发交易。',
-      actions: ['改用技术策略', '修改规则'],
+      actions: [{ label: '改用技术策略', action: 'use_example' }, { label: '修改规则', action: 'edit_rules' }],
       runId,
     }
   }
@@ -619,7 +690,7 @@ const failureFor = (
       status: 'partial',
       title: '数据不完整',
       reason: '当前快照没有覆盖这条策略需要的事件或行情，系统不会自动联网补数或放宽规则。',
-      actions: ['改用技术策略', '修改规则'],
+      actions: [{ label: '改用技术策略', action: 'use_example' }, { label: '修改规则', action: 'edit_rules' }],
       runId,
     }
   }
@@ -629,7 +700,15 @@ const failureFor = (
     status: 'rejected',
     title: fallbackTitle,
     reason: errorMessage(error),
-    actions: runId ? ['重新读取', '修改规则'] : ['修改规则', '使用技术示例'],
+    actions: runId ? [{
+      label: fallbackKey === 'run_failed' && normalized === 'query_temporarily_unavailable'
+        ? '重新获取数据' : fallbackKey === 'run_failed'
+        && !/(timeout|transport|provider|network|data|history|calendar|quote|cost)/.test(normalized)
+        ? '重新回测' : '重新读取',
+      action: fallbackKey === 'result_failed' ? 'read_results'
+        : fallbackKey === 'run_failed' ? 'retry_run' : 'read_run',
+    }, { label: '修改规则', action: 'edit_rules' }]
+      : [{ label: '修改规则', action: 'edit_rules' }, { label: '使用技术示例', action: 'use_example' }],
     runId,
   }
 }
@@ -697,6 +776,7 @@ export default function App({
   const queryClient = useQueryClient()
   const maCrossExample = `${instrument.name}5日均线上穿20日均线买入，5日均线下穿20日均线卖出`
   const [utterance, setUtterance] = useState('')
+  const selectedExample = useRef<StrategyExample | undefined>(undefined)
   const [strategySlots, setStrategySlots] = useState<{ draft: StrategyDraft; mode: 'stock' | 'rules' }>()
   const rerunAfterEdit = useRef(false)
   const refreshEditedRun = useRef(false)
@@ -708,6 +788,7 @@ export default function App({
   const [baselineDraft, setBaselineDraft] = useState<StrategyDraft>()
   const [clarification, setClarification] = useState<Clarification>()
   const [clarificationTarget, setClarificationTarget] = useState<ClarificationTarget>()
+  const returnToCandidateBatch = useRef<(() => void) | null>(null)
   const [clarificationMessages, setClarificationMessages] = useState<ClarificationMessage[]>([])
   const [clarificationPrompt, setClarificationPrompt] = useState<string>()
   const [clarificationData, setClarificationData] = useState<ClarificationData>()
@@ -720,6 +801,59 @@ export default function App({
    */
   const [runCommand, setRunCommand] = useState<string>()
   const [journeyHistory, setJourneyHistory] = useState<JourneySnapshot[]>([])
+  const [recentBacktests, setRecentBacktests] = useState(() => readRecentBacktests(apiMode))
+  const recentBacktestsRef = useRef(recentBacktests)
+  useEffect(() => {
+    let active = true
+    void loadCompletedReports(apiMode).then(loaded => {
+      if (!active) return
+      const reports = new Map(loaded.reports.map(report => [report.id, report]))
+      recentBacktestsRef.current.reports.forEach(report => reports.set(report.id, report))
+      const next = { ...loaded, reports: [...reports.values()].slice(-MAX_RECENT_BACKTESTS) }
+      recentBacktestsRef.current = next
+      setRecentBacktests(next)
+    })
+    return () => { active = false }
+  }, [])
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const railRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (!historyOpen) return
+    const rail = railRef.current
+    const media = window.matchMedia('(max-width: 1023px)')
+    if (!rail || !media.matches) { setHistoryOpen(false); return }
+    const toggle = rail.querySelector<HTMLButtonElement>('.rail-history-toggle')
+    // The mobile drawer is modal: background content must not receive keyboard focus.
+    const background = [...(rail.parentElement?.children ?? [])]
+      .filter((node): node is HTMLElement => node instanceof HTMLElement && node !== rail && !node.classList.contains('rail-backdrop'))
+      .map(node => ({ node, inert: node.inert }))
+    background.forEach(({ node }) => { node.inert = true })
+    toggle?.focus()
+    const focusable = () => [...rail.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), [tabindex="0"]')]
+      .filter(node => node.getClientRects().length > 0)
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && rail.querySelector('#usage-guide:popover-open')) return
+      if (event.key === 'Escape') { event.preventDefault(); setHistoryOpen(false); return }
+      if (event.key !== 'Tab') return
+      const items = focusable()
+      const first = items[0], last = items[items.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
+    }
+    const onFocus = (event: FocusEvent) => { if (!rail.contains(event.target as Node)) toggle?.focus() }
+    const onResize = () => { if (!media.matches) setHistoryOpen(false) }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('focusin', onFocus)
+    media.addEventListener('change', onResize)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('focusin', onFocus)
+      media.removeEventListener('change', onResize)
+      background.forEach(({ node, inert }) => { node.inert = inert })
+      if (media.matches) toggle?.focus()
+    }
+  }, [historyOpen])
+  const reviewGeneration = useRef(0)
   const exposedReviewReferences = useRef<NonNullable<CompileRequest['relatedReviews']>>([])
   const rememberReviewReference = (review: BacktestReviewResponse) => {
     const reference = { runId: review.runId, responseHash: review.modelProvenance.responseHash }
@@ -729,17 +863,15 @@ export default function App({
       reference,
     ].slice(-20)
   }
-  // Browser-tab lifetime only. A new strategy keeps this opaque server draft
-  // lineage; an explicit new conversation clears it. Never persist it globally.
+  // Explicit new strategy clears lineage; archived reports never supply context.
   const [conversationTailDraftId, setConversationTailDraftId] = useState<string>()
   const [reportSnapshot, setReportSnapshot] = useState<JourneySnapshot>()
+  const [galleryReportId, setGalleryReportId] = useState<string>()
   const [reviewContextError, setReviewContextError] = useState<{ runId: string; message: string }>()
 
   const [stack, setStack] = useState<Overlay[]>([])
   const [paramsFocus, setParamsFocus] = useState<EditableRow['key'] | 'more'>('entry')
   const [conditionPath, setConditionPath] = useState<string>()
-  const [chainTitle, setChainTitle] = useState('交易因果轨迹')
-  const [chainNodes, setChainNodes] = useState<ReturnType<typeof buildChain>>([])
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   /**
    * 策略审阅栏的展开态。桌面端是常驻右栏（这个值只控制手机端那块贴底面板），
@@ -752,12 +884,36 @@ export default function App({
    *   'detail' —— 左栏 + 一整块策略详情，中间的对话让位（回测跑完后的落点）
    * 详情态不是「另一个页面」，只是同一块工作区换了一种排布，所以做成状态而不是路由。
    */
-  const [view, setView] = useState<'chat' | 'detail'>('chat')
+  const [view, setWorkspaceView] = useState<WorkspaceView>(() => isGalleryLocation() ? 'gallery' : 'chat')
+  const [galleryEntryKey, setGalleryEntryKey] = useState(0)
+  const setView = (next: WorkspaceView) => {
+    // Only own the gallery hash; preserve the host's pathname and query context.
+    if ((next === 'gallery') !== isGalleryLocation()) {
+      const url = new URL(window.location.href)
+      if (next === 'gallery') url.hash = 'strategies'
+      else url.hash = ''
+      window.history.pushState(null, '', url)
+    }
+    setWorkspaceView(next)
+  }
+  useEffect(() => {
+    const syncNavigation = () => {
+      setWorkspaceView(current => isGalleryLocation() ? 'gallery' : current === 'gallery' ? 'chat' : current)
+      setHistoryOpen(false)
+    }
+    window.addEventListener('popstate', syncNavigation)
+    window.addEventListener('hashchange', syncNavigation)
+    return () => {
+      window.removeEventListener('popstate', syncNavigation)
+      window.removeEventListener('hashchange', syncNavigation)
+    }
+  }, [])
   const [detailTab, setDetailTab] = useState<'flow' | 'report'>('flow')
   /** 详情区显示哪一次回测：默认当前这次，左栏点历史时切过去。 */
   const [detailJourneyId, setDetailJourneyId] = useState<string>()
   const [dialogueProgress, setDialogueProgress] = useState<readonly DialogueProgressEvent[]>([])
   const [dialogueRecovery, setDialogueRecovery] = useState<PreviewPollRecovery | null>(null)
+  const [isConnectionChecking, setIsConnectionChecking] = useState(false)
   const dialogueProgressAbortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const workspaceRef = useRef<HTMLDivElement>(null)
@@ -814,6 +970,7 @@ export default function App({
       relatedReview?: CompileRequest['relatedReview']
       relatedReviews?: CompileRequest['relatedReviews']
       dialogueProgress: DialogueProgressObserver
+      previousUnrunDraft?: UnrunDraftSnapshot
     }) => {
       const request = {
         ...compileRequestFor({ text, instrumentOverride }),
@@ -831,6 +988,14 @@ export default function App({
     onSuccess: (outcome, variables) => {
       if (variables.dialogueProgress.signal?.aborted) return
       setDialogueRecovery(null)
+      // A not-yet-run draft is still part of this conversation. Preserve its
+      // visible turns when the server confirms this is an edit, just as we do
+      // for follow-ups after a completed backtest.
+      const previous = outcome.isStrategyEdit ? variables.previousUnrunDraft : undefined
+      const editMessages: ClarificationMessage[] = previous
+        ? [...previous.messages, { role: 'user', text: variables.text }]
+        : []
+      if (previous) setSubmittedText(previous.submittedText)
       // Even a rerun chip may need clarification or a user-requested pause.
       // Only the resolved server turn can authorize the new calculation.
       rerunAfterEdit.current = outcome.status === 'compiled' && outcome.runRequested === true
@@ -864,7 +1029,7 @@ export default function App({
           executionContext: outcome.executionSettings
             ?? (outcome.isStrategyEdit ? variables.executionContext : undefined),
         })
-        setClarificationMessages([])
+        setClarificationMessages(editMessages)
         setClarificationSuggestions([])
         setClarificationPrompt(outcome.assistantMessage ?? clarificationMessage(outcome.clarification))
         setClarificationData(outcome.data)
@@ -883,15 +1048,29 @@ export default function App({
         setClarificationPrompt(undefined)
         setClarificationData(undefined)
         setClarificationMessages(outcome.assistantMessage?.trim()
-          ? [{ role: 'assistant', text: outcome.assistantMessage }]
-          : [])
+          ? [...editMessages, { role: 'assistant', text: outcome.assistantMessage }]
+          : editMessages)
         setDraft(nextDraft)
         setBaselineDraft(cloneDraft(nextDraft))
+        recoverCapabilitiesAfterReady()
       }
     },
     onError: (error, variables) => {
       if (variables.dialogueProgress.signal?.aborted) return
       setDialogueRecovery(null)
+      rerunAfterEdit.current = false
+      refreshEditedRun.current = false
+      // Failed generation must not discard the last editable draft. Context
+      // expiry/staleness still requires its existing explicit recovery path.
+      const previous = variables.previousUnrunDraft
+      if (previous && !contextRecoveryMessage(error)) {
+        setDraft(cloneDraft(previous.draft))
+        setBaselineDraft(previous.baseline ? cloneDraft(previous.baseline) : undefined)
+        setSubmittedText(previous.submittedText)
+        setFromPanelEdit(previous.fromPanelEdit)
+        setClarificationMessages(previous.messages)
+        setReviewOpen(previous.reviewOpen)
+      }
       if (isReviewContextError(error) && variables.relatedReview) {
         setReviewContextError({ runId: variables.relatedReview.runId, message: errorMessage(error) })
       }
@@ -994,6 +1173,7 @@ export default function App({
         }
         setDraft(nextDraft)
         setBaselineDraft(cloneDraft(nextDraft))
+        recoverCapabilitiesAfterReady()
       }
       setUtterance('')
       window.setTimeout(() => inputRef.current?.focus(), 0)
@@ -1022,6 +1202,20 @@ export default function App({
     staleTime: 30_000,
     retry: apiMode === 'live' ? 1 : false,
   })
+
+  const recoverCapabilitiesAfterReady = () => {
+    const state = queryClient.getQueryState(['capabilities'])
+    if (state?.status !== 'error') return
+    // Recovery only prepares the existing draft; it does not authorize a run.
+    rerunAfterEdit.current = false
+    refreshEditedRun.current = false
+    if (state.fetchStatus === 'idle') {
+      void queryClient.refetchQueries(
+        { queryKey: ['capabilities'], exact: true, type: 'active' },
+        { cancelRefetch: false },
+      )
+    }
+  }
 
   const startMutation = useMutation({
     mutationFn: async ({ candidate, refreshData = false }: {
@@ -1109,6 +1303,7 @@ export default function App({
       reviewProgressAbortRef.current = controller
       setReviewProgress({ runId: source.id, events: [] })
       setReviewRecovery(undefined)
+      const generation = reviewGeneration.current
       return backtestApi.review(source.id, {
         signal: controller.signal,
         onProgress: (events) => {
@@ -1117,7 +1312,12 @@ export default function App({
         onRecovery: (state) => {
           if (!controller.signal.aborted) setReviewRecovery({ runId: source.id, state })
         },
-      }, conversationReferences(source))
+      }, conversationReferences(source)).then(review => {
+        if (controller.signal.aborted || generation !== reviewGeneration.current) {
+          throw new DOMException('Discarded previous conversation response', 'AbortError')
+        }
+        return review
+      })
     },
     onSuccess: (review) => {
       rememberReviewReference(review)
@@ -1170,7 +1370,11 @@ export default function App({
       strategyApi.revise(source.draft, true),
     onSuccess: (saved, { mode }) => {
       setConversationTailDraftId(saved.id)
-      startNewCondition()
+      setView('chat')
+      setReviewOpen(false)
+      setDetailJourneyId(undefined)
+      rememberCurrentJourney()
+      resetForEdit()
       setUtterance('')
       setStrategySlots({ draft: saved, mode })
     },
@@ -1181,6 +1385,7 @@ export default function App({
     && (summaryQuery.isLoading || seriesQuery.isLoading || activitiesQuery.isLoading)
   const resultReady = Boolean(summaryQuery.data && seriesQuery.data && activitiesQuery.data)
   const isJourneyLocked = compileMutation.isPending
+    || isConnectionChecking
     || answerMutation.isPending
     || startMutation.isPending
     || optimizationMutation.isPending
@@ -1189,9 +1394,6 @@ export default function App({
     runQuery.data && !terminalStates.has(runQuery.data.state),
   )
   const validation = draft ? draftValidation(draft) : { valid: false, reason: undefined }
-  const needsLimitUpRuleRewrite = compileMutation.isError
-    && errorCode(compileMutation.error) === 'previous_session_limit_up_capability_unavailable'
-
   const uiStrategy = useMemo(() => draft ? toStrategySummary(draft) : undefined, [draft])
   const readyAssistantMessageIndex = draft && uiStrategy
     && clarificationMessages.at(-1)?.role === 'assistant' ? clarificationMessages.length - 1 : -1
@@ -1199,6 +1401,59 @@ export default function App({
   const capability = useMemo(() => draft
     ? assessStrategyCapabilities(draft, capabilitiesQuery.data, apiMode)
     : undefined, [capabilitiesQuery.data, draft])
+  // A failed metadata refresh does not invalidate the last successful catalog.
+  // The real backend preparation still decides whether this exact draft can run.
+  const canPrepare = Boolean(draft && validation.valid && capability?.canRun)
+  const preparationBody = useMemo(() => canPrepare && draft ? toLiveBacktestBody(draft) : undefined,
+    [canPrepare, draft])
+  const preparationQuery = useQuery({
+    // Bind readiness to exactly the strategy and execution settings sent to a run.
+    // React Query cancels the consumed signal when edits replace this request.
+    queryKey: ['backtest-preparation', preparationBody],
+    queryFn: async ({ signal }) => {
+      if (!draft) throw new Error('没有待检查的策略。')
+      if (apiMode === 'live') {
+        await new Promise<void>((resolve, reject) => {
+          const abort = () => {
+            window.clearTimeout(timer)
+            reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+          }
+          const timer = window.setTimeout(() => {
+            signal.removeEventListener('abort', abort)
+            resolve()
+          }, 250)
+          if (signal.aborted) abort()
+          else signal.addEventListener('abort', abort, { once: true })
+        })
+      }
+      return backtestApi.prepare(draft, signal)
+    },
+    enabled: canPrepare,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
+  const retryConnection = async () => {
+    const source = draft
+    if (!source || isJourneyLocked || isConnectionChecking) return
+    rerunAfterEdit.current = false
+    refreshEditedRun.current = false
+    setIsConnectionChecking(true)
+    try {
+      const preparedKey = ['backtest-preparation', toLiveBacktestBody(source)]
+      await queryClient.invalidateQueries({ queryKey: preparedKey, exact: true, refetchType: 'none' })
+      const result = await capabilitiesQuery.refetch({ cancelRefetch: false })
+      if (currentDraftRef.current !== source
+        || !assessStrategyCapabilities(source, result.data, apiMode).canRun) return
+      // If newly available metadata just enabled preparation, reuse that fetch.
+      // Otherwise refresh the existing failed preparation without changing inputs.
+      await queryClient.refetchQueries(
+        { queryKey: preparedKey, exact: true, type: 'active' },
+        { cancelRefetch: false },
+      )
+    } finally {
+      setIsConnectionChecking(false)
+    }
+  }
   const metrics = useMemo(() => summaryQuery.data ? toBacktestMetrics(summaryQuery.data) : undefined,
     [summaryQuery.data])
   const series = useMemo(() => toSeries(seriesQuery.data ?? []), [seriesQuery.data])
@@ -1206,7 +1461,8 @@ export default function App({
   const marks = useMemo(() => toChartMarks(series, activitiesQuery.data ?? []), [series, activitiesQuery.data])
   const evidence = useMemo(() => summaryQuery.data ? toRunEvidence(summaryQuery.data) : undefined,
     [summaryQuery.data])
-  const canStart = Boolean(validation.valid && capability?.canRun && !capabilitiesQuery.isError)
+  const canStart = Boolean(canPrepare && preparationQuery.data?.ready
+    && !preparationQuery.isFetching && !preparationQuery.isError)
   const startEditedRun = startMutation.mutate
   useEffect(() => {
     if (!rerunAfterEdit.current || !draft || !canStart || isJourneyLocked
@@ -1218,10 +1474,27 @@ export default function App({
     refreshEditedRun.current = false
     startEditedRun({ candidate: draft, refreshData })
   }, [draft, canStart, isJourneyLocked, compileMutation.isPending, clarification, runId, startEditedRun])
+  const capabilitiesConnectionFailed = errorCode(capabilitiesQuery.error) === 'api_network_unavailable'
+  const capabilitiesFailureReason = capabilitiesConnectionFailed
+    ? '本次查询遇到网络异常，暂未确认回测准备状态。'
+    : `${errorMessage(capabilitiesQuery.error)}${capabilitiesQuery.error instanceof ApiError
+      && capabilitiesQuery.error.problem.status >= 400
+      ? `（HTTP ${capabilitiesQuery.error.problem.status}）` : ''} 可重新读取能力。`
   const startDisabledReason = validation.reason
-    ?? (capabilitiesQuery.isError
-      ? `${errorMessage(capabilitiesQuery.error)} 暂时读不到后端能力说明，不能确认这条策略是否可安全运行。`
-      : capability?.reason ?? (capabilitiesQuery.isLoading ? '正在读取后端能力说明。' : undefined))
+    ?? (capabilitiesQuery.isError && !capabilitiesQuery.data
+      ? `暂未取得回测准备状态，策略和参数已保留；${capabilitiesFailureReason}`
+      : !capability?.canRun
+        ? capability?.reason ?? (capabilitiesQuery.isLoading ? '正在确认回测准备状态。' : undefined)
+        : preparationQuery.isError ? draft && preparationQuery.error instanceof ApiError
+          ? backtestPreparationFailureReason(draft, preparationQuery.error.problem)
+          : errorMessage(preparationQuery.error)
+          : !canStart ? '正在检查当前股票、回测区间和指标数据，检查完成后可开始回测。' : undefined)
+  const startBlockedLabel = validation.reason ? undefined
+    : capabilitiesQuery.isError && !capabilitiesQuery.data
+      ? capabilitiesConnectionFailed ? '等待连接恢复' : '能力说明暂不可用'
+      : capabilitiesQuery.data && !capability?.canRun
+        ? capabilitiesQuery.data.backtest_execution_available ? '暂不支持回测' : '暂未准备好'
+        : preparationQuery.isError ? '暂时无法回测' : undefined
 
   const currentSnapshot = useMemo<JourneySnapshot | undefined>(() => {
     if (
@@ -1296,6 +1569,19 @@ export default function App({
     requestReview(currentSnapshot)
   }, [currentSnapshot, requestReview, reviewMutation.isPending])
 
+  const storeCompletedReports = (reports: CompletedReportSnapshot[]) => {
+    if (!reports.length) return
+    void persistCompletedReports(apiMode, recentBacktestsRef.current.reports, reports).then(next => {
+      recentBacktestsRef.current = next
+      setRecentBacktests(next)
+    }).catch(() => {
+      setRecentBacktests(current => ({ ...current, notice: '本机报告保存失败，当前报告仍可查看。' }))
+    })
+  }
+  useEffect(() => {
+    storeCompletedReports([...journeyHistory, ...(currentSnapshot ? [currentSnapshot] : [])])
+  }, [currentSnapshot, journeyHistory])
+
   const rememberCurrentJourney = () => {
     if (!currentSnapshot) return
     setJourneyHistory((current) => current.some((item) => item.id === currentSnapshot.id)
@@ -1304,6 +1590,7 @@ export default function App({
   }
 
   const resetForEdit = () => {
+    returnToCandidateBatch.current = null
     dialogueProgressAbortRef.current?.abort()
     dialogueProgressAbortRef.current = null
     setDialogueProgress([])
@@ -1319,6 +1606,7 @@ export default function App({
     setClarificationSuggestions([])
     setClarificationPrompt(undefined)
     setClarificationData(undefined)
+    setClarificationRequestFailed(false)
     setRunId(undefined)
     setRunCommand(undefined)
     setSubmittedText(undefined)
@@ -1332,15 +1620,18 @@ export default function App({
     window.setTimeout(() => inputRef.current?.focus(), 0)
   }
 
-  const startNewCondition = () => {
-    setView('chat')
-    setReviewOpen(false)
-    setDetailJourneyId(undefined)
-    rememberCurrentJourney()
-    resetForEdit()
-  }
-
   const startNewConversation = () => {
+    selectedExample.current = undefined
+    storeCompletedReports([...journeyHistory, ...(currentSnapshot ? [currentSnapshot] : [])])
+    reviewGeneration.current += 1
+    reviewProgressAbortRef.current?.abort()
+    reviewProgressAbortRef.current = null
+    reviewMutation.reset()
+    resumeStrategyMutation.reset()
+    cancelMutation.reset()
+    setReviewProgress(undefined)
+    setReviewRecovery(undefined)
+    currentDraftRef.current = undefined
     exposedReviewReferences.current = []
     setConversationTailDraftId(undefined)
     setReviewContextError(undefined)
@@ -1349,6 +1640,8 @@ export default function App({
     setView('chat')
     setReviewOpen(false)
     setDetailJourneyId(undefined)
+    setHistoryOpen(false)
+    setShowScrollToBottom(false)
     resetForEdit()
   }
 
@@ -1426,6 +1719,14 @@ export default function App({
     optimizationMutation.reset()
     compileMutation.mutate({
       dialogueProgress: beginDialogueProgress(),
+      previousUnrunDraft: draft && !runId ? {
+        draft: cloneDraft(draft),
+        baseline: baselineDraft ? cloneDraft(baselineDraft) : undefined,
+        submittedText,
+        fromPanelEdit,
+        messages: [...clarificationMessages],
+        reviewOpen,
+      } : undefined,
       text: normalized,
       instrumentOverride: options.instrumentOverride,
       parentDraftId: conversationTailDraftId,
@@ -1501,10 +1802,23 @@ export default function App({
   const submitIdeaProposal = (proposalId: string) => {
     const proposal = clarification?.ideaRoute?.proposals.find((item) => item.id === proposalId)
     if (proposal && isCompleteIdeaProposal(proposal) && clarificationTarget) {
-      const title = proposal.title.trim() || proposal.suggested_utterance
-      const displayText = proposal.pairing_reason
-        ? `${proposal.instrument_name ?? proposal.instrument_symbol} · ${title}`
-        : title
+      const batch = { clarification, clarificationTarget, clarificationMessages,
+        clarificationPrompt, clarificationData, clarificationSuggestions, submittedText }
+      returnToCandidateBatch.current = () => {
+        resetForEdit()
+        setClarification(batch.clarification)
+        setClarificationTarget(batch.clarificationTarget)
+        setClarificationMessages(batch.clarificationMessages)
+        setClarificationPrompt(batch.clarificationPrompt)
+        setClarificationData(batch.clarificationData)
+        setClarificationSuggestions(batch.clarificationSuggestions)
+        setSubmittedText(batch.submittedText)
+        setReviewOpen(false)
+      }
+      const displayText = ideaProposalCards(
+        clarification, clarificationTarget, clarificationSuggestions, capabilitiesQuery.data,
+      ).find((card) => card.id === proposal.id)?.title
+        || proposal.title.trim() || proposal.suggested_utterance
       submitText(displayText, {
         proposalId: proposal.id,
       })
@@ -1556,18 +1870,6 @@ export default function App({
     setConversationTailDraftId(saved.id)
   }
 
-  const openChain = (trade: TradeRow) => {
-    const source = reportSnapshot ?? currentSnapshot
-    if (!source) return
-    setChainTitle(`${trade.title} · 因果轨迹`)
-    setChainNodes(buildChain(source.draft, source.activities, trade, {
-      metrics: source.metrics,
-      series: source.series,
-      evidence: source.evidence,
-    }))
-    open('chain')
-  }
-
   /**
    * 看报告 = 切到详情态的报告分区。
    * 报告是这次回测的产物，它的位置在详情里；对话只负责记录「跑过这一次」，
@@ -1580,23 +1882,33 @@ export default function App({
     setDetailTab('report')
     setView('detail')
   }
+  const openRecentReport = (snapshot: CompletedReportSnapshot) => {
+    setReportSnapshot(historyJourney(snapshot))
+    setDetailJourneyId(snapshot.id)
+    setDetailTab('report')
+    setView('detail')
+    setHistoryOpen(false)
+  }
   const detailSnapshot = detailJourneyId
-    ? journeyHistory.find((item) => item.id === detailJourneyId) ?? currentSnapshot
+    ? journeyHistory.find((item) => item.id === detailJourneyId)
+      ?? recentBacktests.reports.map(historyJourney).find(item => item.id === detailJourneyId)
+      ?? (reportSnapshot?.id === detailJourneyId ? reportSnapshot : undefined)
     : currentSnapshot
+  const isReadOnlyHistory = detailJourneyId !== undefined
+  const isGalleryReport = Boolean(detailSnapshot && detailSnapshot.id === galleryReportId)
   const detailReview = detailSnapshot?.review ?? (detailSnapshot && reviewMutation.data?.runId === detailSnapshot.id
     ? reviewMutation.data
     : undefined)
   const detailReviewIsActive = reviewMutation.variables?.id === detailSnapshot?.id
   const detailOptimizationIsActive = optimizationMutation.variables?.source.id === detailSnapshot?.id
 
-  /** 报告里的下钻（因果轨迹 / 成交规则）仍然用二级页：它们是从报告再往里的一层。 */
+  /** 成交规则仍用二级页；委托行只与报告图表联动。 */
   const reportBodyProps = (snapshot: JourneySnapshot) => ({
     metrics: snapshot.metrics,
     series: snapshot.series,
     marks: snapshot.marks,
     trades: snapshot.trades,
     evidence: snapshot.evidence,
-    onOpenChain: openChain,
     onOpenExecution: () => { setReportSnapshot(snapshot); openExecutionDetails() },
     mode: apiMode as 'mock' | 'live',
   })
@@ -1615,57 +1927,55 @@ export default function App({
   } else if (cancelMutation.isError) {
     failure = failureFor(cancelMutation.error, 'cancel_failed', '取消请求没有完成', instrument, runId)
   } else if (runQuery.data?.state === 'failed') {
-    failure = runQuery.data.error === 'skill_history_before_listing' ? {
-      key: 'history_range_invalid', status: 'unavailable', title: '请调整回测区间',
-      reason: backtestFailureMessage(runQuery.data), actions: ['修改回测区间'], runId,
-    } : failureFor(
+    failure = failureFor(
       new Error(backtestFailureMessage(runQuery.data)),
       'run_failed',
       '回测失败',
       instrument,
       runId,
+      runQuery.data.error,
     )
   } else if (runQuery.data?.state === 'cancelled') {
     failure = {
       key: 'cancelled', status: 'implemented', title: '用户取消',
-      reason: '任务已停止。修改规则或参数后可以重新提交。', actions: ['修改规则'], runId,
+      reason: '任务已停止。修改规则或参数后可以重新提交。',
+      actions: [{ label: '修改规则', action: 'edit_rules' }], runId,
     }
   } else if (resultError) {
     failure = failureFor(resultError, 'result_failed', '结果读取不完整', instrument, runId)
   }
 
-  const handleFailureAction = (index: number) => {
-    if (failure?.key === 'history_range_invalid') {
-      if (!draft) return
-      setRunId(undefined)
-      setRunCommand(undefined)
+  const handleFailureAction = (action: FailureState['actions'][number]['action']) => {
+    if (action === 'read_results') {
+      refreshResults()
+      return
+    }
+    if (action === 'read_run') {
+      cancelMutation.reset()
+      void runQuery.refetch()
+      return
+    }
+    if (action === 'use_example') {
+      submitText(maCrossExample)
+      return
+    }
+    // Editing and retrying both retain the original draft, baseline, and settings.
+    // Only the explicit example action may compile a different strategy.
+    if (!draft || startMutation.isPending) return
+    setRunId(undefined)
+    setRunCommand(undefined)
+    setStack([])
+    setView('chat')
+    cancelMutation.reset()
+    if (action === 'retry_run') {
+      setRunCommand('重新回测')
+      startMutation.mutate({ candidate: cloneDraft(draft), refreshData: true })
+    } else {
       startMutation.reset()
       setReviewOpen(true)
-      openParams('range')
-    } else if (index === 0 && failure?.key === 'result_failed') refreshResults()
-    else if (index === 0 && ['run_read_failed', 'cancel_failed'].includes(failure?.key ?? '')) {
-      void runQuery.refetch()
-    } else if (failure?.key === 'run_failed') {
-      // Retrying a failed calculation must submit the same draft/settings,
-      // not clear the conversation or compile an unrelated example.
-      if (!draft || startMutation.isPending) return
-      setRunId(undefined)
-      setStack([])
-      setView('chat')
-      if (index === 0) {
-        setRunCommand('重新回测')
-        startMutation.mutate({ candidate: cloneDraft(draft), refreshData: true })
-      } else {
-        setRunCommand(undefined)
-        startMutation.reset()
-        setReviewOpen(true)
-      }
-    } else if (
-      failure?.key === 'data_incomplete'
-      || failure?.key === 'event_time_insufficient'
-    ) {
-      submitText(maCrossExample)
-    } else resetForEdit()
+      if (action === 'edit_range') openParams('range')
+      if (action === 'edit_settings') openParams('more')
+    }
   }
 
   const apiLabel = apiMode === 'mock' ? '界面预览' : '回测服务'
@@ -1677,9 +1987,11 @@ export default function App({
     clarification,
     clarificationTarget,
     clarificationSuggestions,
+    capabilitiesQuery.data,
   )
   const hasPairedProposals = activeIdeaProposalCards.some((proposal) => proposal.paired)
-  const instrumentSuggestions = (clarification?.instrumentSuggestions?.length
+  const hasConfirmedIdeaStock = hasConfirmedIdeaInstrument(clarification)
+  const instrumentSuggestions = hasConfirmedIdeaStock ? [] : (clarification?.instrumentSuggestions?.length
     ? clarification.instrumentSuggestions
     : clarification?.instrumentSuggestion ? [clarification.instrumentSuggestion] : [])
     .filter((item, index, items) => items.findIndex(other => other.symbol === item.symbol) === index)
@@ -1730,6 +2042,17 @@ export default function App({
     setView('detail')
   }, [settledRunId])
 
+  const latestJourney = journeyHistory.at(-1)
+  const currentConversationTitle = draft && uiStrategy
+    ? `${draft.instrument.name} · ${strategyTitle(toUiInstrument(draft), uiStrategy)}`
+    : submittedText?.trim() || utterance.trim()
+      || (latestJourney ? `${latestJourney.instrument.name} · ${strategyTitle(latestJourney.instrument, latestJourney.strategy)}` : '')
+  const currentConversationRunIds = new Set([
+    ...journeyHistory.map(item => item.id), ...(runId ? [runId] : []),
+  ])
+  const archivedReports = [...recentBacktests.reports].reverse()
+    .filter(item => !currentConversationRunIds.has(item.id))
+
   return (
     <div className="app" data-api-mode={apiMode} data-has-overlay={stack.length > 0 ? 'true' : 'false'}>
       <div className="screens">
@@ -1737,33 +2060,22 @@ export default function App({
           data-cold={!submittedText && journeyHistory.length === 0 ? 'true' : 'false'}
           data-view={view}
           data-review={view === 'chat' && reviewOpen && draft && uiStrategy ? 'true' : 'false'}>
-          {/*
-            顶栏按 Public 的产品截图重做：左边是产品自己的字标，右边是「当前上下文 +
-            状态」，中间用一条竖发丝线分开——对应它那条 "Buying power … | Brokerage"。
-            原来那条宿主导航（返回键 / 东方财富徽标 / 妙想AI / 汉堡菜单）整条去掉了。
-          */}
-          <header className="topbar">
-            <span className="wordmark"><i aria-hidden="true" />策略回测</span>
-            {/*
-              右侧留空。当前股票和运行模式在下面都各有落点（策略卡带股票、
-              详情头部带模式），顶栏再挂一遍只是重复，且把视线拉到一个
-              不需要操作的角落。
-            */}
-          </header>
-
           <div className="workspace" ref={workspaceRef}>
             {/* 分隔条绝对定位、不占 grid 区域，见 ColumnResizer 里的说明 */}
             <ColumnResizer side="rail" target={workspaceRef} />
             <ColumnResizer side="review" target={workspaceRef} />
-          {/*
-            左栏对应 Public 的 Agents 侧栏：标题 + 新建 + 历史列表。
-            手机端整条收起（历史本来就在对话流里按时间排着，不需要再来一份导航）。
-          */}
-          <aside className="rail" aria-label="策略与历史">
-            <div className="rail-head">
-              <h2>回测策略</h2>
-            </div>
-            <button type="button" className="rail-new" onClick={() => startNewCondition()}
+          {historyOpen && <button type="button" className="rail-backdrop" tabIndex={-1} aria-label="关闭导航菜单" onClick={() => setHistoryOpen(false)} />}
+          <aside ref={railRef} className="rail" aria-label="策略与历史" data-history-open={historyOpen}
+            role={historyOpen ? 'dialog' : undefined} aria-modal={historyOpen || undefined}>
+            <div className="rail-new-row">
+            <button type="button" className="rail-history-toggle" aria-expanded={historyOpen}
+              aria-label={historyOpen ? '收起导航菜单' : '打开导航菜单'}
+              aria-controls="strategy-history" onClick={() => setHistoryOpen(open => !open)}>
+              <svg width="20" height="20" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <path d={historyOpen ? 'm4 4 10 10M14 4 4 14' : 'M3 4h12M3 9h12M3 14h12'} stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button type="button" className="rail-new" onClick={startNewConversation}
               disabled={isJourneyLocked}>
               <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
                 <path d="M10.6 2.9H4.2A1.7 1.7 0 0 0 2.5 4.6v9.2a1.7 1.7 0 0 0 1.7 1.7h9.2a1.7 1.7 0 0 0 1.7-1.7V7.4"
@@ -1772,38 +2084,66 @@ export default function App({
               </svg>
               新建策略
             </button>
-            <div className="rail-sect">本次会话</div>
-            <button type="button" className="rail-new" onClick={startNewConversation}
-              disabled={isJourneyLocked} aria-label="新建会话并清空上下文">
+            </div>
+            <button type="button" className="rail-gallery" aria-current={view === 'gallery' ? 'page' : undefined}
+              disabled={isJourneyLocked} onClick={() => { setGalleryEntryKey(key => key + 1); setView('gallery'); setHistoryOpen(false) }}>
               <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-                <path d="M14.5 9a5.5 5.5 0 1 1-1.6-3.9M14.5 3.8v3.6h-3.6"
-                  stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"
-                  strokeLinejoin="round" />
+                <path d="M2.5 2.5h5v5h-5zM10.5 2.5h5v5h-5zM2.5 10.5h5v5h-5zM10.5 10.5h5v5h-5z"
+                  stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
               </svg>
-              新建会话（清空上下文）
+              策略广场
             </button>
-            <nav className="rail-list">
-              {journeyHistory.map((journey) => (
-                <button key={journey.id} type="button"
-                  className={`rail-item${view === 'detail' && detailSnapshot?.id === journey.id ? ' is-active' : ''}`}
-                  onClick={() => { setDetailJourneyId(journey.id); setDetailTab('report'); setView('detail') }}>
-                  <i aria-hidden="true" />
-                  <span>{strategyTitle(journey.instrument, journey.strategy)}</span>
-                </button>
-              ))}
-              {draft && uiStrategy && submittedText ? (
-                <button type="button"
-                  className={`rail-item${view === 'chat' ? ' is-active' : ''}`}
-                  onClick={() => { setDetailJourneyId(undefined); setView('chat'); setReviewOpen(true) }}>
-                  <i aria-hidden="true" />
-                  <span>{strategyTitle(toUiInstrument(draft), uiStrategy)}</span>
-                </button>
-              ) : null}
-              {journeyHistory.length === 0 && !submittedText ? (
-                <p className="rail-empty">还没有回测记录</p>
-              ) : null}
-            </nav>
+            <h2 className="rail-sect">
+              <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <path d="M2.5 8a6.5 6.5 0 1 1 1.7 5.4M2.5 3.5V8H7M9 5v4l2.5 1.5"
+                  stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              最近
+            </h2>
+            <div className="rail-content" id="strategy-history">
+              <nav className="rail-list" aria-label="最近记录">
+                {currentConversationTitle ? <button type="button" data-current-conversation="true"
+                  className={`rail-item${view !== 'gallery' && (view === 'chat' || !detailJourneyId || currentConversationRunIds.has(detailJourneyId)) ? ' is-active' : ''}`}
+                  title={currentConversationTitle} aria-label={`${currentConversationTitle}，当前`}
+                  onClick={() => { setDetailJourneyId(undefined); setReportSnapshot(undefined);
+                    setView('chat'); setHistoryOpen(false) }}>
+                  <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                    <path d="M3 3h12v10H7l-4 3V3Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+                  </svg>
+                  <span>{currentConversationTitle}</span><small>当前</small>
+                </button> : null}
+                {archivedReports.map(journey => {
+                  const title = `${journey.instrument.name} · ${strategyTitle(journey.instrument, journey.strategy)}`
+                  const fullTitle = `${title} · ${journey.draft.backtest.start} 至 ${journey.draft.backtest.end}`
+                  return <button key={journey.id} type="button" data-history-id={journey.id}
+                    className={`rail-item rail-report${view === 'detail' && detailJourneyId === journey.id ? ' is-active' : ''}`}
+                    title={fullTitle} aria-label={fullTitle}
+                    onClick={() => openRecentReport(journey)}>
+                    <svg width="17" height="17" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                      <path d="M4 2h7l3 3v11H4V2Zm7 0v3h3M7 8h4M7 11h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                    <span>{title}</span>
+                  </button>
+                })}
+              </nav>
+            </div>
+            {recentBacktests.notice ? <p className="rail-storage-notice" role="status">{recentBacktests.notice}</p> : null}
+            <UsageGuide />
           </aside>
+
+          <StrategyGallery active={view === 'gallery'} entryKey={galleryEntryKey} disabled={isJourneyLocked} onSearch={instrumentApi.search}
+            onOpenReport={snapshot => { setGalleryReportId(snapshot.id); openRecentReport(snapshot) }}
+            onUse={example => {
+              if (isJourneyLocked) return
+              startNewConversation()
+              setSubmittedText(example.utterance)
+              compileMutation.mutate({
+                text: example.utterance,
+                instrumentOverride: example.instrument,
+                dialogueProgress: beginDialogueProgress(),
+                relatedRunIds: [], relatedReviews: [],
+              })
+            }} />
 
           <div className="scroll" ref={scrollRef} onScroll={(event) => {
             const node = event.currentTarget
@@ -1811,6 +2151,7 @@ export default function App({
           }}>
             <div className="stream" aria-live="polite">
               <DayDivider>当前会话</DayDivider>
+              {apiMode === 'mock' ? <Notice tone="info">界面演示模式：未连接真实模型与行情，回测结果为演示数据。</Notice> : null}
 
               {journeyHistory.map((journey) => (
                 <Fragment key={journey.id}>
@@ -1869,7 +2210,7 @@ export default function App({
                         ? '改一下下面的股票或买卖条件，再继续回测。'
                       : journeyHistory.length > 0
                         ? <>说出新的买卖规则，继续回测。</>
-                        : <>想怎么交易？用一句话告诉我，我来帮你把它变成可回测的策略。</>}
+                        : <>今天，我们怎么交易？<br />从验证一个想法开始。</>}
                   </Say>
                   {/*
                     示例只在冷启动时出现：它的作用是告诉第一次来的人「一句话可以写成什么样」。
@@ -1967,17 +2308,33 @@ export default function App({
                   {!clarificationRequestFailed && clarification?.provisionalDraft ? (() => {
                     const provisional = clarification.provisionalDraft
                     const trees = strategyRuleTrees(provisional)
+                    const needsSemanticConfirmation = clarification.id === 'semantic_confirmation_required'
+                    const executionAssessment = clarification.executionAssessment
                     return (
                       <div className="provisional-strategy" data-testid="provisional-strategy">
-                        <div className="provisional-strategy__meta">按你的口语推测 · 等你确认</div>
+                        <h3 className="provisional-strategy__meta">
+                          {executionAssessment ? '规则已识别 · 暂未执行回测' : needsSemanticConfirmation
+                            ? '已识别部分 · 尚未完整实现'
+                            : '按你的口语推测 · 等你确认'}
+                        </h3>
+                        {needsSemanticConfirmation || executionAssessment ? (
+                          <div className="provisional-strategy__rule">
+                            <span>股票</span>
+                            <div>{provisional.instrument.name === provisional.instrument.symbol
+                              ? provisional.instrument.symbol
+                              : `${provisional.instrument.name}（${provisional.instrument.symbol}）`}</div>
+                          </div>
+                        ) : null}
                         <div className="provisional-strategy__rule">
-                          <span>买入</span>{summarizeRule(trees.entry)}
+                          <span>买入</span><div>{summarizeRule(trees.entry)}</div>
                         </div>
                         <div className="provisional-strategy__rule">
-                          <span>卖出</span>{summarizeRule(trees.exit)}
+                          <span>卖出</span><div>{summarizeRule(trees.exit)}</div>
                         </div>
                         <div className="provisional-strategy__note">
-                          {clarification.provisionalNote ?? '这只是暂时理解，不会自动开始回测。'}
+                          {executionAssessment
+                            ? `待准备：${executionAssessment.missing.join('、')}。原规则已保留，可以继续修改。`
+                            : clarification.provisionalNote ?? '这只是暂时理解，不会自动开始回测。'}
                         </div>
                       </div>
                     )
@@ -1985,7 +2342,7 @@ export default function App({
                   {!clarificationRequestFailed && clarification?.ideaRoute ? (
                     <>
                       <IdeaResearchEvidence clarification={clarification} />
-                      {activeIdeaProposalCards.length > 0 && !clarification.instrumentSuggestions?.length ? (
+                      {activeIdeaProposalCards.length > 0 && (!clarification.instrumentSuggestions?.length || hasConfirmedIdeaStock) ? (
                         <Proposals
                           items={activeIdeaProposalCards}
                           onPick={submitIdeaProposal}
@@ -2035,15 +2392,27 @@ export default function App({
                         界面预览只展示规则识别和卡片结构；没有读取年报正文，也没有计算词频。
                       </Notice>
                     ) : null}
-                  <button type="button" className="preview-card" onClick={() => setReviewOpen(true)}>
-                    <span className="preview-eyebrow">预览策略</span>
+                  <div className="preview-actions">
+                    <button type="button" className="preview-card" onClick={() => setReviewOpen(true)}>
                       <span className="preview-name">{strategyTitle(toUiInstrument(draft), uiStrategy)}</span>
-                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
-                      <path d="M1.6 9S4.5 3.8 9 3.8 16.4 9 16.4 9 13.5 14.2 9 14.2 1.6 9 1.6 9Z"
-                        stroke="currentColor" strokeWidth="1.3" />
-                      <circle cx="9" cy="9" r="2.1" fill="currentColor" />
-                    </svg>
-                  </button>
+                      <span className="preview-action-label">
+                        {isJourneyLocked ? '查看策略' : '查看并修改'}
+                        <svg viewBox="0 0 18 18" aria-hidden="true">
+                          <path d="m7 4 5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                    </button>
+                    {returnToCandidateBatch.current ? <button type="button" className="preview-return"
+                      disabled={isJourneyLocked} onClick={() => {
+                        rememberCurrentJourney()
+                        returnToCandidateBatch.current?.()
+                      }}>
+                      <span>返回其他方案</span>
+                      <svg viewBox="0 0 18 18" aria-hidden="true">
+                        <path d="m7 4 5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button> : null}
+                  </div>
                 </Turn>
               ) : null}
 
@@ -2052,7 +2421,7 @@ export default function App({
               {startMutation.isPending ? (
                 <Turn>
                   <ThinkingStream
-                    status="正在准备历史回测"
+                    status="正在读取这段时间的行情，请稍候"
                   />
                 </Turn>
               ) : null}
@@ -2095,7 +2464,7 @@ export default function App({
                         candidate: draft,
                         refreshData: startMutation.variables?.refreshData ?? false,
                       })
-                    }}>重试回测</Chip>
+                    }}>重试</Chip>
                     <Chip disabled={isJourneyLocked} onClick={() => setReviewOpen(true)}>审阅策略</Chip>
                   </Chips>
                 </Turn>
@@ -2133,21 +2502,21 @@ export default function App({
             <section className="detail" aria-label="策略详情">
               <div className="detail-inner">
                 <div className="detail-top">
-                  <button type="button" className="detail-back" aria-label="回到对话"
-                    onClick={() => setView('chat')}>
+                  <button type="button" className="detail-back" aria-label={isGalleryReport ? '返回策略广场' : '回到对话'}
+                    onClick={() => setView(isGalleryReport ? 'gallery' : 'chat')}>
                     <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
                       <path d="M12 4.5 6.5 10l5.5 5.5" stroke="currentColor" strokeWidth="1.6"
                         strokeLinecap="round" strokeLinejoin="round" />
                     </svg>
-                    <span className="detail-back-label">返回对话</span>
+                    <span className="detail-back-label">{isGalleryReport ? '返回策略广场' : '返回对话'}</span>
                   </button>
                   <h1 className="detail-title">
                     {strategyTitle(detailSnapshot.instrument, detailSnapshot.strategy)}
                   </h1>
-                  <button type="button" className="detail-edit"
+                  {!isReadOnlyHistory ? <button type="button" className="detail-edit"
                     onClick={() => { setView('chat'); setReviewOpen(true) }}>
                     编辑策略
-                  </button>
+                  </button> : null}
                 </div>
                 {/*
                   只留一行身份信息。买卖规则在「工作流」分区里逐条列着，数据区间既是
@@ -2157,6 +2526,7 @@ export default function App({
                   <b>{detailSnapshot.instrument.name}</b>
                   <span className="num">{detailSnapshot.instrument.code}</span>
                   <em>{apiLabel}</em>
+                  {isReadOnlyHistory ? <em>{isGalleryReport ? '样例回测 · 只读' : '只读历史'}</em> : null}
                 </p>
 
                 <div className="detail-tabs" role="tablist" aria-label="策略详情分区">
@@ -2195,7 +2565,30 @@ export default function App({
                   <div id="pg-report">
                     <h2 className="sr-only">回测报告</h2>
                     <ReportBody {...reportBodyProps(detailSnapshot)} showExecutionEntry={false} />
-                    <BacktestReview
+                    {isReadOnlyHistory ? (detailReview || (detailReviewIsActive && (reviewMutation.isPending || reviewMutation.isError))
+                      || reviewContextError?.runId === detailSnapshot.id) ? (
+                      <section className="backtest-review" aria-label={detailReview ? '已保存的 AI 分析' : 'AI 分析与优化'}>
+                        <h2>{detailReview ? '已保存的 AI 分析' : 'AI 分析与优化'}</h2>
+                        {detailReviewIsActive && reviewMutation.isPending
+                          ? <button type="button" disabled>AI 正在分析</button> : null}
+                        {detailReview ? <><p>{detailReview.analysis}</p><p>{detailReview.conclusion}</p></> : null}
+                        {(detailReviewIsActive && reviewMutation.isError) || reviewContextError?.runId === detailSnapshot.id ? (
+                          <div className="backtest-review__error" role="alert">
+                            <p>{detailReviewIsActive && reviewMutation.isError
+                              ? errorMessage(reviewMutation.error) : reviewContextError?.message}</p>
+                            <button type="button"
+                              disabled={reviewMutation.isPending}
+                              onClick={() => reviewMutation.mutate(detailSnapshot)}>
+                              {detailReviewIsActive && reviewMutation.isPending ? '正在重新分析…' : '重试 AI 分析'}
+                            </button>
+                          </div>
+                        ) : null}
+                        {detailReview ? <h3>当时的优化建议</h3> : null}
+                        {detailReview?.optimizationCandidates.map(candidate => (
+                          <p key={candidate.id}><b>{candidate.title}</b><br />{candidate.suggestedUtterance}</p>
+                        ))}
+                      </section>
+                    ) : null : <BacktestReview
                       review={detailReview}
                       describeCandidate={(candidate) => executableRuleText(
                         fromBacktestOptimizationCandidate(candidate, detailSnapshot.draft, capabilitiesQuery.data),
@@ -2227,7 +2620,7 @@ export default function App({
                         : resumeStrategyMutation.isError ? errorMessage(resumeStrategyMutation.error)
                         : undefined}
                       candidateActionsDisabled={isJourneyLocked}
-                    />
+                    />}
                   </div>
                 </div>
 
@@ -2273,10 +2666,19 @@ export default function App({
                   }}
                   isStarting={startMutation.isPending}
                   isLocked={isJourneyLocked}
+                  checkingSettings={preparationQuery.isFetching || isConnectionChecking
+                    || (!capabilitiesQuery.data && capabilitiesQuery.isFetching)}
                   settled={runQuery.data?.state === 'succeeded' ? '已完成回测' : undefined}
                   editableAfterRun
                   canStart={canStart}
                   disabledReason={startDisabledReason}
+                  blockedLabel={startBlockedLabel}
+                  retryLabel={capabilitiesQuery.isError && !capabilitiesQuery.data
+                    ? capabilitiesConnectionFailed ? '重新检查连接' : '重新读取能力'
+                    : errorCode(preparationQuery.error) === 'api_network_unavailable'
+                      ? '重新检查连接' : '重新检查数据'}
+                  onRetryConnection={capabilitiesQuery.isError || preparationQuery.isError
+                    ? () => { void retryConnection() } : undefined}
                   error={startMutation.isError && reviewOpen ? errorMessage(startMutation.error) : undefined}
                   executionSummary={summarizeExecution(draft)}
                 />
@@ -2294,15 +2696,24 @@ export default function App({
                   setUtterance('')
                   window.setTimeout(() => inputRef.current?.focus(), 0)
                 }} />
-            ) : <form className="inputbar" onSubmit={(event) => { event.preventDefault(); submitText(utterance) }}>
+            ) : <form className="inputbar" onSubmit={(event) => {
+              event.preventDefault()
+              const example = selectedExample.current
+              submitText(utterance, example?.utterance === utterance && example.instrument
+                ? { instrumentOverride: example.instrument } : {})
+              selectedExample.current = undefined
+            }}>
               <input ref={inputRef} className="strategy-input" aria-label="交易规则" value={utterance}
-                disabled={isJourneyLocked} onChange={(event) => setUtterance(event.target.value)}
-                placeholder={needsLimitUpRuleRewrite
-                  ? '改用价格、涨跌幅或技术指标条件'
+                disabled={isJourneyLocked} onChange={(event) => {
+                  selectedExample.current = undefined
+                  setUtterance(event.target.value)
+                }}
+                placeholder={answerMutation.isError
+                  ? compileFailurePlaceholder(answerMutation.error)
                   : clarification
                     ? clarificationPlaceholder(clarification)
                     : compileMutation.isError
-                      ? '补充完整规则，或直接换一种说法'
+                      ? compileFailurePlaceholder(compileMutation.error)
                       : instrumentContextError
                         ? '输入股票名称、买入和卖出条件'
                         : '说出什么时候买、什么时候卖'} />
@@ -2317,15 +2728,11 @@ export default function App({
 
             {/* 冷启动的示例句排在输入框下方，对应 Public 首屏输入框下那排分类 chip */}
             {!submittedText && !instrumentContextError && journeyHistory.length === 0 ? (
-              <div className="home-examples" aria-label="策略示例">
-                <Chips>
-                  {DEFAULT_STRATEGY_EXAMPLES.map(example => (
-                    <Chip key={example.instrument.symbol} onClick={() => submitText(example.utterance, {
-                      instrumentOverride: example.instrument,
-                    })}>{example.utterance}</Chip>
-                  ))}
-                </Chips>
-              </div>
+              <StrategyExamples inputHasText={Boolean(utterance.trim())} onChoose={example => {
+                selectedExample.current = example
+                setUtterance(example.utterance)
+                inputRef.current?.focus()
+              }} />
             ) : null}
 
             <p className="disclaimer">仅做历史回测，不构成投资建议</p>
@@ -2349,7 +2756,6 @@ export default function App({
             draft={reportSnapshot.draft} trades={reportSnapshot.trades}
             evidence={reportSnapshot.evidence} mode={apiMode} />
         ) : null}
-        <ChainScreen open={activeOverlay === 'chain'} onBack={back} title={chainTitle} nodes={chainNodes} />
       </div>
     </div>
   )

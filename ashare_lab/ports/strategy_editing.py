@@ -7,9 +7,13 @@ from typing import Literal, Protocol
 
 from ashare_lab.domain.strategy import StrategySpec
 from ashare_lab.ports.candidate_generation import CandidateProvenance
-from ashare_lab.ports.clarification_dialogue import ClarificationDialogueTurn
+from ashare_lab.ports.clarification_dialogue import ClarificationDialogueTurn, ClarificationOption
 from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.instrument_resolution import InstrumentNameCandidate
+
+
+class StrategyEditSemanticError(RuntimeError):
+    """The provider responded, but bounded correction still changed user intent."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +32,8 @@ class StrategyEditRequest:
     pending_execution_settings: ExecutionSettingsPatch = field(
         default_factory=ExecutionSettingsPatch,
     )
+    selected_clarification: ClarificationOption | None = None
+    pending_edit_inputs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +49,10 @@ class StrategyEditResult:
     refresh_data: bool = False
     instrument_refs: tuple[str, ...] = ()
     execution_settings: ExecutionSettingsPatch = field(default_factory=ExecutionSettingsPatch)
+    clarification_options: tuple[ClarificationOption, ...] = ()
+    # Scope resolved from this turn, not from whether a stock happens to be named.
+    # Unknown preserves compatibility; only an explicit new edit drops a pending plan.
+    pending_relation: Literal["continuation", "new_edit", "unclear"] = "unclear"
 
 
 class StrategyEditor(Protocol):

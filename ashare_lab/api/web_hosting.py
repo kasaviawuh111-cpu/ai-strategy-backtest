@@ -7,7 +7,7 @@ from os import PathLike, stat_result
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
@@ -37,7 +37,7 @@ class _CacheControlledStaticFiles(StaticFiles):
 
 
 def install_web_hosting(app: FastAPI, dist_root: str | Path | None) -> None:
-    """Attach only the built entry point and asset tree after API routes."""
+    """Attach the built entry point, public gallery data and asset tree."""
 
     root = validate_web_dist_root(dist_root)
     if root is None:
@@ -48,6 +48,20 @@ def install_web_hosting(app: FastAPI, dist_root: str | Path | None) -> None:
 
     async def serve_index() -> FileResponse:
         return FileResponse(index, headers={"Cache-Control": "no-store"})
+
+    async def serve_gallery_samples() -> FileResponse:
+        samples = root / "strategy-gallery-samples.json"
+        if samples.is_symlink() or not samples.is_file():
+            raise HTTPException(status_code=404, detail="Gallery samples unavailable")
+        return FileResponse(
+            samples, media_type="application/json", headers={"Cache-Control": "no-cache"},
+        )
+
+    # Explicit allowlist: do not expose manifests or other files in the dist root.
+    app.add_api_route(
+        "/strategy-gallery-samples.json", serve_gallery_samples,
+        methods=["GET", "HEAD"], include_in_schema=False, name="web-gallery-samples",
+    )
 
     route_options: dict[str, Any] = {
         "endpoint": serve_index,

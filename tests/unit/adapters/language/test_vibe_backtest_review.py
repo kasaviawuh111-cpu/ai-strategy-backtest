@@ -11,18 +11,63 @@ from ashare_lab.adapters.language.vibe_backtest_review import (
     VibeBacktestReviewAdvisor,
     _narrative_fact_errors,
     _ProviderNarrative,
+    _return_comparison,
 )
 from ashare_lab.adapters.language.vibe_candidates import (
     CandidateProviderIdentityView,
+    CandidateTransportError,
     CandidateTransportRequest,
     CandidateTransportResponse,
     build_candidate_capability_matrix,
 )
 from ashare_lab.domain.catalog import load_catalog_directory, load_coverage_catalog_directory
 from ashare_lab.domain.strategy import StrategySpec
-from ashare_lab.ports.backtest_review import BacktestReviewRequest
+from ashare_lab.ports.backtest_review import BacktestReviewContentError, BacktestReviewRequest
 
 ROOT = Path(__file__).parents[4]
+
+
+@pytest.mark.parametrize(("ratio", "expected"), [
+    (-0.00000844, "-0.00084%"), (0.00000844, "+0.00084%"),
+    (-0.00000000001, "-0.000000001%"),
+    (0.0, "+0.00%"), (-0.0, "+0.00%"), (-0.01234, "-1.23%"),
+    (None, None), (float("nan"), None),
+])
+def test_review_percent_preserves_small_nonzero_returns(ratio, expected) -> None:
+    comparison = _return_comparison({"summary": {
+        "totalReturn": ratio, "benchmarkReturn": ratio,
+        "benchmarkComparisonStatus": "comparable",
+    }})
+    assert comparison["strategyReturnPercent"] == expected
+    assert comparison["benchmarkReturnPercent"] == expected
+    assert comparison["excessReturnPercent"] == ("+0.00%" if expected else None)
+
+
+def test_review_rejects_rounding_nonzero_return_to_zero() -> None:
+    facts = {"summary": {"totalReturn": -0.00000844}}
+    assert _narrative_fact_errors(_ProviderNarrative(
+        analysis="策略收益-0.00%。", conclusion="需核对执行口径。"), facts)
+    assert not _narrative_fact_errors(_ProviderNarrative(
+        analysis="策略收益-0.00084%。", conclusion="需核对执行口径。"), facts)
+    assert _narrative_fact_errors(_ProviderNarrative(
+        analysis="实际收益约-0.00%。", conclusion="需核对执行口径。"), facts)
+
+
+@pytest.mark.parametrize(("text", "valid"), [
+    ("策略亏10.49%，跑赢同股持有22.52%。", True),
+    ("策略亏10.49%，超额收益+22.52%。", True),
+    ("策略亏10.49%，跑赢同股持有22.52个百分点。", False),
+    ("策略亏10.49%，跑赢同股持有16.45%。", False),
+    ("策略亏10.49%，跑输同股持有22.52%。", False),
+    ("策略亏10.49%，超额收益-22.52%。", False),
+])
+def test_compounded_excess_checks_number_unit_and_direction(text, valid) -> None:
+    errors = _narrative_fact_errors(_ProviderNarrative(
+        analysis=text, conclusion="需核对执行口径。"), {"summary": {
+            "totalReturn": -0.1049, "benchmarkReturn": -0.2694,
+            "benchmarkComparisonStatus": "comparable",
+        }})
+    assert (not errors) == valid
 
 
 @pytest.mark.parametrize("analysis", [
@@ -122,6 +167,184 @@ def _request() -> BacktestReviewRequest:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("recover", [True, False])
+async def test_price_plan_reply_network_check_retries_once_and_preserves_cause(recover) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    error = CandidateTransportError("temporary link failure", failure_kind="connection_failed")
+    check = AsyncMock(side_effect=[error, {
+        "facts": "supported", "state_and_authority": "supported",
+        "user_intent_and_tone": "supported",
+    } if recover else error])
+    advisor = VibeBacktestReviewAdvisor(
+        _Transport([{"analysis": "本次策略仍然亏损，需要核对执行口径。",
+                     "conclusion": "修改参数后可再比较。", "proposals": []}]),
+        review_transport=SimpleNamespace(generate_json=check), model_semantic_review=True,
+        capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(ROOT / "catalogs"),
+            load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
+        ), provider_identity=CandidateProviderIdentityView(
+            provider="test", model="deep", prompt_version="test", schema_version="test",
+        ),
+    )
+    original = _request()
+    request = replace(original, strategy_payload={
+        **original.strategy_payload, "entry": None, "exit": None, "trading_plan": {"kind": "grid"},
+    })
+    if recover:
+        assert await advisor.review(request) is not None
+    else:
+        with pytest.raises(CandidateTransportError) as raised:
+            await advisor.review(request)
+        assert raised.value.failure_kind == "connection_failed"
+    assert check.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_price_plan_review_answers_without_inventing_indicator_revisions() -> None:
+    transport = _Transport([{
+        "analysis": "本次策略收益为负，尚未实现正收益。",
+        "conclusion": "可以调整网格参数后，再比较同一段历史结果。",
+        "proposals": [],
+    }])
+    advisor = VibeBacktestReviewAdvisor(
+        transport, capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(ROOT / "catalogs"),
+            load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
+        ), provider_identity=CandidateProviderIdentityView(
+            provider="test", model="deep", prompt_version="test", schema_version="test",
+        ),
+    )
+    request = _request()
+    result = await advisor.review(replace(request, strategy_payload={
+        **request.strategy_payload, "entry": None, "exit": None,
+        "trading_plan": {"kind": "grid"},
+    }))
+    assert result is not None and not result.proposals
+    assert transport.requests[0].response_schema["properties"]["proposals"]["maxItems"] == 0
+    assert "不得添加指标条件" in transport.requests[0].system_contract
+    assert "不能把所有价格计划统称日线" in transport.requests[0].system_contract
+    assert "策略配置表示请求口径，不能替代实际执行证据" in transport.requests[0].system_contract
+    assert "按日线观察和开盘价代理，不能冒称分钟" not in transport.requests[0].system_contract
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("price_plan", [False, True])
+@pytest.mark.parametrize("field", ["analysis", "conclusion"])
+@pytest.mark.parametrize("repair_succeeds", [False, True])
+async def test_long_narrative_gets_one_bounded_repair_without_changing_rules(
+    price_plan: bool, field: str, repair_succeeds: bool,
+) -> None:
+    payload = _payload()
+    if price_plan:
+        payload["proposals"] = []
+    corrected = {key: payload[key] for key in ("analysis", "conclusion")}
+    payload[field] = "这只是待验证的说明，需要核对实际执行记录。" * 5
+    if not repair_succeeds:
+        corrected[field] = payload[field]
+    transport = _Transport([payload, corrected])
+    advisor = VibeBacktestReviewAdvisor(
+        transport, capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(ROOT / "catalogs"),
+            load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
+        ), provider_identity=CandidateProviderIdentityView(
+            provider="test", model="fixture", prompt_version="test", schema_version="test",
+        ),
+    )
+    request = _request()
+    if price_plan:
+        request = replace(request, strategy_payload={
+            **request.strategy_payload, "entry": None, "exit": None,
+            "trading_plan": {"kind": "scheduled"},
+        })
+    if repair_succeeds:
+        result = await advisor.review(request)
+        assert result is not None and getattr(result, field) == corrected[field]
+        assert all(len(getattr(result, key)) <= 56 for key in corrected)
+        assert [p.strategy.model_dump(mode="json") for p in result.proposals] == [
+            p["strategy"] for p in payload["proposals"]
+        ]
+    else:
+        with pytest.raises(BacktestReviewContentError):
+            await advisor.review(request)
+    assert len(transport.requests) == 2
+    assert set(transport.requests[1].response_schema["properties"]) == {"analysis", "conclusion"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False])
+async def test_separate_review_transport_preserves_generation_and_gate(
+    monkeypatch: pytest.MonkeyPatch, approved: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    deep = _Transport([_payload()])
+    fast = _Transport([])
+    audit = AsyncMock(return_value=approved)
+    monkeypatch.setattr(
+        "ashare_lab.adapters.language.vibe_backtest_review.review_display_semantics", audit,
+    )
+    advisor = VibeBacktestReviewAdvisor(
+        deep, review_transport=fast, model_semantic_review=True,
+        capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(ROOT / "catalogs"),
+            load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
+        ),
+        provider_identity=CandidateProviderIdentityView(
+            provider="test", model="deep", prompt_version="test", schema_version="test",
+        ),
+    )
+    if approved:
+        assert await advisor.review(_request()) is not None
+    else:
+        with pytest.raises(BacktestReviewContentError):
+            await advisor.review(_request())
+    assert len(deep.requests) == 1
+    audit.assert_awaited_once()
+    assert audit.call_args.args[0] is fast
+    assert audit.call_args.kwargs["verified_context"]["candidateExecutionState"] == (
+        "new_proposals_not_executed"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["connection_failed", "timeout", "unknown"])
+async def test_review_transport_failures_are_not_reported_as_content_failures(
+    monkeypatch: pytest.MonkeyPatch, failure_kind: str,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from ashare_lab.adapters.language.vibe_candidates import CandidateFailureKind
+
+    failure = CandidateTransportError(
+        "sanitized transport failure", failure_kind=cast(CandidateFailureKind, failure_kind),
+    )
+    transport = _Transport([_payload()])
+    monkeypatch.setattr(
+        "ashare_lab.adapters.language.vibe_backtest_review.review_display_semantics",
+        AsyncMock(side_effect=failure),
+    )
+    advisor = VibeBacktestReviewAdvisor(
+        transport, model_semantic_review=True,
+        capability_matrix=build_candidate_capability_matrix(
+            load_catalog_directory(ROOT / "catalogs"),
+            load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
+        ),
+        provider_identity=CandidateProviderIdentityView(
+            provider="test", model="fixture", prompt_version="test", schema_version="test",
+        ),
+    )
+    if failure.is_classified:
+        with pytest.raises(CandidateTransportError) as raised:
+            await advisor.review(_request())
+        assert raised.value is failure
+    else:
+        assert await advisor.review(_request()) is None
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.asyncio
 async def test_verified_result_and_evidence_gate_are_sent_to_deep_model() -> None:
     transport = _Transport([_payload()])
     matrix = build_candidate_capability_matrix(
@@ -166,13 +389,13 @@ async def test_verified_result_and_evidence_gate_are_sent_to_deep_model() -> Non
 @pytest.mark.parametrize(
     ("total_return", "benchmark_return", "comparison_status", "expected_excess"),
     [
-        (-0.1049, -0.2694, "comparable", "+16.45个百分点"),
-        (-0.1049, 0.2694, "comparable", "-37.43个百分点"),
+        (-0.1049, -0.2694, "comparable", "+22.52%"),
+        (-0.1049, 0.2694, "comparable", "-29.49%"),
         (-0.1049, None, "benchmark_unavailable", None),
         (0.0, -0.2694, "strategy_entry_not_filled", None),
     ],
 )
-async def test_return_comparison_distinguishes_benchmark_percent_from_excess_percentage_points(
+async def test_return_comparison_uses_compounded_relative_excess_return(
     total_return: float, benchmark_return: float | None,
     comparison_status: str, expected_excess: str | None,
 ) -> None:
@@ -203,7 +426,7 @@ async def test_return_comparison_distinguishes_benchmark_percent_from_excess_per
         "strategyReturnPercent": f"{total_return * 100:+.2f}%",
         "benchmarkReturnPercent": (f"{benchmark_return * 100:+.2f}%"
                                    if benchmark_return is not None else None),
-        "excessReturnPercentagePoints": expected_excess,
+        "excessReturnPercent": expected_excess,
     }
     assert "基准收益不等于超额收益" in request.system_contract
     assert "不能把基准收益的绝对值当成跑赢幅度" in request.system_contract
@@ -232,7 +455,8 @@ async def test_incomplete_or_guaranteed_model_review_fails_closed_without_retry(
         ),
     )
 
-    assert await advisor.review(_request()) is None
+    with pytest.raises(BacktestReviewContentError):
+        await advisor.review(_request())
     assert len(transport.requests) == 1
 
 
@@ -292,7 +516,8 @@ async def test_repeated_numeric_error_is_not_shown_and_does_not_loop() -> None:
         "totalReturn": -0.130675990386398, "benchmarkReturn": -0.2693720547218151,
         "benchmarkComparisonStatus": "comparable",
     }})
-    assert await advisor.review(request) is None
+    with pytest.raises(BacktestReviewContentError):
+        await advisor.review(request)
     assert len(transport.requests) == 2
 
 

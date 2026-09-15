@@ -148,6 +148,21 @@ def test_unknown_legacy_failure_keeps_compatibility() -> None:
     assert error.public_code == "candidate_provider_timeout"
 
 
+@pytest.mark.parametrize(("kind", "timed_out", "message"), [
+    ("timeout", False, "模型服务响应超时，本次请求未完成；你的输入和已有策略已保留。"),
+    ("unknown", True, "模型服务响应超时，本次请求未完成；你的输入和已有策略已保留。"),
+    ("connection_failed", False,
+     "模型服务连接未完成或中断，本次请求未完成；你的输入和已有策略已保留。"),
+])
+def test_connection_timeout_final_copy_does_not_ask_for_manual_retry(
+    kind: CandidateFailureKind, timed_out: bool, message: str,
+) -> None:
+    error = CandidateTransportError("private fixture", failure_kind=kind, timed_out=timed_out)
+    assert error.public_message == message
+    assert "重试" not in error.public_message
+    assert "private fixture" not in error.public_message
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("kind", "status"), [
     ("authentication_failed", 401), ("insufficient_balance", 402),

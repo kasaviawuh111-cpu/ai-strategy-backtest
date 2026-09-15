@@ -2,29 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from functools import partial
+from time import monotonic
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Response, status
 
 from ashare_lab.adapters.language.vibe_candidates import CandidateTransportError
+from ashare_lab.adapters.market_data.mx_finance_history_format import MxFinanceHistoryDecoder
+from ashare_lab.adapters.market_data.mx_grid_anchor import MissingLatestGridQuoteError
 from ashare_lab.adapters.market_data.mx_saas import (
     MxSaasProviderAuthError,
     MxSaasProviderDataError,
     MxSaasProviderError,
     MxSaasProviderNoDataError,
     MxSaasProviderUnavailableError,
+    mx_can_switch_channel,
     screen_security_entities,
 )
-from ashare_lab.application.backtest_submission import resolve_execution_settings
-from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus, FieldProvenance
+from ashare_lab.application.backtest_submission import (
+    BacktestDataNotYetAvailableError, BacktestDateRangeError,
+    BacktestRunConfig, resolve_execution_settings,
+)
+from ashare_lab.application.compile_strategy import (
+    CompileOutcome, CompileStatus, FieldProvenance, _selected_clarification_proposal,
+)
 from ashare_lab.application.dialogue_state import (
     DialogueState,
     VerifiedInstrumentMemory,
@@ -50,18 +61,22 @@ from ashare_lab.domain.strategy import (
     iter_indicator_conditions,
     validate_strategy_against_catalog,
 )
+from ashare_lab.domain.strategy.price_plans import GridPlan
 from ashare_lab.ports.candidate_generation import CompileInput
 from ashare_lab.ports.dialogue_progress import emit_progress
 from ashare_lab.ports.idea_routing import IdeaAssetMapping, IdeaProposal, IdeaRoute
 from ashare_lab.ports.live_market_data import (
     LiveFinanceDataResult,
     LiveMarketDataResult,
+    LiveRecoveringFinanceData,
     LiveScreenedFinanceData,
     LiveScreenedFinanceDataResult,
 )
 from ashare_lab.ports.request_context import current_request_id
 from ashare_lab.ports.strategy_advice import (
+    IndustryExpansionAdvisor,
     QueryDataReviewAdvisor,
+    StockRecommendation,
     StockRecommendationAdvisor,
     StockStrategyDataRequest,
     StockStrategyPairing,
@@ -69,6 +84,7 @@ from ashare_lab.ports.strategy_advice import (
     VerifiedFactStrategyAdviceRequest,
 )
 
+from ..backtest_preflight import preflight_ready_outcome, resolve_latest_grid_quote
 from ..backtest_review_schemas import BacktestReviewResponse
 from ..container import ApiContainer, get_container
 from ..errors import ApiProblem
@@ -135,6 +151,7 @@ _IDEA_ROUTE_DIAGNOSTICS = {
     "ambiguous_volume_direction",
     "ambiguous_boolean_expression",
     "ambiguous_cross_indicator",
+    "numeric_threshold_requires_clarification",
     "data_query_only",
 }
 _LOGGER = logging.getLogger("uvicorn.error")
@@ -145,6 +162,7 @@ class _LiveQueryStatus:
     """Request-local failure metadata; never rewrite the pending strategy."""
 
     diagnostic_code: str | None = None
+    strategy_requested: bool = False
 
 
 @router.post(
@@ -152,7 +170,7 @@ class _LiveQueryStatus:
     response_model=StrategyDraftResponse,
     status_code=status.HTTP_201_CREATED,
     operation_id="createStrategyDraft",
-    responses=error_response_docs(404, 409, 413, 422, 500),
+    responses=error_response_docs(404, 409, 413, 422, 500, 503),
 )
 async def create_strategy_draft(
     body: StrategyDraftRequest,
@@ -162,6 +180,43 @@ async def create_strategy_draft(
     parent_draft_id: ParentDraftId = None,
 ) -> StrategyDraftResponse:
     validate_idempotency_key(idempotency_key)
+    request_hash = canonical_hash({
+        "request": body.model_dump(mode="json"),
+        "parent_draft_id": str(parent_draft_id) if parent_draft_id is not None else None,
+    })
+    scope = "http:create-draft:v1"
+    if idempotency_key is not None:
+        try:
+            cached = await container.drafts.get_http_response(
+                scope=scope, key=idempotency_key, request_hash=request_hash,
+            )
+        except IdempotencyConflictError as exc:
+            raise _idempotency_conflict() from exc
+        if cached is not None:
+            set_idempotency_replayed(response, replayed=True)
+            return StrategyDraftResponse.model_validate_json(cached)
+    result = await _create_strategy_draft(
+        body, response, container, idempotency_key, parent_draft_id,
+    )
+    if idempotency_key is not None:
+        try:
+            cached = await container.drafts.remember_http_response(
+                scope=scope, key=idempotency_key, request_hash=request_hash,
+                payload_json=result.model_dump_json(),
+            )
+        except IdempotencyConflictError as exc:
+            raise _idempotency_conflict() from exc
+        return StrategyDraftResponse.model_validate_json(cached)
+    return result
+
+
+async def _create_strategy_draft(
+    body: StrategyDraftRequest,
+    response: Response,
+    container: ApiContainer,
+    idempotency_key: str | None,
+    parent_draft_id: UUID | None,
+) -> StrategyDraftResponse:
     parent_state: DialogueState | None = None
     if parent_draft_id is not None:
         try:
@@ -191,6 +246,21 @@ async def create_strategy_draft(
         ))
     intent = classify_clarification_turn(body.utterance)
     compile_input = _compile_input(body)
+    orchestrator = DialogueTurnOrchestrator(container.compiler)
+    model_intent = None
+    classify_initial = getattr(container.compiler, "classify_initial_intent", None)
+    if parent_state is None and classify_initial is not None:
+        model_intent = await classify_initial(compile_input)
+        if model_intent is not None:
+            intent = model_intent
+            compile_input = replace(compile_input, semantic_intent=intent.value)
+    if parent_state is not None:
+        model_intent = await orchestrator.classify_intent(
+            state=parent_state, answer=body.utterance,
+        )
+        if model_intent is not None:
+            intent = model_intent
+            compile_input = replace(compile_input, semantic_intent=intent.value)
     assistant_message: str | None = None
     verified_instrument: VerifiedInstrumentMemory | None = None
     pending_instrument_reuse: VerifiedInstrumentMemory | None = None
@@ -198,6 +268,7 @@ async def create_strategy_draft(
         await DialogueTurnOrchestrator(container.compiler).plan_strategy_edit(
             state=parent_state, answer=body.utterance,
             explicit_edit=body.edit_current_strategy,
+            semantic_intent=model_intent,
         )
         if parent_state is not None and (
             body.edit_current_strategy or compile_input.instrument_context is None
@@ -215,9 +286,19 @@ async def create_strategy_draft(
             status_code=409, code="strategy_edit_context_required",
             message="没有找到可修改的原策略。请从原回测报告重新进入修改。",
         )
-    if edit_plan is None and parent_state is not None and intent is TurnIntent.DATA_QUERY:
+    if edit_plan is None and parent_state is not None and (
+        intent is TurnIntent.DATA_QUERY
+        or model_intent in {
+            TurnIntent.CASUAL, TurnIntent.CANCEL, TurnIntent.UNKNOWN, TurnIntent.SAFETY,
+            TurnIntent.VIEWPOINT,
+        }
+        or parent_state.outcome.status is CompileStatus.NEEDS_CLARIFICATION
+        or (parent_state.outcome.status is CompileStatus.UNSUPPORTED
+            and model_intent is TurnIntent.SUPPLEMENT)
+    ):
         edit_plan = await DialogueTurnOrchestrator(container.compiler).plan(
             state=parent_state, answer=body.utterance, try_strategy_edit=False,
+            semantic_intent=model_intent,
         )
     if edit_plan is not None:
         intent = edit_plan.intent
@@ -266,6 +347,7 @@ async def create_strategy_draft(
                 state=parent_state,
                 answer=body.utterance,
                 try_strategy_edit=False,
+                semantic_intent=model_intent,
             )
         except ValueError as exc:
             raise ApiProblem(
@@ -288,9 +370,17 @@ async def create_strategy_draft(
         pending_instrument_reuse = plan.pending_instrument_reuse
     else:
         outcome = await container.compiler.compile(compile_input)
-    if (parent_state is not None and edit_plan is not None
-            and edit_plan.clarification_turn is not None
-            and not edit_plan.clarification_turn.revision_changed):
+    query_data = None
+    detour_status = _LiveQueryStatus()
+    if parent_state is not None and intent is TurnIntent.DATA_QUERY:
+        assistant_message, query_data, _ = await _resolve_live_data_query(
+            answer=body.utterance, state=parent_state, container=container,
+            query_status=detour_status,
+        )
+        outcome = parent_state.outcome
+    if parent_state is not None and (intent is TurnIntent.DATA_QUERY or (
+            edit_plan is not None and edit_plan.clarification_turn is not None
+            and not edit_plan.clarification_turn.revision_changed)):
         # Discussion advances the conversation, not the strategy revision.
         # Project the current reply without replaying old run/review intents.
         instrument = verified_instrument or parent_state.last_verified_instrument
@@ -311,7 +401,8 @@ async def create_strategy_draft(
                     draft_id=parent_state.draft_id, revision=parent_state.revision,
                     user_text=body.utterance,
                     assistant_text=assistant_message or _initial_dialogue_message(outcome),
-                    intent=intent.value, verified_instrument=instrument, require_latest=True,
+                    # Showing the saved identity is not a new verification.
+                    intent=intent.value, require_latest=True,
                 )
         except DraftRevisionStaleError as exc:
             raise ApiProblem(
@@ -324,15 +415,18 @@ async def create_strategy_draft(
         return _to_response(
             unchanged.value, assistant_message=unchanged.value.outcome.clarification,
             verified_instrument=instrument,
+            data=query_data, query_diagnostic_code=detour_status.diagnostic_code,
         )
-    if (outcome.diagnostic_code == "non_daily_timeframe_not_supported"
-            and outcome.status is CompileStatus.UNSUPPORTED
-            and compile_input.instrument_context is None):
-        identity = await container.compiler.resolve_unsupported_instrument(compile_input)
-        if identity is not None:
-            symbol, grounding = identity
-            compile_input = replace(compile_input, instrument_context=symbol)
-            outcome = replace(outcome, candidate_grounding=(grounding,))
+    previous_input, previous_outcome = compile_input, outcome
+    recover_identity = getattr(container.compiler, "recover_unsupported_identity", None)
+    if recover_identity is not None:
+        compile_input, outcome = await recover_identity(compile_input, outcome)
+    if compile_input is not previous_input:
+        verified_instrument = _resolved_compile_instrument_memory(compile_input)
+    if (outcome is not previous_outcome and previous_outcome.diagnostic_code in {
+        "instrument_required", "instrument_unconfirmed", "instrument_resolution_unavailable",
+    }):
+        assistant_message = None
     if (assistant_message is None and outcome.idea_route is None
             and outcome.status is CompileStatus.NEEDS_CLARIFICATION
             and outcome.diagnostic_code in {
@@ -358,9 +452,17 @@ async def create_strategy_draft(
                 "question仅是待澄清状态参考，由模型写一段完整回复，不原样附加固定说明。"
             ),
         ))
+    optional_offer_prepared = (outcome.diagnostic_code == "instrument_required"
+                               and outcome.selected_idea_proposal is not None)
     outcome, offered_instrument = await _offer_missing_instrument(
         outcome=outcome, compile_input=compile_input, state=parent_state, container=container,
     )
+    prepared_outcome = outcome if optional_offer_prepared else await _preflight_idea_choices(outcome=outcome, container=container)
+    if prepared_outcome is not outcome:
+        outcome = prepared_outcome
+        assistant_message = outcome.clarification
+        offered_instrument = None
+        pending_instrument_reuse = None
     if offered_instrument is not None:
         pending_instrument_reuse = offered_instrument
         assistant_message = None
@@ -372,6 +474,17 @@ async def create_strategy_draft(
         "strategy_optimization_requested", "strategy_optimization_unavailable",
     }:
         assistant_message = outcome.clarification
+    prepared_outcome = await preflight_ready_outcome(
+        outcome=outcome, container=container, request=compile_input,
+    )
+    if prepared_outcome is not outcome:
+        outcome = prepared_outcome
+        assistant_message = outcome.clarification
+        if outcome.revision_base_strategy is not None:
+            compile_input = replace(
+                compile_input,
+                instrument_context=outcome.revision_base_strategy.instrument.symbol,
+            )
     if assistant_message is None and outcome.status is CompileStatus.READY:
         assistant_message = await container.compiler.compose_ready_response(
             answer=body.utterance, outcome=outcome,
@@ -450,7 +563,7 @@ async def create_strategy_draft(
         idea_route_override=idea_route,
         verified_instrument=verified_instrument,
         backtest_review=backtest_review,
-        diagnostic_code_override=query_status.diagnostic_code,
+        query_diagnostic_code=query_status.diagnostic_code,
     )
 
 
@@ -459,7 +572,7 @@ async def create_strategy_draft(
     response_model=ClarificationAnswerResponse,
     status_code=status.HTTP_200_OK,
     operation_id="answerStrategyDraftClarification",
-    responses=error_response_docs(404, 409, 413, 422, 500),
+    responses=error_response_docs(404, 409, 413, 422, 500, 503),
 )
 async def answer_strategy_draft_clarification(
     draft_id: UUID,
@@ -522,16 +635,24 @@ async def answer_strategy_draft_clarification(
             code="strategy_draft_not_awaiting_clarification",
             message="Strategy draft is not awaiting clarification",
         )
-    if (turn.outcome.status is CompileStatus.UNSUPPORTED
-            and turn.outcome.diagnostic_code == "non_daily_timeframe_not_supported"
-            and turn.compile_input.instrument_context is None):
-        identity = await container.compiler.resolve_unsupported_instrument(turn.compile_input)
-        if identity is not None:
-            symbol, grounding = identity
-            turn = replace(
-                turn, compile_input=replace(turn.compile_input, instrument_context=symbol),
-                outcome=replace(turn.outcome, candidate_grounding=(grounding,)),
-            )
+    recovered_input, recovered_outcome = await container.compiler.recover_unsupported_identity(
+        turn.compile_input, turn.outcome,
+    )
+    if recovered_input is not turn.compile_input or recovered_outcome is not turn.outcome:
+        recompiled = turn.outcome.diagnostic_code in {
+            "instrument_required", "instrument_unconfirmed", "instrument_resolution_unavailable",
+        }
+        turn = replace(
+            turn, compile_input=recovered_input, outcome=recovered_outcome,
+            revision_changed=True,
+            assistant_message=(_initial_dialogue_message(recovered_outcome)
+                               if recompiled else turn.assistant_message),
+            reply_kind=("accepted" if recovered_outcome.status is CompileStatus.READY
+                        else "clarification") if recompiled else turn.reply_kind,
+            suggestions=() if recompiled else turn.suggestions,
+        )
+        plan = replace(plan, clarification_turn=turn,
+                       verified_instrument=_resolved_compile_instrument_memory(recovered_input))
     if (turn.outcome.status is CompileStatus.READY and turn.outcome.strategy is not None
             and dialogue_state.outcome.idea_route is not None):
         symbol = turn.outcome.strategy.instrument.symbol
@@ -545,14 +666,26 @@ async def answer_strategy_draft_clarification(
                 evidence=f"用户选择组合：{selected.title}；当时的匹配依据：{selected.pairing_reason}",
             ))
 
+    optional_offer_prepared = (turn.outcome.diagnostic_code == "instrument_required"
+                               and turn.outcome.selected_idea_proposal is not None)
     offered_outcome, offered_instrument = await _offer_missing_instrument(
         outcome=turn.outcome, compile_input=turn.compile_input,
         state=dialogue_state, container=container,
     ) if turn.revision_changed else (turn.outcome, None)
+    if turn.revision_changed and not optional_offer_prepared:
+        prepared_outcome = await _preflight_idea_choices(
+            outcome=offered_outcome, container=container,
+        )
+        if prepared_outcome is not offered_outcome:
+            offered_outcome, offered_instrument = prepared_outcome, None
     if offered_outcome is not turn.outcome:
+        visible_ids = ({item.id for item in offered_outcome.idea_route.proposals}
+                       if offered_outcome.idea_route is not None else None)
         turn = replace(
             turn, outcome=offered_outcome,
             assistant_message=offered_outcome.clarification or turn.assistant_message,
+            suggestions=tuple(item for item in turn.suggestions
+                              if visible_ids is None or item.id in visible_ids),
             revision_changed=True,
         )
         plan = replace(plan, clarification_turn=turn,
@@ -566,6 +699,20 @@ async def answer_strategy_draft_clarification(
         turn = replace(turn, outcome=reviewed_outcome,
                        assistant_message=reviewed_outcome.clarification or turn.assistant_message)
 
+    if turn.revision_changed:
+        prepared_outcome = await preflight_ready_outcome(
+            outcome=turn.outcome, container=container, request=turn.compile_input,
+        )
+        if prepared_outcome is not turn.outcome:
+            turn = replace(
+                turn, outcome=prepared_outcome, reply_kind="clarification",
+                assistant_message=prepared_outcome.clarification or turn.assistant_message,
+                suggestions=(),
+                compile_input=(replace(
+                    turn.compile_input,
+                    instrument_context=prepared_outcome.revision_base_strategy.instrument.symbol,
+                ) if prepared_outcome.revision_base_strategy is not None else turn.compile_input),
+            )
     stored: StoredDraftRevision | DialogueState = replace(
         dialogue_state, outcome=replace(turn.outcome, run_requested=False, refresh_data=False),
     )
@@ -579,15 +726,25 @@ async def answer_strategy_draft_clarification(
             }
         )
         try:
-            result = await container.drafts.revise(
-                draft_id=draft_id,
-                outcome=turn.outcome,
-                compile_input=turn.compile_input,
-                request_hash=request_hash,
-                idempotency_key=None,
-                expected_revision=revision,
-                pending_instrument_reuse=plan.pending_instrument_reuse,
-            )
+            if _selected_clarification_proposal(dialogue_state.outcome, body.answer) is not None:
+                # Comparing candidates must not consume the shared batch revision.
+                # Each selection gets its own editable/executable child draft.
+                result = await container.drafts.create(
+                    outcome=turn.outcome, compile_input=turn.compile_input,
+                    request_hash=request_hash, idempotency_key=None,
+                    parent_draft_id=draft_id, expected_parent_revision=revision,
+                    pending_instrument_reuse=plan.pending_instrument_reuse,
+                )
+            else:
+                result = await container.drafts.revise(
+                    draft_id=draft_id,
+                    outcome=turn.outcome,
+                    compile_input=turn.compile_input,
+                    request_hash=request_hash,
+                    idempotency_key=None,
+                    expected_revision=revision,
+                    pending_instrument_reuse=plan.pending_instrument_reuse,
+                )
         except DraftRevisionStaleError as exc:
             raise ApiProblem(
                 status_code=409,
@@ -609,12 +766,12 @@ async def answer_strategy_draft_clarification(
     ) if turn.revision_changed else (dialogue_state.last_verified_instrument or instrument)
     try:
         await container.drafts.record_dialogue_turn(
-            draft_id=draft_id,
+            draft_id=stored.draft_id,
             user_text=body.answer,
             assistant_text=turn.assistant_message,
             intent=plan.intent.value,
             revision=stored.revision,
-            verified_instrument=instrument,
+            verified_instrument=instrument if turn.revision_changed else None,
             require_latest=not turn.revision_changed,
         )
     except DraftRevisionStaleError as exc:
@@ -643,7 +800,7 @@ async def answer_strategy_draft_clarification(
     response_model=StrategyDraftResponse,
     status_code=status.HTTP_201_CREATED,
     operation_id="reviseStrategyDraft",
-    responses=error_response_docs(404, 409, 413, 422, 500),
+    responses=error_response_docs(404, 409, 413, 422, 500, 503),
 )
 async def revise_strategy_draft(
     draft_id: UUID,
@@ -675,6 +832,7 @@ async def revise_strategy_draft(
         provenance=(FieldProvenance(path="/", source="revision/request.strategy"),),
         execution_settings=settings,
     )
+    outcome = await preflight_ready_outcome(outcome=outcome, container=container)
     request_hash = canonical_hash(body.model_dump(mode="json"))
     revision_input = CompileInput(
         utterance=body.utterance or "已确认的结构化策略",
@@ -728,7 +886,7 @@ async def _pair_stock_strategies_with_data(
             remaining_data_rounds=2 - round_index, data_feedback=tuple(feedback),
         )
         if pairing is None:
-            return None, "组合分析模型这次没有返回可用方案。已生成的策略会保留，可以稍后重试。"
+            return None, "策略方向已生成，但本次尚未完成股票与策略的匹配。已有策略已保留，你可以直接指定股票继续。"
         requested = pairing.data_request
         if requested is None:
             return pairing, None
@@ -739,7 +897,7 @@ async def _pair_stock_strategies_with_data(
             return None, "组合分析的补查请求未通过校验。已生成的策略会保留。"
         if any(set(item.symbols) == set(requested.symbols)
                and set(item.fields) == set(requested.fields) for item in attempted):
-            return None, "补查仍未取得新的匹配依据。已生成的策略会保留，可以换只股票试试。"
+            return None, "补查仍未取得新的股票匹配依据。已有策略已保留，你可以直接指定股票继续。"
         provider = container.live_finance_data
         skill_name = "东方财富查数 Skill"
         if provider is None:
@@ -749,10 +907,16 @@ async def _pair_stock_strategies_with_data(
         indicators = "、".join(requested.fields)
         query = (
             f"仅查询这些A股：{'、'.join(requested.symbols)}。需要：{indicators}。"
+            "本次只用于当前股票与策略配对，每只股票每项返回最新可用一条及日期，不返回历史逐日序列。"
             "请返回证券代码、简称、指标对应日期或区间、单位；缺失字段标明不可用，不要选股。"
         )
         try:
-            extra = await provider.query_finance(query=query, indicators=indicators)
+            if callable(getattr(type(provider), "query_current_finance", None)):
+                extra = await cast(LiveRecoveringFinanceData, provider).query_current_finance(
+                    query=query, indicators=indicators, asset_type="A股",
+                )
+            else:
+                extra = await provider.query_finance(query=query, indicators=indicators)
         except MxSaasProviderAuthError:
             return None, _live_data_auth_message(skill_name=skill_name)
         except (MxSaasProviderDataError, MxSaasProviderUnavailableError) as exc:
@@ -760,6 +924,13 @@ async def _pair_stock_strategies_with_data(
                       else "本次查数服务未能返回可用数据")
             feedback.append(f"第{round_index + 1}轮：{indicators}；{detail}。可调整字段继续查询。")
             emit_progress("stock_data_retry", "这次补查没有取得所需数据，正在调整查询继续检索。")
+            continue
+        if len(json.dumps([dict(table) for table in extra.tables], ensure_ascii=False, default=str).encode()) > 100_000:
+            feedback.append(
+                f"第{round_index + 1}轮：{indicators}；返回数据过大，未送入配对模型，不能据此判断股票无关联。"
+                "请减少股票数量或字段，只补查最必要的主营业务/行业最新一条，不重复整组历史数据请求。"
+            )
+            emit_progress("stock_data_retry", "补查返回的数据较多，正在缩小查询，继续核实股票关联。")
             continue
         supplements.append(extra)
         has_data = _finance_tables_have_data(extra.tables)
@@ -779,22 +950,58 @@ async def _offer_missing_instrument(
     *, outcome: CompileOutcome, compile_input: CompileInput,
     state: DialogueState | None, container: ApiContainer,
 ) -> tuple[CompileOutcome, VerifiedInstrumentMemory | None]:
+    # Optional sample discovery must not hold a concrete missing-stock
+    # clarification hostage to screening, pairing and historical preparation.
+    concrete_missing_stock = (outcome.diagnostic_code == "instrument_required"
+                              and outcome.selected_idea_proposal is not None)
+    if not concrete_missing_stock:
+        return await _offer_missing_instrument_impl(outcome=outcome,
+            compile_input=compile_input, state=state, container=container)
+    try:
+        async with asyncio.timeout(120):
+            offered, memory = await _offer_missing_instrument_impl(outcome=outcome,
+                compile_input=compile_input, state=state, container=container)
+            prepared = await _preflight_idea_choices(outcome=offered, container=container)
+            if prepared is not offered:
+                offered, memory = prepared, None
+    except TimeoutError:
+        # Sample discovery is optional here. Keep the actionable stock-name
+        # question and the already complete template, not a generic retry loop.
+        return outcome, None
+    if offered.diagnostic_code == "candidate_data_not_ready":
+        return outcome, None
+    return offered, memory
+
+
+async def _offer_missing_instrument_impl(
+    *, outcome: CompileOutcome, compile_input: CompileInput,
+    state: DialogueState | None, container: ApiContainer, expand_industry: bool = False,
+) -> tuple[CompileOutcome, VerifiedInstrumentMemory | None]:
     """Offer a verified current sample without silently binding it to a backtest."""
     unbound_ideas = (
         outcome.idea_route is not None
+        and bool(outcome.idea_route.proposals)
         and outcome.idea_route.asset_mapping.instrument_symbol is None
         and compile_input.instrument_context is None
         and all(item.instrument_symbol is None for item in outcome.idea_route.proposals)
     )
     if (outcome.instrument_suggestion_declined
             or outcome.status is not CompileStatus.NEEDS_CLARIFICATION
+            or outcome.diagnostic_code in {
+                "instrument_unconfirmed", "instrument_resolution_unavailable",
+            }
             or not (unbound_ideas or outcome.diagnostic_code == "instrument_required")):
         return outcome, None
+    # Offer verified stocks for unbound strategy suggestions as well. They stay
+    # proposals for the user to choose; this does not authorize a backtest.
     if unbound_ideas and outcome.idea_route is not None:
         # This is the model's validated public reply, not a locally invented
         # thought process. Expose it before waiting on any stock lookup.
-        emit_progress("strategy_direction", outcome.idea_route.understanding)
-    remembered = (
+        emit_progress("strategy_direction", "正在核实相关股票，再结合标的准备可修改的交易方案。")
+    reselecting = outcome.diagnostic_code == "candidate_reselection_requested"
+    if reselecting:
+        outcome = replace(outcome, diagnostic_code="idea_guidance_required")
+    remembered = None if reselecting else (
         state.pending_instrument_reuse or state.last_verified_instrument
     ) if state else None
     candidate = remembered
@@ -808,18 +1015,57 @@ async def _offer_missing_instrument(
         provider = container.live_market_data
         if provider is None:
             return replace(outcome, clarification=(
-                "东方财富选股 Skill 未配置。策略已保留，可以先输入你自己的股票。"
+                "这次暂时无法帮你挑选股票。方案已保留，你也可以输入想回测的股票继续。"
             )), None
         # The Skill receives the model's actual entry rules as alternatives,
         # never the persona prose as a financial screening condition.
         rules = ("；".join(item.entry_summary for item in outcome.idea_route.proposals)
                  if unbound_ideas and outcome.idea_route is not None else
                  proposal.entry_summary if proposal is not None else compile_input.utterance)
+        templates = (
+            outcome.idea_route.proposals if unbound_ideas and outcome.idea_route is not None
+            else (proposal,) if proposal is not None else ()
+        )
+        starts = [item.strategy_template.backtest.start for item in templates
+                  if item.strategy_template is not None]
+        history_scope = (f"首发上市日不晚于{min(starts).isoformat()}，" if starts else "")
+        user_scope = (
+            f"用户原始要求【{compile_input.idea_inspiration or ''} {compile_input.utterance}】。"
+            "保留用户明确限定的市场、板块、行业、主题和股票范围，"
+            "不能以成交活跃替代这些限定；返回用于核实范围的所属板块、行业或概念字段。"
+        )
+        if expand_industry:
+            advisor = container.strategy_advisor
+            expansion = (await advisor.plan_industry_expansion(
+                f"{compile_input.idea_inspiration or ''} {compile_input.utterance}"
+            ) if isinstance(advisor, IndustryExpansionAdvisor) else None)
+            if expansion is None:
+                return replace(outcome, stock_recommendations=(), instrument_candidates=(),
+                    clarification="这次暂未完成相关股票与行业的核实，你的交易规则已保留。可以让我重新查询，或补充希望关注的行业；不会用无关股票替代。",
+                    run_requested=False), None
+            user_scope = (
+                f"用户原始要求【{compile_input.idea_inspiration or ''} {compile_input.utterance}】。"
+                f"直接主题未核实到匹配股票，本轮允许扩展到【{expansion.industry}】，"
+                "例如具体水果扩展到水果种植业。不是全市场通用推荐，不选择无关热门股。"
+                "如果用户明确要求仅限直接关联或禁止扩展，必须保持原范围。"
+                "保留其他市场、数值和排除条件；返回主营业务、所属行业及关联依据。"
+                "没有可核实业务依据就返回空结果。"
+            )
+            emit_progress("stock_scope_expansion", "直接相关标的尚未核实，正在补查所属行业；不会用无关热门股代替。")
         query = (
+            user_scope
+            +
             f"为日线策略【{rules}】筛选最多10只A股历史回测候选（满足任一方向即可）："
-            "非ST，成交活跃，按最近交易日成交额降序。返回证券代码、证券简称、"
+            f"{history_scope}非ST，成交活跃，按最近交易日成交额降序。"
+            "返回证券代码、证券简称、首发上市日、"
             "最新交易日、成交额，以及上述策略涉及的关键技术指标当前值。"
         )
+        if unbound_ideas:
+            query = (user_scope + "查询与上述主题有可核实业务关联的A股，最多10只。"
+                     "返回证券代码、简称、主营业务、行业、首发上市日及最新成交额。"
+                     "无需今天触发技术买卖信号，不能用全市场成交排名代替主题关联。")
+        if expand_industry:
+            query = expansion.query
         emit_progress("stock_screening", "正在挑选可以试试这条策略的股票。")
         try:
             try:
@@ -828,15 +1074,20 @@ async def _offer_missing_instrument(
                 if not entities:
                     raise MxSaasProviderNoDataError("screening returned no identifiable security")
             except MxSaasProviderNoDataError:
+                if expand_industry or unbound_ideas:
+                    raise
                 # A historical sample need not trigger today's entry rule.
                 # This fallback is only for the proactive sample offer, never
                 # for an explicit user screen, and still needs confirmation.
                 emit_progress(
                     "stock_screening",
-                    "当前条件没有匹配股票，正在另选成交活跃的回测样本，买卖规则不变。",
+                    "正在保留原选股范围补查历史回测样本，不要求今天恰好触发买入。",
                 )
                 query = (
-                    "A股非ST，最近交易日成交额排名前10，返回股票代码、股票简称、"
+                    user_scope
+                    + "仅取消今天必须触发买卖信号的要求，不放宽原选股范围。"
+                    f"A股非ST，{history_scope}最近交易日成交额排名前10，"
+                    "返回股票代码、股票简称、首发上市日、"
                     "成交额、最新价、5日移动平均线、20日移动平均线、"
                     "近20日最高收盘价、近20日涨跌幅。"
                 )
@@ -847,14 +1098,36 @@ async def _offer_missing_instrument(
             if unbound_ideas and outcome.idea_route is not None and isinstance(
                 container.strategy_advisor, StockStrategyPairingAdvisor,
             ):
-                pairing, pairing_error = await _pair_stock_strategies_with_data(
-                    advisor=container.strategy_advisor, result=result,
-                    compile_input=compile_input, route=outcome.idea_route, container=container,
-                )
-                if pairing is None or len(pairing.pairs) < 2:
-                    return replace(outcome, clarification=pairing_error or (
-                        "股票数据已取到，但股票与策略的组合推荐暂未完成。请稍后重试。"
-                    )), None
+                transport_failed = False
+                try:
+                    pairing, _ = await _pair_stock_strategies_with_data(
+                        advisor=container.strategy_advisor, result=result,
+                        compile_input=(replace(compile_input, utterance=user_scope)
+                                       if expand_industry else compile_input),
+                        route=outcome.idea_route, container=container,
+                    )
+                except CandidateTransportError as exc:
+                    if not exc.is_classified:
+                        raise
+                    pairing = None
+                    transport_failed = True
+                if pairing is None or not pairing.pairs:
+                    if not transport_failed and not expand_industry:
+                        return await _offer_missing_instrument_impl(
+                            outcome=outcome, compile_input=compile_input, state=state,
+                            container=container, expand_industry=True,
+                        )
+                    # Security identity is not evidence of the requested scope.
+                    # Never resurrect rejected/unverified rows as selectable chips.
+                    return replace(
+                        outcome,
+                        clarification=(
+                            "这次还没核实到符合你要求的股票，我先不把无关股票放进来。"
+                            "你的策略思路已保留，可以继续补充选股方向，或稍后重新查询。"
+                        ),
+                        stock_recommendations=(), instrument_candidates=(),
+                        run_requested=False,
+                    ), None
                 proposals = {item.id: item for item in outcome.idea_route.proposals}
                 names = {normalize_a_share_instrument(item.code).value: item.name
                          for item in entities}
@@ -878,21 +1151,31 @@ async def _offer_missing_instrument(
                         "股票与策略的组合未通过校验，请稍后重试。"
                     )), None
                 emit_progress("stock_strategy_pairs_ready", "股票与策略组合已准备好，可以选择。")
+                introduction = pairing.introduction
                 return replace(
-                    outcome, clarification=pairing.introduction,
-                    idea_route=replace(outcome.idea_route, proposals=tuple(matched)),
+                    outcome, clarification=introduction,
+                    idea_route=replace(outcome.idea_route, understanding=introduction, proposals=tuple(matched)),
                     suggested_strategy=None, suggested_strategy_hash=None,
                     suggested_strategy_choice_id=None, suggested_strategy_note=None,
                 ), None
             entity = entities[0]
+            if not isinstance(container.strategy_advisor, StockRecommendationAdvisor):
+                return replace(outcome, stock_recommendations=(), instrument_candidates=(),
+                    clarification="股票筛选结果还未完成核实，暂不展示候选。你的交易规则已保留，可以稍后重试。",
+                    run_requested=False), None
             if isinstance(container.strategy_advisor, StockRecommendationAdvisor):
                 emit_progress("stock_comparison", "正在比较候选股票，挑选最多 3 只。")
                 ranked = await container.strategy_advisor.recommend_stocks(query, result)
                 if not ranked:
-                    return replace(outcome, clarification=(
-                        "股票数据已取到，但这次推荐分析尚未完成。"
-                        "你可以先告诉我想回测的股票，策略会保留。"
-                    )), None
+                    if ranked == () and not expand_industry:
+                        return await _offer_missing_instrument_impl(
+                            outcome=outcome, compile_input=compile_input, state=state,
+                            container=container, expand_industry=True,
+                        )
+                    return replace(outcome, stock_recommendations=(), instrument_candidates=(),
+                        clarification=(
+                            "这次还没核实到符合你要求的股票，暂不展示候选。你的交易规则已保留，可以稍后重试。"
+                        ), run_requested=False), None
                 entity = next(item for item in entities
                               if normalize_a_share_instrument(item.code).value == ranked[0].symbol)
                 recommendations = tuple(replace(
@@ -921,6 +1204,7 @@ async def _offer_missing_instrument(
                     introduction = await container.compiler.compose_dialogue_response(
                         answer=compile_input.utterance, question="想先用哪只股票试试？",
                         context=(
+                            ("本次从直接主题扩展到所属行业，须说明具体行业与业务依据，不能冒称直接关联。" if expand_industry else "") +
                             f"用户已选策略：{outcome.selected_idea_proposal.title}。"
                             f"买入：{outcome.selected_idea_proposal.entry_summary}；"
                             f"卖出：{outcome.selected_idea_proposal.exit_summary}。"
@@ -960,6 +1244,11 @@ async def _offer_missing_instrument(
             )
         except (MxSaasProviderAuthError, MxSaasProviderUnavailableError,
                 MxSaasProviderDataError, AshareInstrumentCodeError) as exc:
+            if isinstance(exc, MxSaasProviderNoDataError) and not expand_industry:
+                return await _offer_missing_instrument_impl(
+                    outcome=outcome, compile_input=compile_input, state=state,
+                    container=container, expand_industry=True,
+                )
             skill_name = "东方财富选股 Skill"
             if isinstance(exc, MxSaasProviderAuthError):
                 message = _live_data_auth_message(skill_name=skill_name)
@@ -1000,6 +1289,7 @@ async def _offer_missing_instrument(
         question="" if unbound_ideas else "你想用哪只股票试试，也可以告诉我自己的股票？",
         context=(
             direction_context +
+            ("本轮候选是直接主题未命中后扩展到所属行业的结果，必须明确说明扩展后的行业和业务依据，不声称直接关联。" if expand_industry else "") +
             f"候选股票：{recommendation_text or label}。"
             f"来源：{candidate.source}；已知依据：{candidate.evidence or '仅核验证券身份'}。"
             "当前只有候选信息，尚未回测。身份信息不证明均线、量价或买入信号，"
@@ -1013,6 +1303,283 @@ async def _offer_missing_instrument(
             "idea_guidance_required" if unbound_ideas else "instrument_reuse_confirmation"
         ),
     ), candidate
+
+
+async def _preflight_idea_choices(
+    *, outcome: CompileOutcome, container: ApiContainer,
+) -> CompileOutcome:
+    """Prepare real historical inputs before exposing stock-bound choices.
+
+    Choices remain editable when preparation fails. Provider diagnostics stay
+    in logs; only problems the user can act on belong in the conversation.
+    Execution still passes the normal data gate after a choice is confirmed.
+    """
+    if outcome.selected_idea_proposal is not None or (
+        outcome.status is CompileStatus.READY and outcome.strategy is not None
+    ):
+        # A selected plan is checked by preflight_ready_outcome. Its sibling
+        # suggestions must not block editing or repeat all data preparation.
+        return outcome
+    service = getattr(container, "backtest_submission", None)
+    prepare = getattr(service, "prepare_candidate", None)
+    route = outcome.idea_route
+    if prepare is None or route is None or not any(
+        item.instrument_symbol is not None for item in route.proposals
+    ):
+        return outcome
+
+    # Lazy import: the service itself consumes API result schemas.
+    from ashare_lab.adapters.market_data.mx_daily_history import (
+        MxDailyHistoryBeforeListingError,
+        MxDailyHistoryError,
+    )
+    from ashare_lab.application.skill_backtest_service import SkillCandidatePreparationError
+    from ashare_lab.application.skill_numeric_history import SkillNumericHistoryError
+    from ashare_lab.domain.strategy.price_plans import GridSpecificationError
+    from ashare_lab.application.minute_grid_plan import MinuteGridCapabilityError
+    from ashare_lab.application.execution_feedback import execution_capability_feedback
+
+    config = BacktestRunConfig(
+        **resolve_execution_settings(outcome.execution_settings).model_dump(exclude_none=True),
+        refresh_data=outcome.refresh_data,
+    )
+    gate = asyncio.Semaphore(2)
+    failure_details: dict[str, str] = {}
+
+    async def calibrate_grid(item: IdeaProposal) -> IdeaProposal:
+        """Bind model-suggested grid prices to the latest verified market price.
+
+        Bound idea choices contain model suggestions, not user-edited parameters.
+        Manual revisions use the separate revision endpoint and are never changed here.
+        """
+        strategy = item.strategy
+        trading_plan = getattr(strategy, "trading_plan", None)
+        if strategy is None or not isinstance(trading_plan, GridPlan):
+            return item
+        # Preparation verifies data, not permission to rewrite a user's plan.
+        # Grounded direct rules and already selected templates can reach this
+        # path through optional stock recommendations or a later stock change.
+        if outcome.selected_idea_proposal is not None or any(
+            evidence.path == "/trading_plan"
+            or evidence.path.startswith("/trading_plan/")
+            for evidence in outcome.candidate_grounding
+        ):
+            return item
+        params = trading_plan.parameters
+        if params.anchor_mode in {"manual", "first_open"}:
+            return item
+        if params.anchor_mode == "previous_close":
+            resolved = await service.resolve_grid_anchor(strategy)
+            quoted = resolved.trading_plan.parameters
+        else:
+            quoted = await resolve_latest_grid_quote(
+                params, strategy.instrument.symbol, getattr(container, "live_finance_data", None),
+            )
+        anchor_label = "回测起始日昨收价" if params.anchor_mode == "previous_close" else "行情最新价"
+        latest = quoted.resolved_anchor
+        # Unanchored model suggestions still have a suggested price interval.
+        # Using the new quote as the old anchor leaves that interval unscaled
+        # (e.g. 40–80 around a 300-yuan stock), then manual validation fails.
+        old_anchor = params.anchor_price or (params.lower_price + params.upper_price) / 2
+        scale = latest / old_anchor
+        cents = lambda value: (Decimal(value) * scale).quantize(
+            Decimal("0.01"), ROUND_HALF_UP,
+        )
+        updates: dict[str, object] = {
+            "anchor_mode": params.anchor_mode, "anchor_price": latest,
+            "anchor_quote_source": quoted.anchor_quote_source,
+            "anchor_quote_retrieved_at": quoted.anchor_quote_retrieved_at,
+            "anchor_quote_time_label": quoted.anchor_quote_time_label,
+            "anchor_quote_response_sha256": quoted.anchor_quote_response_sha256,
+            "startup_mode": "wait_for_crossing",
+        }
+        # Relative ranges are resolved from the real quote by the grid engine.
+        # The broad representational bounds must not be scaled down to zero.
+        relative_range = any(value is not None for value in (
+            params.range_percent, params.levels_below, params.levels_above,
+        ))
+        if not relative_range:
+            updates.update(lower_price=cents(params.lower_price), upper_price=cents(params.upper_price))
+        # A quote lookup does not change CNY order gaps/limits or create a
+        # half-funded initial position. These remain exactly as proposed.
+        calibrated = type(params).model_validate({
+            **params.model_dump(mode="python"), **updates,
+        })
+        plan = trading_plan.model_copy(update={"parameters": calibrated})
+        calibrated_strategy = strategy.model_copy(update={"trading_plan": plan})
+        spacing = calibrated.spacing_for("buy")[1]
+        unit = "元" if calibrated.spacing_for("buy")[0] == "cny" else "%"
+        quantity = (f"{calibrated.order_shares}股" if calibrated.sizing_mode == "shares"
+                    else f"{calibrated.order_amount_cny}元")
+        entry = (
+            f"以{anchor_label}{latest}元（{quoted.anchor_quote_time_label}）为初始基准，"
+            f"每下跨{spacing}{unit}买入{quantity}；"
+            f"期初可卖持仓{calibrated.opening_shares}股，"
+            f"计划初始买入{calibrated.initial_shares}股，最多{calibrated.max_shares}股"
+        )
+        exit_text = (
+            f"每上跨{calibrated.spacing_for('sell')[1]}"
+            f"{'元' if calibrated.spacing_for('sell')[0] == 'cny' else '%'}卖出{quantity}，"
+            f"至少保留{calibrated.min_shares}股"
+        )
+        assumption = (
+            f"基准价已绑定{anchor_label}{latest}元（{quoted.anchor_quote_time_label}）；"
+            + ("价格范围按原相对范围或格数计算；" if relative_range else "建议价格区间已同比例校准；")
+            + "元价差、委托限价和初始持仓不变。"
+        )
+        return replace(
+            item, strategy=calibrated_strategy,
+            strategy_hash=canonical_hash(calibrated_strategy),
+            entry_summary=entry, exit_summary=exit_text,
+            suggested_utterance=(
+                f"{entry}；{exit_text}；回测{strategy.backtest.start}至{strategy.backtest.end}，"
+                f"本金{strategy.backtest.initial_cash_cny}元。"
+            ),
+            assumptions=tuple((*item.assumptions, assumption)),
+        )
+
+    async def check(item: IdeaProposal) -> tuple[IdeaProposal, str | None]:
+        if item.instrument_symbol is None:
+            return item, None
+        if item.strategy is None:
+            return item, "strategy_incomplete"
+        started = monotonic()
+        exception_class = "none"
+        reason = None
+        try:
+            async with gate:
+                async with asyncio.timeout(180):
+                    item = await calibrate_grid(item)
+                    if (isinstance(item.strategy.trading_plan, GridPlan)
+                            and item.strategy.trading_plan.parameters.anchor_mode == "previous_close"):
+                        resolved = await service.resolve_grid_anchor(item.strategy)
+                        item = replace(item, strategy=resolved, strategy_hash=canonical_hash(resolved))
+                    await prepare(item.strategy, config)
+        except MxDailyHistoryBeforeListingError as exc:
+            exception_class = type(exc).__name__
+            reason = "history_before_listing"
+            failure_details[item.id] = "上市时间晚于所选回测起点，历史行情不能覆盖该区间；可以调整区间，系统不会自动缩短。"
+        except (BacktestDataNotYetAvailableError, BacktestDateRangeError) as exc:
+            exception_class = type(exc).__name__
+            reason = "backtest_date_unavailable"
+        except GridSpecificationError as exc:
+            exception_class = type(exc).__name__
+            reason = exc.code
+            failure_details[item.id] = exc.safe_message
+        except MinuteGridCapabilityError as exc:
+            exception_class = type(exc).__name__
+            reason, failure_details[item.id] = execution_capability_feedback(str(exc))
+        except SkillCandidatePreparationError as exc:
+            exception_class = type(exc).__name__
+            reason = exc.code
+        except SkillNumericHistoryError as exc:
+            exception_class = type(exc).__name__
+            reason = f"skill_numeric_{exc.code}"
+        except TimeoutError as exc:
+            exception_class = type(exc).__name__
+            reason = "data_preparation_timeout"
+        except MxSaasProviderAuthError as exc:
+            exception_class = type(exc).__name__
+            reason = "data_provider_auth_failed"
+        except MxSaasProviderDataError as exc:
+            exception_class = type(exc).__name__
+            reason = ("data_history_unavailable" if isinstance(exc, MxSaasProviderNoDataError)
+                      else exc.data_reason)
+        except MxSaasProviderError as exc:
+            exception_class = type(exc).__name__
+            reason = "data_provider_unavailable"
+        except MxDailyHistoryError as exc:
+            exception_class = type(exc).__name__
+            reason = "history_not_aligned_or_incomplete"
+        except MissingLatestGridQuoteError as exc:
+            exception_class = type(exc).__name__
+            reason = "grid_latest_quote_unavailable"
+        except ValueError as exc:
+            exception_class = type(exc).__name__
+            from ashare_lab.application.minute_replay_input import MinuteReplayDataError
+            if isinstance(exc, MinuteReplayDataError):
+                reason = "execution_data_not_ready"
+            else:
+                reason = "data_or_parameters_not_ready"
+            # Keep provider prose and raw values out of public replies/logs.
+        _LOGGER.info(
+            "candidate_preflight request_id=%s symbol=%s strategy_hash=%s "
+            "start=%s end=%s result=%s exception_class=%s elapsed_ms=%s",
+            current_request_id(), item.instrument_symbol, item.strategy_hash,
+            item.strategy.backtest.start, item.strategy.backtest.end, reason or "ready",
+            exception_class, round((monotonic() - started) * 1000),
+        )
+        return item, reason
+
+    emit_progress(
+        "candidate_data_preparation", "正在整理可选方案。",
+    )
+    checked = await asyncio.gather(*(check(item) for item in route.proposals))
+    eligible = tuple(item for item, reason in checked if reason is None)
+    parameter_reasons = {"grid_geometry_conflict", "grid_nonpositive_level", "grid_parameters_invalid",
+                         "grid_parameters_unavailable", "grid_quote_validation_failed"}
+    # Preparation errors are operational diagnostics, not strategy assumptions.
+    # Keep the original explanation and show only a concrete change the user can
+    # make. A network/data failure must not replace it with a service report.
+    actionable = {
+        item.id: ("这只股票在所选开始日期还未上市，请将开始日期改到上市之后。"
+                  if reason == "history_before_listing" else failure_details[item.id])
+        for item, reason in checked
+        if reason == "history_before_listing"
+        or (reason in parameter_reasons and item.id in failure_details)
+    }
+    annotated = tuple(replace(item, assumptions=tuple(
+        note for note in item.assumptions
+        if not note.startswith(("数据准备：", "参数检查：", "回测设置："))
+    ) + (("回测设置：" + actionable[item.id],) if item.id in actionable else ()))
+        for item, _ in checked)
+    message = route.understanding
+    if actionable:
+        message += "\n\n" + "\n".join(
+            f"{item.title}：{actionable[item.id]}"
+            for item, _ in checked if item.id in actionable
+        )
+    recovered = outcome.diagnostic_code in {"candidate_data_not_ready", "candidate_data_incomplete"}
+    if len(eligible) == len(route.proposals):
+        emit_progress("candidate_data_ready", "方案已整理好，可以选择和调整。")
+        if not recovered and annotated == route.proposals:
+            return outcome
+        calibrated_outcome = replace(
+            outcome, idea_route=replace(route, proposals=annotated),
+        )
+        if recovered:
+            return replace(
+                calibrated_outcome, diagnostic_code="idea_guidance_required",
+                clarification=route.understanding,
+            )
+        return calibrated_outcome
+
+    valid_ids = {item.id for item in eligible}
+    valid_symbols = {item.instrument_symbol for item in eligible}
+    if eligible:
+        emit_progress("candidate_data_ready", "方案已整理好，可以选择和调整。")
+        keep_suggested = outcome.suggested_strategy_choice_id in valid_ids
+        return replace(
+            outcome, idea_route=replace(route, proposals=annotated, understanding=message),
+            clarification=message,
+            diagnostic_code="idea_guidance_required" if recovered else outcome.diagnostic_code,
+            stock_recommendations=tuple(item for item in outcome.stock_recommendations
+                                        if item.symbol in valid_symbols),
+            suggested_strategy=outcome.suggested_strategy if keep_suggested else None,
+            suggested_strategy_hash=outcome.suggested_strategy_hash if keep_suggested else None,
+            suggested_strategy_choice_id=(outcome.suggested_strategy_choice_id
+                                          if keep_suggested else None),
+            suggested_strategy_note=outcome.suggested_strategy_note if keep_suggested else None,
+        )
+
+    emit_progress("candidate_data_not_ready", "方案已保留，可以先查看和调整。")
+    return replace(
+        outcome, diagnostic_code="candidate_data_incomplete", clarification=message,
+        idea_route=replace(route, proposals=annotated, understanding=message),
+        stock_recommendations=(), suggested_strategy=None, suggested_strategy_hash=None,
+        suggested_strategy_choice_id=None, suggested_strategy_note=None,
+        run_requested=False, refresh_data=False,
+    )
 
 
 async def _answer_live_data_query(
@@ -1047,11 +1614,11 @@ async def _answer_live_data_query(
         suggestions=(),
         draft=_to_response(
             state,
-            diagnostic_code_override=query_status.diagnostic_code,
             idea_route_override=(
                 idea_route if _diagnostic_allows_idea_route(state.outcome.diagnostic_code) else None
             ),
         ),
+        query_diagnostic_code=query_status.diagnostic_code,
         data=data,
     )
 
@@ -1087,6 +1654,12 @@ async def _resolve_live_data_query(
         )
         provider = container.live_market_data
         if provider is None:
+            recovered = await _recover_current_data_query(
+                error=None, query=answer, container=container, prefer_screen=False,
+                query_status=query_status, state=state,
+            )
+            if recovered is not None:
+                return recovered
             query_status.diagnostic_code = "live_market_data_unavailable"
             return (
                 _live_data_unavailable_message(skill_name=skill_name, configured=False),
@@ -1146,6 +1719,12 @@ async def _resolve_live_data_query(
                 asset_type=data_query_asset_type(answer),
             )
         except MxSaasProviderError as exc:
+            recovered = await _recover_current_data_query(
+                error=exc, query=answer, container=container, prefer_screen=False,
+                query_status=query_status, state=state,
+            )
+            if recovered is not None:
+                return recovered
             return _live_query_provider_failure(exc, skill_name, query_status), None, None
         result, review_error, review_reply = await _review_live_query_result(
             answer=answer, result=result, container=container, skill_name=skill_name,
@@ -1159,7 +1738,9 @@ async def _resolve_live_data_query(
         if recommending:
             advisor = container.strategy_advisor
             if not isinstance(advisor, StockRecommendationAdvisor):
-                return "股票数据已取到，但推荐分析暂时不可用，请稍后重试。", None, None
+                return _current_data_summary(result), ClarificationDataPayload(
+                    kind="screen", screen=_to_live_screen_response(result),
+                ), None
             emit_progress("stock_comparison", "股票数据已取到，正在比较并挑选最多 3 只。")
             try:
                 recommendations = await advisor.recommend_stocks(answer, result)
@@ -1200,13 +1781,6 @@ async def _resolve_live_data_query(
 
     provider = container.live_finance_data
     skill_name = "东方财富查数 Skill"
-    if provider is None:
-        query_status.diagnostic_code = "live_market_data_unavailable"
-        return (
-            _live_data_unavailable_message(skill_name=skill_name, configured=False),
-            None,
-            None,
-        )
     instrument_context = state.verified_instrument_context
     if data_query_needs_instrument_context(answer) and instrument_context is None:
         message = await _compose_live_query_reply(
@@ -1216,14 +1790,39 @@ async def _resolve_live_data_query(
         )
         return message, None, None
     query = _ground_data_query(answer, instrument_context=instrument_context)
+    if provider is None:
+        recovered = await _recover_current_data_query(
+            error=None, query=query, container=container, prefer_screen=True,
+            query_status=query_status, state=state,
+        )
+        if recovered is not None:
+            return recovered
+        query_status.diagnostic_code = "live_market_data_unavailable"
+        return _live_data_unavailable_message(skill_name=skill_name, configured=False), None, None
     try:
         result = await provider.query_finance(
             query=query,
             indicators=extract_data_query_indicators(answer),
         )
     except MxSaasProviderError as exc:
+        recovered = await _recover_current_data_query(
+            error=exc, query=query, container=container, prefer_screen=True,
+            query_status=query_status, state=state,
+        )
+        if recovered is not None:
+            return recovered
         return _live_query_provider_failure(exc, skill_name, query_status), None, None
-    result, review_error, _ = await _review_live_query_result(
+    if not _finance_tables_have_data(result.tables):
+        recovered = await _recover_current_data_query(
+            error=None, query=query, container=container, prefer_screen=True,
+            query_status=query_status, state=state,
+        )
+        if recovered is not None:
+            return recovered
+        return _live_data_empty_message(skill_name=skill_name), ClarificationDataPayload(
+            kind="finance", finance=_to_live_finance_response(result),
+        ), None
+    result, review_error, review_reply = await _review_live_query_result(
         answer=query, result=result, container=container, skill_name=skill_name,
         # The corrected natural-language query contains the requested fields and period.
         # Do not re-attach the old indicators and undo the model's correction.
@@ -1235,21 +1834,102 @@ async def _resolve_live_data_query(
     if review_error is not None:
         return review_error, data, None
     if _finance_tables_have_data(result.tables):
-        try:
-            advised = await _validated_live_data_answer(
-                answer=answer, result=result, state=state, container=container,
-            )
-        except CandidateTransportError as exc:
-            return _live_query_model_failure(exc, query_status), data, None
-        if advised is not None:
-            message, idea_route = advised
-            return message, data, idea_route
-        return (
-            "数据已返回，但本次模型回答未能完成；查询结果已保留，请重试。",
-            data,
-            None,
+        return await _finish_finance_query(
+            answer=answer, result=result, state=state, container=container, data=data,
+            query_status=query_status, review_reply=review_reply,
         )
     return _live_data_empty_message(skill_name=skill_name), data, None
+
+
+async def _finish_finance_query(
+    *, answer: str, result: LiveFinanceDataResult, state: DialogueState,
+    container: ApiContainer, data: ClarificationDataPayload, query_status: _LiveQueryStatus,
+    review_reply: str | None,
+) -> tuple[str, ClarificationDataPayload, IdeaRoute | None]:
+    # Only the existing model's explicit mixed-request assessment enables
+    # strategy advice; ordinary data lookups never compile trading rules.
+    message = review_reply or _current_data_summary(result)
+    if not query_status.strategy_requested:
+        return message, data, None
+    try:
+        advised = await _validated_live_data_answer(
+            answer=answer, result=result, state=state, container=container,
+        )
+    except CandidateTransportError as exc:
+        return _live_query_model_failure(exc, query_status), data, None
+    if advised is not None:
+        return advised[0], data, advised[1]
+    return message + "\n数据查询已完成；这次策略建议暂未生成，查询结果已保留。", data, None
+
+
+def _current_data_summary(result: LiveMarketDataResult | LiveFinanceDataResult) -> str:
+    """Describe returned values without asserting that all requested criteria passed."""
+    if isinstance(result, LiveMarketDataResult):
+        facts = [
+            "；".join(f"{key}：{value}" for key, value in list(row.items())[:6]
+                    if isinstance(value, str | int | float) and not isinstance(value, bool))
+            for row in result.rows[:3]
+        ]
+    else:
+        facts = list(_verified_finance_facts(result))
+    text = "\n".join(fact for fact in facts if fact)
+    return "数据已返回，以下是服务实际返回的内容：\n" + text if text else (
+        "查询结果已返回，可以查看下面的数据表。"
+    )
+
+
+async def _recover_current_data_query(
+    *, error: MxSaasProviderError | None, query: str, container: ApiContainer,
+    prefer_screen: bool, query_status: _LiveQueryStatus, state: DialogueState,
+) -> tuple[str, ClarificationDataPayload | None, IdeaRoute | None] | None:
+    """Try the other read-only Skill once; keep query scope and actual result type."""
+    if error is not None and not mx_can_switch_channel(error):
+        return None
+    screen_provider, finance_provider = container.live_market_data, container.live_finance_data
+    if (prefer_screen and screen_provider is None) or (
+        not prefer_screen and finance_provider is None
+    ):
+        return None
+    skill_name = "东方财富选股 Skill" if prefer_screen else "东方财富查数 Skill"
+    emit_progress("query_data_retry", f"当前通道暂未返回数据，正在通过{skill_name}补查同一问题。")
+    try:
+        if prefer_screen and screen_provider is not None:
+            result = await screen_provider.screen(
+                query=query, asset_type=data_query_asset_type(query),
+            )
+        elif finance_provider is not None:
+            result = await finance_provider.query_finance(
+                query=query, indicators=extract_data_query_indicators(query),
+            )
+        else:
+            return None
+    except MxSaasProviderError as exc:
+        return _live_query_provider_failure(exc, skill_name, query_status), None, None
+    data = (
+        ClarificationDataPayload(kind="screen", screen=_to_live_screen_response(result))
+        if isinstance(result, LiveMarketDataResult) else
+        ClarificationDataPayload(kind="finance", finance=_to_live_finance_response(result))
+    )
+    has_data = bool(result.rows) if isinstance(result, LiveMarketDataResult) else (
+        _finance_tables_have_data(result.tables)
+    )
+    if not has_data:
+        return _live_data_empty_message(skill_name=skill_name), data, None
+    # The alternate call has consumed the only additional data round. A failed
+    # optional review must not discard this genuine table or trigger a third call.
+    async def no_refetch(*, query: str) -> LiveMarketDataResult | LiveFinanceDataResult:
+        raise AssertionError("read-only lookup retry budget exhausted")
+
+    _, review_error, review_reply = await _review_live_query_result(
+        answer=query, result=result, container=container, skill_name=skill_name,
+        refetch=no_refetch, query_status=query_status, remaining_data_rounds=0,
+    )
+    if review_error is None and isinstance(result, LiveFinanceDataResult):
+        return await _finish_finance_query(
+            answer=query, result=result, state=state, container=container, data=data,
+            query_status=query_status, review_reply=review_reply,
+        )
+    return review_error or review_reply or _current_data_summary(result), data, None
 
 
 def _query_result_snapshot(
@@ -1286,38 +1966,41 @@ def _query_result_snapshot(
     }
 
 
-async def _review_live_query_result[T: (LiveMarketDataResult, LiveFinanceDataResult)](
+async def _review_live_query_result[T: LiveMarketDataResult | LiveFinanceDataResult](
     *, answer: str, result: T, container: ApiContainer, skill_name: str,
     refetch: Callable[..., Awaitable[T]],
     query_status: _LiveQueryStatus | None = None,
+    remaining_data_rounds: int = 1,
 ) -> tuple[T, str | None, str | None]:
-    """At most one model-directed re-fetch through the same current-data tool."""
+    """Advisory review, with at most one model-directed data correction."""
     query_status = query_status if query_status is not None else _LiveQueryStatus()
     advisor = container.strategy_advisor
-    unavailable = "数据已返回，但口径核对暂未完成；结果已保留，尚不能确认满足本次查询。"
     if not isinstance(advisor, QueryDataReviewAdvisor):
-        return result, unavailable, None
+        return result, None, _current_data_summary(result)
     attempted = [result.query]
-    for round_index in range(2):
+    for round_index in range(remaining_data_rounds + 1):
         emit_progress("query_data_review", "数据已返回，正在核对日期、字段和查询范围。")
         try:
             review = await advisor.review_query_result(
                 question=answer, data_snapshot=_query_result_snapshot(result),
-                previous_queries=tuple(attempted), remaining_data_rounds=1 - round_index,
+                previous_queries=tuple(attempted),
+                remaining_data_rounds=remaining_data_rounds - round_index,
             )
         except CandidateTransportError as exc:
-            return result, _live_query_model_failure(exc, query_status), None
+            _LOGGER.info("query_review_optional_failure kind=%s", exc.failure_kind)
+            return result, None, _current_data_summary(result)
         if review is None or (review.satisfied and review.retry_query is not None):
-            return result, unavailable, None
+            return result, None, _current_data_summary(result)
         if review.satisfied:
+            query_status.strategy_requested = review.strategy_requested
             return result, None, review.message
-        if round_index == 1 or review.retry_query is None:
+        if round_index == remaining_data_rounds or review.retry_query is None:
             return result, review.message, None
         retry_query = review.retry_query.strip()
         if not retry_query or any(
             "".join(retry_query.split()) == "".join(query.split()) for query in attempted
         ):
-            return result, unavailable, None
+            return result, review.message, None
         attempted.append(retry_query)
         emit_progress("query_data_retry", review.message)
         try:
@@ -1326,7 +2009,7 @@ async def _review_live_query_result[T: (LiveMarketDataResult, LiveFinanceDataRes
             return result, _live_query_provider_failure(
                 exc, skill_name, query_status,
             ) + "已取得的查询结果已保留。", None
-    return result, unavailable, None
+    return result, None, _current_data_summary(result)
 
 
 def _screen_reply_facts(result: LiveMarketDataResult) -> dict[str, object]:
@@ -1428,6 +2111,7 @@ async def _model_advised_live_data_answer(
                 utterance=suggested_utterance,
                 instrument_context=symbol,
                 as_of_date=state.compile_input.as_of_date,
+                semantic_intent="new_strategy",
             )
         )
         if (
@@ -1467,7 +2151,7 @@ async def _model_advised_live_data_answer(
         )
         if len(proposals) == 3:
             break
-    if len(proposals) < 2:
+    if not proposals:
         return None
     return advice.analysis, IdeaRoute(
         understanding=advice.analysis,
@@ -1508,34 +2192,35 @@ def _verified_finance_facts(result: LiveFinanceDataResult) -> tuple[str, ...]:
     return tuple(facts)
 
 
+
+
 async def _finance_instrument_symbol(
     *,
     result: LiveFinanceDataResult,
     state: DialogueState,
     container: ApiContainer,
 ) -> str | None:
-    candidates: list[str] = []
-    if state.verified_instrument_context is not None:
-        candidates.append(state.verified_instrument_context)
+    # Reuse the provider's security decoder for metadata and complete row-oriented
+    # tables. A previous strategy must never override this query's returned stock.
+    decoder = MxFinanceHistoryDecoder()
+    candidates: set[str] = set()
     for table in result.tables:
-        code = table.get("code")
-        if isinstance(code, str):
-            candidates.append(code)
-        entity_codes = table.get("entityCodes")
-        if isinstance(entity_codes, (list, tuple)):
-            candidates.extend(
-                item for item in cast(Sequence[object], entity_codes) if isinstance(item, str)
-            )
+        codes = decoder.entity_codes(table)
+        candidates.update(codes)
         entity_name = table.get("entityName")
-        if isinstance(entity_name, str):
-            match = _EXPLICIT_SECURITY_CODE_RE.search(entity_name)
-            if match is not None:
-                candidates.append(match.group(0))
-    for candidate in candidates:
+        if not codes and isinstance(entity_name, str) and entity_name.strip():
+            matches = _EXPLICIT_SECURITY_CODE_RE.findall(entity_name)
+            candidates.update(matches or (entity_name.strip(),))
+    if not candidates:
+        context = state.verified_instrument_context
+        return await container.compiler.resolve_instrument_context(context) if context else None
+    resolved_symbols: set[str] = set()
+    for candidate in sorted(candidates):
         resolved = await container.compiler.resolve_instrument_context(candidate)
-        if resolved is not None:
-            return resolved
-    return None
+        if resolved is None:
+            return None
+        resolved_symbols.add(resolved)
+    return next(iter(resolved_symbols)) if len(resolved_symbols) == 1 else None
 
 
 def _diagnostic_allows_idea_route(diagnostic_code: str | None) -> bool:
@@ -1811,7 +2496,7 @@ def _finance_payload_has_values(payload: object) -> bool:
 
 
 def _live_data_auth_message(*, skill_name: str) -> str:
-    return f"{skill_name}授权失败；刚才的策略已保留。"
+    return "这次暂时无法查询，刚才的方案已保留。"
 
 
 def _live_query_provider_failure(
@@ -1834,16 +2519,16 @@ def _live_query_model_failure(
 
 def _live_data_unavailable_message(*, skill_name: str, configured: bool) -> str:
     if not configured:
-        return f"{skill_name}未配置；刚才的策略已保留。"
-    return f"{skill_name}服务未完成本次查询；刚才的策略已保留。"
+        return "这次暂时无法查询，刚才的方案已保留。"
+    return "这次查询没成功，刚才的方案已保留。"
 
 
 def _live_data_invalid_message(*, skill_name: str) -> str:
-    return f"{skill_name}返回的数据无法解析；刚才的策略已保留。"
+    return "这次没能拿到可用的查询结果，刚才的方案已保留。"
 
 
 def _live_data_empty_message(*, skill_name: str) -> str:
-    return f"{skill_name}未返回匹配数据；刚才的策略已保留。"
+    return "这次没有找到符合条件的结果，刚才的方案已保留。"
 
 
 def _compile_input(body: StrategyDraftRequest) -> CompileInput:
@@ -1948,6 +2633,18 @@ async def _complete_instrument_memory(
                    evidence=f"{result.query}；已核对返回证券代码与名称")
 
 
+def _resolved_compile_instrument_memory(request: CompileInput) -> VerifiedInstrumentMemory | None:
+    resolved = request.resolved_instrument
+    if resolved is None or not resolved.matches(request):
+        return None
+    text = resolved.evidence.text
+    return VerifiedInstrumentMemory(
+        symbol=resolved.symbol,
+        name=text if _EXPLICIT_SECURITY_CODE_RE.fullmatch(text) is None else None,
+        source="security_name_resolution", verified_at=datetime.now(UTC), evidence=text,
+    )
+
+
 def _initial_verified_instrument(
     *,
     body: StrategyDraftRequest,
@@ -1980,13 +2677,11 @@ def _initial_verified_instrument(
     )
     if evidence is None and grounding is not None:
         evidence = grounding.text
-    name = (
-        evidence
-        if evidence is not None
-        and _EXPLICIT_SECURITY_CODE_RE.fullmatch(evidence) is None
-        and grounding is not None
-        else None
-    )
+    # A source quotation can contain both the code and an entire trading
+    # clause. It establishes code grounding, not an official security name.
+    # _complete_instrument_memory resolves the name without rejecting the plan
+    # if that display-only query is unavailable.
+    name = None
     return VerifiedInstrumentMemory(
         symbol=symbol,
         name=name,
@@ -2004,11 +2699,28 @@ def _to_response(
     idea_route_override: IdeaRoute | None = None,
     verified_instrument: VerifiedInstrumentMemory | None = None,
     backtest_review: BacktestReviewResponse | None = None,
-    diagnostic_code_override: str | None = None,
+    query_diagnostic_code: str | None = None,
 ) -> StrategyDraftResponse:
+    from ..execution_assessment import assess_execution
+
     outcome: CompileOutcome = stored.outcome
+    assessment = assess_execution(outcome)
     candidate_provenance = outcome.candidate_provenance
-    idea_route = idea_route_override or outcome.idea_route
+    idea_route = (None if outcome.diagnostic_code == "candidate_data_not_ready"
+                  else idea_route_override or outcome.idea_route)
+    if outcome.idea_route is not None and outcome.diagnostic_code != "candidate_data_not_ready" and any(
+        note.startswith("数据准备：") for proposal in outcome.idea_route.proposals for note in proposal.assumptions
+    ):
+        idea_route = outcome.idea_route
+    # Unbound templates are internal planning material, not selectable proposals.
+    # Keep them in stored state for later pairing, but never ask clients to choose
+    # a strategy first and discover an unrelated stock afterwards.
+    if idea_route is not None and stored.compile_input.instrument_context is None:
+        bound_proposals = tuple(p for p in idea_route.proposals if p.instrument_symbol is not None)
+        # Internal templates are retained in the draft, but are not a malformed
+        # public empty proposal list. Return the concrete recovery clarification.
+        idea_route = (replace(idea_route, proposals=bound_proposals) if bound_proposals
+                      else None if idea_route.proposals else idea_route)
     grounding_spans = tuple(
         CandidateGroundingItem(
             path=item.path,
@@ -2018,7 +2730,13 @@ def _to_response(
         )
         for item in outcome.candidate_grounding
     )
+    # Isolated previews deliberately have no selectable idea route. Preserve
+    # their review-only payload without turning it into executable strategy.
+    expose_preview = idea_route is not None or outcome.diagnostic_code in {
+        "semantic_confirmation_required", "execution_prerequisite_required",
+    }
     response = StrategyDraftResponse(
+        execution_assessment=assessment,
         draft_id=stored.draft_id,
         revision=stored.revision,
         status=outcome.status,
@@ -2029,7 +2747,10 @@ def _to_response(
         strategy=outcome.strategy,
         strategy_hash=outcome.strategy_hash,
         clarification=outcome.clarification,
-        diagnostic_code=diagnostic_code_override or outcome.diagnostic_code,
+        diagnostic_code=("stock_pairing_pending" if idea_route is None
+                         and outcome.diagnostic_code == "idea_guidance_required"
+                         else outcome.diagnostic_code),
+        query_diagnostic_code=query_diagnostic_code,
         backtest_review=backtest_review,
         verified_instrument=(InstrumentSuggestionPayload(
             symbol=verified_instrument.symbol, name=verified_instrument.name,
@@ -2043,7 +2764,8 @@ def _to_response(
                 source=stored.pending_instrument_reuse.source,
                 retrieved_at=stored.pending_instrument_reuse.verified_at,
                 evidence=stored.pending_instrument_reuse.evidence,
-            ) if stored.pending_instrument_reuse is not None else None
+            ) if stored.pending_instrument_reuse is not None
+            and outcome.diagnostic_code != "candidate_data_not_ready" else None
         ),
         instrument_suggestions=tuple(
             InstrumentSuggestionPayload(
@@ -2098,10 +2820,12 @@ def _to_response(
             for item in outcome.candidate_alternatives
         ),
         idea_route=None if idea_route is None else _to_idea_route_payload(idea_route),
-        suggested_strategy=outcome.suggested_strategy,
-        suggested_strategy_hash=outcome.suggested_strategy_hash,
-        suggested_strategy_choice_id=outcome.suggested_strategy_choice_id,
-        suggested_strategy_note=outcome.suggested_strategy_note,
+        suggested_strategy=outcome.suggested_strategy if expose_preview else None,
+        suggested_strategy_hash=outcome.suggested_strategy_hash if expose_preview else None,
+        suggested_strategy_choice_id=(
+            outcome.suggested_strategy_choice_id if expose_preview else None
+        ),
+        suggested_strategy_note=outcome.suggested_strategy_note if expose_preview else None,
         assistant_message=assistant_message,
         data=data,
         created_at=stored.created_at,
@@ -2123,14 +2847,24 @@ def _to_idea_route_payload(idea_route: IdeaRoute) -> IdeaRoutePayload:
         asset_mapping=IdeaAssetMappingPayload(
             instrument_symbol=instrument_symbol,
             relation=idea_route.asset_mapping.relation,
-            rationale=idea_route.asset_mapping.rationale,
+            # Provider-authored guidance may omit this display-only sentence.
+            # Keep the route usable and preserve the actual mapping fields;
+            # an empty rationale must never turn an otherwise valid answer
+            # into an unrelated HTTP 500.
+            rationale=(idea_route.asset_mapping.rationale.strip()
+                       or "保留当前标的和策略方向。"),
             evidence_status=idea_route.asset_mapping.evidence_status,
         ),
         proposals=tuple(
             IdeaProposalPayload(
                 id=item.id,
+                strategy=item.strategy,
+                strategy_template=item.strategy_template,
                 title=item.title,
                 hypothesis=item.hypothesis,
+                grid_plan=(item.strategy.trading_plan if item.strategy is not None
+                           and item.strategy.trading_plan is not None
+                           and item.strategy.trading_plan.kind == "grid" else None),
                 entry_summary=item.entry_summary,
                 exit_summary=item.exit_summary,
                 suggested_utterance=item.suggested_utterance,

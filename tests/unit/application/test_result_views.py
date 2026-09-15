@@ -266,6 +266,7 @@ def test_result_bundle_keeps_signal_order_fill_and_unfilled_separate() -> None:
 
 
 def test_result_bundle_projects_signal_validity_and_retry_causality() -> None:
+    from ashare_lab.application.daily_backtest import DailyBacktestConfig
     source = bars(closes=("10", "9", "11", "12", "12", "12", "12"))
     source_sessions = list(sessions(source))
     for offset in (3, 4):
@@ -273,7 +274,8 @@ def test_result_bundle_projects_signal_validity_and_retry_causality() -> None:
             source_sessions[offset],
             upper_limit=source[offset].open,
         )
-    result = run(source_bars=source, source_sessions=tuple(source_sessions))
+    result = run(source_bars=source, source_sessions=tuple(source_sessions),
+                 config=DailyBacktestConfig(edge_entry_validity_sessions=3))
 
     bundle = build_result_bundle(
         result,

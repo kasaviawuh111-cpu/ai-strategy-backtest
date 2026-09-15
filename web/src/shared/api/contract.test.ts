@@ -2,6 +2,8 @@ import {
   dataAsOfDate,
   fromLiveClarificationAnswerResponse,
   fromLiveDraftResponse,
+  ideaProposalRuleSummaries,
+  ideaProposalTitle,
   mergeLiveRevision,
   toLiveBacktestBody,
   toLiveCompileBody,
@@ -12,10 +14,12 @@ import type {
   CapabilitiesResponse,
   CompileRequest,
   IndicatorCapability,
+  IdeaRouteProposal,
   StrategyCondition,
   StrategyDraft,
   StrategySpec,
   StrategySpecIndicatorCondition,
+  PricePlan,
 } from './types'
 import { toStrategySummary } from '../../view-model'
 import { DEFAULT_EXECUTION_SETTINGS } from '../config/backtest'
@@ -147,6 +151,108 @@ const withFastParameter = (condition: StrategyCondition, value: number): Strateg
       }
 
 describe('live API contract adapter', () => {
+  it.each([true, false])('uses structured candidate comparisons without rewriting the source (bound=%s)', (bound) => {
+    const condition: StrategySpecIndicatorCondition = {
+      type: 'indicator_condition', indicator_id: 'technical.adx', definition_version: '1.0.0',
+      params: { period: 14 }, timeframe: '1d', evaluation_mode: 'bar_close_confirmed',
+      trigger: 'above', value: 25,
+    }
+    const rules: StrategySpec = { ...strategy,
+      entry: { type: 'all', children: [condition, { type: 'not', child: {
+        ...condition, indicator_id: 'price.return_pct', params: { period: 5, price_field: 'close' },
+        trigger: 'at_most', value: 12,
+      } }] }, exit: { op: 'first_of', children: [{ ...condition, trigger: 'below', value: 20 }] },
+    }
+    const proposal: IdeaRouteProposal = {
+      id: 'server-choice', title: '待选择的多条件建议', hypothesis: '待回测验证',
+      entry_summary: 'ADX达到25并保证不过热', exit_summary: 'ADX达到20就止盈',
+      suggested_utterance: '这是服务端原始建议句，必须保留买入卖出内容和选中引用。',
+      capability_ids: [], assumptions: ['参数可编辑'], confidence: 0.8,
+      ...(bound ? { strategy: rules } : { strategy_template: {
+        catalog: rules.catalog, entry: rules.entry, exit: rules.exit,
+        execution: rules.execution, backtest: rules.backtest,
+      } }),
+    }
+    const before = structuredClone(proposal)
+    const summaries = ideaProposalRuleSummaries(proposal)
+    expect(summaries.entry).toContain('高于 25')
+    expect(summaries.entry).toContain('且')
+    expect(summaries.entry).toContain('非（近 5 个交易日涨幅 ≤ 12%）')
+    expect(summaries.entry).not.toMatch(/达到|保证/)
+    expect(summaries.exit).toContain('低于 20')
+    expect(summaries.exit).not.toContain('止盈')
+    expect(proposal).toEqual(before)
+  })
+
+  it('keeps text-only summaries but derives price-plan summaries from actual rules', () => {
+    const proposal: IdeaRouteProposal = {
+      id: 'text-only', title: '待解释方向', hypothesis: '待验证', entry_summary: '原始买入说明',
+      exit_summary: '原始卖出说明', suggested_utterance: '按原始模型建议的买入卖出规则继续解释。',
+      capability_ids: [], assumptions: [], confidence: 0.6,
+    }
+    const expected = { entry: proposal.entry_summary, exit: proposal.exit_summary }
+    expect(ideaProposalRuleSummaries(proposal)).toEqual(expected)
+    expect(ideaProposalTitle(proposal)).toBe('待解释方向')
+    expect(ideaProposalTitle({ ...proposal, title: '可修改策略方向 1',
+      capability_ids: ['technical.kdj', 'technical.rsi'],
+    })).toBe('KDJ / RSI策略')
+    expect(ideaProposalTitle({ ...proposal, title: '可修改策略方向 2', strategy: { ...strategy,
+      entry: null, exit: null, trading_plan: { kind: 'conditional', parameters: { rules: [
+        { kind: 'rebound', side: 'buy', gap: 2 }, { kind: 'pullback', side: 'sell', gap: 3 },
+      ] } },
+    } })).toBe('反弹买入 / 回落卖出')
+    expect(ideaProposalRuleSummaries({ ...proposal, strategy: { ...strategy,
+      entry: null, exit: null, trading_plan: { kind: 'scheduled', parameters: {
+        budget_cny: 1000, sizing_mode: 'amount', frequency: 'monthly', day: 15, side: 'buy', at: 'close',
+      } },
+    } })).toEqual({ entry: '每月15日（月末不足则取月末），收盘买入1000元（含费用预算）；休市顺延', exit: '未设置卖出规则' })
+  })
+
+  it('retains a persisted provider failure as a resumable conversation, never executable', () => {
+    const outcome = fromLiveDraftResponse({ ...response, status: 'unsupported',
+      strategy: null, strategy_hash: null, diagnostic_code: 'candidate_provider_invalid_output',
+    }, request)
+    expect(outcome.status).toBe('needs_clarification')
+    expect(outcome).toMatchObject({ draftId: response.draft_id, revision: response.revision })
+    expect(outcome).not.toHaveProperty('draft')
+    if (outcome.status === 'needs_clarification') {
+      expect(outcome.clarification.question).toContain('不用重新输入')
+      expect(outcome.clarification.choices).toEqual([expect.objectContaining({
+        id: 'retry-strategy-generation', label: '重新生成', suggestedUtterance: request.utterance,
+      })])
+    }
+  })
+
+  it('retains prepared rules after a data failure without creating execution authority', () => {
+    const result = fromLiveDraftResponse({ ...response, status: 'needs_clarification',
+      strategy: null, strategy_hash: null, diagnostic_code: 'skill_numeric_unit_unconfirmed',
+      execution_assessment: { status: 'understood_not_executable', message: '缺历史单位口径',
+        missing: ['历史单位口径'], interpreted_strategy: strategy,
+        strategy_hash: response.strategy_hash },
+    }, request)
+    expect(result.status).toBe('needs_clarification')
+    if (result.status !== 'needs_clarification') return
+    expect(result.clarification.question).toBe('缺历史单位口径')
+    expect(result.clarification.reason).toBe('')
+    expect(result.clarification.provisionalDraft?.strategySpec).toEqual(strategy)
+    expect(result.clarification.choices).toEqual([])
+    expect(result).not.toHaveProperty('draft')
+    expect(result).not.toHaveProperty('runRequested', true)
+  })
+
+  it('roundtrips fixed CNY slippage independently of percentage and supports clearing it', () => {
+    const result = fromLiveDraftResponse({ ...response,
+      execution_settings: { slippage_cny: '0.02', slippage_bps: '0' },
+    }, request)
+    if (result.status !== 'compiled') throw new Error('expected draft')
+    expect(toLiveRevisionBody(result.draft).execution_settings?.slippage_cny).toBe(0.02)
+    expect(toLiveBacktestBody(result.draft).config.slippageCny).toBe(0.02)
+    const cleared = mergeLiveRevision({ ...response, revision: 2,
+      execution_settings: { slippage_cny: '0', slippage_bps: '5' } }, result.draft)
+    expect(toLiveBacktestBody(cleared).config.slippageCny).toBe(0)
+    expect(cleared.execution.slippageBps).toBe(5)
+  })
+
   it('maps stored execution settings with decimal strings, explicit zero and false', () => {
     const outcome = fromLiveDraftResponse({ ...response, execution_settings: {
       slippage_bps: '0', commission_rate: '0', minimum_commission_cny: 0,
@@ -210,6 +316,74 @@ describe('live API contract adapter', () => {
         verifiedSymbol === '600183.SH' ? '生益科技' : '600183.SH')
       expect(outcome.draft.instrument.symbol).toBe('600183.SH')
     }
+  })
+
+  it.each([
+    ['scheduled', { at: 'open' }, '在指定交易日开盘'],
+    ['scheduled', { at: 'close' }, '在指定交易日收盘'],
+    ['grid', { observation: 'minute_bar' }, '新触发委托最早下一根K线生效'],
+    ['grid', { observation: null }, '当前尚未确认分钟数据可用'],
+    ['grid', { observation: 'daily_close' }, '日线收盘确认信号'],
+  ] as const)('describes the actual %s plan timing', (kind, parameters, expected) => {
+    const outcome = fromLiveDraftResponse({ ...response, strategy: {
+      ...strategy, entry: null, exit: null,
+      trading_plan: { kind, parameters } as PricePlan,
+    } }, request)
+    if (outcome.status !== 'compiled') throw new Error('expected ready strategy')
+    expect(outcome.draft.assumptions[0]).toContain(expected)
+    if (!('observation' in parameters) || parameters.observation !== 'daily_close') {
+      expect(outcome.draft.assumptions[0]).not.toContain('日线收盘确认信号')
+    }
+  })
+
+  it.each(['buy', 'sell'] as const)('retains both composed legs and execution when saving a %s schedule', (side) => {
+    const composed: StrategySpec = { ...strategy,
+      entry: side === 'buy' ? null : strategy.entry,
+      exit: side === 'sell' ? null : strategy.exit,
+      trading_plan: { kind: 'scheduled', parameters: {
+        side, frequency: 'monthly', day: 1, sizing_mode: 'shares', quantity: 100,
+      } },
+      execution: { ...strategy.execution, entry_policy: 'composed_entry_leg',
+        exit_policy: 'composed_exit_leg', data_capability: 'daily_and_minute_ohlcv',
+        execution_resolution: '1m', evaluation_frequency: 'daily_close_and_minute_bar',
+        position_policy: 'bounded_inventory' },
+    }
+    const outcome = fromLiveDraftResponse({ ...response, strategy: composed }, request)
+    if (outcome.status !== 'compiled') throw new Error('expected ready strategy')
+    const summary = toStrategySummary(outcome.draft)
+    expect(JSON.stringify(summary)).toContain(side === 'buy' ? 'MACD 死叉' : 'MACD 金叉')
+    expect(JSON.stringify(summary)).not.toContain(side === 'buy' ? '未设置卖出规则' : '未设置买入规则')
+    const saved = toLiveRevisionBody(outcome.draft).strategy
+    expect(saved.execution).toEqual(composed.execution)
+    expect(saved.entry).toEqual(composed.entry)
+    expect(saved.exit).toEqual(composed.exit)
+    expect(saved.trading_plan?.parameters.side).toBe(side)
+  })
+
+  it('renders daily-signal plus minute-protection timing without calling it daily-only', () => {
+    const hybrid: StrategySpec = {
+      ...strategy,
+      exit: { op: 'first_of', children: [{
+        type: 'minute_protection_exit', take_profit_pct: 5, stop_loss_pct: 3,
+        trailing_drawdown_pct: null, limit_price_cny: null,
+        anchor: 'fee_exclusive_weighted_acquisition_cost',
+        observation: 'raw_minute_high_low', execution: 'next_bar_order_activation',
+      }] },
+      execution: {
+        timezone: 'Asia/Shanghai', entry_policy: 'next_market_session_open',
+        exit_policy: 'daily_signal_open_or_next_minute_activation',
+        data_capability: 'daily_and_minute_ohlcv', execution_resolution: '1m',
+        evaluation_frequency: 'daily_close_and_minute_bar',
+        position_policy: 'single_position_no_pyramiding', t_plus_one: true,
+      },
+    }
+    const outcome = fromLiveDraftResponse({ ...response, strategy: hybrid }, request)
+    if (outcome.status !== 'compiled') throw new Error('expected ready hybrid strategy')
+    expect(outcome.draft.exit.conditions[0]).toMatchObject({
+      kind: 'minute_protection', takeProfitPct: 5, stopLossPct: 3,
+    })
+    expect(outcome.draft.assumptions[0]).toContain('日线条件收盘后确认')
+    expect(outcome.draft.assumptions[0]).toContain('新委托下一分钟生效')
   })
 
   it('keeps a ready semantic edit executable even with an acknowledgement', () => {
@@ -570,6 +744,39 @@ describe('live API contract adapter', () => {
     expect(outcome.clarification.provisionalChoiceId).toBe('rsi_reversal')
   })
 
+  it.each([false, true])('keeps semantic confirmation non-executable without recommendations (run_requested=%s)', (runRequested) => {
+    const note = '“放量后再买”的时序还不明确，请确认是金叉当天同时放量，还是放量后的下一次金叉。'
+    const outcome = fromLiveDraftResponse({
+      ...response,
+      status: 'needs_clarification',
+      strategy: null,
+      strategy_hash: null,
+      run_requested: runRequested,
+      diagnostic_code: 'semantic_confirmation_required',
+      clarification: '已识别买卖规则，还需要确认一处具体含义。',
+      idea_route: null,
+      suggested_strategy: strategy,
+      suggested_strategy_hash: `sha256:${'b'.repeat(64)}`,
+      suggested_strategy_choice_id: null,
+      suggested_strategy_note: note,
+    }, request)
+
+    expect(outcome.status).toBe('needs_clarification')
+    if (outcome.status !== 'needs_clarification') throw new Error('expected semantic confirmation')
+    expect(outcome).not.toHaveProperty('draft')
+    expect(outcome).not.toHaveProperty('runRequested')
+    expect(outcome.clarification.id).toBe('semantic_confirmation_required')
+    expect(outcome.clarification.choices).toEqual([])
+    expect(outcome.clarification.ideaRoute).toBeUndefined()
+    expect(outcome.clarification.provisionalChoiceId).toBeUndefined()
+    expect(outcome.clarification.provisionalNote).toBe(note)
+    expect(outcome.clarification.provisionalDraft).toMatchObject({
+      strategyHash: `sha256:${'b'.repeat(64)}`,
+      strategySpec: strategy,
+      instrument: { name: '东方财富', symbol: '300059.SZ' },
+    })
+  })
+
   it('asks for a code instead of offering the demo stock in standalone mode', () => {
     const outcome = fromLiveDraftResponse({
       ...response,
@@ -782,6 +989,24 @@ describe('live API contract adapter', () => {
       id: 'trend-confirmation',
       description: '卖出：MACD 死叉',
     })
+    const pendingData = fromLiveDraftResponse({
+      ...guidedResponse,
+      diagnostic_code: 'candidate_data_incomplete',
+      run_requested: false,
+      idea_route: {
+        ...guidedResponse.idea_route!,
+        proposals: guidedResponse.idea_route!.proposals.map((item) => ({
+          ...item, assumptions: ['数据准备：所需指标尚未返回；尚未开始回测。'],
+        })),
+      },
+    }, request)
+    expect(pendingData.status).toBe('needs_clarification')
+    if (pendingData.status !== 'needs_clarification') throw new Error('expected clarification')
+    expect(pendingData.clarification.choices.map((item) => item.id)).toEqual(['trend-confirmation', 'oversold-rebound'])
+    expect(pendingData.clarification.ideaRoute?.proposals.every(
+      (item) => item.assumptions[0]?.startsWith('数据准备：') === true,
+    )).toBe(true)
+    expect(pendingData).not.toHaveProperty('runRequested', true)
     for (const diagnosticCode of ['strategy_rule_incomplete', 'ambiguous_cross_indicator']) {
       const completeOutcome = fromLiveDraftResponse({
         ...guidedResponse,
@@ -817,7 +1042,7 @@ describe('live API contract adapter', () => {
     expect(outcome).not.toHaveProperty('draft')
   })
 
-  it('fails closed when idea guidance has fewer than two complete directions', () => {
+  it('fails closed when no prepared direction is available', () => {
     expect(() => fromLiveDraftResponse({
       ...response,
       status: 'needs_clarification',
@@ -837,7 +1062,7 @@ describe('live API contract adapter', () => {
         },
         proposals: [],
       },
-    }, request)).toThrow('服务没有返回至少两个可供选择的完整策略方向')
+    }, request)).toThrow('服务没有返回可供选择的完整策略方向')
   })
 
   it('shows the model analysis for an unbound viewpoint without guessing a stock', () => {
@@ -953,35 +1178,34 @@ describe('live API contract adapter', () => {
   })
 
   it.each([
-    ['candidate_provider_authentication_failed', '模型服务鉴权失败，本次请求未完成，请检查服务端模型配置。'],
-    ['candidate_provider_permission_denied', '模型服务拒绝访问，本次请求未完成，请检查服务端账户权限。'],
-    ['candidate_provider_insufficient_balance', 'DeepSeek 账户余额不足，本次模型请求未完成，请检查服务端账户余额。'],
-    ['candidate_provider_billing_restricted', '模型服务账户计费受限，本次请求未完成，请检查服务端计费状态。'],
-    ['candidate_provider_rate_limited', '模型服务请求频率受限，本次请求未完成，请稍后重试。'],
-    ['candidate_provider_service_unavailable', '模型服务暂时不可用，本次请求未完成，请稍后重试。'],
-    ['candidate_provider_timeout', '策略生成模型请求超时，本次未生成策略。请原样重试。'],
-    ['candidate_provider_connection_failed', '模型服务连接未完成或中断，本次请求未完成，请稍后重试。'],
-    ['candidate_provider_invalid_response', '模型返回的格式无效，本次请求未完成，请重试。'],
-    ['candidate_provider_incomplete_response', '模型响应未完整返回，本次请求未完成，请重试。'],
-    ['candidate_provider_unavailable', '策略生成模型服务调用未完成，请稍后原样重试。'],
-    ['candidate_provider_invalid_output', '这次策略解析未通过结构或条件校验，尚未生成可回测结果。'],
-  ])('preserves the bounded provider failure diagnostic %s', (diagnosticCode, message) => {
-    let failure: unknown
-    try {
-      fromLiveDraftResponse({
+    ['candidate_provider_authentication_failed', '策略服务暂时无法使用，刚才的内容已经保留。', false],
+    ['candidate_provider_permission_denied', '策略服务暂时无法使用，刚才的内容已经保留。', false],
+    ['candidate_provider_insufficient_balance', '策略服务暂时无法使用，刚才的内容已经保留。', false],
+    ['candidate_provider_billing_restricted', '策略服务暂时无法使用，刚才的内容已经保留。', false],
+    ['candidate_provider_rate_limited', '刚才的连接中断了。点一下“重新生成”即可继续，不用重新输入。', true],
+    ['candidate_provider_service_unavailable', '刚才的连接中断了。点一下“重新生成”即可继续，不用重新输入。', true],
+    ['candidate_provider_timeout', '刚才的连接中断了。点一下“重新生成”即可继续，不用重新输入。', true],
+    ['candidate_provider_connection_failed', '刚才的连接中断了。点一下“重新生成”即可继续，不用重新输入。', true],
+    ['candidate_provider_invalid_response', '策略方案没有完整生成。点一下“重新生成”即可继续，不用重新输入。', true],
+    ['candidate_provider_incomplete_response', '策略方案没有完整生成。点一下“重新生成”即可继续，不用重新输入。', true],
+    ['candidate_provider_unavailable', '策略方案没有完整生成。点一下“重新生成”即可继续，不用重新输入。', true],
+    ['candidate_provider_invalid_output', '策略方案没有完整生成。点一下“重新生成”即可继续，不用重新输入。', true],
+  ])('preserves the bounded provider failure diagnostic %s', (diagnosticCode, message, retryable) => {
+    const outcome = fromLiveDraftResponse({
         ...response,
         status: 'unsupported',
         strategy: null,
         strategy_hash: null,
-        clarification: null,
+        clarification: '策略处理链路授权或核对未完成，后台诊断。',
         diagnostic_code: diagnosticCode,
       }, request)
-    } catch (error) {
-      failure = error
-    }
-    expect(failure).toMatchObject({
-      name: 'ApiError',
-      problem: { status: 422, code: diagnosticCode, detail: message },
+    expect(outcome).toMatchObject({
+      status: 'needs_clarification', draftId: response.draft_id, revision: response.revision,
+      clarification: {
+        id: diagnosticCode,
+        question: message,
+        choices: retryable ? [expect.objectContaining({ label: '重新生成' })] : [],
+      },
     })
   })
 
@@ -1064,8 +1288,8 @@ describe('live API contract adapter', () => {
       end: '2026-07-31',
       initial_cash_cny: 200_000,
     })
-    expect(revisionBody.strategy.entry.type).toBe('indicator_condition')
-    if (revisionBody.strategy.entry.type === 'indicator_condition') {
+    expect(revisionBody.strategy.entry?.type).toBe('indicator_condition')
+    if (revisionBody.strategy.entry?.type === 'indicator_condition') {
       expect(revisionBody.strategy.entry.params.fast).toBe(10)
     }
     const saved = mergeLiveRevision(
@@ -1084,7 +1308,7 @@ describe('live API contract adapter', () => {
       slippageBps: 8,
       allocationRatio: 0.75,
       limitHandling: 'wait_for_unlock',
-      commissionRate: 0.0003,
+      commissionRate: 0.00025,
       minimumCommissionCny: 5,
       retryUnfilledExits: false,
       maxExitAttempts: 7,
@@ -1092,11 +1316,11 @@ describe('live API contract adapter', () => {
       settlementExtensionDays: 30,
       runRobustness: false,
     })
-    expect(body.strategy.entry.type).toBe('indicator_condition')
-    if (body.strategy.entry.type === 'indicator_condition') {
+    expect(body.strategy.entry?.type).toBe('indicator_condition')
+    if (body.strategy.entry?.type === 'indicator_condition') {
       expect(body.strategy.entry.params.fast).toBe(10)
     }
-    const savedExit = body.strategy.exit.children[0]
+    const savedExit = body.strategy.exit!.children[0]
     expect(savedExit?.type).toBe('indicator_condition')
     if (savedExit?.type === 'indicator_condition') {
       expect(savedExit.params.fast).toBe(10)
@@ -1178,7 +1402,7 @@ describe('live API contract adapter', () => {
     )
     if (outcome.status !== 'compiled') throw new Error('expected a compiled moving-average strategy')
 
-    expect(outcome.draft.title).toBe('MA 规则 · 日线')
+    expect(outcome.draft.title).toBe('收盘突破 20 日均线时买入，跌破 20 日线卖出')
     expect(outcome.draft.entry.conditions[0]).toMatchObject({
       indicatorId: 'technical.ma',
       label: '收盘突破 20 日均线',
@@ -1196,6 +1420,46 @@ describe('live API contract adapter', () => {
       indicatorId: 'technical.ma',
       label: '收盘跌破 20 日均线',
     })
+  })
+
+  it.each([
+    ['price_crosses_above_upper', '突破前 20 个交易日最高价'],
+    ['price_crosses_below_lower', '跌破前 20 个交易日最低价'],
+    ['price_above_upper', '高于前 20 个交易日最高价'],
+    ['price_below_lower', '低于前 20 个交易日最低价'],
+  ])('explains channel condition %s without changing its trigger', (trigger, label) => {
+    const condition: StrategySpecIndicatorCondition = {
+      type: 'indicator_condition', indicator_id: 'technical.donchian', definition_version: '1.0.0',
+      params: { period: 20 }, timeframe: '1d', evaluation_mode: 'bar_close_confirmed', trigger, value: null,
+    }
+    const outcome = fromLiveDraftResponse({ ...response, strategy: {
+      ...strategy, entry: condition, exit: { op: 'first_of', children: [condition] },
+    } }, request)
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled strategy')
+    expect(outcome.draft.entry.conditions[0]).toMatchObject({ label, trigger: `${label}，以收盘价确认；统计窗口不含当天。` })
+    expect(outcome.draft.title).toBe(`${label}时买入，${label}卖出`)
+  })
+
+  it('summarizes a multi-condition strategy as one trading idea instead of indicator fragments', () => {
+    const indicator = (indicator_id: string, trigger: string, params: Record<string, number>, value: number | null = null): StrategySpecIndicatorCondition => ({
+      type: 'indicator_condition', indicator_id, definition_version: '1.0.0', params,
+      timeframe: '1d', evaluation_mode: 'bar_close_confirmed', trigger, value,
+    })
+    const outcome = fromLiveDraftResponse({ ...response, strategy: {
+      ...strategy,
+      entry: { type: 'all', children: [
+        indicator('technical.ma_cross', 'fast_above_slow', { fast_period: 20, slow_period: 60 }),
+        indicator('price.return_pct', 'below', { period: 1 }, 0),
+        indicator('technical.ma', 'price_above', { period: 20 }),
+      ] },
+      exit: { op: 'first_of', children: [
+        indicator('technical.ma', 'price_crosses_below', { period: 20 }),
+        { type: 'holding_period_exit', sessions: 10, anchor: 'first_entry_fill',
+          count_mode: 'subsequent_trading_sessions', execution: 'target_session_open_proxy' },
+      ] },
+    } }, request)
+    if (outcome.status !== 'compiled') throw new Error('expected a compiled strategy')
+    expect(outcome.draft.title).toBe('上涨趋势中回踩买入，跌破 20 日线或持有 10 个交易日卖出')
   })
 
   it('renders static price-to-average comparisons without raw trigger identifiers', () => {
@@ -1567,6 +1831,39 @@ describe('live API contract adapter', () => {
     ]))
   })
 
+  it.each([
+    ['above', '高于'], ['below', '低于'], ['at_least', '不低于'], ['at_most', '不高于'],
+    ['crosses_above', '上穿'], ['crosses_below', '下穿'],
+  ])('renders both queried series for %s and never keeps a scalar threshold', (trigger, expectedLabel) => {
+    const pair: StrategySpecIndicatorCondition = {
+      type: 'indicator_condition', indicator_id: 'provider.series_compare', definition_version: '1.0.0',
+      params: { left_metric_query: '5日均线', right_metric_query: '20日均线', unit: '元' },
+      timeframe: '1d', evaluation_mode: 'bar_close_confirmed', trigger, value: 99,
+    }
+    const outcome = fromLiveDraftResponse({ ...response, strategy: { ...strategy, entry: pair } }, request)
+    if (outcome.status !== 'compiled') throw new Error('expected series comparison strategy')
+    expect(outcome.draft.entry.conditions[0]).toMatchObject({
+      label: `5日均线 ${expectedLabel} 20日均线（共同单位：元）`,
+      trigger: `日线收盘确认：5日均线 ${expectedLabel} 20日均线（共同单位：元）`,
+      parameters: [],
+    })
+    expect(toLiveRevisionBody(outcome.draft).strategy.entry).toEqual({ ...pair, value: null })
+  })
+
+  it('keeps generic scalar query names, units and thresholds intact', () => {
+    const numeric: StrategySpecIndicatorCondition = {
+      type: 'indicator_condition', indicator_id: 'provider.numeric', definition_version: '1.0.0',
+      params: { metric_query: '市盈率TTM', unit: '倍' },
+      timeframe: '1d', evaluation_mode: 'bar_close_confirmed', trigger: 'below', value: 20,
+    }
+    const outcome = fromLiveDraftResponse({ ...response, strategy: { ...strategy, entry: numeric } }, request)
+    if (outcome.status !== 'compiled') throw new Error('expected scalar comparison strategy')
+    expect(outcome.draft.entry.conditions[0]).toMatchObject({
+      label: '市盈率TTM 低于 20倍', parameters: [expect.objectContaining({ key: '$value', value: 20, unit: '倍' })],
+    })
+    expect(toLiveRevisionBody(outcome.draft).strategy.entry).toEqual(numeric)
+  })
+
   it('shows absolute-price condition orders with their thresholds in Chinese', () => {
     const entry: StrategySpecIndicatorCondition = {
       type: 'indicator_condition',
@@ -1811,7 +2108,7 @@ describe('live API contract adapter', () => {
     )
     if (outcome.status !== 'compiled') throw new Error('expected a compiled event strategy')
 
-    expect(outcome.draft.title).toBe('年度报告 + MACD 规则 · 日线')
+    expect(outcome.draft.title).toBe('年度报告发布时买入，MACD 死叉卖出')
     expect(outcome.draft.execution).toMatchObject({
       dataCapability: 'daily_ohlcv_events',
       evaluationFrequency: 'event_available_plus_1d_close',
@@ -1875,7 +2172,7 @@ describe('live API contract adapter', () => {
     )
     if (outcome.status !== 'compiled') throw new Error('expected a compiled financial strategy')
 
-    expect(outcome.draft.title).toBe('市盈率 PE + MACD 规则 · 日线')
+    expect(outcome.draft.title).toBe('市盈率 PE < 20时买入，MACD 死叉卖出')
     expect(outcome.draft.execution).toMatchObject({
       dataCapability: 'daily_ohlcv_financials',
       evaluationFrequency: 'financial_available_plus_1d_close',
@@ -1970,7 +2267,7 @@ describe('live API contract adapter', () => {
     expect(outcome.draft.exit.conditions[0]).toMatchObject({
       kind: 'holding_period',
       sessions: 3,
-      label: '实际买入成交后第 3 个交易日卖出',
+      label: '成交后第 3 个交易日尝试卖出',
     })
     expect(toLiveRevisionBody(outcome.draft).strategy).toEqual(documentStrategy)
     expect(toLiveBacktestBody(outcome.draft).strategy).toEqual(documentStrategy)

@@ -63,10 +63,20 @@ export interface EditableRow {
 
 export interface StrategySummary {
   title: string;
+  pricePlanKind?: 'grid' | 'conditional' | 'scheduled';
+  hasSequentialPricePlanStages?: boolean;
+  gridReview?: {
+    anchor: string;
+    initialization?: string;
+    buy: Array<{ label: string; value: string }>;
+    sell: Array<{ label: string; value: string }>;
+  };
   /** 卡片本身就是表单；高级执行设置仍下沉到二级页。 */
   rows: EditableRow[];
   strategyHash: string;
   entryRule: StrategyRuleNode;
+  /** 从最终买入条件与执行策略推导，不能把普通阈值误称为上穿。 */
+  entryTriggerNote?: string;
   exitRule: StrategyRuleNode;
   confirmation: string;
   earliestExecution: string;
@@ -137,12 +147,14 @@ export interface BacktestMetrics {
   benchmarkComparisonStatus: 'comparable' | 'strategy_entry_not_filled' | 'benchmark_entry_not_filled' | 'benchmark_unavailable';
   mdd: number | null;     // 最大回撤 %（负数）
   trips: number;   // 完整交易数
+  tradeCountSemantics?: 'closed_position_cycles';
   win: number | null;     // 胜率 %
   sharpe: number | null;
   ann: number | null;     // 年化收益 %
   initialCashCny: number | null;
   finalEquityCny: number;
   interpretation: string;
+  executionNote?: string | null;
   dataRange: { start: string; end: string; sessions: number };
   warnings: string[];
   /** 只有 API 明确提供时才显示；前端不能从活动流推断。 */
@@ -182,6 +194,7 @@ export interface ChartMark {
 }
 
 export interface TradeRow {
+  signalAt?: string | null;
   id: string;
   kind: ActivityKind;
   side: 'buy' | 'sell';
@@ -241,7 +254,7 @@ export interface OrderRow {
   outcomeNote: string | null;
   timeQuality?: string | null;
   timeSemantics?: string | null;
-  /** 该链上全部活动，点开因果轨迹时用。 */
+  /** 该委托关联的活动，用于列表与图中买卖点联动。 */
   activities: TradeRow[];
 }
 
@@ -293,6 +306,10 @@ export interface FailureState {
   title: string;
   status: StatusWord;
   reason: string;    // 必须告诉用户具体缺了什么
-  actions: string[]; // 下一步
+  actions: Array<{
+    label: string;
+    action: 'edit_rules' | 'edit_range' | 'edit_settings' | 'use_example'
+      | 'retry_run' | 'read_run' | 'read_results';
+  }>;
   runId?: string;
 }

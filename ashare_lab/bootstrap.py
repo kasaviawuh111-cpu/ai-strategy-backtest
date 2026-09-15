@@ -510,6 +510,7 @@ def create_configured_app(
         selected,
         extract_fast_transport=candidate_transport,
     )
+    _configure_candidate_timeout_fallback(candidate_transport, plan_deep_transport)
     web_researcher = _build_web_researcher(selected)
     live_data_provider = _build_mx_saas_live_market_data(selected)
     instrument_name_resolver = _build_compiler_instrument_name_resolver(
@@ -526,12 +527,17 @@ def create_configured_app(
         backtest_anchor_date=runtime.execution.backtest_anchor_date,
         instrument_name_resolver=instrument_name_resolver,
         researcher=web_researcher,
+        inspiration_market_data=live_data_provider,
+        candidate_model_semantic_review=isinstance(
+            candidate_transport, OpenAICompatibleCandidateTransport,
+        ),
     )
     strategy_advisor = (
         VibeVerifiedFactStrategyAdvisor(
             plan_deep_transport,
             capability_matrix=capability_matrix,
             provider_identity=plan_deep_transport.identity,
+            model_semantic_review=True,
         )
         if isinstance(plan_deep_transport, OpenAICompatibleCandidateTransport)
         else None
@@ -539,8 +545,10 @@ def create_configured_app(
     backtest_review_advisor = (
         VibeBacktestReviewAdvisor(
             plan_deep_transport,
+            review_transport=candidate_transport,
             capability_matrix=capability_matrix,
             provider_identity=plan_deep_transport.identity,
+            model_semantic_review=True,
         )
         if isinstance(plan_deep_transport, OpenAICompatibleCandidateTransport)
         else None
@@ -614,7 +622,11 @@ def create_configured_app(
             else None
         ),
     )
-    if isinstance(web_researcher, VolcengineWebSearchResearcher):
+    from ashare_lab.adapters.language.tencent_web_research import TencentWebSearchResearcher
+
+    if isinstance(web_researcher, TencentWebSearchResearcher):
+        research_provider, research_model = "tencent_wsa", "none"
+    elif isinstance(web_researcher, VolcengineWebSearchResearcher):
         research_provider, research_model = "volcengine", "web-search"
     elif isinstance(web_researcher, DeepSeekWebResearcher):
         research_provider, research_model = "deepseek", selected.research_provider_model
@@ -636,10 +648,16 @@ def create_configured_app(
         "version": capability_matrix.schema_version,
         "hash": capability_matrix.content_hash,
     }
-    if isinstance(runtime.queue, ThreadBacktestJobQueue):
-        app.router.add_event_handler("shutdown", runtime.queue.shutdown)
+    # Preparation can enqueue computation until it has drained. Close the
+    # producer first so a graceful shutdown does not reject its final jobs.
     if isinstance(runtime.submission, AsyncBacktestSubmissionCoordinator):
         app.router.add_event_handler("shutdown", runtime.submission.shutdown)
+    if isinstance(runtime.queue, ThreadBacktestJobQueue):
+        app.router.add_event_handler("shutdown", runtime.queue.shutdown)
+    for model_transport in dict.fromkeys((candidate_transport, plan_deep_transport)):
+        if isinstance(model_transport, OpenAICompatibleCandidateTransport):
+            app.router.add_event_handler("startup", model_transport.startup)
+            app.router.add_event_handler("shutdown", model_transport.aclose)
     return app
 
 
@@ -716,6 +734,14 @@ def _build_web_researcher(settings: AppSettings) -> CurrentFactResearcher | None
     if settings.research_provider_mode == "disabled":
         return None
     try:
+        if settings.research_provider_mode == "tencent_web_search":
+            from ashare_lab.adapters.language.tencent_web_research import TencentWebSearchResearcher
+
+            if api_key is None:
+                return None
+            return TencentWebSearchResearcher(
+                api_key=api_key, timeout_seconds=settings.research_provider_timeout_seconds,
+            )
         if settings.research_provider_mode == "volcengine_web_search":
             if api_key is None:
                 return None
@@ -823,6 +849,23 @@ def _build_plan_deep_transport(
     )
 
 
+def _configure_candidate_timeout_fallback(
+    candidate: DisabledCandidateJsonTransport | OpenAICompatibleCandidateTransport,
+    planner: DisabledCandidateJsonTransport | OpenAICompatibleCandidateTransport,
+) -> None:
+    # Approved availability recovery only for the existing Flash / Pro split.
+    # Disabled, inherited, and other configured providers retain their behavior.
+    if (
+        isinstance(candidate, OpenAICompatibleCandidateTransport)
+        and isinstance(planner, OpenAICompatibleCandidateTransport)
+        and candidate is not planner
+        and candidate.identity.provider == planner.identity.provider == "deepseek"
+        and candidate.identity.model in {"deepseek-flash", "deepseek-v4-flash"}
+        and planner.identity.model == "deepseek-v4-pro"
+    ):
+        candidate.use_timeout_fallback(planner)
+
+
 def _language_transport_diagnostic(
     transport: DisabledCandidateJsonTransport | OpenAICompatibleCandidateTransport,
     *,
@@ -843,6 +886,9 @@ def _language_transport_diagnostic(
             "reasoning_effort": reasoning_effort,
         },
         "inherited_from": inherited_from,
+        **({"timeout_fallback_model": transport.timeout_fallback_identity.model}
+           if isinstance(transport, OpenAICompatibleCandidateTransport)
+           and transport.timeout_fallback_identity is not None else {}),
     }
 
 

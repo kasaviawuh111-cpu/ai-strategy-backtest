@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from ashare_lab.adapters.market_data.mx_daily_history import MxDailyHistoryClient
 from ashare_lab.adapters.market_data.mx_indicator_contract import (
-    UnsupportedSkillIndicatorError,
     build_indicator_contract,
 )
 from ashare_lab.adapters.persistence.backtest_runs import InMemoryBacktestRunStore
@@ -28,7 +27,7 @@ from .backtest_fakes import FakeRunStore, FakeSubmitter
 ROOT = Path(__file__).parents[3]
 
 
-def test_skill_capabilities_enable_local_macd_without_relaxing_provider_field_contract() -> None:
+def test_skill_capabilities_publish_routes_without_relaxing_provider_contract() -> None:
     store = InMemoryBacktestRunStore()
     service = SkillBacktestService(
         history=cast(MxDailyHistoryClient, object()),
@@ -41,13 +40,31 @@ def test_skill_capabilities_enable_local_macd_without_relaxing_provider_field_co
         payload = response.json()
         indicators = {item["indicator_id"]: item for item in payload["indicators"]}
         assert payload["backtest_execution_available"]
+        assert len(indicators) == 37
+        assert all(item["status"] == "stable" for item in indicators.values())
+        assert sum(item["data_source"] == "skill_ohlcv_python"
+                   for item in indicators.values()) == 30
+        assert sum(item["data_source"] == "provider_indicator"
+                   for item in indicators.values()) == 7
+        for indicator_id, route in service.indicator_routes.items():
+            assert indicators[indicator_id]["data_source"] == route.source
+            assert indicators[indicator_id]["formula_summary"] == route.formula_summary
         assert indicators["technical.macd"]["status"] == "stable"
         assert "尚未通过验证" not in indicators["technical.macd"]["description"]
-        assert indicators["technical.bollinger"]["status"] == "unavailable"
-        # Capabilities describe the executable local formula, not a newly verified
-        # provider MACD field. Its independent strict contract still rejects use.
-        with pytest.raises(UnsupportedSkillIndicatorError, match="后复权"):
-            build_indicator_contract("technical.macd", "MACD(12,26,9)", ("DIF值", "DEA值"))
+        assert indicators["technical.bollinger"]["data_source"] == "skill_ohlcv_python"
+        assert indicators["technical.rsi"]["data_source"] == "provider_indicator"
+        # This direct-caller fixture exposes the legacy formula profile. Fresh
+        # provider discovery is allowed, but still needs actual parameter proof.
+        contract = build_indicator_contract(
+            "technical.macd", "MACD(12,26,9)", ("DIF值", "DEA值"),
+            condition_params={"fast": 12, "slow": 26, "signal": 9},
+        )
+        field = {"returnName": "MACD(DIF值)", "returnSourceCode": "MACD_DIF",
+                 "fixedParamValue": "N1=12,N2=26,M=9,AdjustFlag=2,Period=1"}
+        assert contract.bind_field("DIF值", field)
+        assert not contract.bind_field("DIF值", {
+            **field, "fixedParamValue": "N1=12,N2=26,M=9,AdjustFlag=3,Period=1",
+        })
     finally:
         service.shutdown()
 
@@ -113,6 +130,7 @@ def test_capabilities_are_machine_readable_and_do_not_claim_backtest_execution(
     assert payload["event_availability_scope"] == "unavailable"
     assert payload["event_catalog_status"] == "published"
     assert set(payload) == {
+        "available_data_end",
         "markets",
         "input_modes",
         "strategy_scopes",
@@ -124,6 +142,7 @@ def test_capabilities_are_machine_readable_and_do_not_claim_backtest_execution(
         "event_preparation_available",
         "event_availability_scope",
         "backtest_execution_available",
+        "skill_data_discovery",
         "limits",
     }
     event_codes = {item["event_code"] for item in payload["events"]}
@@ -209,6 +228,8 @@ def test_all_stable_indicator_capabilities_match_both_active_catalogs(
             "status": definition.status,
             "display_name": metadata.name_zh,
             "description": metadata.description,
+            "data_source": None,
+            "formula_summary": None,
             "warmup_bars": definition.warmup_bars,
             "timeframes": list(definition.timeframes),
             "evaluation_modes": list(definition.evaluation_modes),
@@ -340,12 +361,24 @@ def test_openapi_exposes_compilation_and_async_backtest_vertical_slices(
         "/api/v1/capabilities",
         "/api/v1/strategy-drafts",
         "/api/v1/strategy-drafts/{draft_id}/revisions",
+        "/api/v1/strategy-drafts/{draft_id}/revisions/{revision}/clarification-answers",
         "/api/v1/backtest-runs",
+        "/api/v1/backtest-runs/prepare",
         "/api/v1/backtest-runs/{run_id}",
         "/api/v1/backtest-runs/{run_id}/cancel",
         "/api/v1/backtest-runs/{run_id}/summary",
         "/api/v1/backtest-runs/{run_id}/series",
         "/api/v1/backtest-runs/{run_id}/trades",
+        "/api/v1/backtest-runs/{run_id}/review",
+        "/api/v1/market/instruments",
+        "/api/v1/market/query",
+        "/api/v1/market/screen",
+        "/api/v1/market/screen-query",
+        "/api/v1/market/series-discovery",
+        "/api/v1/portfolio-reviews/analyze",
+        "/api/v1/portfolio-reviews/import-contract",
+        "/api/v1/portfolio-reviews/imports/parse",
+        "/api/v1/portfolio-reviews/narrate-highlight",
         "/api/v2/strategy-drafts",
         "/api/v2/strategy-drafts/{draft_id}/revisions/{revision}",
         "/api/v2/strategy-validations",

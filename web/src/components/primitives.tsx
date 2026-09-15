@@ -7,7 +7,7 @@ import type { DialogueProgressEvent } from '../shared/api/client';
 import { ModelReasoning } from './ModelReasoning';
 
 /* ---------- 数字格式 ---------- */
-export const fmtPct = (v: number | null) => v == null ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`;
+export { formatPercent as fmtPct } from '../shared/percent';
 export const signClass = (v: number | null) => v == null ? '' : (v > 0 ? 'up' : v < 0 ? 'down' : '');
 export const fmtCny = (v: number | null) => v == null
   ? '—'

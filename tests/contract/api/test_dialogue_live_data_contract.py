@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -18,6 +19,7 @@ from ashare_lab.ports.live_market_data import (
     LiveSecurityEntity,
 )
 from ashare_lab.ports.strategy_advice import (
+    QueryDataReview,
     StockRecommendation,
     StrategyAdviceCandidate,
     VerifiedFactStrategyAdvice,
@@ -33,6 +35,11 @@ class _CompilerMustNotRun:
     async def resolve_instrument_context(self, value: str) -> str:
         assert value == "300059.SZ"
         return value
+
+    async def compose_dialogue_response(self, **kwargs: object) -> str:
+        # A response-only model is permitted; only strategy compilation is forbidden.
+        assert kwargs.get("context")
+        return "以下是本轮已比较的股票候选。"
 
 
 class _RecordingCurrentData:
@@ -139,9 +146,29 @@ class _FinancePayloadCurrentData(_RecordingCurrentData):
 
 
 class _FlexibleAdvisor:
-    def __init__(self, *, analysis_only: str | None = None) -> None:
+    def __init__(
+        self, *, analysis_only: str | None = None, strategy_requested: bool = False,
+        expected_data_rounds: int = 1,
+    ) -> None:
         self.requests: list[VerifiedFactStrategyAdviceRequest] = []
         self.analysis_only = analysis_only
+        self.strategy_requested = strategy_requested
+        self.expected_data_rounds = expected_data_rounds
+        self.review_snapshots: list[Mapping[str, object]] = []
+
+    async def review_query_result(
+        self, *, question: str, data_snapshot: Mapping[str, object],
+        previous_queries: tuple[str, ...] = (), remaining_data_rounds: int = 1,
+    ) -> QueryDataReview:
+        # This fixture exercises the API's data-only response contract.
+        # Actual review semantics and re-query bounds have separate adapter tests.
+        assert question and previous_queries and remaining_data_rounds == self.expected_data_rounds
+        self.review_snapshots.append(data_snapshot)
+        return QueryDataReview(
+            satisfied=True, evidence=(), retry_query=None,
+            message=self.analysis_only or "已返回本轮实际数据。",
+            strategy_requested=self.strategy_requested,
+        )
 
     async def advise(
         self,
@@ -209,9 +236,9 @@ def test_first_turn_known_instrument_lookup_calls_live_finance_provider() -> Non
     payload = response.json()
     assert provider.finance_calls == [("东方财富昨天的换手率是多少", "昨天的换手率")]
     assert provider.screen_finance_calls == []
-    assert payload["assistant_message"] == (
-        "数据已返回，但本次模型回答未能完成；查询结果已保留，请重试。"
-    )
+    assert "数据已返回" in payload["assistant_message"]
+    assert "provider-raw-value" in payload["assistant_message"]
+    assert "未完成" not in payload["assistant_message"]
     assert payload["data"]["kind"] == "finance"
     assert payload["data"]["historical_backtest_eligible"] is False
     assert payload["data"]["finance"]["tables"][0]["rawTable"]["data"] == [
@@ -251,10 +278,10 @@ def test_finance_lookup_sends_dated_provider_values_and_returns_model_answer_ver
     assert response.status_code == 201, response.text
     message = response.json()["assistant_message"]
     assert message == analysis
-    assert len(advisor.requests) == 1
-    facts = advisor.requests[0].verified_facts
-    assert "东方财富：日期=2026-09-02" in facts
-    assert "东方财富：换手率(%)=2.37" in facts
+    assert not advisor.requests
+    assert "2026-09-02" in str(advisor.review_snapshots)
+    assert "换手率(%)" in str(advisor.review_snapshots)
+    assert "2.37" in str(advisor.review_snapshots)
     assert provider.screen_calls == [] and provider.screen_finance_calls == []
     assert response.json()["strategy"] is None and response.json()["idea_route"] is None
 
@@ -294,10 +321,10 @@ def test_finance_lookup_accepts_column_oriented_provider_table(
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["assistant_message"] == analysis
-    assert len(advisor.requests) == 1
-    assert "东方财富：最新价=18.88" in advisor.requests[0].verified_facts
-    assert "东方财富：换手率=2.37" in advisor.requests[0].verified_facts
-    assert not any("数据日期=" in fact for fact in advisor.requests[0].verified_facts)
+    assert not advisor.requests
+    assert "18.88" in str(advisor.review_snapshots)
+    assert "2.37" in str(advisor.review_snapshots)
+    assert "数据日期" not in str(advisor.review_snapshots)
     assert provider.screen_calls == [] and provider.screen_finance_calls == []
     assert body["strategy"] is None and body["idea_route"] is None
     assert body["data"]["finance"]["tables"][0][payload_key] == provider._payload[payload_key]
@@ -340,17 +367,20 @@ def test_verified_finance_answer_does_not_replace_missing_model_with_fixed_rules
     assert response.status_code == 201, response.text
     body = response.json()
     message = body["assistant_message"]
-    assert message == "数据已返回，但本次模型回答未能完成；查询结果已保留，请重试。"
+    assert "数据已返回" in message and "最新价(元)=19.15" in message
     assert "ZXJ_f2_3" not in message
     assert "test_finance" not in message
     assert "sha256:" not in message
-    assert "2026-09-03" not in message
+    assert "2026-09-03" in message
     assert body["data"]["finance"]["tables"][0]["rawTable"]["ZXJ_f2_3"] == [19.15]
     assert body["data"]["finance"]["provenance"]["response_sha256"].startswith("sha256:")
     assert body["idea_route"] is None
 
 
-def test_verified_finance_answer_uses_model_parameters_only_after_compiler_validation() -> None:
+@pytest.mark.parametrize("strategy_requested", [False, True])
+def test_finance_strategy_advice_requires_explicit_model_understood_request(
+    strategy_requested: bool,
+) -> None:
     provider = _FinancePayloadCurrentData(
         {
             "code": "300059.SZ",
@@ -366,7 +396,7 @@ def test_verified_finance_answer_uses_model_parameters_only_after_compiler_valid
             ],
         }
     )
-    advisor = _FlexibleAdvisor()
+    advisor = _FlexibleAdvisor(strategy_requested=strategy_requested)
     with TestClient(
         create_app(
             live_market_data=provider,
@@ -377,27 +407,33 @@ def test_verified_finance_answer_uses_model_parameters_only_after_compiler_valid
         response = client.post(
             "/api/v1/strategy-drafts",
             json={
-                "utterance": "查询东方财富现价，并分析两种策略",
+                "utterance": (
+                    "查询东方财富现价，并分析两种策略" if strategy_requested else "查询东方财富现价"
+                ),
                 "as_of_date": "2026-09-03",
             },
         )
 
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["assistant_message"] == "现价只是一个切片，可以用较快趋势和深度超跌两种假设验证。"
-    assert [item["title"] for item in body["idea_route"]["proposals"]] == [
-        "短周期趋势",
-        "深度超跌",
-    ]
-    assert [item["entry_summary"] for item in body["idea_route"]["proposals"]] == [
-        "股价上穿10日均线",
-        "RSI低于25",
-    ]
-    assert all(
-        item["suggested_utterance"].startswith("300059.SZ ")
-        for item in body["idea_route"]["proposals"]
-    )
-    assert "最新价(元)=19.15" in "|".join(advisor.requests[0].verified_facts)
+    if strategy_requested:
+        assert body["assistant_message"] == (
+            "现价只是一个切片，可以用较快趋势和深度超跌两种假设验证。"
+        )
+        assert [item["title"] for item in body["idea_route"]["proposals"]] == [
+            "短周期趋势", "深度超跌",
+        ]
+        assert [item["entry_summary"] for item in body["idea_route"]["proposals"]] == [
+            "股价上穿10日均线", "RSI低于25",
+        ]
+        assert all(item["suggested_utterance"].startswith("300059.SZ ")
+                   for item in body["idea_route"]["proposals"])
+        assert len(advisor.requests) == 1
+    else:
+        assert body["assistant_message"] == "已返回本轮实际数据。"
+        assert body["idea_route"] is None and body["strategy"] is None
+        assert not advisor.requests
+    assert "19.15" in str(advisor.review_snapshots)
 
 
 @pytest.mark.parametrize("payload_key", ["rawTable", "table"])
@@ -439,11 +475,12 @@ def test_finance_date_axis_keeps_latest_date_and_each_column_value_aligned(
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["assistant_message"] == analysis
-    assert len(advisor.requests) == 1
-    assert advisor.requests[0].verified_facts == (
-        "东方财富：数据日期=2026-09-04", "东方财富：收盘价(元)=19.15",
-        "东方财富：成交额(亿元)=48.54", "东方财富：换手率(%)=1.881",
-    )
+    assert not advisor.requests
+    snapshot_tables = cast(list[dict[str, object]], advisor.review_snapshots[0]["tables"])
+    assert snapshot_tables[0]["fields_and_first_row"] == {
+        "数据日期": "2026-09-04", "收盘价(元)": "19.15",
+        "成交额(亿元)": "48.54", "换手率(%)": "1.881",
+    }
     assert len(provider.finance_calls) == 1
     assert provider.screen_calls == [] and provider.screen_finance_calls == []
     assert body["strategy"] is None and body["idea_route"] is None
@@ -454,7 +491,11 @@ def test_finance_date_axis_keeps_latest_date_and_each_column_value_aligned(
 
 @pytest.mark.parametrize("payload_key", ["rawTable", "table"])
 def test_finance_lookup_treats_metadata_without_values_as_empty(payload_key: str) -> None:
-    provider = _FinancePayloadCurrentData(
+    class EmptyCurrentData(_FinancePayloadCurrentData):
+        def _screen_result(self, *, query: str, asset_type: str) -> LiveMarketDataResult:
+            return replace(super()._screen_result(query=query, asset_type=asset_type), rows=())
+
+    provider = EmptyCurrentData(
         {
             payload_key: {
                 "headName": ["最新交易日"],
@@ -481,7 +522,51 @@ def test_finance_lookup_treats_metadata_without_values_as_empty(payload_key: str
     assert response.status_code == 201, response.text
     body = response.json()
     assert "未返回匹配数据" in body["assistant_message"]
-    assert body["data"]["finance"]["tables"][0][payload_key] == provider._payload[payload_key]
+    assert len(provider.finance_calls) == 1
+    assert provider.screen_calls == [("东方财富最新价和换手率是多少", "A股")]
+    assert body["data"]["kind"] == "screen" and body["data"]["screen"]["rows"] == []
+    assert body["strategy"] is None and body["idea_route"] is None
+
+
+@pytest.mark.parametrize("payload_key", ["rawTable", "table"])
+def test_empty_finance_recovers_requested_security_and_fields_from_screen(payload_key: str) -> None:
+    actual_row = {"证券代码": "300059", "证券简称": "东方财富", "最新价(元)": 19.15,
+                  "换手率(%)": 1.881}
+
+    class RecoverableCurrentData(_FinancePayloadCurrentData):
+        def _screen_result(self, *, query: str, asset_type: str) -> LiveMarketDataResult:
+            return replace(
+                super()._screen_result(query=query, asset_type=asset_type),
+                columns=tuple(actual_row), rows=(actual_row,),
+            )
+
+    provider = RecoverableCurrentData({payload_key: {"headName": ["最新交易日"],
+                                                   "最新价": [], "换手率": []}})
+    analysis = "东方财富最新价19.15元，换手率1.881%。"
+    advisor = _FlexibleAdvisor(analysis_only=analysis, expected_data_rounds=0)
+    question = "东方财富最新价和换手率是多少"
+    with TestClient(create_app(
+        compiler=cast(Any, _CompilerMustNotRun()), live_market_data=provider,
+        live_finance_data=provider, strategy_advisor=advisor,
+    )) as client:
+        response = client.post("/api/v1/strategy-drafts", json={
+            "utterance": question, "as_of_date": "2026-09-03",
+        })
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert len(provider.finance_calls) == 1 and provider.finance_calls[0][0] == question
+    assert provider.screen_calls == [(question, "A股")]
+    assert not provider.screen_finance_calls and not advisor.requests
+    assert body["assistant_message"] == analysis
+    assert body["data"]["kind"] == "screen"
+    assert body["data"]["screen"]["rows"] == [actual_row]
+    assert body["data"]["screen"]["provenance"]["response_sha256"] == (
+        provider.provenance.response_sha256
+    )
+    assert advisor.review_snapshots[0]["rows"] == [actual_row]
+    assert body["strategy"] is None and body["idea_route"] is None
+    assert body["data"]["historical_backtest_eligible"] is False
 
 
 def test_first_turn_screened_finance_splits_filter_from_requested_values() -> None:
@@ -491,6 +576,7 @@ def test_first_turn_screened_finance_splits_filter_from_requested_values() -> No
             compiler=cast(Any, _CompilerMustNotRun()),
             live_market_data=provider,
             live_finance_data=provider,
+            strategy_advisor=_FlexibleAdvisor(),
         )
     ) as client:
         response = client.post(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -10,7 +11,7 @@ import pytest
 from ashare_lab.adapters.language import RuleBasedCandidateGenerator
 from ashare_lab.application.compile_strategy import CompileOutcome, CompileStatus, StrategyCompiler
 from ashare_lab.application.dialogue_state import DialogueState
-from ashare_lab.application.dialogue_turn import DialogueTurnOrchestrator
+from ashare_lab.application.dialogue_turn import DialogueTurnOrchestrator, _resolved_instrument_memory
 from ashare_lab.application.turn_intent import TurnIntent
 from ashare_lab.domain.catalog import load_catalog_directory
 from ashare_lab.domain.strategy import IndicatorCondition
@@ -30,6 +31,14 @@ from ashare_lab.ports.idea_routing import (
 ROOT = Path(__file__).parents[3]
 
 
+@pytest.mark.parametrize("label", ["东方财富300059.SZ", "东方财富（300059）", "300059.sz 东方财富"])
+def test_verified_name_code_label_keeps_only_name_for_display(label: str) -> None:
+    memory = _resolved_instrument_memory(instrument="300059.SZ", target=label, source="test")
+    assert memory.name == "东方财富"
+    assert memory.symbol == "300059.SZ"
+    assert memory.evidence == label
+
+
 def _resolve_instrument(name: str) -> str:
     if name == "同花顺":
         return "300033.SZ"
@@ -45,6 +54,104 @@ def _compiler(dialogue: ClarificationDialogueRouter | None = None) -> StrategyCo
         instrument_name_resolver=_resolve_instrument,
         clarification_dialogue_router=dialogue,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [
+    "同花顺300033.SZ", "同花顺（300033.SZ）", "同花顺 300033",
+    "300033.SZ 同花顺", "300033（同花顺）", "同花顺300033.sz",
+])
+async def test_identity_label_requires_name_code_agreement(answer: str) -> None:
+    assert await _compiler().resolve_instrument_context(answer, require_details=True) == "300033.SZ"
+
+
+@pytest.mark.asyncio
+async def test_identity_label_does_not_prefer_code_over_conflicting_name() -> None:
+    compiler = _compiler()
+    assert await compiler.resolve_instrument_context("同花顺300059.SZ") is None
+    with pytest.raises(LookupError, match="instrument_name_code_mismatch"):
+        await compiler.resolve_instrument_context("同花顺300059.SZ", require_details=True)
+    with pytest.raises(LookupError):
+        await compiler.resolve_instrument_context("不存在300059.SZ", require_details=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["casual", "data_query", "safety"])
+async def test_pending_turn_uses_model_intent_and_preserves_rules(intent: str) -> None:
+    contexts = []
+
+    class Dialogue:
+        async def classify_initial(self, answer, as_of_date, *, context=None):
+            contexts.append(context)
+            return intent
+
+        async def assess(self, request):
+            return ClarificationDialogueAssessment(
+                reply_kind="off_topic", acknowledgement_id="light_redirect",
+                natural_reply="我听到了，我们可以先聊聊。",
+            )
+
+    compiler = _compiler(Dialogue())
+    compiler.edit_current_strategy = AsyncMock(
+        side_effect=AssertionError("non-edit intent must not reach strategy editor"),
+    )
+    original = CompileInput(
+        utterance="东方财富MACD金叉买入", instrument_context="300059.SZ",
+        as_of_date=date(2026, 9, 4),
+    )
+    prior = CompileOutcome(
+        status=CompileStatus.NEEDS_CLARIFICATION, diagnostic_code="exit_rule_not_recognized",
+        clarification="什么时候卖出？",
+    )
+    state = DialogueState.project(
+        draft_id=uuid4(), revision=1, compile_input=original, outcome=prior,
+        created_at=datetime(2026, 9, 4, tzinfo=UTC), recent_turns=(),
+    )
+    plan = await DialogueTurnOrchestrator(compiler).plan(
+        state=state, answer="我现在不想讨论这个价格了",
+    )
+    assert plan.intent.value == intent
+    compiler.edit_current_strategy.assert_not_awaited()
+    assert len(contexts) == 1
+    assert contexts[0]["prior_utterance"] == original.utterance
+    assert contexts[0]["instrument_context"] == "300059.SZ"
+    assert contexts[0]["pending_question"] == "什么时候卖出？"
+    if intent == "data_query":
+        assert plan.clarification_turn is None
+    else:
+        turn = plan.clarification_turn
+        assert turn is not None and not turn.revision_changed
+        assert turn.compile_input is original
+        assert turn.outcome.strategy is None and not turn.outcome.run_requested
+
+
+@pytest.mark.asyncio
+async def test_unsupported_supplement_carries_both_turns_and_verified_stock() -> None:
+    compiler = _compiler()
+    original = CompileInput(
+        utterance="东方财富用5分钟K线，5均线上穿20均线买，下穿卖",
+        instrument_context="300059.SZ", as_of_date=date(2026, 9, 4),
+    )
+    prior = CompileOutcome(status=CompileStatus.UNSUPPORTED,
+                           diagnostic_code="non_daily_timeframe_not_supported")
+    state = DialogueState.project(
+        draft_id=uuid4(), revision=1, compile_input=original, outcome=prior,
+        created_at=datetime(2026, 9, 4, tzinfo=UTC), recent_turns=(),
+    )
+    compiler.compile = AsyncMock(return_value=prior)
+    plan = await DialogueTurnOrchestrator(compiler).plan(
+        state=state, answer="只改成日线，其他不变", semantic_intent=TurnIntent.SUPPLEMENT,
+    )
+    compiler.compile.assert_awaited_once()
+    request = compiler.compile.await_args.args[0]
+    assert original.utterance in request.utterance
+    assert "只改成日线，其他不变" in request.utterance
+    assert request.instrument_context == "300059.SZ"
+    assert request.as_of_date == original.as_of_date
+    assert request.semantic_intent == "new_strategy"
+    assert plan.intent is TurnIntent.SUPPLEMENT
+    assert plan.clarification_turn.outcome.status is CompileStatus.UNSUPPORTED
+    assert plan.clarification_turn.outcome.strategy is None
 
 
 @pytest.mark.asyncio
@@ -172,6 +279,48 @@ class _CandidateDialogue:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("intent", ["change_instrument", "data_query"])
+@pytest.mark.parametrize("recommend", [True, False])
+async def test_pending_stock_recommendation_is_independent_of_pause(
+    intent: str, recommend: bool,
+) -> None:
+    base = await _paired_idea_state()
+    assert base.outcome.idea_route is not None
+    proposal = base.outcome.idea_route.proposals[0]
+    outcome = replace(
+        base.outcome, diagnostic_code="instrument_required", idea_route=None,
+        selected_idea_proposal=replace(proposal, instrument_symbol=None, strategy=None),
+        instrument_suggestion_declined=True,
+    )
+    state = DialogueState.project(
+        draft_id=base.draft_id, revision=2, compile_input=base.compile_input,
+        outcome=outcome, created_at=base.created_at, recent_turns=(),
+    )
+
+    class Dialogue(_CandidateDialogue):
+        async def classify_initial(self, answer, as_of_date, *, context=None):
+            return intent
+
+    dialogue = Dialogue(ClarificationDialogueAssessment(
+        reply_kind="question", acknowledgement_id="answer_question",
+        natural_reply="先保留规则，暂不运行。",
+        instrument_recommendation_requested=recommend,
+        run_requested=False, run_request_evidence="先别跑",
+    ))
+    plan = await DialogueTurnOrchestrator(_compiler(dialogue)).plan(
+        state=state, answer="帮我找只适合这条策略的股票，先别跑" if recommend else "先别跑",
+    )
+    turn = plan.clarification_turn
+    assert turn is not None
+    assert turn.outcome.instrument_suggestion_declined is not recommend
+    assert turn.outcome.selected_idea_proposal is outcome.selected_idea_proposal
+    assert turn.compile_input is state.compile_input
+    assert not turn.outcome.run_requested
+    assert not turn.outcome.pending_edit_run_requested
+    assert turn.revision_changed is recommend
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("available", [True, False])
 async def test_ready_reply_is_model_authored_without_changing_execution(available: bool) -> None:
     reply = "规则已准备好，你可以先核对买卖条件。"
@@ -186,7 +335,7 @@ async def test_ready_reply_is_model_authored_without_changing_execution(availabl
     outcome = await compiler.compile(request)
     assert outcome.status is CompileStatus.READY
     message = await compiler.compose_ready_response(answer=request.utterance, outcome=outcome)
-    assert message == (reply if available else "对话模型这次未能返回有效回复，请稍后重试。")
+    assert message == (reply if available else "买卖规则已准备好，可以核对；本次尚未执行回测。")
     assert len(dialogue.requests) == 1
     submitted = dialogue.requests[0]
     assert submitted.response_only and not submitted.options
@@ -372,3 +521,21 @@ async def test_daily_replacement_can_explicitly_choose_another_stock() -> None:
     assert turn.outcome.strategy is not None
     assert turn.outcome.strategy.instrument.symbol == "300033.SZ"
     assert not turn.outcome.run_requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("diagnostic", ["idea_guidance_required", "candidate_data_incomplete", "instrument_required"])
+async def test_current_card_id_bypasses_instrument_dialogue_even_when_data_failed(diagnostic):
+    state = await _paired_idea_state()
+    state = replace(state, outcome=replace(state.outcome, diagnostic_code=diagnostic))
+    selected = state.outcome.idea_route.proposals[1]
+    dialogue = _CandidateDialogue(None)
+    compiler = _compiler(dialogue)
+    compiler.classify_dialogue_intent = AsyncMock(side_effect=AssertionError("card must not be classified"))
+    compiler.assess_instrument_clarification = AsyncMock(side_effect=AssertionError("card is not a stock answer"))
+    result = await DialogueTurnOrchestrator(compiler).plan(state=state, answer=selected.id)
+    assert result.intent is TurnIntent.SELECT_OPTION
+    assert result.clarification_turn.outcome.status is CompileStatus.READY
+    assert result.clarification_turn.outcome.strategy == selected.strategy
+    assert not result.clarification_turn.outcome.run_requested
+    assert dialogue.requests == []

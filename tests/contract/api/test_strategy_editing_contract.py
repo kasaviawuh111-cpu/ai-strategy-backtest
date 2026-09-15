@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter
 
 from ashare_lab.adapters.language import RuleBasedCandidateGenerator
 from ashare_lab.adapters.language.vibe_candidates import (
@@ -18,21 +19,169 @@ from ashare_lab.adapters.language.vibe_clarification import VibeClarificationDia
 from ashare_lab.adapters.market_data.mx_saas import MxSaasProviderNoDataError
 from ashare_lab.api import create_app
 from ashare_lab.api.store import InMemoryDraftStore
-from ashare_lab.application.compile_strategy import CompileStatus, StrategyCompiler
+from ashare_lab.application.compile_strategy import (
+    CompileOutcome,
+    CompileStatus,
+    StrategyCompiler,
+    _exact_edit_choice,
+)
 from ashare_lab.domain.catalog import load_catalog_directory, load_coverage_catalog_directory
 from ashare_lab.domain.strategy import FirstOfExit, IndicatorCondition, StrategySpec, canonical_json
 from ashare_lab.ports.backtest_runs import BacktestJobState
-from ashare_lab.ports.candidate_generation import CandidateProvenance, CompileInput
+from ashare_lab.ports.candidate_generation import (
+    CandidateAst,
+    CandidateProvenance,
+    CompileInput,
+    IndicatorIntent,
+)
+from ashare_lab.ports.clarification_dialogue import (
+    ClarificationDialogueAssessment,
+    ClarificationOption,
+)
 from ashare_lab.ports.live_market_data import (
     LiveFinanceDataResult,
     LiveMarketDataProvenance,
     LiveMarketDataResult,
 )
-from ashare_lab.ports.strategy_editing import StrategyEditRequest, StrategyEditResult
+from ashare_lab.ports.strategy_editing import (
+    StrategyEditRequest,
+    StrategyEditResult,
+    StrategyEditSemanticError,
+)
 
 from .backtest_fakes import FakeRunStore, FakeSubmitter, make_record, result_bundle_json
 
 ROOT = Path(__file__).parents[3]
+
+
+@pytest.mark.parametrize("answer,selected", [
+    ("收盘确认", True), ("收盘确认（", True), ("edit-choice-1", True),
+    ("不要收盘确认", False), ("收盘确认是什么意思", False), ("收盘确认并换股票", False),
+])
+def test_exact_edit_choice_only_resolves_saved_labels(answer, selected):
+    option = ClarificationOption("edit-choice-1", "收盘确认", "按收盘判断")
+    assert _exact_edit_choice(answer, (option,)) == (option if selected else None)
+    assert _exact_edit_choice(answer, (option, replace(option, id="edit-choice-2"))) == (
+        option if answer == option.id else None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("choice", ["edit-choice-1", "stale-choice", None])
+async def test_saved_edit_choice_roundtrips_and_only_current_selection_reaches_editor(choice):
+    option = ClarificationOption("edit-choice-1", "收盘确认", "仅按收盘状态确认条件")
+    requests = []
+
+    class Router:
+        async def assess(self, request):
+            assert request.options == (option,)
+            return ClarificationDialogueAssessment(
+                reply_kind="preference", acknowledgement_id="respect_preference",
+                natural_reply="已收到。", selected_option_id=choice,
+            )
+
+    class Editor:
+        async def edit(self, request):
+            requests.append(request)
+            result = await _Editor().edit(request)
+            return replace(result, disposition="clarify", strategy=None,
+                           run_requested=False, clarification_options=(option,))
+
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(), catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01", strategy_editor=Editor(),
+        backtest_anchor_date=date(2026, 9, 5),
+    )
+    original = CompileInput(utterance="上穿20日均线买入，下穿20日均线卖出",
+                            instrument_context="300059.SZ", as_of_date=date(2026, 9, 5))
+    prior = await compiler.compile(original)
+    first = await compiler.edit_current_strategy(
+        original_input=original, prior_outcome=prior, answer="改买入确认方式",
+    )
+    assert first.outcome.edit_clarification_options == (option,)
+    codec = TypeAdapter(CompileOutcome)
+    saved = codec.validate_json(codec.dump_json(first.outcome))
+    compiler._clarification_dialogue_router = Router()
+    await compiler.edit_current_strategy(
+        original_input=original, prior_outcome=saved, answer="就按收盘的方式确认吧",
+    )
+    assert requests[-1].answer == "就按收盘的方式确认吧"
+    assert requests[-1].selected_clarification == (option if choice == option.id else None)
+    assert requests[-1].strategy == prior.strategy
+    assert requests[-1].pending_edit_inputs == ("改买入确认方式",)
+
+
+@pytest.mark.asyncio
+async def test_semantic_edit_failure_is_not_connection_failure_or_new_revision():
+    class Editor:
+        async def edit(self, request):
+            raise StrategyEditSemanticError("bounded correction exhausted")
+
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(), catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01", strategy_editor=Editor(),
+        backtest_anchor_date=date(2026, 9, 5),
+    )
+    original = CompileInput(utterance="上穿20日均线买入，下穿20日均线卖出",
+                            instrument_context="300059.SZ", as_of_date=date(2026, 9, 5))
+    prior = await compiler.compile(original)
+    result = await compiler.edit_current_strategy(
+        original_input=original, prior_outcome=prior, answer="收盘价是否达到当日涨停价",
+    )
+    assert result is not None and not result.revision_changed
+    assert result.outcome.diagnostic_code == "strategy_edit_semantic_mismatch"
+    assert result.outcome.revision_base_strategy == prior.strategy
+    assert result.outcome.strategy is None and not result.outcome.run_requested
+    assert "不需要重复回答" in result.assistant_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity_kind", ["selected", "absent", "ambiguous", "unavailable"])
+async def test_rule_editor_cannot_override_independently_selected_target(identity_kind):
+    requests = []
+
+    class IdentityRouter:
+        async def assess(self, request):
+            requests.append(request)
+            assert request.identity_only and not request.prior_utterance and not request.options
+            if identity_kind == "unavailable":
+                return None
+            return ClarificationDialogueAssessment(
+                reply_kind="unclear" if identity_kind == "ambiguous" else "preference",
+                acknowledgement_id="ask_rephrase" if identity_kind == "ambiguous"
+                    else "respect_preference",
+                natural_reply="请确认目标股票。",
+                instrument_name="东方财富" if identity_kind == "selected" else None,
+                instrument_selected=identity_kind == "selected",
+            )
+
+    compiler = StrategyCompiler(
+        generator=RuleBasedCandidateGenerator(), catalog=load_catalog_directory(ROOT / "catalogs"),
+        catalog_id="cn_a.signals", release_version="2026.09.01", strategy_editor=_Editor(),
+        backtest_anchor_date=date(2026, 9, 5),
+        instrument_name_resolver=lambda name: {"东方财富": "300059.SZ"}[name],
+    )
+    original = CompileInput(utterance="上穿20日均线买入，下穿20日均线卖出",
+                            instrument_context="300308.SZ", as_of_date=date(2026, 9, 5))
+    prior = await compiler.compile(original)
+    compiler._clarification_dialogue_router = IdentityRouter()
+    result = await compiler.edit_current_strategy(
+        original_input=original, prior_outcome=prior,
+        answer="东方财富，卖出改成10日均线，先不运行。" if identity_kind != "absent"
+               else "卖出改成10日均线，先不运行。",
+    )
+    assert result is not None and len(requests) == 1
+    assert not result.outcome.run_requested
+    if identity_kind in {"ambiguous", "unavailable"}:
+        assert result.outcome.strategy is None
+        assert result.outcome.strategy_hash is None
+        assert result.outcome.revision_base_strategy == prior.strategy
+    else:
+        assert result.outcome.strategy.instrument.symbol == (
+            "300059.SZ" if identity_kind == "selected" else "300308.SZ"
+        )
+        assert result.outcome.strategy.entry == prior.strategy.entry
+        assert result.outcome.strategy.exit.children[0].params["period"] == 10
 
 
 def test_unsupported_minutes_retains_identity_for_daily_followup() -> None:
@@ -44,6 +193,19 @@ def test_unsupported_minutes_retains_identity_for_daily_followup() -> None:
             self, request: CandidateTransportRequest,
         ) -> CandidateTransportResponse:
             self.requests.append(request)
+            if request.response_schema_name == "initial_dialogue_intent":
+                return {"intent": "new_strategy"}
+            if request.response_schema_name == "contextual_dialogue_intent":
+                return {"intent": "supplement"}
+            if request.response_schema_name == "dialogue_reply_semantic_review":
+                return {"facts": "supported", "state_and_authority": "supported",
+                        "user_intent_and_tone": "supported"}
+            if request.user_payload and request.user_payload.get("responseOnly"):
+                return {
+                    "reply_kind": "unclear", "acknowledgement_id": "ask_rephrase",
+                    "natural_reply": "日线规则已准备好，尚未启动回测。",
+                    "recommended_option_ids": [],
+                }
             return {
                 "reply_kind": "preference", "acknowledgement_id": "respect_preference",
                 "natural_reply": "已确认你指定的股票，分钟线回测仍不受支持。",
@@ -52,17 +214,48 @@ def test_unsupported_minutes_retains_identity_for_daily_followup() -> None:
                 "strategy_inspiration": None, "requires_new_data": False,
             }
 
+    class InterpretedCandidates:
+        """Explicit model-result fixtures keep timeframe interpretation out of this test."""
+
+        def __init__(self) -> None:
+            self.requests: list[CompileInput] = []
+
+        async def generate(self, request: CompileInput) -> tuple[CandidateAst, ...]:
+            self.requests.append(request)
+            assert request.semantic_intent == "new_strategy"
+            if len(self.requests) == 1:
+                assert request.instrument_context is None
+                return (CandidateAst(
+                    instrument_symbol=None, entry=(), exit=(), confidence=0.95,
+                    unsupported_code="non_daily_timeframe_not_supported",
+                ),)
+            assert request.instrument_context == "300059.SZ"
+            assert "东方财富用5分钟K线" in request.utterance
+            assert "那就改成日线" in request.utterance
+            return (CandidateAst(
+                instrument_symbol=request.instrument_context, confidence=0.95,
+                entry=(IndicatorIntent("technical.ma_cross", "1.0.0", "golden_cross",
+                                       (("fast_period", 5), ("slow_period", 20),
+                                        ("price_field", "close"))),),
+                exit=(IndicatorIntent("technical.ma_cross", "1.0.0", "death_cross",
+                                      (("fast_period", 5), ("slow_period", 20),
+                                       ("price_field", "close"))),),
+                backtest_lookback_years=1,
+            ),)
+
     transport = IdentityTransport()
+    interpreted = InterpretedCandidates()
     catalog = load_catalog_directory(ROOT / "catalogs")
     live = _UnexpectedLiveData()
     compiler = StrategyCompiler(
-        generator=RuleBasedCandidateGenerator(), catalog=catalog,
+        generator=interpreted, catalog=catalog,
         catalog_id="cn_a.signals", release_version="2026.09.01",
         instrument_name_resolver=lambda name: {"东方财富": "300059.SZ"}[name],
         clarification_dialogue_router=VibeClarificationDialogueRouter(
             transport, capability_matrix=build_candidate_capability_matrix(
                 catalog, load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
             ),
+            model_semantic_review=True,
         ),
         backtest_anchor_date=date(2026, 9, 5),
     )
@@ -76,6 +269,8 @@ def test_unsupported_minutes_retains_identity_for_daily_followup() -> None:
         assert original["status"] == "unsupported"
         assert original["strategy"] is None
         assert not original.get("run_requested")
+        assert original["diagnostic_code"] == "non_daily_timeframe_not_supported"
+        assert original.get("verified_instrument"), original
         assert original["verified_instrument"]["symbol"] == "300059.SZ"
         assert original["verified_instrument"]["name"] == "东方财富"
         assert original["diagnostic_code"] == "non_daily_timeframe_not_supported"
@@ -90,11 +285,19 @@ def test_unsupported_minutes_retains_identity_for_daily_followup() -> None:
         daily = second.json()
         assert daily["status"] == "ready"
         assert daily["strategy"]["instrument"]["symbol"] == "300059.SZ"
+        assert daily["strategy"]["entry"]["params"] == {
+            "fast_period": 5, "slow_period": 20, "price_field": "close",
+        }
+        assert daily["strategy"]["entry"]["trigger"] == "golden_cross"
+        assert daily["strategy"]["exit"]["children"][0]["trigger"] == "death_cross"
         assert not daily.get("run_requested")
         assert daily["idea_route"] is None
     assert not live.calls
-    assert len(transport.requests) == 1
-    payload = transport.requests[0].user_payload
+    assert len(interpreted.requests) == 2
+    identity_requests = [r for r in transport.requests
+                         if r.user_payload and r.user_payload.get("identityOnly")]
+    assert len(identity_requests) == 1
+    payload = identity_requests[0].user_payload
     assert payload is not None
     assert payload["diagnosticCode"] == "non_daily_timeframe_not_supported"
     assert payload["allowDataQuery"] is False
@@ -369,7 +572,11 @@ def test_real_lookup_detour_keeps_strategy_even_when_data_is_unavailable() -> No
         lookup = client.post("/api/v1/strategy-drafts", headers={
             "X-Conversation-Parent-Draft-ID": initial["draft_id"],
         }, json={"utterance": "查一下东方财富最新收盘价", "as_of_date": "2026-09-05"}).json()
-        assert lookup["diagnostic_code"] == "data_query_only"
+        assert lookup["query_diagnostic_code"] == "live_market_data_no_results"
+        for field in (
+            "draft_id", "revision", "status", "strategy", "strategy_hash", "diagnostic_code",
+        ):
+            assert lookup[field] == initial[field]
         edited = client.post("/api/v1/strategy-drafts", headers={
             "X-Conversation-Parent-Draft-ID": lookup["draft_id"],
         }, json={"utterance": "卖出改下穿10日均线", "as_of_date": "2026-09-05"}).json()
@@ -508,13 +715,19 @@ def test_invalid_edit_keeps_old_strategy_non_executable_until_recovered(unchange
     ("换成贵州茅台600519试试", ("贵州茅台", "600519.SH"), True),
     ("换一只吧", ("贵州茅台",), False),
 ])
+@pytest.mark.parametrize("combined", [False, True])
 def test_model_stock_change_resolves_target_and_binds_saved_rules(
-    text: str, refs: tuple[str, ...], accepted: bool,
+    text: str, refs: tuple[str, ...], accepted: bool, combined: bool,
 ) -> None:
     class Editor(_Editor):
         async def edit(self, request: StrategyEditRequest) -> StrategyEditResult:
             result = await super().edit(request)
-            return replace(result, disposition="change_instrument", strategy=None,
+            edited = request.strategy.model_copy(update={"exit": FirstOfExit(children=(
+                request.strategy.exit.children[0].model_copy(update={
+                    "params": {"period": 5, "price_field": "close"},
+                }),
+            ))}) if combined else None
+            return replace(result, disposition="change_instrument", strategy=edited,
                            instrument_refs=refs, run_requested=True, message="已按原规则换股。")
 
     editor, store, provider = Editor(), FakeRunStore(), _UnexpectedLiveData()
@@ -546,6 +759,11 @@ def test_model_stock_change_resolves_target_and_binds_saved_rules(
             expected = {**initial["strategy"], "instrument": {
                 **initial["strategy"]["instrument"], "symbol": "600519.SH",
             }}
+            if combined:
+                expected["exit"] = {"op": "first_of", "children": [{
+                    **initial["strategy"]["exit"]["children"][0],
+                    "params": {"period": 5, "price_field": "close"},
+                }]}
             assert draft["status"] == "ready" and draft["strategy"] == expected
             assert draft["run_requested"] is True
         else:
@@ -562,6 +780,28 @@ def test_model_stock_change_resolves_target_and_binds_saved_rules(
 def test_result_discussion_loads_reports_preserves_strategy_and_accepts_the_next_edit(
     rerun: bool, attach_report: bool, same_rules: bool,
 ) -> None:
+    class IntentTransport:
+        def __init__(self) -> None:
+            self.requests: list[CandidateTransportRequest] = []
+
+        async def generate_json(
+            self, request: CandidateTransportRequest,
+        ) -> CandidateTransportResponse:
+            self.requests.append(request)
+            if request.response_schema_name == "initial_dialogue_intent":
+                return {"intent": "new_strategy"}
+            if request.response_schema_name == "contextual_dialogue_intent":
+                # The language model owns meaning; this contract exercises its
+                # typed discussion decision, not the legacy 怎么样 keyword path.
+                return {"intent": "supplement"}
+            if request.user_payload and request.user_payload.get("identityOnly"):
+                return {"reply_kind": "preference", "acknowledgement_id": "respect_preference",
+                        "natural_reply": "本轮没有另外选择股票。",
+                        "instrument_name": None, "instrument_selected": False}
+            return {"reply_kind": "unclear", "acknowledgement_id": "ask_rephrase",
+                    "natural_reply": "规则已准备好，尚未开始回测。",
+                    "recommended_option_ids": []}
+
     class DiscussEditor(_Editor):
         async def edit(self, request: StrategyEditRequest) -> StrategyEditResult:
             result = await super().edit(request)
@@ -572,9 +812,16 @@ def test_result_discussion_loads_reports_preserves_strategy_and_accepts_the_next
                            strategy=request.strategy if same_rules else result.strategy)
 
     editor, store, provider = DiscussEditor(), FakeRunStore(), _UnexpectedLiveData()
+    transport = IntentTransport()
+    dialogue = VibeClarificationDialogueRouter(transport, capability_matrix=
+        build_candidate_capability_matrix(
+            load_catalog_directory(ROOT / "catalogs"),
+            load_coverage_catalog_directory(ROOT / "catalogs" / "coverage"),
+        ))
     compiler = StrategyCompiler(
         generator=RuleBasedCandidateGenerator(), catalog=load_catalog_directory(ROOT / "catalogs"),
         catalog_id="cn_a.signals", release_version="2026.09.01", strategy_editor=editor,
+        clarification_dialogue_router=dialogue,
         backtest_anchor_date=date(2026, 9, 5),
     )
     with TestClient(create_app(compiler=compiler, run_store=store,
@@ -602,6 +849,12 @@ def test_result_discussion_loads_reports_preserves_strategy_and_accepts_the_next
         assert facts[0]["strategy"] == initial["strategy"]
         assert facts[0]["summary"]["totalReturn"] == .12  # type: ignore[index]
         assert "dataProvenance" not in facts[0]["summary"]  # type: ignore[operator]
+        intent = next(request for request in transport.requests
+                      if request.response_schema_name == "contextual_dialogue_intent")
+        assert intent.user_payload is not None
+        context = intent.user_payload["context"]
+        assert isinstance(context, dict)
+        assert context["backtest_results"][0]["runId"] == run_id
         path = (f"/api/v1/strategy-drafts/{reply['draft_id']}"
                 f"/revisions/{reply['revision']}/clarification-answers")
         followup = client.post(path, json={"answer": "你这次没有把买入也一起改掉吧？",

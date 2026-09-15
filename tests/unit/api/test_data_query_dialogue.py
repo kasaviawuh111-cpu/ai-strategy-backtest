@@ -10,7 +10,11 @@ from uuid import uuid4
 
 import pytest
 
-from ashare_lab.adapters.market_data.mx_saas import MxSaasProviderUnavailableError
+from ashare_lab.adapters.market_data.mx_saas import (
+    MxSaasProviderAuthError,
+    MxSaasProviderNoDataError,
+    MxSaasProviderUnavailableError,
+)
 from ashare_lab.api import create_app
 from ashare_lab.api.container import ApiContainer
 from ashare_lab.api.routes.strategy_drafts import _resolve_live_data_query
@@ -31,6 +35,7 @@ from ashare_lab.ports.live_market_data import (
 from ashare_lab.ports.strategy_advice import (
     QueryDataReview,
     StockRecommendation,
+    VerifiedFactStrategyAdvice,
     VerifiedFactStrategyAdviceRequest,
 )
 
@@ -415,7 +420,8 @@ async def test_unavailable_query_review_preserves_data_without_an_extra_lookup(
         answer="A股近一年涨幅前5只股票", state=_state(),
         container=_container(monkeypatch, provider, dialogue, advisor),
     )
-    assert "核对" in message and message != MODEL_REPLY
+    assert "数据已返回" in message and "收盘价(元) 2026-09-04：20" in message
+    assert "满足" not in message and "未完成" not in message
     assert data is not None and data.screen is not None and data.screen.rows == provider.rows
     assert idea is None and provider.calls == ["screen"]
     assert len(advisor.review_calls) == 1
@@ -464,21 +470,6 @@ async def test_known_stock_finance_retries_finance_only_without_generating_a_str
     dialogue = _Dialogue()
     advisor = _Advisor((_review(satisfied=False, retry=retry), _review(satisfied=True)))
     state = _state()
-    answered_results: list[LiveFinanceDataResult] = []
-
-    async def answer_verified_finance(
-        *, answer: str, result: LiveFinanceDataResult,
-        state: DialogueState, container: ApiContainer,
-    ) -> tuple[str, None]:
-        answered_results.append(result)
-        return MODEL_REPLY, None
-
-    # Only the unchanged final advice delegate is isolated here; exercise the
-    # real lookup/review loop and verify that it forwards the last actual table.
-    monkeypatch.setattr(
-        "ashare_lab.api.routes.strategy_drafts._validated_live_data_answer",
-        answer_verified_finance,
-    )
 
     message, data, idea = await _resolve_live_data_query(
         answer=answer, state=state, container=_container(monkeypatch, provider, dialogue, advisor),
@@ -490,7 +481,190 @@ async def test_known_stock_finance_retries_finance_only_without_generating_a_str
     assert [call["remaining_data_rounds"] for call in advisor.review_calls] == [1, 0]
     assert data is not None and data.finance is not None
     assert data.finance.query == retry and data.finance.tables == last.tables
-    assert len(answered_results) == 1 and answered_results[0].tables == last.tables
-    assert answered_results[0].query == retry
+    assert "3.2" in str(advisor.review_calls[-1]["data_snapshot"])
     assert not dialogue.requests and not advisor.recommendation_calls
     assert state.outcome.strategy is None and not state.outcome.run_requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_tool", ["finance", "screen"])
+async def test_alternate_skill_keeps_original_scope_and_actual_response_type(
+    monkeypatch: pytest.MonkeyPatch, first_tool: str,
+) -> None:
+    answer = "东方财富300059.SZ前20日最高收盘价是多少" if first_tool == "finance" else (
+        "A股近一年涨幅前5只股票"
+    )
+    source = _Provider()
+    screen = replace(source.screen_result(answer), rows=(source.rows[0],))
+    finance = LiveFinanceDataResult(
+        "actual_finance", answer, None,
+        ({"entityName": "东方财富", "code": "300059.SZ", "rawTable": {
+            "headers": ["前20日最高收盘价(元)"], "data": [[23.75]],
+        }},), replace(source.provenance, response_sha256="sha256:" + "b" * 64),
+    )
+    failure = MxSaasProviderNoDataError("first Skill returned no rows")
+    provider = _RetryProvider(
+        screens=(screen,) if first_tool == "finance" else (failure,),
+        finances=(failure,) if first_tool == "finance" else (finance,),
+    )
+    # Optional review unavailable after recovery: show real data, never discard it
+    # and never use another model to generate strategies as a prerequisite.
+    advisor, dialogue, state = _Advisor((None,)), _Dialogue(), _state()
+    message, data, idea = await _resolve_live_data_query(
+        answer=answer, state=state,
+        container=_container(monkeypatch, provider, dialogue, advisor),
+    )
+    assert provider.calls == (
+        ["query_finance", "screen"] if first_tool == "finance"
+        else ["screen", "query_finance"]
+    )
+    assert provider.screen_queries == provider.finance_queries == [answer]
+    assert data is not None and idea is None
+    assert data.kind == ("screen" if first_tool == "finance" else "finance")
+    if data.screen is not None:
+        assert data.screen.rows == screen.rows
+        assert data.screen.provenance.response_sha256 == screen.provenance.response_sha256
+    else:
+        assert data.finance is not None and data.finance.tables == finance.tables
+        assert data.finance.provenance.response_sha256 == finance.provenance.response_sha256
+    assert "数据已返回" in message and "全部满足" not in message
+    assert advisor.review_calls[0]["remaining_data_rounds"] == 0
+    assert not dialogue.requests and not advisor.recommendation_calls
+    assert state.outcome.strategy is None and not state.outcome.run_requested
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alternate_available", [True, False])
+async def test_finance_empty_table_body_uses_one_alternate_query(
+    monkeypatch: pytest.MonkeyPatch, alternate_available: bool,
+) -> None:
+    answer = "东方财富300059.SZ最新价是多少"
+    source = _Provider()
+    empty = LiveFinanceDataResult(
+        "eastmoney_mx_finance_data", answer, None,
+        ({"entityName": "东方财富", "rawTable": {
+            "headers": ["最新价(元)"], "data": [],
+        }},), source.provenance,
+    )
+    actual_row = {"证券代码": "300059", "证券简称": "东方财富", "最新价(元)": 20}
+    screen = replace(source.screen_result(answer), columns=tuple(actual_row), rows=(actual_row,))
+    provider = _RetryProvider(
+        finances=(empty,),
+        screens=(screen if alternate_available else MxSaasProviderNoDataError("empty"),),
+    )
+    advisor, dialogue, state = _Advisor((None,)), _Dialogue(), _state()
+    message, data, idea = await _resolve_live_data_query(
+        answer=answer, state=state,
+        container=_container(monkeypatch, provider, dialogue, advisor),
+    )
+    assert provider.calls == ["query_finance", "screen"]
+    assert provider.screen_queries == provider.finance_queries == [answer]
+    assert idea is None and not dialogue.requests and not advisor.recommendation_calls
+    assert state.outcome.strategy is None and not state.outcome.run_requested
+    if alternate_available:
+        assert data is not None and data.screen is not None
+        assert data.screen.rows == screen.rows
+        assert data.screen.provenance.response_sha256 == screen.provenance.response_sha256
+        assert "数据已返回" in message and "全部满足" not in message
+        assert advisor.review_calls[0]["remaining_data_rounds"] == 0
+    else:
+        assert data is None and not advisor.review_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_tool", ["finance", "screen"])
+async def test_authorization_failure_never_tries_the_other_skill(
+    monkeypatch: pytest.MonkeyPatch, first_tool: str,
+) -> None:
+    error = MxSaasProviderAuthError("SECRET_NEVER_ECHO")
+    provider = _RetryProvider(
+        screens=(error,) if first_tool == "screen" else (),
+        finances=(error,) if first_tool == "finance" else (),
+    )
+    answer = "东方财富最新价" if first_tool == "finance" else "A股涨幅前5只股票"
+    advisor, dialogue = _Advisor(), _Dialogue()
+    message, data, idea = await _resolve_live_data_query(
+        answer=answer, state=_state(),
+        container=_container(monkeypatch, provider, dialogue, advisor),
+    )
+    assert provider.calls == ["query_finance" if first_tool == "finance" else "screen"]
+    assert data is None and idea is None and "授权" in message
+    assert "SECRET" not in message and not advisor.review_calls
+
+
+@pytest.mark.asyncio
+async def test_other_skill_recovery_does_not_claim_the_requested_period_is_verified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    answer = "东方财富300059.SZ近一年日均换手率是多少"
+    provider = _RetryProvider(
+        finances=(MxSaasProviderUnavailableError("fixture timeout"),),
+        screens=(_period_screen(annual=False),),
+    )
+    gap = "服务返回的是单日数据；本次实际返回表已保留，尚无所需的近一年日均换手率。"
+    advisor = _Advisor((_review(satisfied=False, retry="不应再发出请求", message=gap),))
+    message, data, idea = await _resolve_live_data_query(
+        answer=answer, state=_state(),
+        container=_container(monkeypatch, provider, _Dialogue(), advisor),
+    )
+    assert message == gap and data is not None and data.screen is not None and idea is None
+    assert provider.calls == ["query_finance", "screen"]
+    assert advisor.review_calls[0]["remaining_data_rounds"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned_identity", ["maotai", "multiple", "none"])
+async def test_mixed_lookup_uses_current_security_not_the_old_strategy_stock(
+    monkeypatch: pytest.MonkeyPatch, returned_identity: str,
+) -> None:
+    class MixedAdvisor(_Advisor):
+        def __init__(self) -> None:
+            super().__init__((replace(_review(satisfied=True), strategy_requested=True),))
+            self.advice_requests: list[VerifiedFactStrategyAdviceRequest] = []
+
+        async def advise(
+            self, request: VerifiedFactStrategyAdviceRequest,
+        ) -> VerifiedFactStrategyAdvice:
+            self.advice_requests.append(request)
+            return VerifiedFactStrategyAdvice(
+                analysis="当前数据已用于本轮明确请求的策略分析。", hypothesis="", proposals=(),
+                provider="fixture", model="fixture", prompt_version="fixture.v1",
+                schema_version="fixture.v1",
+            )
+
+    table: dict[str, object] = {"rawTable": {
+        "headers": ["最新价(元)"], "data": [[1500]],
+    }}
+    if returned_identity == "maotai":
+        table.update({"code": "600519.SH", "entityName": "贵州茅台"})
+    elif returned_identity == "multiple":
+        table["rawTable"] = {
+            "headers": ["证券代码", "证券简称", "最新价(元)"],
+            "data": [["600519", "贵州茅台", 1500], ["300059", "东方财富", 20]],
+        }
+    question = "查询贵州茅台最新价，并分析两种策略" if returned_identity == "maotai" else (
+        "查询贵州茅台和东方财富最新价，并分析策略" if returned_identity == "multiple" else
+        "它的最新价是多少，并分析两种策略"
+    )
+    provider = _RetryProvider(finances=(LiveFinanceDataResult(
+        "fixture", question, None, (table,), _Provider().provenance,
+    ),))
+    advisor, dialogue = MixedAdvisor(), _Dialogue()
+    state = replace(_state(), compile_input=CompileInput(
+        "东方财富原策略", date(2026, 9, 5), "300059.SZ",
+    ))
+    message, data, idea = await _resolve_live_data_query(
+        answer=question, state=state,
+        container=_container(monkeypatch, provider, dialogue, advisor),
+    )
+    assert data is not None and data.finance is not None and idea is None
+    assert state.verified_instrument_context == "300059.SZ"
+    assert provider.calls == ["query_finance"]
+    if returned_identity == "multiple":
+        assert not advisor.advice_requests
+        assert "数据查询已完成" in message and "策略建议暂未生成" in message
+    else:
+        assert len(advisor.advice_requests) == 1
+        assert advisor.advice_requests[0].instrument_symbol == (
+            "600519.SH" if returned_identity == "maotai" else "300059.SZ"
+        )

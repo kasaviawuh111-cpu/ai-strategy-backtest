@@ -32,7 +32,10 @@ describe('backtest date editing', () => {
   it('opens advanced settings and explains all three limit modes', () => {
     const { onChange } = renderSettings()
     expect(screen.getByText('高级研究设置').closest('details')).toHaveAttribute('open')
-    expect(screen.getByRole('note')).toHaveTextContent('即使当天曾开板')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '了解涨跌停处理' }))
+    expect(screen.getByRole('dialog', { name: '涨跌停处理说明' })).toHaveTextContent('即使当天曾开板')
+    fireEvent.keyDown(document, { key: 'Escape' })
     fireEvent.change(screen.getByRole('combobox', { name: /涨跌停处理/ }), {
       target: { value: 'allow_limit_volume' },
     })

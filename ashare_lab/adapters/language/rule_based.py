@@ -810,6 +810,8 @@ def _parse_clause(
                 params=(("fast", fast), ("signal", signal), ("slow", slow)),
             )
         )
+        if cross_family == "macd" and not (global_families & _CROSS_FAMILIES):
+            defaulted.append(_default_path(action, "macd", "indicator_id"))
         if not re.search(r"(?:金叉|死叉|(?:零|0)轴|dif|dea|上穿|下穿|突破|跌破)", text, re.I):
             defaulted.append(_default_path(action, "macd", "trigger"))
 
@@ -1625,7 +1627,10 @@ def _explicit_families(text: str) -> frozenset[_Family]:
         folded,
     ):
         families.add("return_stddev")
-    elif re.search(r"(?:涨跌幅|涨幅|跌幅|收益率)", text) or _mentions_daily_return_shorthand(text):
+    elif re.search(
+        r"(?:涨跌幅|涨幅|跌幅|(?<!净资产)收益率)",
+        text,
+    ) or _mentions_daily_return_shorthand(text):
         families.add("return_pct")
     if _has_price_level_context(text):
         families.add("price_close")
@@ -1810,6 +1815,8 @@ def _resolve_cross_family(
     inherited = global_families & _CROSS_FAMILIES
     if len(inherited) == 1:
         return next(iter(inherited)), None
+    if not inherited:
+        return "macd", None
     return None, "ambiguous_cross_indicator"
 
 

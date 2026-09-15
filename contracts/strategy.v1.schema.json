@@ -99,6 +99,67 @@
       "title": "CatalogRef",
       "type": "object"
     },
+    "ComposedExecutionPolicy": {
+      "additionalProperties": false,
+      "description": "Explicit declaration for independent signal and inventory-plan legs.",
+      "properties": {
+        "data_capability": {
+          "default": "daily_and_minute_ohlcv",
+          "enum": [
+            "daily_and_minute_ohlcv",
+            "daily_and_minute_ohlcv_events",
+            "daily_and_minute_ohlcv_financials",
+            "daily_and_minute_ohlcv_events_financials"
+          ],
+          "title": "Data Capability",
+          "type": "string"
+        },
+        "entry_policy": {
+          "const": "composed_entry_leg",
+          "default": "composed_entry_leg",
+          "title": "Entry Policy",
+          "type": "string"
+        },
+        "evaluation_frequency": {
+          "const": "daily_close_and_minute_bar",
+          "default": "daily_close_and_minute_bar",
+          "title": "Evaluation Frequency",
+          "type": "string"
+        },
+        "execution_resolution": {
+          "const": "1m",
+          "default": "1m",
+          "title": "Execution Resolution",
+          "type": "string"
+        },
+        "exit_policy": {
+          "const": "composed_exit_leg",
+          "default": "composed_exit_leg",
+          "title": "Exit Policy",
+          "type": "string"
+        },
+        "position_policy": {
+          "const": "bounded_inventory",
+          "default": "bounded_inventory",
+          "title": "Position Policy",
+          "type": "string"
+        },
+        "t_plus_one": {
+          "const": true,
+          "default": true,
+          "title": "T Plus One",
+          "type": "boolean"
+        },
+        "timezone": {
+          "const": "Asia/Shanghai",
+          "default": "Asia/Shanghai",
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "title": "ComposedExecutionPolicy",
+      "type": "object"
+    },
     "Condition": {
       "discriminator": {
         "mapping": {
@@ -131,6 +192,422 @@
           "$ref": "#/$defs/NotCondition"
         }
       ]
+    },
+    "ConditionParameters": {
+      "additionalProperties": false,
+      "properties": {
+        "commission_rate": {
+          "anyOf": [
+            {
+              "maximum": 0.05,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0.00025",
+          "title": "Commission Rate"
+        },
+        "initial_capital_scope": {
+          "default": "total_equity",
+          "enum": [
+            "total_equity",
+            "cash_plus_opening_holdings"
+          ],
+          "title": "Initial Capital Scope",
+          "type": "string"
+        },
+        "initial_cash_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "1000000",
+          "title": "Initial Cash Cny"
+        },
+        "initial_shares": {
+          "default": 0,
+          "maximum": 100000000,
+          "minimum": 0,
+          "title": "Initial Shares",
+          "type": "integer"
+        },
+        "max_position_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Position Cny"
+        },
+        "max_shares": {
+          "default": 10000,
+          "maximum": 100000000,
+          "minimum": 1,
+          "title": "Max Shares",
+          "type": "integer"
+        },
+        "min_shares": {
+          "default": 0,
+          "maximum": 100000000,
+          "minimum": 0,
+          "title": "Min Shares",
+          "type": "integer"
+        },
+        "minimum_commission_cny": {
+          "anyOf": [
+            {
+              "maximum": 1000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "5",
+          "title": "Minimum Commission Cny"
+        },
+        "observation": {
+          "default": "daily_close",
+          "enum": [
+            "daily_close",
+            "minute_bar"
+          ],
+          "title": "Observation",
+          "type": "string"
+        },
+        "opening_shares": {
+          "default": 0,
+          "maximum": 100000000,
+          "minimum": 0,
+          "title": "Opening Shares",
+          "type": "integer"
+        },
+        "repeat_cycles": {
+          "default": 1,
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Repeat Cycles",
+          "type": "integer"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/ConditionRule"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Rules",
+          "type": "array"
+        },
+        "slippage_bps": {
+          "anyOf": [
+            {
+              "maximum": 1000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "5",
+          "title": "Slippage Bps"
+        },
+        "slippage_cny": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0",
+          "title": "Slippage Cny"
+        },
+        "stamp_tax_rate": {
+          "anyOf": [
+            {
+              "maximum": 0.05,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0.0005",
+          "title": "Stamp Tax Rate"
+        },
+        "transfer_fee_rate": {
+          "anyOf": [
+            {
+              "maximum": 0.05,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0.00001",
+          "title": "Transfer Fee Rate"
+        }
+      },
+      "required": [
+        "rules"
+      ],
+      "title": "ConditionParameters",
+      "type": "object"
+    },
+    "ConditionRule": {
+      "additionalProperties": false,
+      "properties": {
+        "activation_price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Activation Price"
+        },
+        "amount_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Amount Cny"
+        },
+        "direction": {
+          "default": "up",
+          "enum": [
+            "up",
+            "down"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "gap": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gap"
+        },
+        "gap_unit": {
+          "default": "percent",
+          "enum": [
+            "cny",
+            "percent"
+          ],
+          "title": "Gap Unit",
+          "type": "string"
+        },
+        "group": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group"
+        },
+        "kind": {
+          "enum": [
+            "price",
+            "rebound",
+            "pullback",
+            "take_profit",
+            "stop_loss",
+            "holding_period",
+            "relative_price"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "limit_price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit Price"
+        },
+        "price_comparison": {
+          "default": "inclusive",
+          "enum": [
+            "inclusive",
+            "strict"
+          ],
+          "title": "Price Comparison",
+          "type": "string"
+        },
+        "quantity": {
+          "default": 100,
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Quantity",
+          "type": "integer"
+        },
+        "reference_mode": {
+          "default": "previous_fill",
+          "enum": [
+            "previous_fill",
+            "first_observation"
+          ],
+          "title": "Reference Mode",
+          "type": "string"
+        },
+        "sessions": {
+          "anyOf": [
+            {
+              "maximum": 10000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sessions"
+        },
+        "side": {
+          "enum": [
+            "buy",
+            "sell"
+          ],
+          "title": "Side",
+          "type": "string"
+        },
+        "sizing_mode": {
+          "default": "shares",
+          "enum": [
+            "shares",
+            "amount",
+            "all_position"
+          ],
+          "title": "Sizing Mode",
+          "type": "string"
+        },
+        "target_price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Price"
+        }
+      },
+      "required": [
+        "kind",
+        "side"
+      ],
+      "title": "ConditionRule",
+      "type": "object"
+    },
+    "ConditionalPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "conditional",
+          "default": "conditional",
+          "title": "Kind",
+          "type": "string"
+        },
+        "parameters": {
+          "$ref": "#/$defs/ConditionParameters"
+        }
+      },
+      "required": [
+        "parameters"
+      ],
+      "title": "ConditionalPlan",
+      "type": "object"
     },
     "DailyExecutionPolicy": {
       "additionalProperties": false,
@@ -176,8 +653,12 @@
           "type": "string"
         },
         "position_policy": {
-          "const": "single_position_no_pyramiding",
           "default": "single_position_no_pyramiding",
+          "enum": [
+            "single_position_no_pyramiding",
+            "bounded_inventory",
+            "accumulate_on_new_entry_signal"
+          ],
           "title": "Position Policy",
           "type": "string"
         },
@@ -324,6 +805,7 @@
           "financial_condition": "#/$defs/FinancialCondition",
           "holding_period_exit": "#/$defs/HoldingPeriodExit",
           "indicator_condition": "#/$defs/IndicatorCondition",
+          "minute_protection_exit": "#/$defs/MinuteProtectionExit",
           "not": "#/$defs/NotCondition",
           "position_return_exit": "#/$defs/PositionReturnExit",
           "trailing_drawdown_exit": "#/$defs/TrailingDrawdownExit"
@@ -354,6 +836,9 @@
         },
         {
           "$ref": "#/$defs/PositionReturnExit"
+        },
+        {
+          "$ref": "#/$defs/MinuteProtectionExit"
         },
         {
           "$ref": "#/$defs/TrailingDrawdownExit"
@@ -543,8 +1028,11 @@
           "type": "array"
         },
         "op": {
-          "const": "first_of",
           "default": "first_of",
+          "enum": [
+            "first_of",
+            "all"
+          ],
           "title": "Op",
           "type": "string"
         }
@@ -553,6 +1041,569 @@
         "children"
       ],
       "title": "FirstOfExit",
+      "type": "object"
+    },
+    "GridParameters": {
+      "additionalProperties": false,
+      "description": "Persisted choices. Percent uses percentage points: 1 means 1%.",
+      "properties": {
+        "anchor_mode": {
+          "default": "manual",
+          "enum": [
+            "manual",
+            "first_open",
+            "latest_price",
+            "previous_close"
+          ],
+          "title": "Anchor Mode",
+          "type": "string"
+        },
+        "anchor_price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Price"
+        },
+        "anchor_quote_response_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Quote Response Sha256"
+        },
+        "anchor_quote_retrieved_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Quote Retrieved At"
+        },
+        "anchor_quote_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Quote Source"
+        },
+        "anchor_quote_time_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Quote Time Label"
+        },
+        "anchor_update": {
+          "default": "fixed",
+          "enum": [
+            "fixed",
+            "last_fill",
+            "last_trigger"
+          ],
+          "title": "Anchor Update",
+          "type": "string"
+        },
+        "buy_limit": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Buy Limit"
+        },
+        "buy_spacing": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Buy Spacing"
+        },
+        "buy_spacing_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "cny",
+                "anchor_percent",
+                "percent"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Buy Spacing Mode"
+        },
+        "commission_rate": {
+          "anyOf": [
+            {
+              "maximum": 0.05,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0.00025",
+          "title": "Commission Rate"
+        },
+        "initial_capital_scope": {
+          "default": "total_equity",
+          "enum": [
+            "total_equity",
+            "cash_plus_opening_holdings"
+          ],
+          "title": "Initial Capital Scope",
+          "type": "string"
+        },
+        "initial_cash_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "1000000",
+          "title": "Initial Cash Cny"
+        },
+        "initial_shares": {
+          "default": 0,
+          "maximum": 100000000,
+          "minimum": 0,
+          "title": "Initial Shares",
+          "type": "integer"
+        },
+        "levels_above": {
+          "anyOf": [
+            {
+              "maximum": 10000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Levels Above"
+        },
+        "levels_below": {
+          "anyOf": [
+            {
+              "maximum": 10000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Levels Below"
+        },
+        "limit_offset_cny": {
+          "anyOf": [
+            {
+              "maximum": 10000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0",
+          "title": "Limit Offset Cny"
+        },
+        "lower_price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Lower Price"
+        },
+        "max_position_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Position Cny"
+        },
+        "max_shares": {
+          "default": 10000,
+          "maximum": 100000000,
+          "minimum": 1,
+          "title": "Max Shares",
+          "type": "integer"
+        },
+        "min_shares": {
+          "default": 0,
+          "maximum": 100000000,
+          "minimum": 0,
+          "title": "Min Shares",
+          "type": "integer"
+        },
+        "minimum_commission_cny": {
+          "anyOf": [
+            {
+              "maximum": 1000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "5",
+          "title": "Minimum Commission Cny"
+        },
+        "observation": {
+          "anyOf": [
+            {
+              "enum": [
+                "daily_close",
+                "minute_bar"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observation"
+        },
+        "opening_shares": {
+          "default": 0,
+          "maximum": 100000000,
+          "minimum": 0,
+          "title": "Opening Shares",
+          "type": "integer"
+        },
+        "order_amount_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "10000",
+          "title": "Order Amount Cny"
+        },
+        "order_shares": {
+          "default": 100,
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Order Shares",
+          "type": "integer"
+        },
+        "price_mode": {
+          "default": "next_open",
+          "enum": [
+            "next_open",
+            "grid_limit",
+            "fixed_limit"
+          ],
+          "title": "Price Mode",
+          "type": "string"
+        },
+        "range_percent": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 100.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Range Percent"
+        },
+        "sell_limit": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sell Limit"
+        },
+        "sell_spacing": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sell Spacing"
+        },
+        "sell_spacing_mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "cny",
+                "anchor_percent",
+                "percent"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sell Spacing Mode"
+        },
+        "sizing_mode": {
+          "default": "shares",
+          "enum": [
+            "shares",
+            "amount"
+          ],
+          "title": "Sizing Mode",
+          "type": "string"
+        },
+        "slippage_bps": {
+          "anyOf": [
+            {
+              "maximum": 1000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "5",
+          "title": "Slippage Bps"
+        },
+        "slippage_cny": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0",
+          "title": "Slippage Cny"
+        },
+        "spacing": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "1",
+          "title": "Spacing"
+        },
+        "spacing_mode": {
+          "default": "cny",
+          "enum": [
+            "cny",
+            "anchor_percent",
+            "percent"
+          ],
+          "title": "Spacing Mode",
+          "type": "string"
+        },
+        "stamp_tax_rate": {
+          "anyOf": [
+            {
+              "maximum": 0.05,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0.0005",
+          "title": "Stamp Tax Rate"
+        },
+        "startup_mode": {
+          "default": "catch_up",
+          "enum": [
+            "catch_up",
+            "wait_for_crossing"
+          ],
+          "title": "Startup Mode",
+          "type": "string"
+        },
+        "transfer_fee_rate": {
+          "anyOf": [
+            {
+              "maximum": 0.05,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0.00001",
+          "title": "Transfer Fee Rate"
+        },
+        "upper_price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "title": "Upper Price"
+        }
+      },
+      "required": [
+        "lower_price",
+        "upper_price"
+      ],
+      "title": "GridParameters",
+      "type": "object"
+    },
+    "GridPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "grid",
+          "default": "grid",
+          "title": "Kind",
+          "type": "string"
+        },
+        "parameters": {
+          "$ref": "#/$defs/GridParameters"
+        }
+      },
+      "required": [
+        "parameters"
+      ],
+      "title": "GridPlan",
       "type": "object"
     },
     "HoldingPeriodExit": {
@@ -594,6 +1645,86 @@
         "sessions"
       ],
       "title": "HoldingPeriodExit",
+      "type": "object"
+    },
+    "HybridExecutionPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "data_capability": {
+          "default": "daily_and_minute_ohlcv",
+          "enum": [
+            "daily_and_minute_ohlcv",
+            "daily_and_minute_ohlcv_events",
+            "daily_and_minute_ohlcv_financials",
+            "daily_and_minute_ohlcv_events_financials"
+          ],
+          "title": "Data Capability",
+          "type": "string"
+        },
+        "entry_policy": {
+          "const": "next_market_session_open",
+          "default": "next_market_session_open",
+          "title": "Entry Policy",
+          "type": "string"
+        },
+        "evaluation_frequency": {
+          "const": "daily_close_and_minute_bar",
+          "default": "daily_close_and_minute_bar",
+          "title": "Evaluation Frequency",
+          "type": "string"
+        },
+        "execution_resolution": {
+          "const": "1m",
+          "default": "1m",
+          "title": "Execution Resolution",
+          "type": "string"
+        },
+        "exit_policy": {
+          "const": "daily_signal_open_or_next_minute_activation",
+          "default": "daily_signal_open_or_next_minute_activation",
+          "title": "Exit Policy",
+          "type": "string"
+        },
+        "position_policy": {
+          "default": "single_position_no_pyramiding",
+          "enum": [
+            "single_position_no_pyramiding",
+            "accumulate_on_new_entry_signal"
+          ],
+          "title": "Position Policy",
+          "type": "string"
+        },
+        "t_plus_one": {
+          "const": true,
+          "default": true,
+          "title": "T Plus One",
+          "type": "boolean"
+        },
+        "timezone": {
+          "const": "Asia/Shanghai",
+          "default": "Asia/Shanghai",
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "title": "HybridExecutionPolicy",
+      "type": "object"
+    },
+    "IndependentPlanPair": {
+      "additionalProperties": false,
+      "properties": {
+        "entry_plan": {
+          "$ref": "#/$defs/PricePlan"
+        },
+        "exit_plan": {
+          "$ref": "#/$defs/PricePlan"
+        }
+      },
+      "required": [
+        "entry_plan",
+        "exit_plan"
+      ],
+      "title": "IndependentPlanPair",
       "type": "object"
     },
     "IndicatorCondition": {
@@ -704,6 +1835,109 @@
         }
       ]
     },
+    "MinuteProtectionExit": {
+      "additionalProperties": false,
+      "description": "Observe raw minute H/L against fee-exclusive weighted acquisition cost.",
+      "properties": {
+        "anchor": {
+          "const": "fee_exclusive_weighted_acquisition_cost",
+          "default": "fee_exclusive_weighted_acquisition_cost",
+          "title": "Anchor",
+          "type": "string"
+        },
+        "execution": {
+          "const": "next_bar_order_activation",
+          "default": "next_bar_order_activation",
+          "title": "Execution",
+          "type": "string"
+        },
+        "limit_price_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit Price Cny"
+        },
+        "observation": {
+          "const": "raw_minute_high_low",
+          "default": "raw_minute_high_low",
+          "title": "Observation",
+          "type": "string"
+        },
+        "stop_loss_pct": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 100.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stop Loss Pct"
+        },
+        "take_profit_pct": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 10000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Take Profit Pct"
+        },
+        "trailing_drawdown_pct": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 100.0,
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trailing Drawdown Pct"
+        },
+        "type": {
+          "const": "minute_protection_exit",
+          "default": "minute_protection_exit",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "title": "MinuteProtectionExit",
+      "type": "object"
+    },
     "NotCondition": {
       "additionalProperties": false,
       "properties": {
@@ -779,6 +2013,344 @@
       "title": "PositionReturnExit",
       "type": "object"
     },
+    "PricePlan": {
+      "discriminator": {
+        "mapping": {
+          "conditional": "#/$defs/ConditionalPlan",
+          "grid": "#/$defs/GridPlan",
+          "scheduled": "#/$defs/ScheduledPlan"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/GridPlan"
+        },
+        {
+          "$ref": "#/$defs/ConditionalPlan"
+        },
+        {
+          "$ref": "#/$defs/ScheduledPlan"
+        }
+      ]
+    },
+    "PricePlanExecutionPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "data_capability": {
+          "enum": [
+            "minute_ohlcv",
+            "daily_ohlcv",
+            "server_selected"
+          ],
+          "title": "Data Capability",
+          "type": "string"
+        },
+        "entry_policy": {
+          "enum": [
+            "next_bar_order_activation",
+            "scheduled_session_open",
+            "scheduled_session_close",
+            "server_selected_grid"
+          ],
+          "title": "Entry Policy",
+          "type": "string"
+        },
+        "evaluation_frequency": {
+          "enum": [
+            "1m_bar",
+            "1d_close",
+            "pre_session_schedule",
+            "server_selected"
+          ],
+          "title": "Evaluation Frequency",
+          "type": "string"
+        },
+        "execution_resolution": {
+          "enum": [
+            "1m",
+            "1d",
+            "server_selected"
+          ],
+          "title": "Execution Resolution",
+          "type": "string"
+        },
+        "exit_policy": {
+          "enum": [
+            "next_bar_order_activation",
+            "scheduled_session_open",
+            "scheduled_session_close",
+            "server_selected_grid"
+          ],
+          "title": "Exit Policy",
+          "type": "string"
+        },
+        "position_policy": {
+          "const": "bounded_inventory",
+          "default": "bounded_inventory",
+          "title": "Position Policy",
+          "type": "string"
+        },
+        "t_plus_one": {
+          "const": true,
+          "default": true,
+          "title": "T Plus One",
+          "type": "boolean"
+        },
+        "timezone": {
+          "const": "Asia/Shanghai",
+          "default": "Asia/Shanghai",
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry_policy",
+        "exit_policy",
+        "data_capability",
+        "execution_resolution",
+        "evaluation_frequency"
+      ],
+      "title": "PricePlanExecutionPolicy",
+      "type": "object"
+    },
+    "ScheduledParameters": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "default": "open",
+          "enum": [
+            "open",
+            "close"
+          ],
+          "title": "At",
+          "type": "string"
+        },
+        "budget_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "1000",
+          "title": "Budget Cny"
+        },
+        "buy_on_start": {
+          "default": false,
+          "title": "Buy On Start",
+          "type": "boolean"
+        },
+        "commission_rate": {
+          "anyOf": [
+            {
+              "maximum": 0.05,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0.00025",
+          "title": "Commission Rate"
+        },
+        "day": {
+          "default": 1,
+          "maximum": 31,
+          "minimum": 1,
+          "title": "Day",
+          "type": "integer"
+        },
+        "exit_rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ConditionRule"
+          },
+          "maxItems": 8,
+          "title": "Exit Rules",
+          "type": "array"
+        },
+        "frequency": {
+          "default": "weekly",
+          "enum": [
+            "once",
+            "weekly",
+            "monthly"
+          ],
+          "title": "Frequency",
+          "type": "string"
+        },
+        "initial_cash_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "1000000",
+          "title": "Initial Cash Cny"
+        },
+        "initial_shares": {
+          "default": 0,
+          "maximum": 100000000,
+          "minimum": 0,
+          "title": "Initial Shares",
+          "type": "integer"
+        },
+        "limit_price": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Limit Price"
+        },
+        "max_position_cny": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 1000000000.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Position Cny"
+        },
+        "max_shares": {
+          "default": 10000,
+          "maximum": 100000000,
+          "minimum": 1,
+          "title": "Max Shares",
+          "type": "integer"
+        },
+        "min_shares": {
+          "default": 0,
+          "maximum": 100000000,
+          "minimum": 0,
+          "title": "Min Shares",
+          "type": "integer"
+        },
+        "minimum_commission_cny": {
+          "anyOf": [
+            {
+              "maximum": 1000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "5",
+          "title": "Minimum Commission Cny"
+        },
+        "quantity": {
+          "default": 100,
+          "maximum": 1000000,
+          "minimum": 1,
+          "title": "Quantity",
+          "type": "integer"
+        },
+        "side": {
+          "default": "buy",
+          "enum": [
+            "buy",
+            "sell"
+          ],
+          "title": "Side",
+          "type": "string"
+        },
+        "sizing_mode": {
+          "default": "amount",
+          "enum": [
+            "amount",
+            "shares"
+          ],
+          "title": "Sizing Mode",
+          "type": "string"
+        },
+        "slippage_bps": {
+          "anyOf": [
+            {
+              "maximum": 1000.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "5",
+          "title": "Slippage Bps"
+        },
+        "slippage_cny": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            }
+          ],
+          "default": "0",
+          "title": "Slippage Cny"
+        }
+      },
+      "title": "ScheduledParameters",
+      "type": "object"
+    },
+    "ScheduledPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "scheduled",
+          "default": "scheduled",
+          "title": "Kind",
+          "type": "string"
+        },
+        "parameters": {
+          "$ref": "#/$defs/ScheduledParameters"
+        }
+      },
+      "required": [
+        "parameters"
+      ],
+      "title": "ScheduledPlan",
+      "type": "object"
+    },
     "TrailingDrawdownExit": {
       "additionalProperties": false,
       "description": "Exit after a close-confirmed drawdown from the post-entry close peak.",
@@ -838,13 +2410,54 @@
       "$ref": "#/$defs/CatalogRef"
     },
     "entry": {
-      "$ref": "#/$defs/Condition"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Condition"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "execution": {
-      "$ref": "#/$defs/DailyExecutionPolicy"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DailyExecutionPolicy"
+        },
+        {
+          "$ref": "#/$defs/PricePlanExecutionPolicy"
+        },
+        {
+          "$ref": "#/$defs/HybridExecutionPolicy"
+        },
+        {
+          "$ref": "#/$defs/ComposedExecutionPolicy"
+        }
+      ],
+      "title": "Execution"
     },
     "exit": {
-      "$ref": "#/$defs/FirstOfExit"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FirstOfExit"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "independent_plans": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IndependentPlanPair"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "instrument": {
       "$ref": "#/$defs/Instrument"
@@ -854,13 +2467,22 @@
       "default": "strategy.v1",
       "title": "Schema Version",
       "type": "string"
+    },
+    "trading_plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PricePlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [
     "catalog",
     "instrument",
-    "entry",
-    "exit",
     "backtest"
   ],
   "title": "StrategySpec",

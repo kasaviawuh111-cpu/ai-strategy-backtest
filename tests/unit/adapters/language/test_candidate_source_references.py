@@ -186,6 +186,39 @@ def test_repeated_original_text_is_located_by_id_not_first_text_match() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source_name,model_name,valid", [
+    ("蓝色 光标", "蓝色光标", True),
+    ("怡 亚 通", "怡亚通", True),
+    ("贵\u3000州\t茅台", "贵州茅台", True),
+    ("蓝色光标", "蓝色 光标", True),
+    ("蓝色 光标 蓝色光标", "蓝色光标", False),
+    ("蓝色 光标", "贵州茅台", False),
+    ("蓝色，光标", "蓝色光标", False),
+])
+async def test_instrument_reference_tolerates_only_whitespace_and_preserves_source(
+    source_name: str, model_name: str, valid: bool,
+) -> None:
+    utterance = f"{source_name}，{SCREENSHOT_ENTRY}；{SCREENSHOT_EXIT}"
+    fragments = _candidate_source_fragments(utterance)
+    stock_refs = [key for key, span in fragments.items() if span.end <= len(source_name)]
+    entry_ref = _reference(utterance, SCREENSHOT_ENTRY)
+    exit_ref = _reference(utterance, SCREENSHOT_EXIT)
+    payload = _screenshot_payload()
+    _candidate(payload).update({
+        "instrument_name": model_name,
+        "instrument_span": {"first_fragment": stock_refs[0], "last_fragment": stock_refs[-1]},
+        "entry_spans": [entry_ref, entry_ref], "exit_spans": [exit_ref, exit_ref, exit_ref],
+    })
+    generated = (await _generator(_FakeTransport(payload)).generate(_request(utterance)))[0]
+    assert (generated.unsupported_code is None) is valid
+    if valid:
+        assert generated.instrument_name == source_name
+        evidence = next(item for item in generated.grounding_evidence if item.path == "/instrument/name")
+        assert utterance[evidence.start:evidence.end] == evidence.text == source_name
+        assert generated.entry[0].value == 30 and generated.exit[0].value == 55
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("bad_reference", [
     {"first_fragment": "s999", "last_fragment": "s999"},
     {"first_fragment": "s3", "last_fragment": "s2"},

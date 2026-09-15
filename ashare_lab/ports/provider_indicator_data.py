@@ -8,16 +8,31 @@ OHLCV as a silent fallback.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypedDict
 
 from ashare_lab.domain.shared import DomainValidationError, require_aware
+from ashare_lab.domain.strategy.models import JsonScalar
 
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _INSTRUMENT = re.compile(r"^[0-9]{6}\.(?:SH|SZ|BJ)$")
 _INDICATOR_ID = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$")
+
+# Compatibility route identities for the legacy (non-provider-first) profile.
+# This is not the all-Skill catalog or a runtime availability claim.
+LEGACY_SKILL_PROVIDER_INDICATORS = frozenset({
+    "technical.ma", "technical.ma_cross", "technical.rsi", "price.close",
+    "price.amplitude", "market.amount", "market.turnover_rate", "price.consecutive_up",
+})
+
+
+class ProviderConditionParameters(TypedDict, total=False):
+    """Optional acquisition parameters included in query and cache identities."""
+
+    condition_params: Mapping[str, JsonScalar]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +46,7 @@ class ProviderIndicatorValue:
     source_field_name: str | None = None
     source_unit: str | None = None
     source_parameters: str | None = None
+    unit_normalization: str | None = None
 
     def __post_init__(self) -> None:
         if not self.field_code.strip() or not self.field_name.strip():
@@ -120,4 +136,5 @@ class HistoricalIndicatorData(Protocol):
         value_names: tuple[str, ...],
         start: date,
         end: date,
+        condition_params: Mapping[str, JsonScalar] | None = None,
     ) -> ProviderIndicatorSeries: ...

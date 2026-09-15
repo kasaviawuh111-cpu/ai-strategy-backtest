@@ -191,6 +191,35 @@ class SQLAlchemyDraftStore:
                     f"draft persistence schema is missing tables: {', '.join(missing)}"
                 )
 
+    async def get_http_response(
+        self, *, scope: str, key: str, request_hash: str,
+    ) -> str | None:
+        def operation() -> str | None:
+            with Session(self.engine) as session:
+                row = session.get(_IdempotencyRow, (scope, key))
+                if row is None:
+                    return None
+                if row.request_hash != request_hash:
+                    raise IdempotencyConflictError(key)
+                return row.payload_json
+        return await asyncio.to_thread(operation)
+
+    async def remember_http_response(
+        self, *, scope: str, key: str, request_hash: str, payload_json: str,
+    ) -> str:
+        def operation() -> str:
+            with Session(self.engine) as session, session.begin():
+                row = session.get(_IdempotencyRow, (scope, key))
+                if row is not None:
+                    if row.request_hash != request_hash:
+                        raise IdempotencyConflictError(key)
+                    return row.payload_json
+                session.add(_IdempotencyRow(
+                    scope=scope, key=key, request_hash=request_hash, payload_json=payload_json,
+                ))
+                return payload_json
+        return await asyncio.to_thread(_transaction_retry, operation)
+
     async def create(
         self, *, outcome: CompileOutcome, compile_input: CompileInput,
         request_hash: str, idempotency_key: str | None,

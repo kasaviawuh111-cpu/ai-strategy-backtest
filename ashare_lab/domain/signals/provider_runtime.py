@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from ashare_lab.domain.historical_units import unit_definition, unit_text
 from ashare_lab.domain.shared import DomainValidationError, InstrumentId
 from ashare_lab.domain.strategy.models import (
     AllCondition,
@@ -23,6 +24,7 @@ from ashare_lab.domain.strategy.models import (
 from ashare_lab.ports.provider_indicator_data import (
     ProviderIndicatorPoint,
     ProviderIndicatorSeries,
+    ProviderIndicatorValue,
 )
 
 from .comparators import Comparator, evaluate_comparator
@@ -360,6 +362,25 @@ def _evaluate_comparison(
     point: ProviderIndicatorPoint,
     previous_point: ProviderIndicatorPoint | None,
 ) -> tuple[bool, Decimal, Decimal] | None:
+    if comparison.right.source in {RightOperandSource.FIELD, RightOperandSource.PREVIOUS_FIELD}:
+        right_point = (
+            point if comparison.right.source is RightOperandSource.FIELD else previous_point
+        )
+        if right_point is not None:
+            assert comparison.right.field_name is not None
+            _require_compatible_field_units(
+                _field(point, comparison.left_field),
+                _field(right_point, comparison.right.field_name),
+            )
+            if condition.indicator_id in {"volume.relative", "volume.price_confirmation"} and (
+                _field_value(point, comparison.left_field) <= 0
+                or _field_value(right_point, comparison.right.field_name) <= 0
+            ):
+                # Rewriting volume / baseline > multiplier as volume >
+                # baseline * multiplier is equivalent only for a positive
+                # baseline. Suspensions / zero means remain unavailable, just
+                # as in the existing relative-volume formula evaluator.
+                return None
     left = _field_value(point, comparison.left_field)
     right = _right_value(
         comparison.right,
@@ -377,6 +398,9 @@ def _evaluate_comparison(
     }:
         if previous_point is None:
             return None
+        _require_compatible_field_units(
+            _field(point, comparison.left_field), _field(previous_point, comparison.left_field),
+        )
         previous_left = _field_value(previous_point, comparison.left_field)
         previous_right = _right_value(
             comparison.right,
@@ -448,9 +472,9 @@ def _decimal(value: object, label: str) -> Decimal:
     return result
 
 
-def _field_value(point: ProviderIndicatorPoint, requested_name: str) -> Decimal:
+def _field(point: ProviderIndicatorPoint, requested_name: str) -> ProviderIndicatorValue:
     matches = tuple(
-        item.value
+        item
         for item in point.values
         if _field_token(item.field_name) == _field_token(requested_name)
     )
@@ -459,6 +483,22 @@ def _field_value(point: ProviderIndicatorPoint, requested_name: str) -> Decimal:
             f"provider field {requested_name!r} is missing or ambiguous on {point.session_date}"
         )
     return matches[0]
+
+
+def _field_value(point: ProviderIndicatorPoint, requested_name: str) -> Decimal:
+    return _field(point, requested_name).value
+
+
+def _require_compatible_field_units(
+    left: ProviderIndicatorValue, right: ProviderIndicatorValue,
+) -> None:
+    # Acquisition owns normalization. Do not infer missing units for historic
+    # fixtures or reinterpret raw values here; reject explicit dimension OR
+    # scale mismatches before comparing, including previous-session operands.
+    if left.unit is None or right.unit is None:
+        return
+    if unit_definition(unit_text(left.unit)) != unit_definition(unit_text(right.unit)):
+        raise ProviderSignalRuntimeError("provider comparison fields have incompatible units")
 
 
 def _field_token(value: str) -> str:

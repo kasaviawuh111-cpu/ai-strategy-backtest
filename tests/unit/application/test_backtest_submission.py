@@ -497,14 +497,14 @@ def test_capacity_mode_is_pinned_in_config_manifest_and_fingerprint(
         "cn.a_share.daily.published_open_proxy.latency_1s.cutoff_0915."
         "recorded_0930.not_exact.day_order.v2"
     )
-    assert default_config["edge_entry_validity_sessions"] == 3
+    assert default_config["edge_entry_validity_sessions"] == 1
     assert default_config["event_entry_validity_sessions"] == 1
     assert default_config["state_entry_validity_sessions"] == 1
     assert default_manifest["assumptions"]["entry_signal_validity_policy"] == (
         "cn.a_share.daily.entry_signal_validity.edge_event_state.composite_fail_closed."
-        "event_revision_unavailable_one_attempt.retryable_day_orders.v3"
+        "default_one_attempt.persistent_account_exits.v4"
     )
-    assert default_manifest["assumptions"]["edge_entry_validity_sessions"] == "3"
+    assert default_manifest["assumptions"]["edge_entry_validity_sessions"] == "1"
     assert default_manifest["assumptions"]["event_entry_validity_sessions"] == "1"
     assert default_manifest["assumptions"]["state_entry_validity_sessions"] == "1"
     assert default.record.fingerprint != unlimited.record.fingerprint

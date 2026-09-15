@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Literal
+from zoneinfo import ZoneInfo
 
-from pydantic import Field, model_validator
+from pydantic import AwareDatetime, Field, model_validator
 
 from .backtest_schemas import CamelApiModel
 
@@ -53,7 +54,7 @@ class SkillDataProvenance(CamelApiModel):
 
     provider: Literal["eastmoney_mx_finance_data"]
     instrument_id: str = Field(alias="instrumentId")
-    price_basis: Literal["provider_back_adjusted"] = Field(alias="priceBasis")
+    price_basis: Literal["provider_back_adjusted", "unadjusted"] = Field(alias="priceBasis")
     retrieved_at: datetime = Field(alias="retrievedAt")
     history_start: date = Field(alias="historyStart")
     history_end: date = Field(alias="historyEnd")
@@ -78,6 +79,9 @@ class SkillDataProvenance(CamelApiModel):
         default=(), alias="derivedIndicatorEvidence"
     )
     queries: tuple[str, ...]
+    holding_calendar: dict[str, str | int | None] | None = Field(
+        default=None, alias="holdingCalendar", exclude_if=lambda value: value is None,
+    )
 
 
 class BacktestSummaryView(CamelApiModel):
@@ -95,9 +99,18 @@ class BacktestSummaryView(CamelApiModel):
     sharpe_ratio: float | None = Field(alias="sharpeRatio")
     win_rate: float | None = Field(alias="winRate", ge=0, le=1)
     trade_count: int = Field(alias="tradeCount", ge=0)
-    initial_cash_cny: float | None = Field(default=None, alias="initialCashCny", gt=0)
+    trade_count_semantics: Literal["closed_position_cycles"] | None = Field(
+        default=None, alias="tradeCountSemantics", exclude_if=lambda value: value is None,
+    )
+    initial_cash_cny: float | None = Field(default=None, alias="initialCashCny", ge=0)
+    initial_equity_cny: float | None = Field(
+        default=None, alias="initialEquityCny", gt=0, exclude_if=lambda value: value is None,
+    )
     final_equity_cny: float = Field(alias="finalEquityCny", gt=0)
     interpretation: str = Field(min_length=1, max_length=2_000)
+    execution_note: str | None = Field(
+        default=None, alias="executionNote", max_length=1000, exclude_if=lambda value: value is None,
+    )
     data_range: BacktestDataRange = Field(alias="dataRange")
     warnings: tuple[str, ...]
     # Results created before run evidence was introduced remain readable, but
@@ -107,7 +120,7 @@ class BacktestSummaryView(CamelApiModel):
 
 
 class BacktestSeriesPoint(CamelApiModel):
-    date: date
+    date: date | AwareDatetime
     equity: float = Field(gt=0)
     benchmark: float | None = Field(default=None, gt=0)
     drawdown: float = Field(ge=-1, le=0)
@@ -134,6 +147,9 @@ class BacktestSignalEvidence(CamelApiModel):
 
 
 class BacktestActivity(CamelApiModel):
+    execution_details: dict[str, str | int | float | None] = Field(
+        default_factory=dict, alias="executionDetails", exclude_if=lambda value: not value,
+    )
     id: str = Field(min_length=1, max_length=256)
     kind: Literal["signal", "order", "fill", "partial_fill", "unfilled", "expired"]
     occurred_at: datetime = Field(alias="occurredAt")
@@ -142,7 +158,7 @@ class BacktestActivity(CamelApiModel):
     price: float | None = Field(default=None, gt=0)
     quantity: int | None = Field(default=None, ge=1)
     notional_cny: float | None = Field(default=None, alias="notionalCny", gt=0)
-    status: Literal["confirmed", "submitted", "filled", "partially_filled", "cancelled", "expired"]
+    status: Literal["confirmed", "submitted", "filled", "partially_filled", "cancelled", "expired", "rejected"]
     reason: str = Field(min_length=1, max_length=2_000)
     chain_id: str | None = Field(default=None, alias="chainId", max_length=256)
     decision_id: str | None = Field(default=None, alias="decisionId", max_length=256)
@@ -176,6 +192,17 @@ class BacktestActivity(CamelApiModel):
 
 
 class BacktestAudit(CamelApiModel):
+    signal_adjustment_source: str | None = Field(
+        default=None, alias="signalAdjustmentSource", exclude_if=lambda value: value is None,
+    )
+    price_plan_ledger: str | None = Field(
+        default=None, alias="pricePlanLedger", exclude_if=lambda value: value is None,
+    )
+    # Internal reproducibility inputs, not a report warning or model analysis input.
+    # Empty legacy bundles must serialize identically for existing integrity hashes.
+    skill_numeric_sources: tuple[str, ...] = Field(
+        default=(), alias="skillNumericSources", exclude_if=lambda value: not value,
+    )
     # Legacy bundles may have no bundle-integrity evidence. A stored hash is
     # trusted only when a supported schema is present and the read path has
     # recomputed it over the complete persisted bundle.
@@ -199,9 +226,16 @@ class BacktestAudit(CamelApiModel):
     open_position_notional_cny: float | None = Field(
         default=None, alias="openPositionNotionalCny", ge=0
     )
+    open_dividend_receivable_cny: float | None = Field(
+        default=None, alias="openDividendReceivableCny", ge=0,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class BacktestStressScenario(CamelApiModel):
+    slippage_cny: float = Field(
+        default=0, alias="slippageCny", ge=0, exclude_if=lambda value: not value,
+    )
     id: str
     config_hash: str | None = Field(
         default=None,
@@ -240,6 +274,8 @@ class BacktestResultBundle(CamelApiModel):
     @model_validator(mode="after")
     def collections_are_ordered_and_unique(self) -> BacktestResultBundle:
         series_dates = tuple(item.date for item in self.series)
+        if len({isinstance(value, datetime) for value in series_dates}) > 1:
+            raise ValueError("result series must use one time granularity")
         if series_dates != tuple(sorted(series_dates)) or len(series_dates) != len(
             set(series_dates)
         ):
@@ -250,6 +286,8 @@ class BacktestResultBundle(CamelApiModel):
         activity_times = tuple(item.occurred_at for item in self.activities)
         if activity_times != tuple(sorted(activity_times)):
             raise ValueError("result activities must be time ordered")
-        if self.summary.data_range.sessions != len(self.series) - 1:
+        sessions = (len({item.date.astimezone(ZoneInfo("Asia/Shanghai")).date() for item in self.series[1:]})
+                    if isinstance(series_dates[0], datetime) else len(self.series) - 1)
+        if self.summary.data_range.sessions != sessions:
             raise ValueError("result session count does not match series")
         return self

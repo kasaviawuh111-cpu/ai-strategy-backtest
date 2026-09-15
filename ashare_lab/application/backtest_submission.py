@@ -106,13 +106,14 @@ def _event_data_available_by_default() -> bool:
 class BacktestRunConfig:
     participation_rate: Decimal = Decimal("0.05")
     slippage_bps: Decimal = Decimal("5")
+    slippage_cny: Decimal = Decimal("0")
     allocation_ratio: Decimal = Decimal("1")
     limit_handling: LimitHandling = LimitHandling.WAIT_FOR_UNLOCK
-    commission_rate: Decimal = Decimal("0.0003")
+    commission_rate: Decimal = Decimal("0.00025")
     minimum_commission_cny: Decimal = Decimal("5")
     retry_unfilled_exits: bool = True
     max_exit_attempts: int = 20
-    edge_entry_validity_sessions: int = 3
+    edge_entry_validity_sessions: int = 1
     event_entry_validity_sessions: int = 1
     state_entry_validity_sessions: int = 1
     warmup_calendar_days: int = 180
@@ -129,6 +130,8 @@ class BacktestRunConfig:
             raise DomainValidationError("participation and allocation must be in (0, 1]")
         if not Decimal("0") <= self.slippage_bps <= Decimal("1000"):
             raise DomainValidationError("slippage_bps must be in [0, 1000]")
+        if not self.slippage_cny.is_finite() or self.slippage_cny < 0:
+            raise DomainValidationError("slippage_cny must be finite and non-negative")
         if self.commission_rate < 0 or self.minimum_commission_cny < 0:
             raise DomainValidationError("commission terms cannot be negative")
         if self.max_exit_attempts < 1:
@@ -184,6 +187,7 @@ class BacktestRunConfig:
             "run_robustness": self.run_robustness,
             "settlement_extension_days": self.settlement_extension_days,
             "slippage_bps": str(self.slippage_bps),
+            **({"slippage_cny": str(self.slippage_cny)} if self.slippage_cny else {}),
             "state_entry_validity_sessions": self.state_entry_validity_sessions,
             "snapshot_end": snapshot_period.end.isoformat(),
             "snapshot_start": snapshot_period.start.isoformat(),
@@ -196,7 +200,8 @@ def resolve_execution_settings(patch: ExecutionSettingsPatch) -> ExecutionSettin
     """Use the engine's existing defaults for a complete draft configuration."""
     defaults = BacktestRunConfig()
     return ExecutionSettingsPatch.model_validate(
-        {key: getattr(defaults, key) for key in ExecutionSettingsPatch.model_fields}
+        {key: getattr(defaults, key) for key in ExecutionSettingsPatch.model_fields
+         if key != "slippage_cny"}
     ).merged(patch)
 
 
@@ -248,6 +253,8 @@ class BacktestSubmissionService:
         *,
         run_id: RunId | None = None,
     ) -> CreateRunResult:
+        if strategy.trading_plan is not None or strategy.independent_plans is not None:
+            raise DomainValidationError("当前快照执行器尚未接入价格交易计划，请使用已接入的查数执行链路")
         requires_events = strategy_requires_events(strategy)
         requires_financials = strategy_requires_financials(strategy)
         requires_event_document_text = any(
@@ -353,6 +360,7 @@ class BacktestSubmissionService:
                 price_limit_mode=config.limit_handling.value,
                 participation_rate=str(config.participation_rate),
                 slippage_bps=str(config.slippage_bps),
+                slippage_cny=str(config.slippage_cny),
                 commission_rate=str(config.commission_rate),
                 minimum_commission_cny=str(config.minimum_commission_cny),
                 fee_schedule_version=self._versions.fee_schedule_version,
@@ -563,6 +571,8 @@ def _provider_indicator_series_payload(series: ProviderIndicatorSeries) -> dict[
 
 
 def _exit_condition(strategy: StrategySpec) -> Condition | None:
+    if strategy.exit is None:
+        return None
     children = tuple(
         child
         for child in strategy.exit.children
