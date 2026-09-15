@@ -36,3 +36,17 @@
 - 修改后：`remaining-pairing-after/low_pe_macd_pairing.json`，请求 `a9d53c3f77ab4469a62e7430203ffb1f`；`model-7-dialogue_reply_semantic_review.json` 为独立审核通过结果。
 - 灵感补测：`remaining-lychee-after/ambiguous20_lychee.json`，请求 `1167e77ec5684783b733c261604f16a9`。
 - 复现命令：`.venv/bin/python outputs/single-strategy-order-regression-20260915/probe.py <case> <output-directory>`；case 分别为 `low_pe_macd_pairing`、`ambiguous20_lychee`。凭据只从已有钥匙串读入内存，不写入测试结果。
+
+## 后续离线修复：新方案默认说明与执行边界一致
+
+2026-09-15 14:24:05 UTC，只读调用 DeepSeek `GET /user/balance` 返回 HTTP 200、`is_available=false`。未调用生成接口、未充值、未输出凭据或余额明细。该字段按[官方余额接口说明](https://api-docs.deepseek.com/zh-cn/api/get-user-balance/)表示当前账户是否有余额可供 API 调用。
+
+在模型调用受阻期间，继续核对荔枝失败的首轮与修复轮：首轮两个日线方案的 `position_policy` 为 `single_position_no_pyramiding`，与新方案边界要求的 `accumulate_on_new_entry_signal` 不一致；既有 Pro 修复轮已更正为新触发口径，随后才遭遇余额不足。
+
+查明新方案生成使用的 JSON Schema 仍导出旧仓位口径为默认值，与要求模型复制服务端边界的说明冲突。修复复用 `_apply_new_plan_schema_defaults`，只在新生成的 Schema 副本中将日线和混合观察策略的默认口径对齐，并要求明确填写该字段；保留旧枚举，不改持久化类型默认值，不改变网格及组合计划的 `bounded_inventory`，也不绕过既有执行边界校验。该措施消除已确认的说明冲突，不能在未复测时声称模型不会再犯错。
+
+- 新增的有标的、无标的两条断言修改前均失败，修改后通过。
+- `test_vibe_ideas.py` 与 `test_price_plan_candidates.py`：169/169 通过，包含旧策略解码兼容、日线/混合观察的新生成默认值及原价格计划行为。
+- `git diff --check` 通过。
+- 本批真实模型复验仍待余额恢复；此前低 PE 通过证据属于上一提交 `2b88e6e`，不冒充此次新增改动后的完整真实复测。
+- 本地运行服务与线上 031 均未更新。下一步仍是补完真实用例、更新本地、通知用户验收，确认后才能发布这批新修复。

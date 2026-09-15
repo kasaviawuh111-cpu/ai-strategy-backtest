@@ -3085,9 +3085,19 @@ def _apply_new_plan_schema_defaults(definitions: dict[str, object]) -> None:
 
     Both model routes export the durable schema, whose defaults preserve old
     plans. Override only this generated copy and ask the model to spell out
-    grid choices so omitted fields do not silently expand to legacy defaults.
+    grid and signal-position choices so omitted fields do not silently expand
+    to legacy defaults.
     Explicit manual/first-open, catch-up and order-type choices remain valid.
     """
+    for name in ("DailyExecutionPolicy", "HybridExecutionPolicy"):
+        if name not in definitions:
+            continue
+        execution = _schema_object(definitions, name)
+        position = _schema_object(_schema_object(execution, "properties"), "position_policy")
+        position["default"] = "accumulate_on_new_entry_signal"
+        execution["required"] = list(dict.fromkeys([
+            *cast(list[str], execution.get("required", [])), "position_policy",
+        ]))
     grid = _schema_object(definitions, "GridParameters")
     properties = _schema_object(grid, "properties")
     defaults = {"anchor_mode": "previous_close", "anchor_update": "last_trigger", "startup_mode": "wait_for_crossing",

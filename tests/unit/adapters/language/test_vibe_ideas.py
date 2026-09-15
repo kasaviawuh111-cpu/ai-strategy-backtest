@@ -90,6 +90,27 @@ def _selection_evidence():
 ROOT = Path(__file__).parents[4]
 
 
+@pytest.mark.parametrize("unbound", [False, True])
+def test_new_idea_schema_uses_new_signal_policy_without_migrating_saved_strategies(unbound):
+    from ashare_lab.domain.strategy import HybridExecutionPolicy
+
+    definitions = _idea_response_schema(require_strategy=True, unbound=unbound)["$defs"]
+    for name in ("DailyExecutionPolicy", "HybridExecutionPolicy"):
+        schema = definitions[name]
+        policy = schema["properties"]["position_policy"]
+        assert policy["default"] == "accumulate_on_new_entry_signal"
+        assert "position_policy" in schema["required"]
+        assert "single_position_no_pyramiding" in policy["enum"]
+    for name in ("PricePlanExecutionPolicy", "ComposedExecutionPolicy"):
+        assert definitions[name]["properties"]["position_policy"]["default"] == "bounded_inventory"
+    # Durable defaults still decode previously saved plans with their old meaning.
+    for policy_type in (DailyExecutionPolicy, HybridExecutionPolicy):
+        assert policy_type.model_validate({}).position_policy == "single_position_no_pyramiding"
+        assert policy_type.model_json_schema()["properties"]["position_policy"]["default"] == (
+            "single_position_no_pyramiding"
+        )
+
+
 def test_requested_profit_loss_keeps_only_complete_structured_suggestions():
     from ashare_lab.domain.strategy import execution_for_price_plan
     from ashare_lab.domain.strategy.price_plans import ConditionalPlan, ConditionParameters, ConditionRule
