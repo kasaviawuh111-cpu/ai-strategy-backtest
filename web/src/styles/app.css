@@ -266,6 +266,10 @@ button,input,select{font:inherit}
 .condition-range small{display:block}
 .condition-sections .erow::after{display:none}
 .condition-sections .erow+.erow{margin-top:12px}
+.grid-workflow{margin-top:24px}
+.grid-workflow .erow::after{display:block}
+.grid-workflow .erow+.erow{margin-top:20px}
+.erow--static{cursor:default}
 .condition-relation:focus-visible,.condition-range:focus-visible{outline:2px solid var(--color-primary);outline-offset:3px}
 .condition-sections button:disabled{opacity:.6;cursor:default}
 .erow{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;

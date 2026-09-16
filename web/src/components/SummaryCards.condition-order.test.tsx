@@ -95,6 +95,7 @@ describe('condition-order strategy card', () => {
       rows: [
         { key: 'entry', label: '买入', value: '下跨一格买入100股', kind: 'buy' },
         { key: 'exit', label: '卖出', value: '上跨一格卖出100股', kind: 'sell' },
+        { key: 'range', label: '区间', value: '近一年' },
       ],
       entryRule: leaf('entry', '下跨一格买入100股'), exitRule: leaf('exit', '上跨一格卖出100股'),
       confirmation: '分钟触发', earliestExecution: '下一分钟', conditionCount: 2, eventFacts: [],
@@ -108,6 +109,11 @@ describe('condition-order strategy card', () => {
 
     expect(screen.getByText('价格下跌时，按网格分批买入。')).toBeVisible()
     expect(screen.getByText('价格上涨时，按网格分批卖出。')).toBeVisible()
+    expect(screen.getByRole('region', { name: '交易规则流程' })).toHaveTextContent('买入')
+    expect(screen.getByRole('region', { name: '交易规则流程' })).toHaveTextContent('卖出')
+    expect(screen.getByRole('region', { name: '交易规则流程' })).toHaveTextContent('区间')
+    expect(screen.getByRole('region', { name: '交易规则流程' })).toHaveTextContent('近一年')
+    expect(screen.getByRole('region', { name: '交易规则流程' }).querySelectorAll('.erow')).toHaveLength(3)
     expect(screen.queryByText('起始日昨收26.95元')).not.toBeInTheDocument()
     expect(screen.queryByText('空仓启动，等待买点')).not.toBeInTheDocument()
     expect(screen.queryByText('买入间距')).not.toBeInTheDocument()

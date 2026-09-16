@@ -96,6 +96,8 @@ export function StrategyCard(
   const isReadOnly = Boolean(isLocked || (settled && !editableAfterRun));
   const fieldsLocked = isReadOnly || stockEditing;
   const advancedSummary = executionSummary ?? (strategy.pricePlanKind ? '按交易计划' : '默认');
+  const gridSummary = strategy.gridReview ? gridPlanSummary(strategy) : [];
+  const gridRange = strategy.rows.find((row) => row.key === 'range');
   return (
     <section className={`mcard${settled ? ' is-settled' : ''}${stockEditing ? ' is-stock-editing' : ''}`}>
       <div className="pad">
@@ -123,14 +125,20 @@ export function StrategyCard(
           </button>
         </div>
         <div className="condition-sections">
-          {strategy.gridReview ? gridPlanSummary(strategy).map(({ side, text }) => <section
-            className={`condition-section ${side}`} key={`grid-${side}`} aria-label={`${side === 'buy' ? '买入' : '卖出'}条件`}>
-            <header className="condition-heading"><span className="lb">{side === 'buy' ? '买入' : '卖出'}</span></header>
-            <p className="condition-trigger-note">{text}</p>
-          </section>) : null}
+          {gridSummary.length > 0 ? <section className="grid-workflow" aria-label="交易规则流程">
+            <div className="erows erows--grid-summary">
+              {gridSummary.map(({ side, text }) => <div className={`erow erow--static ${side}`} key={`grid-${side}`}>
+                <span className="lb">{side === 'buy' ? '买入' : '卖出'}</span>
+                <span className="val">{text}</span>
+              </div>)}
+              {gridRange ? <div className="erow erow--static range">
+                <span className="lb">{gridRange.label}</span>
+                <span className="val">{gridRange.value}</span>
+              </div> : null}
+            </div>
+          </section> : null}
           {strategy.rows.map((row) => {
-            if (strategy.gridReview && (row.key === 'entry' || row.key === 'exit')
-              && (row.key === 'entry' ? strategy.gridReview.buy : strategy.gridReview.sell).length > 0) return null
+            if (gridSummary.length > 0 && (row.key === 'entry' || row.key === 'exit' || row.key === 'range')) return null
             const root = row.key === 'entry' ? strategy.entryRule : row.key === 'exit' ? strategy.exitRule : null;
             // first_of with a single market-condition group delegates to that group.
             // Do not label an ALL group as OR just because the exit envelope is first_of.
