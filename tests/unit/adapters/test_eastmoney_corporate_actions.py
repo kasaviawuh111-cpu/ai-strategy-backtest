@@ -507,6 +507,23 @@ def test_negative_split_proof_accepts_known_placement_listing_change(reason: str
     assert proof["recognizedChangeReasons"] == sorted(reason.split(","))
 
 
+@pytest.mark.parametrize('reason', ['H股超额配售', '首发H股上市'])
+@pytest.mark.parametrize('change', [None, 'LISTED_ASHARES_CHANGE', 'TOTAL_SHARES_CHANGE', 'H_FREESHARE_CHANGE'])
+def test_h_share_issue_requires_balanced_ledger_without_a_share_change(reason, change):
+    row = _equity_row(reason=reason)
+    row.update(LISTED_ASHARES_CHANGE=0, LIMITED_ASHARES_CHANGE=0,
+               H_FREESHARE_CHANGE=8175000, TOTAL_SHARES_CHANGE=8175000)
+    if change is not None:
+        row[change] = 1
+    transport = _transport(dividend_rows=[], equity_rows=[row],
+        bonus_payload=_bonus_payload(include_cash_settlement=False))
+    if change is None:
+        assert reason in _prepare(transport).coverage['negativeSplitProof']['recognizedChangeReasons']
+    else:
+        with pytest.raises(EastmoneyCorporateActionError, match='unclassified change reason'):
+            _prepare(transport)
+
+
 @pytest.mark.parametrize(
     ("reason", "message"),
     [

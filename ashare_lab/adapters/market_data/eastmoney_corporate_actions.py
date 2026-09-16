@@ -148,6 +148,10 @@ class EastmoneyCorporateActionError(RuntimeError):
     """The public response cannot support the promised reference coverage."""
 
 
+class EastmoneyCorporateActionValidationError(EastmoneyCorporateActionError):
+    """Data was acquired, but its economic meaning is not yet verified."""
+
+
 @dataclass(frozen=True, slots=True)
 class EastmoneyPageEvidence:
     lane: str
@@ -1106,6 +1110,31 @@ def _matches_incentive_issuance(row: Mapping[str, object], observation: EventObs
     return amount_doc == limited and after_doc == after and before_doc + amount_doc == after_doc
 
 
+def _is_verified_h_share_issue(row: JsonObject, reason: str) -> bool:
+    """Recognize H issuance only when the ledger proves no A-share change."""
+    if reason not in {"H股超额配售", "首发H股上市"}:
+        return False
+    def number(key: str, *, optional: bool = False) -> Decimal | None:
+        value = row.get(key)
+        if value is None and optional:
+            return Decimal(0)
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            n = Decimal(str(value))
+            return n if n.is_finite() and n == n.to_integral_value() else None
+        except InvalidOperation:
+            return None
+    if any(number(k) != 0 for k in ("LISTED_ASHARES_CHANGE", "LIMITED_ASHARES_CHANGE")):
+        return False
+    if any(number(k, optional=True) != 0 for k in (
+            "B_FREESHARE_CHANGE", "LIMITED_BSHARES_CHANGE", "NONFREE_SHARES_CHANGE",
+            "OTHERFREE_SHARES_CHANGE", "LIMITED_H_SHARES_CHANGE")):
+        return False
+    issued = number("H_FREESHARE_CHANGE")
+    return issued is not None and issued > 0 and number("TOTAL_SHARES_CHANGE") == issued
+
+
 def _validate_negative_split_proof(
     equity: EastmoneyLaneCollection,
     *,
@@ -1141,8 +1170,9 @@ def _validate_negative_split_proof(
             not any(marker in token for marker in _KNOWN_NON_SPLIT_CHANGE_MARKERS)
             for token in tokens
         ):
-            if f"{changed_at.isoformat()}|{reason}" not in (resolved_changes or {}):
-                raise EastmoneyCorporateActionError(
+            if (f"{changed_at.isoformat()}|{reason}" not in (resolved_changes or {})
+                    and not _is_verified_h_share_issue(row, reason)):
+                raise EastmoneyCorporateActionValidationError(
                     f"capital-structure ledger has an unclassified change reason: {reason}"
                 )
         recognized_reasons.update(tokens)

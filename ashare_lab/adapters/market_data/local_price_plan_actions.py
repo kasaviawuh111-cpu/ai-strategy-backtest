@@ -221,11 +221,14 @@ def acquire_price_plan_actions(strategy, history, start):
     """Reuse the supplier adapter and raw-price factor verification, not a new feed."""
     from ashare_lab.adapters.market_data.eastmoney_corporate_actions import (
         EastmoneyCorporateActionReferenceAdapter, EastmoneyCorporateActionError,
+        EastmoneyCorporateActionValidationError,
     )
     try:
         with EastmoneyCorporateActionReferenceAdapter() as adapter:
             result = adapter.prepare(symbol=strategy.instrument.symbol,
                                      start=start, end=strategy.backtest.end)
+    except EastmoneyCorporateActionValidationError as exc:
+        raise MinuteReplayDataError("corporate_action_source_invalid") from exc
     except EastmoneyCorporateActionError as exc:
         raise MinuteReplayDataError("corporate_action_acquisition_unavailable") from exc
     rebases = source_backed_price_rebases(result, history) if result.corporate_actions else ()
