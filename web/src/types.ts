@@ -64,6 +64,7 @@ export interface EditableRow {
 export interface StrategySummary {
   title: string;
   pricePlanKind?: 'grid' | 'conditional' | 'scheduled';
+  independentPlanKinds?: { entry: 'grid' | 'conditional' | 'scheduled'; exit: 'grid' | 'conditional' | 'scheduled' };
   hasSequentialPricePlanStages?: boolean;
   gridReview?: {
     anchor: string;

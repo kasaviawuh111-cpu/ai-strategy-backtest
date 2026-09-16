@@ -164,7 +164,10 @@ export function StrategyCard(
                 <header className="condition-heading"><span className="lb">{row.label}</span>
                   {strategy.pricePlanKind !== 'grid' && <button type="button" className="condition-relation" disabled={fieldsLocked}
                     onClick={() => onEditRow(row.key, node.id)}>
-                    {strategy.pricePlanKind ? strategy.pricePlanKind === 'scheduled' ? '按日历安排 · 休市顺延'
+                    {strategy.independentPlanKinds && (row.key === 'entry' || row.key === 'exit')
+                      ? strategy.independentPlanKinds[row.key] === 'scheduled' ? '按日历安排 · 休市顺延'
+                        : strategy.independentPlanKinds[row.key] === 'grid' ? '按网格分批触发' : '满足条件时触发'
+                      : strategy.pricePlanKind ? strategy.pricePlanKind === 'scheduled' ? '按日历安排 · 休市顺延'
                       : strategy.pricePlanKind === 'conditional' && !strategy.hasSequentialPricePlanStages
                         ? row.value.startsWith('建仓：') ? '区间开始时建仓'
                           : row.value.startsWith('期初已有') ? '已有底仓' : '满足条件时触发'

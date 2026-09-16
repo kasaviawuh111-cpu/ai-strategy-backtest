@@ -638,6 +638,10 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
   return {
     title: conciseStrategyTitle(draft),
     pricePlanKind: draft.strategySpec.trading_plan?.kind,
+    independentPlanKinds: draft.strategySpec.independent_plans ? {
+      entry: draft.strategySpec.independent_plans.entry_plan.kind,
+      exit: draft.strategySpec.independent_plans.exit_plan.kind,
+    } : undefined,
     hasSequentialPricePlanStages: draft.strategySpec.trading_plan
       ? conditionalStageCount(draft.strategySpec.trading_plan) > 1 : false,
     gridReview: draft.strategySpec.trading_plan?.kind === 'grid'

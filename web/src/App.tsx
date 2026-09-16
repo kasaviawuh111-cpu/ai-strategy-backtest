@@ -130,7 +130,7 @@ const planStrategyTitle = (strategy: StrategySummary): string | null => {
 }
 
 const strategyTitle = (_instrument: Instrument, strategy: StrategySummary): string =>
-  planStrategyTitle(strategy)
+  (strategy.independentPlanKinds ? strategy.title : planStrategyTitle(strategy))
     ?? `${compactLegTitle(summarizeRule(strategy.entryRule), '买入')}，${compactLegTitle(summarizeRule(strategy.exitRule), '卖出')}`
 
 const terminalStates = new Set(['succeeded', 'failed', 'cancelled'])
