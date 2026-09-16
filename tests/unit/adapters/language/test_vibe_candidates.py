@@ -194,6 +194,18 @@ def test_condition_schema_feedback_explains_known_rule_without_echoing_input():
     assert "private-secret-value" not in _candidate_schema_feedback(private_error.value)
 
 
+def test_default_provenance_feedback_explains_paths_without_waiving_grounding():
+    from ashare_lab.adapters.language.vibe_candidates import _candidate_repair_hints, BoundedCandidate
+    code = _candidate_schema_feedback(ValueError("candidate claimed an unknown or unconsumed defaulted field"))
+    assert code == 'defaulted_field_unconsumed'
+    hints = ' '.join(_candidate_repair_hints([code]))
+    assert '/entry/序号/params/参数名' in hints
+    assert '不得冒充确定条件' in hints
+    assert '不要删除规则' in hints
+    description = BoundedCandidate.model_json_schema()['properties']['defaulted_fields']['description']
+    assert 'Do not list /value' in description
+
+
 def test_condition_kind_canonicalizes_only_implied_execution_mechanics() -> None:
     candidate = {"trading_plan": {"kind": "conditional", "parameters": {"rules": [{
         "kind": "rebound", "side": "sell", "direction": "down", "gap": "2",

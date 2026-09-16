@@ -273,6 +273,14 @@ _SAFE_VALIDATION_MESSAGE_CODES = {
 }
 
 _CANDIDATE_REPAIR_HINTS = {
+    "defaulted_field_unconsumed": (
+        "defaulted_fields只标记实际存在的指标参数路径/entry/序号/params/参数名或"
+        "/exit/序号/params/参数名，值必须等于该指标Catalog默认值。"
+        "value阈值、trigger、观察周期和止盈止损字段不是Catalog参数默认值，"
+        "不得仅因模型自行补充就标为默认。检查所有路径的侧、序号和参数名；"
+        "保留用户明确的股票、条件、数值及组合关系，不要删除规则以消除错误。"
+        "原文未给出且目录没有默认值的阈值不得冒充确定条件，须交由语义澄清处理。"
+    ),
     "period_evidence_missing": (
         "已填写backtest_lookback_years或起止日期时，必须同时填写backtest_span，"
         "引用sourceFragments中明确时间原话的first_fragment/last_fragment。"
@@ -1016,7 +1024,12 @@ class BoundedCandidate(_StrictCandidateModel):
     confidence: float = Field(ge=0.0, le=1.0)
     entry_join: ConditionJoin = "all"
     exit_join: ConditionJoin = "any"
-    defaulted_fields: tuple[str, ...] = Field(default=(), max_length=32)
+    defaulted_fields: tuple[str, ...] = Field(default=(), max_length=32, description=(
+        "Only existing indicator Catalog parameter defaults: /entry/N/params/name or "
+        "/exit/N/params/name. The value must equal that indicator's Catalog default. "
+        "Do not list /value, /trigger, exit risk thresholds, observation or invented paths. "
+        "An unspecified threshold is not a Catalog default; preserve uncertainty for clarification."
+    ))
     backtest_start: date | None = None
     backtest_end: date | None = None
     backtest_lookback_years: int | None = Field(default=None, ge=1, le=50)
