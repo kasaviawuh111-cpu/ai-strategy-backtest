@@ -28,6 +28,22 @@ def verdict():
     }
 
 
+@pytest.mark.parametrize('entry_kind', ['grid', 'conditional', 'scheduled'])
+@pytest.mark.parametrize('exit_kind', ['grid', 'conditional', 'scheduled'])
+def test_independent_review_context_preserves_each_native_clock(entry_kind, exit_kind):
+    from ashare_lab.adapters.language.candidate_semantic_review import _candidate_execution_context
+    from tests.contract.api.test_independent_price_plan_contract import pair_strategy
+    pair = pair_strategy(entry_kind, exit_kind).independent_plans.model_dump(mode='json')
+    context = _candidate_execution_context({'independent_plans': pair})
+    assert context['bar_interval'] == 'independent_plan_native_clocks'
+    assert context['position'] == 'shared_cash_inventory_cost_and_t_plus_one'
+    assert context['sequence'] == 'no_cross_leg_fill_prerequisite'
+    for leg in ('entry_plan', 'exit_plan'):
+        original = _candidate_execution_context({'trading_plan': pair[leg]})
+        assert {key.removeprefix(leg + '.'): value for key, value in context.items()
+                if key.startswith(leg + '.')} == original
+
+
 def test_represented_requirement_cannot_also_be_a_semantic_difference():
     from ashare_lab.adapters.language.candidate_semantic_review import _validate_semantic_review
     row = dict(candidate_path='/trading_plan/parameters/observation', source_quote='q0',
@@ -107,6 +123,35 @@ def test_scheduled_execution_context_is_not_next_day_signal(at):
     assert context["signal_evaluation"] == "schedule_fixed_before_session_open"
     assert context["execution"] == f"scheduled_session_{at}"
     assert context["limit_matching"] == ("close_only" if at == "close" else "open_then_hl")
+
+
+@pytest.mark.asyncio
+async def test_pair_review_payload_exposes_both_plans_not_source_metadata():
+    from tests.contract.api.test_independent_price_plan_contract import pair_strategy
+    captured = []
+    class Transport:
+        async def generate_json(self, request):
+            captured.append(request)
+            return provider_verdict(request)
+    request = CandidateTransportRequest(
+        utterance='每周四买入，涨到11元卖出', instrument_context='300059.SZ',
+        as_of_date=date(2026, 9, 16), max_candidates=1, response_schema={},
+        capability_matrix={}, capability_projection_version='test',
+        capability_projection_hash='test', system_contract='test')
+    candidate = {
+        'independent_plans': pair_strategy('scheduled', 'conditional').independent_plans.model_dump(mode='json'),
+        'entry_plan_span': {'start': 0, 'end': 5, 'text': '每周四买入'},
+        'exit_plan_span': {'start': 6, 'end': 14, 'text': '涨到11元卖出'},
+    }
+    result = await review_candidate_semantics(Transport(), request, candidate)
+    payload = captured[0].user_payload
+    assert set(payload['candidate']) == {'independent_plans'}
+    assert set(payload['candidate']['independent_plans']) == {'entry_plan', 'exit_plan'}
+    assert payload['executionContext']['entry_plan.execution'] == 'scheduled_session_open'
+    assert payload['executionContext']['exit_plan.bar_interval'] == '1m'
+    expected = hashlib.sha256(json.dumps(candidate, ensure_ascii=False, sort_keys=True,
+                                        allow_nan=False).encode()).hexdigest()
+    assert result.candidate_sha256 == 'sha256:' + expected
 
 
 def test_display_groups_same_requirement_without_losing_repair_paths():

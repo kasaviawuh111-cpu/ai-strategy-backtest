@@ -204,6 +204,22 @@ def _candidate_field_paths(value: object, prefix: str = "") -> list[str]:
 
 
 def _candidate_execution_context(candidate: Mapping[str, object]) -> dict[str, str]:
+    pair = candidate.get("independent_plans")
+    if isinstance(pair, Mapping):
+        context = {
+            "bar_interval": "independent_plan_native_clocks",
+            "signal_evaluation": "independent_entry_and_exit_legs",
+            "position": "shared_cash_inventory_cost_and_t_plus_one",
+            "conflicts": "exit_priority_no_duplicate_sell",
+            "sequence": "no_cross_leg_fill_prerequisite",
+            "availability": "checked_at_backtest_submission",
+        }
+        for leg in ("entry_plan", "exit_plan"):
+            plan = pair.get(leg)
+            if isinstance(plan, Mapping):
+                context.update({f"{leg}.{key}": value for key, value in
+                                _candidate_execution_context({"trading_plan": plan}).items()})
+        return context
     plan = candidate.get("trading_plan")
     if isinstance(plan, Mapping) and (candidate.get("entry") or candidate.get("exit")):
         return {
@@ -299,6 +315,8 @@ async def review_candidate_semantics(
         "backtest_span",
         "initial_cash_span",
         "plan_span",
+        "entry_plan_span",
+        "exit_plan_span",
         "execution_setting_evidence",
         "instrument_suggestion_declined",
     }
@@ -416,6 +434,11 @@ async def review_candidate_semantics(
             "没有用户原句依据的新增后续行为也属于实质差异，不能要求用户补齐虚构的新目标。"
             "候选只展示执行字段，引用和默认来源等辅助记录已由工程核验。"
             "trading_plan可单独闭环，也可与另一侧entry/exit指标条件组合。"
+            "independent_plans则是两侧各自独立的计划：entry_plan只买、exit_plan只卖，"
+            "必须分别检查频率、时点、数量、条件和原文，不可因顶层entry/exit为空就判定缺规则。"
+            "两侧共享账户及T+1约束，不是两个独立回测；各按自身时钟观察，不能整体当成日线信号。"
+            "两侧没有成交前置依赖：用户没说先后不可强加，用户明确先成交再启动下一步则必须保留依赖，"
+            "不能用无依赖双计划冒充顺序策略。"
             "组合时逐侧核对全部规则：例如定投买入＋MACD死叉卖出，应保留scheduled买入和exit日MACD死叉；"
             "日信号按收盘确认次交易日执行，定时计划仍按预定开收盘执行，不得把两者时钟混同。"
             "grid的cny是元价差，anchor_percent是基准价百分比等差格距，percent是相邻格价比1+spacing/100；"
