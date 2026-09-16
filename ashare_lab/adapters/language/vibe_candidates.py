@@ -1444,6 +1444,8 @@ class VibeBoundedCandidateGenerator:
                 "缺少股票本身、或只说先别跑，不能据此拒绝推荐；"
                 "用户本轮明确请求帮忙推荐股票时，此字段为false，不取消推荐。"
                 "若原话明确给出本金，必须换算为整数人民币元写入 initial_cash_cny，"
+                "存在计划时，同一金额也必须写入trading_plan.parameters.initial_cash_cny，"
+                "或独立买卖两侧各自parameters.initial_cash_cny；这是同一共享账户本金，不能相加、均分或保留冲突默认值。"
                 "并在 initial_cash_span 给出对应原文；未给本金时两字段均为 null；"
                 "原话明确给出的成交设置必须完整提取到 execution_settings，不能遗漏费用，"
                 "也不能混入买卖条件或改动固定的 StrategySpec.execution 撮合规则。"

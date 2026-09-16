@@ -13,6 +13,16 @@ def outcome(plan):
     return CompileOutcome(status=CompileStatus.READY, strategy=strategy)
 
 
+def test_independent_plans_are_not_described_as_daily_signals():
+    from tests.contract.api.test_independent_price_plan_contract import pair_strategy
+    strategy = pair_strategy('scheduled', 'conditional')
+    assessment = assess_execution(CompileOutcome(status=CompileStatus.READY, strategy=strategy))
+    assert '独立触发' in assessment.message
+    assert '共享资金和持仓' in assessment.message
+    assert '日线收盘确认' not in assessment.message
+    assert assessment.status == 'research_degraded'
+
+
 def test_transient_service_failure_does_not_reuse_old_strategy_or_claim_parse_failure():
     for code, dependency in (
         ("instrument_resolution_unavailable", "证券身份查询服务"),

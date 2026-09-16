@@ -71,7 +71,10 @@ def assess_execution(outcome: CompileOutcome) -> ExecutionAssessment | None:
         )
     if outcome.status is CompileStatus.READY and outcome.strategy is not None:
         plan = outcome.strategy.trading_plan
-        if isinstance(outcome.strategy.execution, HybridExecutionPolicy):
+        if outcome.strategy.independent_plans is not None:
+            execution = ("买入和卖出按各自计划独立触发，共享资金和持仓并遵守T+1；"
+                         "定时规则按指定交易时点执行，价格规则按各自观察频率与委托类型模拟")
+        elif isinstance(outcome.strategy.execution, HybridExecutionPolicy):
             execution = "日线信号收盘确认、下一交易日开盘起委托；持仓保护按分钟检查，触发后下一根分钟起委托"
         elif isinstance(plan, (GridPlan, ConditionalPlan)) and plan.parameters.observation == "minute_bar":
             execution = "已识别1分钟价格计划，新委托从下一根分钟起生效"
