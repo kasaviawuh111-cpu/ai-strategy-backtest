@@ -160,9 +160,6 @@ export function StrategyCard(
                       : operator === 'not' ? '不满足以下条件' : `任一触发就${row.label}（或）` : '满足条件时触发'}<Chevron />
                   </button>}
                 </header>
-                {row.key === 'entry' && strategy.entryTriggerNote ? (
-                  <p className="condition-trigger-note">{strategy.entryTriggerNote}</p>
-                ) : null}
                 <div className={`erows${strategy.pricePlanKind === 'grid' ? ' erows--readonly' : ''}`}>
                   {children.map((child) => strategy.pricePlanKind === 'grid'
                     ? <div key={child.id} className="erow">

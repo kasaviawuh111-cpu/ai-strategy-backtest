@@ -14,7 +14,7 @@ const leaf = (id: string, label: string, parameters: string[] = []): StrategyRul
 })
 
 describe('condition-order strategy card', () => {
-  it('shows the trigger note only in the buy section without changing the condition editor', () => {
+  it('keeps the condition editor while hiding the trigger note from the first-level review', () => {
     const entryRule = leaf('entry', 'MACD 金叉')
     const exitRule = leaf('exit', 'MACD 死叉')
     const strategy: StrategySummary = {
@@ -29,15 +29,12 @@ describe('condition-order strategy card', () => {
     const edit = vi.fn()
     const props = { instrument: { name: '东方财富', code: '300059.SZ' },
       onEditRow: edit, onOpenMore: vi.fn(), onRun: vi.fn() }
-    const { rerender } = render(<StrategyCard {...props} strategy={strategy} />)
-    expect(screen.getByRole('region', { name: '买入条件' })).toHaveTextContent(strategy.entryTriggerNote!)
+    render(<StrategyCard {...props} strategy={strategy} />)
+    expect(screen.getByRole('region', { name: '买入条件' })).not.toHaveTextContent(strategy.entryTriggerNote!)
     expect(screen.getByRole('region', { name: '卖出条件' })).not.toHaveTextContent(strategy.entryTriggerNote!)
-    expect(screen.getAllByText(strategy.entryTriggerNote!)).toHaveLength(1)
+    expect(screen.queryByText(strategy.entryTriggerNote!)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'MACD 金叉' }))
     expect(edit).toHaveBeenCalledWith('entry', 'entry')
-
-    rerender(<StrategyCard {...props} strategy={{ ...strategy, entryTriggerNote: undefined }} />)
-    expect(screen.queryByText(strategy.entryTriggerNote!)).not.toBeInTheDocument()
   })
 
   it('does not call a single conditional rule stage 1', () => {

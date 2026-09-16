@@ -255,7 +255,6 @@ button,input,select{font:inherit}
 .rule-edit-condition{padding:16px 0;border-top:1px solid var(--hairline)}
 .rule-edit-condition h3{padding:0 16px;font-size:15px;line-height:24px;overflow-wrap:anywhere}
 .condition-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.condition-trigger-note{margin:2px 0 8px;color:var(--ink-2);font-size:13px;line-height:21px;overflow-wrap:anywhere}
 .condition-heading .lb,.condition-range .lb{padding:3px 8px;background:var(--surface-sunken);border-radius:var(--r-chip);font-size:13px}
 .condition-section.buy .lb{color:var(--color-up);background:var(--color-up-weak)}
 .condition-section.sell .lb{color:var(--color-down);background:var(--color-down-weak)}
