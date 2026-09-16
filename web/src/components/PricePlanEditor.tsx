@@ -107,7 +107,14 @@ export function PricePlanEditor({ draft, onChange }: {
     onChange({ ...draft,
       execution: { ...draft.execution, entryPolicy: execution.entry_policy,
         exitPolicy: execution.exit_policy, tPlusOne: execution.t_plus_one,
-        dataCapability: execution.data_capability, evaluationFrequency: execution.evaluation_frequency },
+        dataCapability: execution.data_capability, evaluationFrequency: execution.evaluation_frequency,
+        // Price-plan fees are the executable source of truth. Keep the shared
+        // draft mirror aligned so save/review state can never describe another cost model.
+        slippageBps: Number(next.parameters.slippage_bps ?? draft.execution.slippageBps),
+        slippageCny: Number(next.parameters.slippage_cny ?? draft.execution.slippageCny ?? 0),
+        commissionRate: Number(next.parameters.commission_rate ?? draft.execution.commissionRate),
+        minimumCommissionCny: Number(next.parameters.minimum_commission_cny ?? draft.execution.minimumCommissionCny),
+      },
       strategySpec: { ...draft.strategySpec, trading_plan: next, execution } })
   }
   const field = (key: string, value: unknown, update: (v: string | number | null) => void,

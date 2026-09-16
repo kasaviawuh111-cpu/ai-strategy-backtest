@@ -72,7 +72,16 @@ export function RuleTree({ node, compact = false }: { node: StrategyRuleNode; co
   return <div className="rule-tree"><RuleNode node={node} compact={compact} /></div>;
 }
 
-/** 策略确认卡：首层只保留买入、卖出、区间；本金与高级成交设置下沉。 */
+const gridPlanSummary = (strategy: StrategySummary): Array<{ side: 'buy' | 'sell'; text: string }> => {
+  const gridBuy = Boolean(strategy.gridReview?.buy.length)
+  const gridSell = Boolean(strategy.gridReview?.sell.length)
+  return [
+    ...(gridBuy ? [{ side: 'buy' as const, text: '价格下跌时，按网格分批买入。' }] : []),
+    ...(gridSell ? [{ side: 'sell' as const, text: '价格上涨时，按网格分批卖出。' }] : []),
+  ]
+}
+
+/** 策略确认卡：首层只保留买入、卖出、区间；具体参数与高级设置下沉。 */
 export function StrategyCard(
   { instrument, strategy, onEditRow, onOpenMore, onRun, isStarting, isLocked, settled, editableAfterRun = false, canStart = true, checkingSettings = false, disabledReason, blockedLabel, error, executionSummary, stockEditor, onRetryConnection, retryLabel = '重新检查连接' }:
   { instrument: Instrument; strategy: StrategySummary;
@@ -80,12 +89,13 @@ export function StrategyCard(
     isStarting?: boolean; isLocked?: boolean; settled?: string; editableAfterRun?: boolean; canStart?: boolean; checkingSettings?: boolean; disabledReason?: string; blockedLabel?: string; error?: string;
     onRetryConnection?: () => void;
     retryLabel?: string;
-    /** 当前成交设置的一句话后果，由 view-model 的 summarizeExecution 生成。 */
+    /** 当前高级设置的一句话摘要，由 view-model 的 summarizeExecution 生成。 */
     executionSummary?: string; stockEditor?: InlineStockEditorActions },
 ) {
   const [stockEditing, setStockEditing] = useState(false);
   const isReadOnly = Boolean(isLocked || (settled && !editableAfterRun));
   const fieldsLocked = isReadOnly || stockEditing;
+  const advancedSummary = executionSummary ?? (strategy.pricePlanKind ? '按交易计划' : '默认');
   return (
     <section className={`mcard${settled ? ' is-settled' : ''}${stockEditing ? ' is-stock-editing' : ''}`}>
       <div className="pad">
@@ -101,40 +111,26 @@ export function StrategyCard(
               {instrument.changePct ? <span className="up">{instrument.changePct}</span> : null}
             </span>
           ) : null}
-          {/*
-            成交设置是入口，不是一行说明。放在标题行右上角：想改的人找得到，
-            不想改的人一眼跳过，卡片不再为它多占一整行 48px。
-          */}
+          {/* 高级设置是单一入口：交易计划、成交成本和研究执行语义都在二级页。 */}
           <button
             type="button"
             className={`exec-entry${fieldsLocked ? ' off' : ''}`}
             onClick={onOpenMore}
             disabled={fieldsLocked}
           >
-            成交设置<span className="v">{executionSummary ?? '默认'}</span>
+            高级设置<span className="v">{advancedSummary}</span>
             <Chevron />
           </button>
         </div>
         <div className="condition-sections">
-          {strategy.gridReview ? <dl className="grid-review-facts grid-review-anchor">
-            <div><dt>基准价</dt><dd>{strategy.gridReview.anchor}</dd></div>
-            {strategy.gridReview.initialization ? <div><dt>建仓计划</dt><dd>{strategy.gridReview.initialization}</dd></div> : null}
-            <div className="grid-review-edit-row"><dt>参数调整</dt><dd>
-              <button type="button" className="grid-review-edit" disabled={fieldsLocked}
-                onClick={() => onEditRow('entry')}><span>修改网格参数</span><Chevron /></button>
-            </dd></div>
-          </dl> : null}
+          {strategy.gridReview ? gridPlanSummary(strategy).map(({ side, text }) => <section
+            className={`condition-section ${side}`} key={`grid-${side}`} aria-label={`${side === 'buy' ? '买入' : '卖出'}条件`}>
+            <header className="condition-heading"><span className="lb">{side === 'buy' ? '买入' : '卖出'}</span></header>
+            <p className="condition-trigger-note">{text}</p>
+          </section>) : null}
           {strategy.rows.map((row) => {
             if (strategy.gridReview && (row.key === 'entry' || row.key === 'exit')
-              && (row.key === 'entry' ? strategy.gridReview.buy : strategy.gridReview.sell).length > 0) {
-              const facts = row.key === 'entry' ? strategy.gridReview.buy : strategy.gridReview.sell;
-              return <section className={`condition-section ${row.kind}`} key={row.key} aria-label={`${row.label}条件`}>
-                <header className="condition-heading"><span className="lb">{row.label}</span></header>
-                <dl className="grid-review-facts">
-                  {facts.map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd>{fact.value}</dd></div>)}
-                </dl>
-              </section>;
-            }
+              && (row.key === 'entry' ? strategy.gridReview.buy : strategy.gridReview.sell).length > 0) return null
             const root = row.key === 'entry' ? strategy.entryRule : row.key === 'exit' ? strategy.exitRule : null;
             // first_of with a single market-condition group delegates to that group.
             // Do not label an ALL group as OR just because the exit envelope is first_of.

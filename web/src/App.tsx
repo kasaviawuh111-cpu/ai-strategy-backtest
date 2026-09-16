@@ -118,8 +118,20 @@ const historyJourney = (snapshot: CompletedReportSnapshot): JourneySnapshot => (
 const compactLegTitle = (summary: string, action: '买入' | '卖出'): string =>
   summary.endsWith(action) || summary.endsWith('退出') ? summary : `${summary}${action}`
 
+const planStrategyTitle = (strategy: StrategySummary): string | null => {
+  if (!strategy.pricePlanKind) return null
+  if (strategy.pricePlanKind !== 'grid') return strategy.title
+  const gridBuy = Boolean(strategy.gridReview?.buy.length)
+  const gridSell = Boolean(strategy.gridReview?.sell.length)
+  if (gridBuy && gridSell) return '下跌补仓、上涨卖出网格'
+  if (gridBuy) return '下跌补仓网格策略'
+  if (gridSell) return '上涨卖出网格策略'
+  return '网格交易策略'
+}
+
 const strategyTitle = (_instrument: Instrument, strategy: StrategySummary): string =>
-  `${compactLegTitle(summarizeRule(strategy.entryRule), '买入')}，${compactLegTitle(summarizeRule(strategy.exitRule), '卖出')}`
+  planStrategyTitle(strategy)
+    ?? `${compactLegTitle(summarizeRule(strategy.entryRule), '买入')}，${compactLegTitle(summarizeRule(strategy.exitRule), '卖出')}`
 
 const terminalStates = new Set(['succeeded', 'failed', 'cancelled'])
 /** 点「开始回测」时替用户发出的那句话；和按钮文案保持同一个词。 */

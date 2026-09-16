@@ -214,14 +214,11 @@ export function ParamsScreen(
           </Section>
           <NumericInputGroup resetKey={`${draft.id}-${numericReset}`} onValidityChange={setNumbersValid}>
           <fieldset className="settings-fields" disabled={isLocked || stockEditing}>
-          {draft.strategySpec.trading_plan ? <Section title="交易计划参数">
-            <PricePlanEditor draft={draft} onChange={onChange} />
-          </Section> : null}
           {!draft.strategySpec.trading_plan && (focus === 'entry' || focus === 'exit') ? <div data-focus={focus}><Section title={focus === 'entry' ? '编辑买入条件' : '编辑卖出条件'}>
             <RuleSpecEditor draft={draft} side={focus} path={conditionPath} capabilities={capabilities} onChange={onChange} />
           </Section></div> : null}
           <div data-focus="entry" className="section-anchor" />
-          {focus !== 'entry' && focus !== 'exit' ? <Section title="交易规则与参数" aside="规则和参数在同一处核对">
+          {!draft.strategySpec.trading_plan && focus !== 'entry' && focus !== 'exit' ? <Section title="交易规则与参数" aside="规则和参数在同一处核对">
             <div className="rule-parameter-leg rule-parameter-leg--buy">
               <header><span>买入</span><small>满足以下规则时</small></header>
               <RuleSpecEditor draft={draft} side="entry" capabilities={capabilities} onChange={onChange} />
@@ -283,12 +280,15 @@ export function ParamsScreen(
           </Section>
 
           <div data-focus="more" className="section-anchor" />
-          {!draft.strategySpec.trading_plan ? <details className="advanced-settings" open={focus === 'more'}>
+          <details className="advanced-settings" open={focus === 'more'}>
             <summary>
-              <span>高级研究设置</span>
-              <small>成交、费用、容量、仓位与预热</small>
+              <span>高级设置</span>
+              <small>{draft.strategySpec.trading_plan ? '交易计划、成交、费用与研究执行' : '成交、费用、容量、仓位与预热'}</small>
             </summary>
-            <Section title="成交与费用" aside="影响能否成交和成交价格">
+            {draft.strategySpec.trading_plan ? <Section title="交易计划与参数" aside="网格、定投或条件计划在同一处核对">
+              <PricePlanEditor draft={draft} onChange={onChange} />
+            </Section> : null}
+            {!draft.strategySpec.trading_plan ? <><Section title="成交与费用" aside="影响能否成交和成交价格">
             <Row label={<SettingInfo label="信号与成交" />} value={signalExecutionSummary(draft)} wrap />
             <div className="grow setting-row">
               <span className="k"><SettingInfo label="涨跌停处理" help={priceLimitHelp[draft.execution.priceLimitMode]} /></span>
@@ -413,8 +413,8 @@ export function ParamsScreen(
                   <option value="no">关闭</option>
                 </select>
               </div>
-            </Section>
-          </details> : null}
+            </Section></> : null}
+          </details>
 
           </fieldset>
           </NumericInputGroup>

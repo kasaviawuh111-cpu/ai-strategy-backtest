@@ -509,7 +509,7 @@ describe('result view model', () => {
 
   it.each([
     ['exit_retry_budget_exhausted', '已达到卖出尝试上限'],
-    ['exit_retry_disabled', '成交设置关闭了卖出重试'],
+    ['exit_retry_disabled', '高级设置关闭了卖出重试'],
   ])('explains %s without inventing another order or losing a partial fill', (reason, explanation) => {
     const signal = { ...activities[0]!, side: 'sell' as const }
     const order = { ...activities[1]!, side: 'sell' as const }

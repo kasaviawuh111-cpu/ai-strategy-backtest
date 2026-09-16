@@ -78,6 +78,36 @@ it('allows valid price-plan share counts to leave settings without native step m
   expect(back).toHaveBeenCalledOnce()
 })
 
+it('puts a grid plan in advanced settings instead of rendering empty buy and sell rule sections', () => {
+  const initial = withEditedStrategySpec(base, { ...base.strategySpec, entry: null, exit: null,
+    trading_plan: { kind: 'grid' as const, parameters: {
+      anchor_mode: 'manual', anchor_price: '20', spacing: '1', spacing_mode: 'cny',
+      sizing_mode: 'shares', order_shares: 100, initial_shares: 0, min_shares: 0, max_shares: 2000,
+    } } })
+  harness(initial)
+  expect(screen.getByText('高级设置')).toBeVisible()
+  expect(screen.getByText('交易计划与参数')).toBeVisible()
+  expect(screen.queryByText('交易规则与参数')).not.toBeInTheDocument()
+  expect(screen.queryByText('满足以下规则时')).not.toBeInTheDocument()
+  expect(screen.queryByText('成交与费用')).not.toBeInTheDocument()
+  expect(screen.queryByText('研究执行参数')).not.toBeInTheDocument()
+})
+
+it('keeps plan fees and the execution draft in sync without a second fee editor', () => {
+  const initial = withEditedStrategySpec(base, { ...base.strategySpec, entry: null, exit: null,
+    trading_plan: { kind: 'grid' as const, parameters: {
+      anchor_mode: 'manual', anchor_price: '20', spacing: '1', spacing_mode: 'cny',
+      sizing_mode: 'shares', order_shares: 100, initial_shares: 0, min_shares: 0, max_shares: 2000,
+      commission_rate: 0.00025, minimum_commission_cny: 5, slippage_bps: 5, slippage_cny: 0,
+    } } })
+  const { changed } = harness(initial)
+  fireEvent.change(screen.getByLabelText('滑点（基点）'), { target: { value: '8' } })
+  const updated = changed.mock.calls.at(-1)?.[0]
+  expect(updated.strategySpec.trading_plan?.parameters.slippage_bps).toBe(8)
+  expect(updated.execution.slippageBps).toBe(8)
+  expect(screen.queryByLabelText('单边滑点')).not.toBeInTheDocument()
+})
+
 it('edits independent buy and sell spacing without replacing the other direction', () => {
   const initial = withEditedStrategySpec(base, { ...base.strategySpec, entry: null, exit: null,
     trading_plan: { kind: 'grid', parameters: {

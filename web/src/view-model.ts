@@ -583,7 +583,7 @@ export const describeBacktestWindow = (start: string, end: string) => {
 }
 
 /**
- * 策略卡上「成交设置」那一行的右侧状态。
+ * 策略卡上「高级设置」那一行的右侧状态。
  *
  * 这一行不负责在首页把成交规则讲一遍——讲三行字既占地方，也没人在确认策略时读。
  * 它只需要回答两件事：这里可以改；现在是不是动过。想知道具体规则、想改，点进去。
@@ -1083,8 +1083,8 @@ const retryReasonLabels: Record<string, string> = {
 }
 
 const exitRetryStopLabels: Record<string, string> = {
-  exit_retry_budget_exhausted: '已达到卖出尝试上限，未卖出部分保留；可调整成交设置后重新回测',
-  exit_retry_disabled: '成交设置关闭了卖出重试，未卖出部分保留；可调整设置后重新回测',
+  exit_retry_budget_exhausted: '已达到卖出尝试上限，未卖出部分保留；可调整高级设置后重新回测',
+  exit_retry_disabled: '高级设置关闭了卖出重试，未卖出部分保留；可调整设置后重新回测',
 }
 
 const outcomeReasonLabels: Record<string, string> = {

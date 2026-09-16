@@ -31,9 +31,9 @@ const renderSettings = () => {
 describe('backtest date editing', () => {
   it('keeps advanced settings progressive and explains all three limit modes', () => {
     const { onChange } = renderSettings()
-    const advanced = screen.getByText('高级研究设置').closest('details')
+    const advanced = screen.getByText('高级设置').closest('details')
     expect(advanced).not.toHaveAttribute('open')
-    fireEvent.click(screen.getByText('高级研究设置'))
+    fireEvent.click(screen.getByText('高级设置'))
     expect(advanced).toHaveAttribute('open')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '了解涨跌停处理' }))

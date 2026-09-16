@@ -73,8 +73,8 @@ describe('condition-order strategy card', () => {
     expect(screen.getByRole('region', { name: '卖出条件' })).toHaveTextContent('MACD 死叉')
     expect(screen.queryByText('卖出间距')).not.toBeInTheDocument()
   })
-  it('opens grid parameter editing without submitting a backtest', () => {
-    const edit = vi.fn(), run = vi.fn()
+  it('routes grid parameters through advanced settings without submitting a backtest', () => {
+    const edit = vi.fn(), openMore = vi.fn(), run = vi.fn()
     const strategy: StrategySummary = {
       title: '网格交易', rows: [], strategyHash: 'sha256:grid',
       entryRule: leaf('entry', '下跨买入'), exitRule: leaf('exit', '上跨卖出'),
@@ -82,10 +82,36 @@ describe('condition-order strategy card', () => {
       gridReview: { anchor: '起始日昨收26.95元', initialization: '空仓启动，等待买点', buy: [], sell: [] },
     }
     render(<StrategyCard instrument={{ name: '东方财富', code: '300059.SZ' }} strategy={strategy}
-      onEditRow={edit} onOpenMore={vi.fn()} onRun={run} />)
-    fireEvent.click(screen.getByRole('button', { name: '修改网格参数' }))
-    expect(edit).toHaveBeenCalledWith('entry')
+      onEditRow={edit} onOpenMore={openMore} onRun={run} />)
+    fireEvent.click(screen.getByRole('button', { name: /高级设置/ }))
+    expect(openMore).toHaveBeenCalledOnce()
+    expect(edit).not.toHaveBeenCalled()
     expect(run).not.toHaveBeenCalled()
+  })
+
+  it('shows grid behavior without exposing its execution parameters on the review card', () => {
+    const strategy: StrategySummary = {
+      title: '网格·1元·100股/格', pricePlanKind: 'grid', strategyHash: 'sha256:grid-summary',
+      rows: [
+        { key: 'entry', label: '买入', value: '下跨一格买入100股', kind: 'buy' },
+        { key: 'exit', label: '卖出', value: '上跨一格卖出100股', kind: 'sell' },
+      ],
+      entryRule: leaf('entry', '下跨一格买入100股'), exitRule: leaf('exit', '上跨一格卖出100股'),
+      confirmation: '分钟触发', earliestExecution: '下一分钟', conditionCount: 2, eventFacts: [],
+      gridReview: {
+        anchor: '起始日昨收26.95元', initialization: '空仓启动，等待买点',
+        buy: [{ label: '买入间距', value: '1元' }], sell: [{ label: '每格股数', value: '100股' }],
+      },
+    }
+    render(<StrategyCard instrument={{ name: '东方财富', code: '300059.SZ' }} strategy={strategy}
+      onEditRow={vi.fn()} onOpenMore={vi.fn()} onRun={vi.fn()} />)
+
+    expect(screen.getByText('价格下跌时，按网格分批买入。')).toBeVisible()
+    expect(screen.getByText('价格上涨时，按网格分批卖出。')).toBeVisible()
+    expect(screen.queryByText('起始日昨收26.95元')).not.toBeInTheDocument()
+    expect(screen.queryByText('空仓启动，等待买点')).not.toBeInTheDocument()
+    expect(screen.queryByText('买入间距')).not.toBeInTheDocument()
+    expect(screen.queryByText('每格股数')).not.toBeInTheDocument()
   })
   it.each([
     { blockedLabel: '暂不支持回测', checkingSettings: false, expectedLabel: '暂不支持回测' },
