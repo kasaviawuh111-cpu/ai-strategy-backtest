@@ -88,8 +88,8 @@ export function EquityChart(
     const hasBenchmark = comparisonAvailable && series.some((point) => isFiniteValue(point.benchmark))
     const benchmark = series.map((point) => comparisonAvailable && isFiniteValue(point.benchmark) ? point.benchmark : null)
     const excess = series.map((point) => {
-      if (!comparisonAvailable || !isFiniteValue(point.benchmark) || point.benchmark <= -100) return null
-      const value = ((1 + point.strategy / 100) / (1 + point.benchmark / 100) - 1) * 100
+      if (!comparisonAvailable || !isFiniteValue(point.benchmark)) return null
+      const value = point.strategy - point.benchmark
       return isFiniteValue(value) ? value : null
     })
     const drawdown = series.map((point) => Math.min(0, point.drawdown))
@@ -187,7 +187,7 @@ export function EquityChart(
       <div className="legend equity-legend">
         <span><i style={{ borderColor: C.strategy }} />本策略 {fmtPct(lastStrategy)}</span>
         {geo.hasBenchmark ? <span><i style={{ borderColor: C.benchmark, borderTopStyle: 'dashed' }} />{BENCHMARK_LABEL} {optionalPct(lastBenchmark)}</span> : null}
-        {geo.hasBenchmark && geo.comparisonAvailable ? <span><i style={{ borderColor: C.excess }} />超额 {optionalPct(lastExcess)}</span> : null}
+        {geo.hasBenchmark && geo.comparisonAvailable ? <span><i style={{ borderColor: C.excess }} />收益率差 {optionalPct(lastExcess).replace('%', ' 个百分点')}</span> : null}
         <span><i style={{ borderColor: C.drawdown }} />回撤 {fmtPct(geo.drawdown[last] ?? 0)}</span>
         <label className="toggle">
           <input type="checkbox" checked={showMarks} onChange={(event) => { setShowMarks(event.target.checked); setExpandedMarks([]) }} />
@@ -319,7 +319,7 @@ export function EquityChart(
             <div className="d">{series[activeIndex]?.date ?? ''}</div>
             <div className="r"><em><i style={{ borderColor: C.strategy }} />本策略</em><b className={signClass(activeStrategy)}>{fmtPct(activeStrategy)}</b></div>
             {geo.hasBenchmark ? <div className="r"><em><i style={{ borderColor: C.benchmark }} />{BENCHMARK_LABEL}</em><b className={isFiniteValue(activeBenchmark) ? signClass(activeBenchmark) : ''}>{optionalPct(activeBenchmark)}</b></div> : null}
-            {geo.hasBenchmark && geo.comparisonAvailable ? <div className="r"><em><i style={{ borderColor: C.excess }} />超额</em><b className={isFiniteValue(activeExcess) ? signClass(activeExcess) : ''}>{optionalPct(activeExcess)}</b></div> : null}
+            {geo.hasBenchmark && geo.comparisonAvailable ? <div className="r"><em><i style={{ borderColor: C.excess }} />收益率差</em><b className={isFiniteValue(activeExcess) ? signClass(activeExcess) : ''}>{optionalPct(activeExcess).replace('%', ' 个百分点')}</b></div> : null}
             <div className="r"><em><i style={{ borderColor: C.drawdown }} />回撤</em><b className="down">{fmtPct(activeDrawdown)}</b></div>
           </div>
         ) : null}

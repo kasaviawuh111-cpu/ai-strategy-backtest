@@ -1,7 +1,23 @@
-/* Execution timestamps remain readable on narrow order-table columns. */
-.order-row .oc-side small.order-timestamp {
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
-  overflow-wrap: anywhere;
+/* Compact execution table: fill price leads; limit and timing stay in details. */
+.order-table{container-type:inline-size}
+.order-table .order-head,.order-table .order-row{box-sizing:border-box;grid-template-columns:148px minmax(0,1fr) 88px 72px;gap:16px;padding:12px 16px}
+.order-table .order-row.is-active{background:var(--color-primary-weak);box-shadow:none}
+.order-table .order-head{color:var(--ink-3);letter-spacing:0}
+.order-table .order-row .oc-side b{display:inline-block;width:fit-content;font-size:12px;line-height:20px;padding:0 6px;border-radius:4px}
+.order-table .oc-side b.buy{background:var(--color-up-weak)}
+.order-table .oc-side b.sell{background:var(--color-down-weak)}
+.order-table .oc small{color:var(--ink-3)}
+.order-table .oc-side small.order-timestamp{white-space:nowrap;font-size:12px;line-height:20px;margin-top:4px}
+.order-table .order-row .oc-signal b{font-size:13px;font-weight:400;white-space:normal;line-height:20px}
+.order-table .oc-num .order-status{font-size:12px;font-weight:400}
+.order-expanded{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px 24px;border-top:1px solid var(--hairline);padding-top:12px;font-size:12px;line-height:20px;color:var(--ink-2);font-weight:400}
+.order-price-explanation{flex-basis:100%;color:var(--ink-3)}
+@container (max-width:560px){
+ .order-table .order-head{display:none}
+ .order-table .order-row{grid-template-columns:minmax(0,1fr) 88px;gap:8px 16px}
+ .order-table .oc-side{grid-column:1;grid-row:1}
+ .order-table .oc-signal{grid-column:1;grid-row:2}
+ .order-table .oc-num:nth-child(3){grid-column:2;grid-row:1}
+ .order-table .oc-num:nth-child(4){grid-column:2;grid-row:2}
+ .order-table .oc-num:nth-child(3)::before{content:'成交价';display:block;font-size:11px;line-height:18px;color:var(--ink-3);margin-bottom:4px}
 }

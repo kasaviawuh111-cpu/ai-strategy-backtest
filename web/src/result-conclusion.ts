@@ -25,32 +25,24 @@ export function numericResultConclusion(metrics: BacktestMetrics) {
       : '；完整买卖 0 回合' : ''}。`
 
   if (metrics.benchmarkComparisonStatus === 'strategy_entry_not_filled') {
-    if (metrics.executionNote) return `${strategy}，本次没有已成交买入，无法比较超额收益。`
+    if (metrics.executionNote) return `${strategy}，本次没有已成交买入，无法计算收益率差。`
     return conclude(
-      `${strategy}，本次没有已成交买入，无法比较超额收益${metrics.bench == null ? '' : `（${benchmark}，仅作参考）`}`,
+      `${strategy}，本次没有已成交买入，无法计算收益率差${metrics.bench == null ? '' : `（${benchmark}，仅作参考）`}`,
     ).replace('；尚未发生全部卖出', '')
   }
   if (metrics.benchmarkComparisonStatus === 'benchmark_entry_not_filled') {
-    return conclude(`${strategy}，买入持有基准未按同一成交规则成交，无法比较超额收益`)
+    return conclude(`${strategy}，买入持有基准未按同一成交规则成交，无法计算收益率差`)
   }
   if (metrics.benchmarkComparisonStatus === 'benchmark_unavailable') {
-    return conclude(`${strategy}，没有可审计的买入持有基准，无法比较超额收益`)
+    return conclude(`${strategy}，没有可审计的买入持有基准，无法计算收益率差`)
   }
 
   if (metrics.total == null || metrics.bench == null || metrics.excess == null) {
-    return conclude(`${strategy}，${benchmark}，相对收益未记录`)
+    return conclude(`${strategy}，${benchmark}，收益率差未记录`)
   }
 
-  let comparison: string
-  if (metrics.excess === 0) {
-    comparison = '相对持平'
-  } else if (metrics.total < 0 && metrics.bench < 0) {
-    comparison = metrics.excess > 0 ? '相对少亏' : '相对多亏'
-  } else {
-    comparison = metrics.excess > 0 ? '相对领先' : '相对落后'
-  }
-
-  return conclude(
-    `${strategy}，${benchmark}，复合相对${comparison.replace('相对', '')} ${absolutePercent(metrics.excess)}`,
-  )
+  const comparison = metrics.excess === 0
+    ? '收益率持平'
+    : `收益率${metrics.excess > 0 ? '领先' : '落后'} ${percentMagnitude(metrics.excess)} 个百分点`
+  return conclude(`${strategy}，${benchmark}，${comparison}`)
 }

@@ -88,7 +88,7 @@ describe('EquityChart', () => {
     const data = [0, 2, null, 3, null].map((benchmark, index) => ({ ...series[0]!, benchmark, strategy: index }))
     const { container } = render(<EquityChart series={data} marks={[]} />)
     expect(screen.getByText('买入后一直持有 —')).toBeInTheDocument()
-    expect(screen.getByText('超额 —')).toBeInTheDocument()
+    expect(screen.getByText('收益率差 —')).toBeInTheDocument()
     const path = container.querySelector('path[stroke="var(--ink-3)"]')?.getAttribute('d')
     expect(path?.match(/M/g)).toHaveLength(2)
     expect(path?.match(/L/g)).toHaveLength(1)
@@ -98,7 +98,7 @@ describe('EquityChart', () => {
 
   it('keeps the chart finite when the benchmark reaches zero NAV', () => {
     const { container } = render(<EquityChart series={[series[0]!, { ...series[1]!, benchmark: -100 }]} marks={[]} />)
-    expect(screen.getByText('超额 —')).toBeInTheDocument()
+    expect(screen.getByText('收益率差 +90.00 个百分点')).toBeInTheDocument()
     expect(container.innerHTML).not.toMatch(/NaN|Infinity/)
     expect(container.querySelectorAll('svg text').length).toBeGreaterThan(2)
   })

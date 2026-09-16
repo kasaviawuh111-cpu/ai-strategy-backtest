@@ -194,7 +194,7 @@ describe('append-only strategy conversation', () => {
     const review = within(screen.getByRole('complementary', { name: '策略审阅' }))
     expect(review.getByText('已完成回测')).toBeVisible()
     expect(review.queryByRole('button', { name: '开始回测' })).not.toBeInTheDocument()
-    const settings = review.getByRole('button', { name: /成交设置/ })
+    const settings = review.getByRole('button', { name: /高级设置/ })
     expect(settings).toBeEnabled()
     await user.click(settings)
     fireEvent.change(screen.getByRole('spinbutton', { name: '创 20 日新高 观察周期' }), {

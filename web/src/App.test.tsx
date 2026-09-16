@@ -97,7 +97,7 @@ describe('formal main.tsx App journey', () => {
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
     await user.click(sendControl())
     expect(await reviewControls().findByRole('button', { name: '开始回测' })).toBeEnabled()
-    await user.click(screen.getByRole('button', { name: /成交设置/ }))
+    await user.click(screen.getByRole('button', { name: /高级设置/ }))
     fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2020-01-01' } })
     await user.click(screen.getByRole('button', { name: '完成' }))
     await waitFor(() => expect(prepare).toHaveBeenCalledTimes(2))
@@ -108,7 +108,7 @@ describe('formal main.tsx App journey', () => {
       title: '回测区间不可用', detail: message, code: 'skill_history_before_listing' })))
     expect(await screen.findByText(message)).toBeVisible()
     expect(reviewControls().getByRole('button', { name: '暂时无法回测' })).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: /成交设置/ }))
+    await user.click(screen.getByRole('button', { name: /高级设置/ }))
     fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2022-01-04' } })
     await user.click(screen.getByRole('button', { name: '完成' }))
     await waitFor(() => expect(prepare).toHaveBeenCalledTimes(3))
@@ -142,7 +142,7 @@ describe('formal main.tsx App journey', () => {
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
     await user.click(sendControl())
     await reviewControls().findByRole('button', { name: '开始回测' })
-    await user.click(screen.getByRole('button', { name: /成交设置/ }))
+    await user.click(screen.getByRole('button', { name: /高级设置/ }))
     fireEvent.change(screen.getByLabelText(/单边滑点/), { target: { value: '6' } })
     await waitFor(() => expect(prepare).toHaveBeenCalledTimes(2))
     fireEvent.change(screen.getByLabelText(/单边滑点/), { target: { value: '7' } })
@@ -290,7 +290,7 @@ describe('formal main.tsx App journey', () => {
     const detail = () => within(container.querySelector<HTMLElement>('.detail')!)
     await user.click(detail().getByRole('button', { name: '回到对话' }))
     const review = reviewControls()
-    await user.click(review.getByRole('button', { name: /成交设置/ }))
+    await user.click(review.getByRole('button', { name: /高级设置/ }))
     const settings = within(container.querySelector<HTMLElement>('#pg-params')!)
     fireEvent.change(settings.getByRole('spinbutton', { name: '初始资金' }), { target: { value: '500000' } })
     fireEvent.change(settings.getByLabelText(/单边滑点/), { target: { value: '7' } })
@@ -1219,7 +1219,7 @@ describe('formal main.tsx App journey', () => {
     const { container } = renderApp()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: VOLUME_EXAMPLE } })
     await user.click(sendControl())
-    await user.click(await reviewControls().findByRole('button', { name: /成交设置/ }))
+    await user.click(await reviewControls().findByRole('button', { name: /高级设置/ }))
     const settingsPanel = container.querySelector<HTMLElement>('#pg-params')!
     expect(settingsPanel).toBeVisible()
     const settings = within(settingsPanel)
@@ -1491,7 +1491,7 @@ describe('formal main.tsx App journey', () => {
     await user.click(sendControl())
     await screen.findByText(/^查看(?:并修改|策略)$/)
     expect(within(screen.getByLabelText('策略审阅'))
-      .getByRole('button', { name: '成交设置默认' })).toBeVisible()
+      .getByRole('button', { name: '高级设置默认' })).toBeVisible()
     expect(historicalSummaries()).toEqual(['已调整 3 项', '已调整 2 项', '已调整 1 项'])
   }, 20_000)
 
@@ -1957,7 +1957,7 @@ describe('formal main.tsx App journey', () => {
     expectMockRuntimeMarker()
     expectHomeToHideDefaultCapital(container)
     expect(screen.getAllByText(
-      '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，复合相对少亏 60.37%。',
+      '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，收益率领先 36.69 个百分点。',
     ).length).toBeGreaterThan(0)
     expect(screen.queryByRole('button', { name: /^换个条件$/ }))
       .not.toBeInTheDocument()
@@ -2015,7 +2015,7 @@ describe('formal main.tsx App journey', () => {
     ['snapshot_unavailable', '当前快照没有覆盖这条策略需要的事件或行情，系统不会自动联网补数或放宽规则。'],
     ['event_time_quality', '目前无法证明事件在历史上的精确首次可得时间。为避免偷看未来数据，本次不触发交易。'],
     ['skill_mx_read_timeout', '这次没能取到回测所需的行情，暂时无法计算结果。你的策略和设置已保留，可以稍后重试。'],
-    ['skill_history_before_listing', '这只股票于 2021-04-09 上市，你选择的区间从 2020-09-06 开始，包含上市前日期。请修改回测区间；买卖规则和成交设置已保留，不会自动缩短区间。'],
+    ['skill_history_before_listing', '这只股票于 2021-04-09 上市，你选择的区间从 2020-09-06 开始，包含上市前日期。请修改回测区间；买卖规则和高级设置已保留，不会自动缩短区间。'],
     ['skill_history_fields_missing', '查询 2010-03-09 至 2012-03-08 的历史数据时，东方财富未返回涨停价、跌停价。本次回测未完成，原区间和规则已保留；可修改区间或稍后重新读取。'],
     ['skill_MxSaasProviderDataError', '这次取到的行情或指标还无法用于计算，没有生成回测结果。你的策略和设置已保留，可以稍后重试。'],
   ])('recovers a failed run by its machine code without resetting or replacing its strategy: %s', async (error, progressLabel) => {

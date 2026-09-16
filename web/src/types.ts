@@ -143,8 +143,8 @@ export interface StrategyCapabilitySummary {
 export interface BacktestMetrics {
   total: number | null;   // 总收益 %
   bench: number | null;   // 同期持有 %
-  excess: number | null;  // 超额 %
-  /** 后端已审计的比较前提；没有双方已成交买入时不把收益差叫作超额。 */
+  excess: number | null;  // 收益率差，单位：个百分点
+  /** 后端已审计的比较前提；没有双方已成交买入时不展示收益率差。 */
   benchmarkComparisonStatus: 'comparable' | 'strategy_entry_not_filled' | 'benchmark_entry_not_filled' | 'benchmark_unavailable';
   mdd: number | null;     // 最大回撤 %（负数）
   trips: number;   // 完整交易数

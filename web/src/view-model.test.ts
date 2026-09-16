@@ -321,7 +321,7 @@ describe('result view model', () => {
     expect(chain.some(node => node.detail.includes('确认：事件首次可得'))).toBe(false)
   })
 
-  it('computes excess as compounded relative return rather than point subtraction', () => {
+  it('computes return difference in percentage points', () => {
     const result = toBacktestMetrics({
       runId: 'run:relative', totalReturn: -0.1049, benchmarkReturn: -0.2694,
       benchmarkComparisonStatus: 'comparable', annualizedReturn: null,
@@ -329,7 +329,7 @@ describe('result view model', () => {
       initialCashCny: 1000000, finalEquityCny: 895100, interpretation: 'test', warnings: [],
       dataRange: { start: '2025-01-01', end: '2025-12-31', sessions: 240 },
     })
-    expect(result.excess).toBeCloseTo(22.5157, 4)
+    expect(result.excess).toBeCloseTo(16.45, 4)
   })
 
   it('identifies the original failing sell rule after a position-aware exit', () => {

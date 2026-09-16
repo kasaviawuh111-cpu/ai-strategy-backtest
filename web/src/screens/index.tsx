@@ -796,10 +796,10 @@ export function ReportBody(
             </div> : null}
             <div className="order-table" ref={listRef}>
               <div className="order-head" aria-hidden="true">
-                <span>方向 / 时间</span>
+                <span>方向 / 成交时间</span>
                 <span>信号</span>
-                <span className="num-col">委托价</span>
-                <span className="num-col">状态 / 成交价</span>
+                <span className="num-col">成交价</span>
+                <span className="num-col">状态</span>
               </div>
               {orders.length === 0 ? <div className="empty-row">
                 区间内没有产生任何委托。请延长回测区间，或检查买入/卖出条件是否能在该区间成立。
@@ -835,9 +835,7 @@ export function ReportBody(
                   >
                     <span className="oc oc-side">
                       <b className={order.side}>{order.side === 'buy' ? '买入' : '卖出'}</b>
-                      <small className="order-timestamp" title={stamp ? `${stampKind}时间：${stamp}${order.filledAt ? `；成交时间：${order.filledAt}` : ''}` : undefined}>{stamp ? `${stampKind} ${shortStamp(stamp)}` : '时间未记录'}</small>
-                      {order.filledAt && order.orderAt && order.filledAt !== order.orderAt
-                        ? <small className="order-timestamp">成交 {shortStamp(order.filledAt)}</small> : null}
+                      <small className="order-timestamp" title={order.filledAt ?? stamp ?? undefined}>{order.filledAt ? shortStamp(order.filledAt) : stamp ? `${stampKind} ${shortStamp(stamp)}` : '时间未记录'}</small>
                     </span>
                     <span className="oc oc-signal">
                       <b>{order.title}</b>
@@ -845,14 +843,21 @@ export function ReportBody(
                         : order.signalAt ? `${shortDate(order.signalAt)} 确认` : '信号未记录'}</small>
                     </span>
                     <span className="oc oc-num">
-                      <b>{order.orderPrice != null ? `¥${order.orderPrice.toFixed(2)}` : '—'}</b>
+                      <b>{order.price != null ? `¥${order.price.toFixed(2)}` : '—'}</b>
                     </span>
                     <span className="oc oc-num">
                       <b className={`order-status order-status--${order.status}`} title={status.hint}>
                         {status.label}
                       </b>
-                      <small>{order.price != null ? `¥${order.price.toFixed(2)}` : status.brief}</small>
+                      <small>{active ? '详情已展开' : '查看详情'}</small>
                     </span>
+                    {active ? <span className="order-expanded">
+                      <span>委托限价：{order.orderPrice != null ? `¥${order.orderPrice.toFixed(2)}` : '未记录'}</span>
+                      <span>委托时间：{order.orderAt ? shortStamp(order.orderAt) : '未记录'}</span>
+                      <span>成交时间：{order.filledAt ? shortStamp(order.filledAt) : '尚未成交'}</span>
+                      <span className="order-price-explanation">委托限价是{order.side === 'buy' ? '买入可接受的最高价' : '卖出可接受的最低价'}，不等于实际成交价。</span>
+                      {order.timeSemantics ? <span className="order-price-explanation">{order.timeSemantics}</span> : null}
+                    </span> : null}
                     {active && order.outcomeNote ? <span className="order-outcome-note">{order.outcomeNote}</span> : null}
                   </button>
                 )

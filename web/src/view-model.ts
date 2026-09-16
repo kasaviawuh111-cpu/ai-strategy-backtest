@@ -688,7 +688,7 @@ export const toBacktestMetrics = (summary: BacktestSummary): BacktestMetrics => 
     total,
     bench,
     excess: benchmarkComparisonStatus === 'comparable' && total != null && bench != null
-      ? ((1 + total / 100) / (1 + bench / 100) - 1) * 100
+      ? total - bench
       : null,
     benchmarkComparisonStatus,
     mdd: percent(summary.maxDrawdown),

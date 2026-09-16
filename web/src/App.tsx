@@ -2234,7 +2234,7 @@ export default function App({
                     也像是在暗示「你应该选我给的这几个」。
                   */}
                 </Turn>
-              ) : !fromPanelEdit ? <Turn mine><Bubble>{submittedText}</Bubble></Turn> : null}
+              ) : !fromPanelEdit ? <Turn id="current-utterance" mine><Bubble>{submittedText}</Bubble></Turn> : null}
 
               {clarificationMessages.map((message, index) => index === readyAssistantMessageIndex ? null : (
                 <Turn key={`clarification-${index}`} mine={message.role === 'user'}>
@@ -2402,7 +2402,7 @@ export default function App({
               ) : null}
 
               {draft && uiStrategy ? (
-                <Turn>
+                <Turn id="current-strategy">
                   <ModelReasoning events={dialogueProgress} />
                   {readyAssistantMessage ? <Say>{readyAssistantMessage.text}</Say> : null}
                   {readyAssistantMessage?.data
@@ -2525,7 +2525,31 @@ export default function App({
               <div className="detail-inner">
                 <div className="detail-top">
                   <button type="button" className="detail-back" aria-label={isGalleryReport ? '返回策略广场' : '回到对话'}
-                    onClick={() => setView(isGalleryReport ? 'gallery' : 'chat')}>
+                    onClick={() => {
+                      if (isGalleryReport) {
+                        setView('gallery')
+                        return
+                      }
+                      // 回到整段对话：滚到本次旅程/当前策略预览，而不是钉在底部结果卡。
+                      // 审阅栏保持原状态（原先从详情返回也不会强关），避免打断改参流程。
+                      const anchorId = detailJourneyId
+                        ? `journey-${detailJourneyId}`
+                        : 'current-strategy'
+                      setView('chat')
+                      window.requestAnimationFrame(() => {
+                        const node = scrollRef.current
+                        if (!node) return
+                        const target = document.getElementById(anchorId)
+                          ?? document.getElementById('current-utterance')
+                        if (target) {
+                          const top = target.offsetTop - 12
+                          node.scrollTop = Math.max(0, top)
+                        }
+                        setShowScrollToBottom(
+                          node.scrollHeight - node.scrollTop - node.clientHeight > 80,
+                        )
+                      })
+                    }}>
                     <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
                       <path d="M12 4.5 6.5 10l5.5 5.5" stroke="currentColor" strokeWidth="1.6"
                         strokeLinecap="round" strokeLinejoin="round" />

@@ -126,9 +126,9 @@ describe('current report screen', () => {
 
     expect(screen.queryByText('界面预览')).not.toBeInTheDocument()
     expect(screen.getByRole('heading', {
-      name: '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，复合相对少亏 36.69%。',
+      name: '策略亏损 2.54%，同样的钱买入后一直持有亏损 39.23%，收益率领先 36.69 个百分点。',
     })).toBeInTheDocument()
-    for (const label of ['策略总收益', '超额收益', '最大回撤', '完整买卖']) {
+    for (const label of ['策略总收益', '交易策略超额', '最大回撤', '完整买卖']) {
       expect(screen.getByText(label)).toBeInTheDocument()
     }
     expect(screen.queryByText('初始资金')).not.toBeInTheDocument()

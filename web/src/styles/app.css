@@ -647,37 +647,31 @@ button.grow:hover{background:var(--color-primary-weak)}
 
 /* ========== 结果表达：等式、迷你曲线、委托行 ========== */
 
-/* 超额等式：左侧是结论，右侧是它的来源，中间用运算符连起来。
-   目的是让「超额」这个词自带解释，而不是再写一段说明文字。 */
-.equation{display:flex;align-items:stretch;gap:6px;margin-top:14px}
-.equation .eq-lead{flex:0 0 auto;min-width:118px;display:flex;flex-direction:column;justify-content:flex-start;
-  padding:11px 12px;border-radius:var(--r-inner);background:var(--color-up-weak)}
-.equation .eq-lead b{font-family:var(--font-num);font-variant-numeric:tabular-nums;
-  font-size:20px;line-height:27px;font-weight:600;letter-spacing:-.015em}
-.equation .eq-lead>span{display:block;font-size:12px;line-height:17px;color:var(--ink-2);margin-top:1px}
-.equation .eq-lead small{display:block;font-size:11px;line-height:16px;color:var(--ink-4);margin-top:1px}
-/* 右侧灰块被左侧粉块 stretch 撑高（粉块有三行），所以内容必须在块里居中，
-   否则「数字 + 标签」会贴着顶边，整组看起来偏上。
-   运算符则要落在「数字」那一行而不是两行的中缝：给它补一个等于标签行高度
-   （line-height 16 + margin-top 1）的下外边距，让它的外框和 term 一样高，
-   flex 居中之后运算符中心就正好等于数字中心。 */
-.equation .eq-body{flex:1;min-width:0;display:flex;align-items:flex-start;justify-content:center;gap:4px;
-  padding:11px 8px;border-radius:var(--r-inner);background:var(--surface-sunken)}
-.equation .eq-op{flex:0 0 auto;font-style:normal;font-family:var(--font-num);
-  font-size:15px;line-height:27px;font-weight:600;color:var(--ink-4)}
-.equation .eq-term{flex:1;min-width:0;text-align:center}
-/* 数字行与左侧的 eq-lead b 共用行高：两侧顶对齐后，三个数字就落在同一条线上。
-   靠 line-height 而不是硬编码偏移，compact 变体只需要换一个值。 */
-.equation .eq-term b{display:block;font-family:var(--font-num);font-variant-numeric:tabular-nums;
-  font-size:15px;line-height:27px;font-weight:600}
-.equation .eq-term span{display:block;font-size:11px;line-height:16px;color:var(--ink-3);margin-top:1px;
-  overflow-wrap:anywhere}
-.equation--compact .eq-lead{min-width:104px;padding:9px 10px}
-.equation--compact .eq-lead b{font-size:18px;line-height:25px}
-.equation--compact .eq-term b{line-height:25px}
-.equation--compact .eq-op{line-height:25px}
-.equation--compact .eq-body{padding:9px 6px}
-.equation--single .eq-lead{flex:1;background:var(--surface-card)}
+/* 收益率差：三块相扣，数字与页面 KPI 共用字体、颜色和字号。 */
+.equation{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin-top:14px;isolation:isolate;container-type:inline-size}
+.eq-piece{--piece-bg:var(--surface-sunken);position:relative;min-width:0;padding:16px 18px;text-align:center;display:flex;flex-direction:column;justify-content:center}
+.eq-piece::before{content:"";position:absolute;inset:0;border-radius:var(--r-inner);background:var(--piece-bg);z-index:-1}
+.eq-piece:not(:first-child)::before{mask:radial-gradient(circle 18px at -2px 50%,transparent 17px,#000 18px)}
+.eq-piece:not(:last-child)::after{content:"";position:absolute;right:-14px;top:calc(50% - 14px);width:28px;height:28px;border-radius:50%;background:var(--piece-bg);z-index:-1}
+.eq-piece:nth-child(1){z-index:3}
+.eq-piece:nth-child(2){z-index:2}
+.eq-piece:nth-child(3){z-index:1}
+.eq-piece>b{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:center;column-gap:4px;font-family:var(--font-num);font-variant-numeric:tabular-nums;font-size:20px;line-height:28px;font-weight:600;white-space:nowrap}
+.eq-piece>b small{font-family:var(--font);font-size:11px;line-height:16px;font-weight:500}
+.eq-piece>span{font-size:12px;line-height:18px;color:var(--ink-2);margin-top:4px}
+.eq-piece .eq-op{position:absolute;right:-7px;top:50%;transform:translateY(-50%);font:600 18px/1 var(--font-num);color:var(--ink-3);font-style:normal}
+.eq-result.up{--piece-bg:var(--color-up-weak)}
+.eq-result.down{--piece-bg:var(--color-down-weak)}
+.equation--compact .eq-piece{padding-top:12px;padding-bottom:12px}
+.equation-unavailable{margin-top:14px;padding:12px;background:var(--surface-sunken);border-radius:var(--r-inner);font-size:13px;color:var(--ink-2)}
+.equation-unavailable small{display:block;margin-top:4px;color:var(--ink-3)}
+@container (max-width:440px){
+ .eq-piece{padding:12px 10px}
+ .eq-piece>b{font-size:16px;line-height:22px;min-height:38px;align-content:center}
+ .eq-piece>b small{flex-basis:100%;font-size:10px;line-height:14px}
+ .eq-piece>span{font-size:11px;line-height:16px;min-height:32px}
+}
+
 
 /* 迷你净值曲线：会话里的结果卡就能看到形状和买卖点 */
 .mini-equity{margin-top:14px;padding:10px 10px 8px;border-radius:var(--r-inner);background:var(--surface-card);
