@@ -224,6 +224,28 @@ def test_implicit_threshold_remains_confirmation_not_catalog_default(indicator, 
     assert _unspoken_threshold_issues(candidate(f'{text}，阈值{value}')) == ()
 
 
+@pytest.mark.parametrize('side', ['entry', 'exit'])
+@pytest.mark.parametrize('path,removed', [
+    ('/{side}/0/value', True), ('/{side}/1/value', False),
+    ('/{side}/0/params/unknown', False), ('/{side}/00/value', False),
+])
+def test_threshold_default_annotation_is_separated_without_waiving_unknown_paths(side, path, removed):
+    from ashare_lab.adapters.language.vibe_candidates import BoundedCandidate, _materialize_catalog_defaults, _unspoken_threshold_issues
+    path = path.format(side=side)
+    text = 'KDJ超卖买入' if side == 'entry' else 'KDJ超买卖出'
+    candidate = BoundedCandidate.model_validate({
+        side: [{'kind': 'indicator', 'indicator_id': 'technical.kdj',
+                'trigger': 'j_below' if side == 'entry' else 'j_above', 'value': 20, 'params': {}}],
+        side + '_spans': [{'start': 0, 'end': len(text), 'text': text}],
+        'confidence': .99, 'defaulted_fields': [path],
+    })
+    result = _materialize_catalog_defaults(candidate, CAPABILITY_MATRIX)
+    assert (path not in result.defaulted_fields) is removed
+    assert getattr(result, side)[0].value == 20
+    assert len(_unspoken_threshold_issues(result)) == 1
+    assert candidate.defaulted_fields == (path,)
+
+
 def test_condition_kind_canonicalizes_only_implied_execution_mechanics() -> None:
     candidate = {"trading_plan": {"kind": "conditional", "parameters": {"rules": [{
         "kind": "rebound", "side": "sell", "direction": "down", "gap": "2",

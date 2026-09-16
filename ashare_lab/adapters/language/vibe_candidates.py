@@ -2924,7 +2924,20 @@ def _materialize_catalog_defaults(
     explicitly requested value omitted by the model must still fail semantic
     review; a default is not evidence that the request used that value.
     """
-    defaults = list(candidate.defaulted_fields)
+    # A trigger value is not a Catalog parameter default. Treat a redundant
+    # annotation of an existing value separately, without changing that value.
+    # Missing source evidence is handled by _unspoken_threshold_issues even
+    # after positive model review; unknown/dangling paths still fail integrity.
+    defaults = []
+    for path in candidate.defaulted_fields:
+        match = re.fullmatch(r"/(entry|exit)/(0|[1-9]\d*)/value", path)
+        if match:
+            leaves = candidate.entry if match[1] == "entry" else candidate.exit
+            index = int(match[2])
+            if (index < len(leaves) and isinstance(leaves[index], IndicatorCandidate)
+                    and leaves[index].value is not None):
+                continue
+        defaults.append(path)
     updates: dict[str, object] = {}
     for side, leaves, spans in (
         ("entry", candidate.entry, candidate.entry_spans),
