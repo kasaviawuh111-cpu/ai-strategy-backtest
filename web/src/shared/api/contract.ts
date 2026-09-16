@@ -1,6 +1,6 @@
 import { ApiError } from './types'
 import { INDICATOR_NAMES } from '../indicator-labels'
-import { pricePlanTitle, pricePlanExecution } from '../price-plan'
+import { independentPlanTitle, pricePlanTitle, pricePlanExecution } from '../price-plan'
 import { DEFAULT_EXECUTION_SETTINGS } from '../config/backtest'
 import { plainStrategyTitle } from '../strategy-title'
 import { strategyRuleTrees, summarizeRule } from '../../view-model'
@@ -930,7 +930,8 @@ function toDraft(
     revision: response.revision,
     strategyHash: response.strategy_hash,
     sourceText: input.utterance,
-    title: strategy.trading_plan ? pricePlanTitle(strategy.trading_plan)
+    title: strategy.independent_plans ? independentPlanTitle(strategy.independent_plans)
+      : strategy.trading_plan ? pricePlanTitle(strategy.trading_plan)
       : plainStrategyTitle(entry.conditions, exit.conditions),
     instrument: instrumentFrom(strategy, input.instrument, response.candidate_grounding,
       response.verified_instrument),

@@ -381,6 +381,7 @@ describe('live API contract adapter', () => {
       initialCashCny: 200000, start: '2025-03-03' } }
     const summary = toStrategySummary(edited)
     expect(summary.title).toBe('定时买入、条件卖出')
+    expect(outcome.draft.title).toBe(summary.title)
     expect(summary.rows.find(row => row.key === 'entry')?.value).toContain('每月1日')
     expect(summary.rows.find(row => row.key === 'exit')?.value).toContain('25')
     expect(summary.confirmation).toContain('各自计划')

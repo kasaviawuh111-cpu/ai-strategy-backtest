@@ -1,5 +1,10 @@
 import type { PricePlan, StrategySpec } from './api/types'
 
+export function independentPlanTitle(plans: NonNullable<StrategySpec['independent_plans']>): string {
+  const names = { scheduled: '定时', grid: '网格', conditional: '条件' }
+  return `${names[plans.entry_plan.kind]}买入、${names[plans.exit_plan.kind]}卖出`
+}
+
 // Keep edited plans consistent with the server's execution_for_price_plan contract.
 export function pricePlanExecution(plan: PricePlan): StrategySpec['execution'] {
   const common = { timezone: 'Asia/Shanghai', position_policy: 'bounded_inventory', t_plus_one: true } as const

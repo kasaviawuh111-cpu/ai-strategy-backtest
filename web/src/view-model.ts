@@ -10,7 +10,7 @@ import type {
   StrategySpecExitRule,
 } from './shared/api/types'
 import { DEFAULT_EXECUTION_SETTINGS } from './shared/config/backtest'
-import { conditionalStageCount, gridReviewPresentation, pricePlanSides, pricePlanTitle } from './shared/price-plan'
+import { conditionalStageCount, gridReviewPresentation, independentPlanTitle, pricePlanSides, pricePlanTitle } from './shared/price-plan'
 import { plainStrategyTitle } from './shared/strategy-title'
 import type {
   BacktestMetrics,
@@ -668,9 +668,7 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
 
 export function conciseStrategyTitle(draft: StrategyDraft): string {
   if (draft.strategySpec.independent_plans) {
-    const names = { scheduled: '定时', grid: '网格', conditional: '条件' };
-    const plans = draft.strategySpec.independent_plans;
-    return `${names[plans.entry_plan.kind]}买入、${names[plans.exit_plan.kind]}卖出`;
+    return independentPlanTitle(draft.strategySpec.independent_plans)
   }
   if (draft.strategySpec.trading_plan) return pricePlanTitle(draft.strategySpec.trading_plan)
   return plainStrategyTitle(draft.entry.conditions, draft.exit.conditions)
