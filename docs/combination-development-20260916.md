@@ -94,3 +94,10 @@
 - /backtest-runs/prepare 返回 200 ready:true，随后提交返回 202 queued，run:9dc367c2d48c4f40b26c363b391c194b。
 - 最终 failed / minute_data_unavailable，日志底层原因 minute_data_outside_market_calendar。没有 summary/series/trades 成功结果，不能声明端到端通过。
 - 准备检查仅通过不足以证明分钟数据对齐；下一步检查实际本地日历覆盖及分钟来源。严禁删除不对齐数据、缩短日期或改用日线来绕过此失败。
+
+## 日历覆盖修复及执行结果
+
+- 组合回放为首笔容量加载前一个交易日；旧日历从2025年开始，漏掉2024-12-31。通过既有 BaoStock 脚本新增 var/market-calendar-2024-2026.json（727个交易日），新旧2025年起的交易日完全相同，未覆盖旧文件。
+- 当前本地启动通过 MINUTE_MARKET_CALENDAR_PATH 指向新文件。原策略哈希及回测日期不变，run:522f28cb30034b78a90aff290cf127a4 返回 succeeded，结果哈希 sha256:9a5ba1e7eeac73c5aad1923f8cc5eb539963dae4635126bb966dc6f8ca7f1bbe。
+- summary/series/trades 均200；57个交易日，初始权益100000、期末99848.96。证据标记176229a+dirty，本地真实外置分钟数据，不是干净公网版本验收。
+- 成交检查发现买入记录从2025-02-05开始，而输入要求每月第一个交易日且回测从2025-01-02开始。需继续核对1月首笔是否被排程边界遗漏；即使执行状态成功，业务验收仍未通过。
