@@ -38,7 +38,8 @@ def test_pair_candidate_requires_both_sources_and_preserves_legs(entry_kind, exi
         _to_candidate_ast(forged, request, provenance=None)
 
 
-def test_pair_survives_full_candidate_translation():
+@pytest.mark.asyncio
+async def test_pair_survives_full_candidate_translation():
     from tests.unit.adapters.language.test_vibe_candidates import CAPABILITY_MATRIX
     pair = pair_strategy('scheduled', 'conditional').independent_plans
     buy = '每周四买入100股'
@@ -57,3 +58,13 @@ def test_pair_survives_full_candidate_translation():
     assert len(result) == 1
     assert result[0].unsupported_code is None
     assert result[0].independent_plans == pair
+    from unittest.mock import AsyncMock, Mock
+    from ashare_lab.application.compile_strategy import StrategyCompiler, CompileStatus
+    from tests.unit.adapters.language.test_vibe_candidates import CATALOG, CATALOG_RELEASE
+    compiler = StrategyCompiler(generator=Mock(generate=AsyncMock(return_value=result)),
+        catalog=CATALOG, catalog_id='cn_a.signals', release_version=CATALOG_RELEASE)
+    outcome = await compiler.compile(CompileInput(utterance=utterance,
+        as_of_date=date(2026, 9, 16), instrument_context='300059.SZ'))
+    assert outcome.status is CompileStatus.READY, outcome
+    assert outcome.strategy.independent_plans == pair
+    assert outcome.strategy.instrument.symbol == '300059.SZ'
