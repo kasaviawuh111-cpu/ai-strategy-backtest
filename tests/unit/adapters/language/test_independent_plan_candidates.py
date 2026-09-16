@@ -28,6 +28,11 @@ def test_pair_candidate_requires_both_sources_and_preserves_legs(entry_kind, exi
         '/independent_plans/entry_plan', '/independent_plans/exit_plan'}
     with pytest.raises(ValidationError, match='分别引用'):
         BoundedCandidate.model_validate({**raw, 'exit_plan_span': None})
+    from ashare_lab.adapters.language.vibe_candidates import _candidate_schema_feedback
+    try:
+        BoundedCandidate.model_validate({**raw, 'exit_plan_span': None})
+    except ValidationError as exc:
+        assert '独立买卖计划须分别引用用户原话' in _candidate_schema_feedback(exc)
     with pytest.raises(ValidationError, match='占用'):
         BoundedCandidate.model_validate({**raw, 'trading_plan': raw['independent_plans']['entry_plan']})
     with pytest.raises(ValidationError, match='初始资金'):

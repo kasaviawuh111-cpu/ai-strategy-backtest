@@ -2122,6 +2122,12 @@ _SAFE_CANDIDATE_SCHEMA_MESSAGES = {
     "Value error, backtest start must be on or before end",
     "Value error, strategy condition tree exceeds 64 nodes",
     "Value error, 分钟保护至少需要止盈或止损阈值",
+    "Value error, 独立计划不能同时由其他规则占用买卖侧",
+    "Value error, 独立买卖计划须分别引用用户原话",
+    "Value error, 独立计划须保留用户明确给出的初始资金",
+    "Value error, 计划原文依据必须对应独立计划",
+    "Value error, independent plan contains an opposite-side condition",
+    "Value error, independent schedule must own only its declared side",
 }
 
 
@@ -2133,7 +2139,7 @@ def _candidate_schema_feedback(exc: Exception) -> str:
         allowed = {"candidates", "first_fragment", "last_fragment"}
         for model in (BoundedCandidate, CandidateSourceSpan, IndicatorCandidate,
                       HoldingPeriodCandidate, PositionReturnCandidate, TrailingDrawdownCandidate,
-                      GridPlan, GridParameters, ConditionalPlan, ConditionParameters,
+                      IndependentPlanPair, GridPlan, GridParameters, ConditionalPlan, ConditionParameters,
                       ConditionRule, ScheduledPlan, ScheduledParameters):
             allowed.update(model.model_fields)
         allowed.update({"grid", "conditional", "scheduled"})
