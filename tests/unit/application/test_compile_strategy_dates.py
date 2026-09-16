@@ -11,6 +11,24 @@ from ashare_lab.ports.candidate_generation import CandidateAst, CompileInput
 ROOT = Path(__file__).parents[3]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('end,accepted', [('2026-09-16', True), ('2026-09-17', False)])
+async def test_explicit_range_after_import_watermark_reaches_data_preflight(end, accepted):
+    compiler = StrategyCompiler(generator=RuleBasedCandidateGenerator(),
+        catalog=load_catalog_directory(ROOT / 'catalogs'),
+        catalog_id='cn_a.signals', release_version='2026.09.01',
+        trusted_date_provider=lambda: date(2026, 9, 16),
+        backtest_anchor_date=date(2026, 9, 11))
+    outcome = await compiler.compile(CompileInput(
+        utterance=f'MACD金叉买入，死叉卖出，回测2025-09-11至{end}',
+        instrument_context='300308.SZ', as_of_date=date(2026, 9, 11)))
+    assert (outcome.status is CompileStatus.READY) is accepted
+    if accepted:
+        assert outcome.strategy.backtest.end == date.fromisoformat(end)
+    else:
+        assert outcome.diagnostic_code == 'backtest_end_after_as_of_date'
+
+
 class _CapturingGenerator:
     def __init__(self) -> None:
         self.requests: list[CompileInput] = []

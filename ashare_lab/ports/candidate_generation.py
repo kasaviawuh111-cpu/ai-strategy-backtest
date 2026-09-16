@@ -33,6 +33,13 @@ class CompileInput:
     semantic_intent: str | None = None
     # Server-resolved identity for this exact source span, never public/model input.
     resolved_instrument: ResolvedCompileInstrument | None = None
+    # Server-only calendar ceiling; as_of_date may instead anchor default ranges
+    # to the imported data watermark. Explicit dates retain their source value.
+    date_validation_ceiling: date | None = None
+
+    @property
+    def allowed_backtest_end(self) -> date:
+        return self.date_validation_ceiling or self.as_of_date
 
 
 @dataclass(frozen=True, slots=True)

@@ -2089,11 +2089,9 @@ class StrategyCompiler:
                 diagnostic_code="request_as_of_date_in_future",
             )
         effective_as_of_date = self._backtest_anchor_date or request.as_of_date
-        effective_request = (
-            request
-            if effective_as_of_date == request.as_of_date
-            else replace(request, as_of_date=effective_as_of_date)
-        )
+        effective_request = replace(request, as_of_date=effective_as_of_date,
+            date_validation_ceiling=(self._trusted_date_provider()
+                if self._backtest_anchor_date is not None else request.as_of_date))
         if (request.semantic_intent == "safety"
                 or classify_clarification_turn(request.utterance) is TurnIntent.SAFETY):
             turn = await self.safety_support_turn(
@@ -2444,7 +2442,7 @@ class StrategyCompiler:
                 except AshareInstrumentCodeError:
                     rejection_code = "invalid_a_share_instrument"
                 else:
-                    rejection_code = _period_error(current, effective_as_of_date)
+                    rejection_code = _period_error(current, effective_request.allowed_backtest_end)
                     if rejection_code is None:
                         try:
                             current_strategy = self._build_strategy(
@@ -2617,7 +2615,7 @@ class StrategyCompiler:
                 if context_symbol is not None and symbol != context_symbol:
                     diagnostic = "instrument_context_mismatch"
                 else:
-                    diagnostic = _period_error(candidate, request.as_of_date)
+                    diagnostic = _period_error(candidate, request.allowed_backtest_end)
                 if diagnostic is None:
                     strategy = self._build_strategy(
                         candidate, request.as_of_date, instrument_symbol=symbol,
@@ -3397,7 +3395,7 @@ class StrategyCompiler:
                 continue
             if instrument_symbol != expected_symbol:
                 continue
-            if _period_error(candidate, request.as_of_date) is not None:
+            if _period_error(candidate, request.allowed_backtest_end) is not None:
                 continue
             try:
                 strategy = self._build_strategy(
@@ -3663,7 +3661,7 @@ class StrategyCompiler:
                 instrument_symbol = normalize_a_share_instrument(candidate.instrument_symbol).value
             except AshareInstrumentCodeError:
                 continue
-            if _period_error(candidate, request.as_of_date) is not None:
+            if _period_error(candidate, request.allowed_backtest_end) is not None:
                 continue
             try:
                 strategy = self._build_strategy(
@@ -3709,7 +3707,7 @@ class StrategyCompiler:
         """Retain model-parsed complete rules while only the stock is missing."""
         if ((candidate.trading_plan is None and candidate.independent_plans is None
              and (not candidate.entry or not candidate.exit))
-                or _period_error(candidate, request.as_of_date) is not None):
+                or _period_error(candidate, request.allowed_backtest_end) is not None):
             return None
         summaries: list[str] = []
         legs = (("independent_plans/entry_plan", "independent_plans/exit_plan")

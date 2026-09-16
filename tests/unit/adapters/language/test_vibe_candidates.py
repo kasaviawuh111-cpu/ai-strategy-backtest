@@ -311,6 +311,24 @@ def test_condition_kind_canonicalizes_only_implied_execution_mechanics() -> None
     assert rules[1]["quantity"] == 200
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('end,valid', [('2026-09-16', True), ('2026-09-17', False)])
+async def test_bounded_explicit_dates_use_calendar_ceiling_not_default_data_end(end, valid):
+    period = f'回测2025-09-11至{end}'
+    utterance = f'MACD金叉买入，死叉卖出，{period}'
+    payload = _macd_batch(utterance=utterance)
+    candidate = payload['candidates'][0]
+    candidate.update(backtest_start='2025-09-11', backtest_end=end,
+        backtest_span=_source_span(utterance, period))
+    transport = _FakeTransport(payload)
+    generated = await _bounded(transport).generate(CompileInput(
+        utterance=utterance, instrument_context='300308.SZ',
+        as_of_date=date(2026, 9, 11), date_validation_ceiling=date(2026, 9, 16)))
+    assert (generated[0].unsupported_code is None) is valid
+    assert transport.requests[0].as_of_date == date(2026, 9, 16)
+    assert transport.requests[0].user_payload['defaultBacktestEnd'] == '2026-09-11'
+
+
 class _FakeTransport:
     def __init__(self, response: CandidateTransportResponse) -> None:
         self.response = response

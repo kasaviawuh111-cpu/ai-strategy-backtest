@@ -7,6 +7,15 @@
 
 目标以当前线程goal完整范围为准，未完成，不部署公网。
 
+## 范围协商真实链路与剩余入口缺陷
+
+- 上述自然语言入口缺陷已修复：内部CompileInput分离默认数据锚点与服务器日期校验上界，候选审核和编译使用同一上界，默认区间仍按数据水位。317项日期/候选回归通过，追加2项模型候选上界用例通过。已重启本地。
+- 同一浏览器原句复验返回backtest_range_confirmation_required，显示原区间与建议区间；点击“接受建议范围”进入ready审阅页，量价AND、严格“超过”、MA10完整保留，开始回测仍需点击。截图`range-desktop.png`、`range-accepted.png`及对应text已保存并检查。初始截图截到了入场淡入状态，接受后截图为稳定状态；不作为新视觉设计验收。
+
+- 已用300308 ready方案经结构化revision将结束日改为2026-09-16，返回backtest_range_confirmation_required；接受建议范围后ready，结束日2026-09-11，entry/exit完整相等，不自动run。
+- 显式prepare通过后提交本地模拟回测，run:7221acd7928a412dacd0db48803930d2成功；summary/series/trades均返回，244曲线点、6笔成交（3买3卖）。末日净值与摘要finalEquityCny一致，runEvidence.strategyHash与接受后草稿一致。证据`outputs/batch-badcases-20260916/range-and-run-live.json`。运行标识为781054c+dirty，非clean-SHA公网验收。
+- 浏览器自然语言直接指定同日期却失败：request_id=76624fd41ea44361a17f224b8897487f两次候选报backtest_end_after_as_of_date，最终candidate_provider_invalid_output。原因是前端as_of_date和后端effective_request均使用数据末日，把2026-09-16错误地当成未来时间，提前阻断协商。需要分离“默认区间锚点”和“用户显式日期允许上界”；当前仅结构化改参路径可用，不能宣称全部范围入口完成。
+
 ## 真实本地多轮与页面增量
 
 - 300308原句真实请求返回201 ready、diagnostic_code为空；结构为收盘20日新高 AND 成交量严格gt_multiple(前5日均量1.5倍)，卖出first_of下的收盘价下穿MA10。数据准备不再被H股超额配售分类拒绝。验收脚本最初错误地直接读取exit.params，已按实际first_of结构校正并核验已保存响应，没有为测试路径错误重复发模型请求。证据`outputs/batch-badcases-20260916/breakout-live.json`；尚未据此宣称完整回测结果通过。

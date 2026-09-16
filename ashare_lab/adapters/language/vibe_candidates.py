@@ -1211,7 +1211,8 @@ class VibeBoundedCandidateGenerator:
         user_payload = {
             "utterance": request.utterance,
             "instrumentContext": request.instrument_context,
-            "asOfDate": request.as_of_date.isoformat(),
+            "asOfDate": request.allowed_backtest_end.isoformat(),
+            "defaultBacktestEnd": request.as_of_date.isoformat(),
             "maxCandidates": 1,
             "capabilityProjectionVersion": matrix.schema_version,
             "capabilityProjectionHash": matrix.content_hash,
@@ -1232,7 +1233,7 @@ class VibeBoundedCandidateGenerator:
         transport_request = CandidateTransportRequest(
             utterance=request.utterance,
             instrument_context=request.instrument_context,
-            as_of_date=request.as_of_date,
+            as_of_date=request.allowed_backtest_end,
             max_candidates=1,
             response_schema=_bounded_response_schema(
                 matrix, max_candidates=1, source_fragment_ids=tuple(fragments),
@@ -3668,7 +3669,7 @@ def _validate_candidate_integrity(
             raise ValueError("explicit setting requires exact source evidence")
         if span is not None:
             _validate_exact_span(span, request.utterance)
-    if candidate.backtest_end is not None and candidate.backtest_end > request.as_of_date:
+    if candidate.backtest_end is not None and candidate.backtest_end > request.allowed_backtest_end:
         raise _CandidateSemanticRejection("backtest_end_after_as_of_date")
     if (candidate.backtest_start is not None and candidate.backtest_end is not None
             and candidate.backtest_start > candidate.backtest_end):
@@ -5121,7 +5122,7 @@ def _validate_period_grounding(candidate: BoundedCandidate, request: CompileInpu
     for value in (candidate.backtest_start, candidate.backtest_end):
         if value is not None and not _date_evidence(span.text, value):
             raise ValueError("explicit backtest date lacks lexical evidence")
-    if candidate.backtest_end is not None and candidate.backtest_end > request.as_of_date:
+    if candidate.backtest_end is not None and candidate.backtest_end > request.allowed_backtest_end:
         raise _CandidateSemanticRejection("backtest_end_after_as_of_date")
 
 
