@@ -30,13 +30,22 @@ def investment_schedule(*, sessions: Sequence[date], start: date, end: date,
     if any(a >= b for a, b in zip(sessions, sessions[1:])):
         raise ValueError("market calendar must be unique and ordered")
     result: dict[date, Decimal] = {}
-    current = start
+    # A nominal date before the range can roll onto its first trading day
+    # (e.g. Jan 1 holiday -> Jan 2). Filter by the rolled execution date,
+    # without catching up occurrences that already traded before the range.
+    current = (start.replace(day=1) if frequency == "monthly" else
+               start - timedelta(days=start.weekday()))
     while current <= end:
         planned = (current.isoweekday() == day if frequency == "weekly" else
                    current.day == min(day, monthrange(current.year, current.month)[1]))
         if planned:
+            if current < start and (not sessions or current < sessions[0]):
+                # A truncated calendar cannot prove a pre-range occurrence
+                # rolled forward rather than already executed off-calendar.
+                current += timedelta(days=1)
+                continue
             index = bisect_left(sessions, current)
-            if index < len(sessions) and sessions[index] <= end:
+            if index < len(sessions) and start <= sessions[index] <= end:
                 target = sessions[index]
                 result[target] = result.get(target, Decimal(0)) + budget
         current += timedelta(days=1)
