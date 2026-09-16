@@ -1242,6 +1242,11 @@ class VibeBoundedCandidateGenerator:
                 "网格、分批委托、基于成交价止盈止损/期限卖出、反弹买入、回落卖出、先买后卖或先卖后买，"
                 "可直接用trading_plan（grid、conditional或scheduled），不必硬译为指标条件。"
                 "买入与卖出可以独立组合：计划负责的动作保留在trading_plan，其他指标条件放在对应entry或exit及其spans。"
+                "若买卖两侧均需不同或独立的计划，用independent_plans.entry_plan与exit_plan分别保存，"
+                "entry_plan_span和exit_plan_span分别引用各侧原话；trading_plan、plan_span为null，entry/exit及其spans留空。"
+                "两侧各自只负责买或卖，共享同一初始资金、期初持仓、费用和仓位限制，不能分成两份账户。"
+                "例如每月买入配到价卖出，用scheduled买入与conditional卖出两个计划；"
+                "用户没有明确先后时，不可把句子顺序变成成交前置依赖。明确先后依赖继续保留在支持顺序的单个conditional计划中。"
                 "例如每月定投买入配MACD死叉卖出，用scheduled买入计划加exit中的MACD死叉；"
                 "到价/反弹买入配指标卖出同理：conditional.parameters.rules仅放买入条件，"
                 "MACD/RSI等卖出条件放顶层exit，引用对应卖出原句；指标买入配定期卖出则反向组合。"
@@ -1529,6 +1534,7 @@ class VibeBoundedCandidateGenerator:
                         structural_candidates = tuple(
                             candidate for candidate in structural
                             if (candidate.entry and candidate.exit) or candidate.trading_plan
+                            or candidate.independent_plans
                         )
                         approvals: set[str] = set()
                         for item in batch.candidates:
@@ -1598,11 +1604,7 @@ class VibeBoundedCandidateGenerator:
                                     "candidate_semantic_review_reused candidate_sha256=%s "
                                     "equivalent=%s", fingerprint, verdict.review.equivalent,
                                 )
-                            minute_price_plan = (isinstance(item.trading_plan, GridPlan)
-                                and item.trading_plan.parameters.observation == "minute_bar") or (
-                                isinstance(item.trading_plan, ConditionalPlan)
-                                and item.trading_plan.parameters.observation == "minute_bar"
-                            )
+                            minute_price_plan = _has_minute_price_plan(item)
                             minute_protection_only = _minute_interval_is_exit_only(item, request.utterance)
                             if (verdict.review.requested_bar_interval in {"1m", "intraday"} and not (minute_price_plan or minute_protection_only)
                                     or verdict.review.requested_bar_interval in {
@@ -2475,7 +2477,8 @@ def _translate_transport_payload(
             *pending_issues,
             *deterministic_issues,
         )))
-        if pending_issues and ((candidate.entry and candidate.exit) or candidate.trading_plan):
+        if pending_issues and ((candidate.entry and candidate.exit) or candidate.trading_plan
+                               or candidate.independent_plans):
             pending_code = (
                 "execution_prerequisite_required"
                 if not model_review_issues
@@ -2499,6 +2502,13 @@ _SELL_ONLY_PREREQUISITE_MESSAGE = (
     "已识别卖出条件，但当前新策略没有买入规则或期初可卖持仓；"
     "卖出规则仍保留，补充买入规则或期初持仓后，将继续检查数据与执行条件。"
 )
+
+
+def _has_minute_price_plan(candidate: BoundedCandidate) -> bool:
+    plans = ((candidate.independent_plans.entry_plan, candidate.independent_plans.exit_plan)
+             if candidate.independent_plans is not None else (candidate.trading_plan,))
+    return any(isinstance(plan, (GridPlan, ConditionalPlan))
+               and plan.parameters.observation == "minute_bar" for plan in plans)
 
 
 def _minute_interval_is_exit_only(candidate: BoundedCandidate, utterance: str) -> bool:
@@ -2676,6 +2686,14 @@ def _normalize_transport_candidate(
             "plan_span": (
                 None if candidate.plan_span is None
                 else _normalize_exact_unique_span(candidate.plan_span, request.utterance)
+            ),
+            "entry_plan_span": (
+                None if candidate.entry_plan_span is None
+                else _normalize_exact_unique_span(candidate.entry_plan_span, request.utterance)
+            ),
+            "exit_plan_span": (
+                None if candidate.exit_plan_span is None
+                else _normalize_exact_unique_span(candidate.exit_plan_span, request.utterance)
             ),
             # This field is Catalog-indicator provenance, not execution data.
             # Price plans expose their complete typed parameters in the editor;
