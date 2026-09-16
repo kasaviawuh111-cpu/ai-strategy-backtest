@@ -87,3 +87,10 @@
 - draft 1e98aabe-25a1-4700-96e1-a30515fc4d77，hash sha256:111400b353afface8003027743ca8a8f915bca7e6541edc5880d4eca34a9c627。两侧分别 scheduled 买入100股、conditional 上涨至30元卖出100股；共享100000元，原日期保留，分侧原文证据保留。
 - 未提交回测，不能声明真实执行通过。模型补充的仓位上限10000股、卖出重复1次等默认建议仍需在编辑器中可见核对。
 - 返回 execution_assessment 错误落入日线信号说明，已新增双计划说明分支及回归；生成提示明确顶层和计划本金为同一账户金额，不进行静默金额覆盖。
+
+## 首次真实数据执行（未通过）
+
+- 保存模型生成策略到 combination-live-strategy-20260916.json，以 StrategySpec 规范化后重新计算哈希，与 READY 草稿 sha256:111400b353afface8003027743ca8a8f915bca7e6541edc5880d4eca34a9c627 完全一致，未修改日期、规则或本金。
+- /backtest-runs/prepare 返回 200 ready:true，随后提交返回 202 queued，run:9dc367c2d48c4f40b26c363b391c194b。
+- 最终 failed / minute_data_unavailable，日志底层原因 minute_data_outside_market_calendar。没有 summary/series/trades 成功结果，不能声明端到端通过。
+- 准备检查仅通过不足以证明分钟数据对齐；下一步检查实际本地日历覆盖及分钟来源。严禁删除不对齐数据、缩短日期或改用日线来绕过此失败。

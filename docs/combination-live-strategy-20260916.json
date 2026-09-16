@@ -1,0 +1,31 @@
+{
+  "schema_version": "strategy.v1",
+  "catalog": {"catalog_id": "cn_a.signals", "release_version": "2026.09.01"},
+  "instrument": {"market": "CN_A", "symbol": "300059.SZ", "position_mode": "long_only"},
+  "entry": null, "exit": null,
+  "independent_plans": {
+    "entry_plan": {"kind": "scheduled", "parameters": {
+      "exit_rules": [], "buy_on_start": false, "frequency": "monthly", "day": 1,
+      "at": "open", "side": "buy", "sizing_mode": "shares", "quantity": 100,
+      "budget_cny": "1000", "limit_price": null, "initial_cash_cny": "100000",
+      "initial_shares": 0, "min_shares": 0, "max_shares": 10000, "max_position_cny": null,
+      "commission_rate": "0.00025", "minimum_commission_cny": "5", "slippage_bps": "5", "slippage_cny": "0"
+    }},
+    "exit_plan": {"kind": "conditional", "parameters": {
+      "observation": "minute_bar", "rules": [{"kind": "price", "side": "sell",
+        "direction": "up", "price_comparison": "inclusive", "target_price": "30",
+        "gap": null, "gap_unit": "percent", "quantity": 100, "limit_price": null,
+        "group": null, "sessions": null, "sizing_mode": "shares", "amount_cny": null,
+        "activation_price": null, "reference_mode": "previous_fill"}],
+      "repeat_cycles": 1, "initial_cash_cny": "100000", "initial_shares": 0,
+      "opening_shares": 0, "initial_capital_scope": "total_equity", "min_shares": 0,
+      "max_shares": 10000, "max_position_cny": null, "commission_rate": "0.00025",
+      "minimum_commission_cny": "5", "stamp_tax_rate": "0.0005", "transfer_fee_rate": "0.00001", "slippage_bps": "5"
+    }}
+  },
+  "execution": {"timezone": "Asia/Shanghai", "entry_policy": "composed_entry_leg",
+    "exit_policy": "composed_exit_leg", "data_capability": "daily_and_minute_ohlcv",
+    "execution_resolution": "1m", "evaluation_frequency": "daily_close_and_minute_bar",
+    "position_policy": "bounded_inventory", "t_plus_one": true},
+  "backtest": {"start": "2025-01-02", "end": "2025-03-31", "initial_cash_cny": 100000}
+}
