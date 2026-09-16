@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { PricePlanEditor } from '../components/PricePlanEditor'
 import { SettingInfo } from '../components/SettingInfo'
+import './order-timestamps.css'
 
 import type {
   CapacityMode,
@@ -834,9 +835,9 @@ export function ReportBody(
                   >
                     <span className="oc oc-side">
                       <b className={order.side}>{order.side === 'buy' ? '买入' : '卖出'}</b>
-                      <small title={stamp ? `${stampKind}时间：${stamp}${order.filledAt ? `；成交时间：${order.filledAt}` : ''}` : undefined}>{stamp ? `${stampKind} ${shortStamp(stamp)}` : '时间未记录'}</small>
+                      <small className="order-timestamp" title={stamp ? `${stampKind}时间：${stamp}${order.filledAt ? `；成交时间：${order.filledAt}` : ''}` : undefined}>{stamp ? `${stampKind} ${shortStamp(stamp)}` : '时间未记录'}</small>
                       {order.filledAt && order.orderAt && order.filledAt !== order.orderAt
-                        ? <small>成交 {shortStamp(order.filledAt)}</small> : null}
+                        ? <small className="order-timestamp">成交 {shortStamp(order.filledAt)}</small> : null}
                     </span>
                     <span className="oc oc-signal">
                       <b>{order.title}</b>

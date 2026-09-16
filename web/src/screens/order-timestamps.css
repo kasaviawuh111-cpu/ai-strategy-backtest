@@ -1,0 +1,7 @@
+/* Execution timestamps remain readable on narrow order-table columns. */
+.order-row .oc-side small.order-timestamp {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
