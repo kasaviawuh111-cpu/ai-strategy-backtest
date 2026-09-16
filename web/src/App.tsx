@@ -2341,13 +2341,13 @@ export default function App({
                   })() : null}
                   {!clarificationRequestFailed && clarification?.ideaRoute ? (
                     <>
-                      <IdeaResearchEvidence clarification={clarification} />
                       {activeIdeaProposalCards.length > 0 && (!clarification.instrumentSuggestions?.length || hasConfirmedIdeaStock) ? (
                         <Proposals
                           items={activeIdeaProposalCards}
                           onPick={submitIdeaProposal}
                         />
                       ) : null}
+                      <IdeaResearchEvidence clarification={clarification} />
                     </>
                   ) : !clarificationRequestFailed && clarificationSuggestions.length > 0 ? (
                     <Proposals
