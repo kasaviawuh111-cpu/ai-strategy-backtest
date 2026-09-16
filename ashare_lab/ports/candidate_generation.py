@@ -16,6 +16,7 @@ from ashare_lab.domain.financials import (
 )
 from ashare_lab.domain.strategy.models import JsonScalar
 from ashare_lab.domain.strategy.price_plans import PricePlan
+from ashare_lab.domain.strategy.independent_plans import IndependentPlanPair
 from ashare_lab.ports.execution_settings import ExecutionSettingsPatch
 from ashare_lab.ports.instrument_resolution import InstrumentNameCandidate
 
@@ -178,6 +179,15 @@ class CandidateAst:
     # Display-only review disagreements; never source evidence or execution approval.
     semantic_review_issues: tuple[str, ...] = ()
     trading_plan: PricePlan | None = None
+    independent_plans: IndependentPlanPair | None = None
+
+    def __post_init__(self):
+        if self.independent_plans is not None:
+            if self.trading_plan is not None or self.entry or self.exit:
+                raise ValueError('独立计划不能同时由其他规则占用买卖侧')
+            if (self.initial_cash_cny is not None and self.initial_cash_cny !=
+                    self.independent_plans.entry_plan.parameters.initial_cash_cny):
+                raise ValueError('独立计划须保留用户明确给出的初始资金')
 
 
 class CandidateGenerator(Protocol):

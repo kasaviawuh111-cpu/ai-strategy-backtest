@@ -15,6 +15,52 @@ from ashare_lab.ports.candidate_generation import FinancialIntent, EventIntent
 from ashare_lab.domain.financials.models import FinancialMetricId, FinancialUnit
 
 
+@pytest.mark.parametrize('entry_kind', ['grid', 'conditional', 'scheduled'])
+@pytest.mark.parametrize('exit_kind', ['grid', 'conditional', 'scheduled'])
+def test_independent_plan_ast_compiles_both_legs_without_changing_parameters(entry_kind, exit_kind):
+    from tests.contract.api.test_independent_price_plan_contract import pair_strategy
+    from ashare_lab.application.compile_strategy import _candidate_capability_ids, _strategy_capability_ids
+    pair = pair_strategy(entry_kind, exit_kind).independent_plans
+    original = pair.model_dump_json()
+    candidate = CandidateAst(instrument_symbol='300059.SZ', entry=(), exit=(), confidence=.9,
+        independent_plans=pair, initial_cash_cny=100000,
+        backtest_start=date(2025, 1, 2), backtest_end=date(2025, 1, 6))
+    compiler = StrategyCompiler(generator=Mock(),
+        catalog=load_catalog_directory(Path(__file__).resolve().parents[3] / 'catalogs'),
+        catalog_id='cn_a.signals', release_version='2026.09.01')
+    template = compiler._build_strategy_template(candidate, date(2026, 9, 16))
+    bound = compiler._build_strategy(candidate, date(2026, 9, 16), instrument_symbol='300059.SZ')
+    assert template.bind('300059.SZ') == bound
+    assert template.bind('600519.SH').independent_plans == pair
+    assert bound.independent_plans.model_dump_json() == original
+    assert bound.backtest.start == date(2025, 1, 2)
+    assert bound.backtest.end == date(2025, 1, 6)
+    assert bound.backtest.initial_cash_cny == 100000
+    assert isinstance(bound.execution, ComposedExecutionPolicy)
+    assert bound.entry is None and bound.exit is None and bound.trading_plan is None
+    assert set(_candidate_capability_ids(candidate)) == {f'strategy.{entry_kind}', f'strategy.{exit_kind}'}
+    assert _candidate_capability_ids(candidate) == _strategy_capability_ids(bound)
+    from dataclasses import replace
+    from ashare_lab.ports.candidate_generation import CandidateGroundingEvidence
+    utterance = '买入计划；卖出计划'
+    request = CompileInput(utterance=utterance, as_of_date=date(2026, 9, 16))
+    unbound = replace(candidate, instrument_symbol=None, grounding_evidence=(
+        CandidateGroundingEvidence('/independent_plans/entry_plan', 0, 4, '买入计划'),
+        CandidateGroundingEvidence('/independent_plans/exit_plan', 5, 9, '卖出计划'),
+    ))
+    proposal = compiler._unbound_candidate_proposal(request, unbound)
+    assert proposal is not None
+    assert proposal.entry_summary == '买入计划'
+    assert proposal.exit_summary == '卖出计划'
+    assert proposal.strategy_template.independent_plans == pair
+    assert compiler._unbound_candidate_proposal(request, replace(
+        unbound, grounding_evidence=unbound.grounding_evidence[:1])) is None
+    with pytest.raises(ValueError, match='初始资金'):
+        replace(candidate, initial_cash_cny=200000)
+    with pytest.raises(ValueError, match='占用'):
+        replace(candidate, trading_plan=pair.entry_plan)
+
+
 @pytest.mark.parametrize("condition", [
     FinancialIntent(FinancialMetricId.ROE, "gt", Decimal("1"), FinancialUnit.PERCENT,
                     report_type="annual", period_basis="full_year", statement_scope="consolidated"),

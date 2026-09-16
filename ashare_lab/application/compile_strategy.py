@@ -2546,7 +2546,8 @@ class StrategyCompiler:
         ))[:12]
         diagnostic = None
         strategy: StrategySpec | None = None
-        if ((candidate.trading_plan is None and (not candidate.entry or not candidate.exit))
+        if ((candidate.trading_plan is None and candidate.independent_plans is None
+             and (not candidate.entry or not candidate.exit))
                 or not issues):
             diagnostic = "candidate_provider_invalid_output"
         elif (candidate.instrument_symbol is None or candidate.instrument_name is not None
@@ -3652,11 +3653,15 @@ class StrategyCompiler:
         self, request: CompileInput, candidate: CandidateAst,
     ) -> IdeaProposal | None:
         """Retain model-parsed complete rules while only the stock is missing."""
-        if ((candidate.trading_plan is None and (not candidate.entry or not candidate.exit))
+        if ((candidate.trading_plan is None and candidate.independent_plans is None
+             and (not candidate.entry or not candidate.exit))
                 or _period_error(candidate, request.as_of_date) is not None):
             return None
         summaries: list[str] = []
-        for leg in (("trading_plan",) if candidate.trading_plan is not None else ("entry", "exit")):
+        legs = (("independent_plans/entry_plan", "independent_plans/exit_plan")
+                if candidate.independent_plans is not None else
+                ("trading_plan",) if candidate.trading_plan is not None else ("entry", "exit"))
+        for leg in legs:
             spans = [item for item in candidate.grounding_evidence
                      if item.path.startswith(f"/{leg}/") or item.path == f"/{leg}"]
             if not spans:
@@ -3682,6 +3687,18 @@ class StrategyCompiler:
     def _build_strategy_template(
         self, candidate: CandidateAst, as_of_date: date,
     ) -> UnboundIdeaStrategy:
+        if candidate.independent_plans is not None:
+            from ashare_lab.domain.strategy import ComposedExecutionPolicy
+            start, end = _resolve_backtest_period(candidate, as_of_date=as_of_date,
+                                                default_lookback_years=self._lookback_years)
+            pair = candidate.independent_plans
+            return UnboundIdeaStrategy(
+                catalog=CatalogRef(catalog_id=self._catalog_id, release_version=self._release_version),
+                independent_plans=pair, entry=None, exit=None,
+                execution=ComposedExecutionPolicy(),
+                backtest=BacktestConfig(start=start, end=end,
+                    initial_cash_cny=pair.entry_plan.parameters.initial_cash_cny),
+            )
         if candidate.trading_plan is not None:
             plan = with_new_strategy_defaults(candidate.trading_plan)
             start, end = _resolve_backtest_period(candidate, as_of_date=as_of_date,
@@ -3958,6 +3975,9 @@ def _candidate_capability_ids(candidate: CandidateAst) -> tuple[str, ...]:
 
     capability_ids: list[str] = ([f"strategy.{candidate.trading_plan.kind}"]
                                   if candidate.trading_plan is not None else [])
+    if candidate.independent_plans is not None:
+        capability_ids.extend(dict.fromkeys(f'strategy.{plan.kind}' for plan in (
+            candidate.independent_plans.entry_plan, candidate.independent_plans.exit_plan)))
     for intent in (*candidate.entry, *candidate.exit):
         capability_id: str
         if isinstance(intent, IndicatorIntent):
@@ -3980,6 +4000,9 @@ def _candidate_capability_ids(candidate: CandidateAst) -> tuple[str, ...]:
 def _strategy_capability_ids(strategy: StrategySpec) -> tuple[str, ...]:
     capability_ids: list[str] = ([f"strategy.{strategy.trading_plan.kind}"]
                                   if strategy.trading_plan is not None else [])
+    if strategy.independent_plans is not None:
+        capability_ids.extend(dict.fromkeys(f'strategy.{plan.kind}' for plan in (
+            strategy.independent_plans.entry_plan, strategy.independent_plans.exit_plan)))
     for condition in iter_indicator_conditions(strategy):
         if condition.indicator_id not in capability_ids:
             capability_ids.append(condition.indicator_id)
