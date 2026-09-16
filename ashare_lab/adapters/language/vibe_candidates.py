@@ -51,6 +51,7 @@ from ashare_lab.domain.events.catalog import (
 from ashare_lab.domain.strategy.canonical import canonical_hash
 from ashare_lab.domain.strategy.defaults import DEFAULT_INITIAL_CASH_CNY, DEFAULT_SCHEDULED_BUDGET_CNY
 from ashare_lab.domain.strategy.models import JsonScalar
+from ashare_lab.domain.strategy.independent_plans import IndependentPlanPair
 from ashare_lab.domain.strategy.price_plans import (
     ConditionalPlan, GridPlan, PricePlan, GridParameters, ConditionParameters,
     ConditionRule, ScheduledPlan, ScheduledParameters, with_new_strategy_defaults,
@@ -1006,6 +1007,9 @@ class BoundedCandidate(_StrictCandidateModel):
     exit_spans: tuple[CandidateSourceSpan, ...] = Field(default=(), max_length=8)
     trading_plan: PricePlan | None = None
     plan_span: CandidateSourceSpan | None = None
+    independent_plans: IndependentPlanPair | None = None
+    entry_plan_span: CandidateSourceSpan | None = None
+    exit_plan_span: CandidateSourceSpan | None = None
     instrument_span: CandidateSourceSpan | None = None
     backtest_span: CandidateSourceSpan | None = None
     initial_cash_span: CandidateSourceSpan | None = None
@@ -1034,6 +1038,16 @@ class BoundedCandidate(_StrictCandidateModel):
 
     @model_validator(mode="after")
     def period_is_unambiguous(self) -> BoundedCandidate:
+        if self.independent_plans is not None:
+            if self.trading_plan is not None or self.entry or self.exit or self.plan_span is not None:
+                raise ValueError("独立计划不能同时由其他规则占用买卖侧")
+            if self.entry_plan_span is None or self.exit_plan_span is None:
+                raise ValueError("独立买卖计划须分别引用用户原话")
+            if (self.initial_cash_cny is not None and self.initial_cash_cny !=
+                    self.independent_plans.entry_plan.parameters.initial_cash_cny):
+                raise ValueError("独立计划须保留用户明确给出的初始资金")
+        elif self.entry_plan_span is not None or self.exit_plan_span is not None:
+            raise ValueError("计划原文依据必须对应独立计划")
         if self.trading_plan is not None:
             if self.plan_span is None:
                 raise ValueError("交易计划须引用用户原话")
@@ -2199,7 +2213,8 @@ def _validate_transport_payload(
                     item[field] = [_resolve_source_reference(
                         span, fragments=fragments, utterance=utterance,
                     ) for span in cast(list[object] | tuple[object, ...], raw_spans)]
-            for field in ("instrument_span", "backtest_span", "initial_cash_span", "plan_span"):
+            for field in ("instrument_span", "backtest_span", "initial_cash_span", "plan_span",
+                          "entry_plan_span", "exit_plan_span"):
                 if field in item:
                     item[field] = _resolve_source_reference(
                         item[field], fragments=fragments, utterance=utterance,
@@ -2218,6 +2233,9 @@ def _validate_transport_payload(
     batch = BoundedCandidateBatch.model_validate(raw)
     for candidate in batch.candidates:
         validate_generated_plan(candidate.trading_plan, candidate.instrument_symbol, utterance=utterance)
+        if candidate.independent_plans is not None:
+            for plan in (candidate.independent_plans.entry_plan, candidate.independent_plans.exit_plan):
+                validate_generated_plan(plan, candidate.instrument_symbol, utterance=utterance)
     # Materialize NEW-plan defaults while omission is still observable. Later
     # model_dump/validate round trips expand persisted defaults (including old
     # 1,000-CNY plans), so doing this only in _to_candidate_ast is too late.
@@ -2230,6 +2248,19 @@ _SCHEDULED_BUDGET_DEFAULT_PATH = "/trading_plan/parameters/budget_cny"
 
 
 def _materialize_new_plan_defaults(candidate: BoundedCandidate) -> BoundedCandidate:
+    if candidate.independent_plans is not None:
+        defaults = set(candidate.defaulted_fields)
+        plans = {}
+        for leg in ("entry_plan", "exit_plan"):
+            plan = getattr(candidate.independent_plans, leg)
+            if (isinstance(plan, ScheduledPlan) and plan.parameters.sizing_mode == "amount"
+                    and "budget_cny" not in plan.parameters.model_fields_set):
+                defaults.add(f"/independent_plans/{leg}/parameters/budget_cny")
+            plans[leg] = with_new_strategy_defaults(plan)
+        return candidate.model_copy(update={
+            "independent_plans": IndependentPlanPair.model_validate(plans),
+            "defaulted_fields": tuple(sorted(defaults)),
+        })
     plan = candidate.trading_plan
     if plan is None:
         return candidate
@@ -3069,7 +3100,7 @@ def _normalize_leaf_source_span(
 
 def _candidate_rule_gap(candidate: BoundedCandidate) -> str | None:
     """Retain validated partial evidence for clarification, never execution."""
-    if candidate.trading_plan is not None:
+    if candidate.trading_plan is not None or candidate.independent_plans is not None:
         return None
     if not candidate.entry and not candidate.exit:
         return "strategy_rule_incomplete"
@@ -3468,6 +3499,9 @@ def _validate_candidate_integrity(
     """
     if candidate.plan_span is not None:
         _validate_exact_span(candidate.plan_span, request.utterance)
+    for span in (candidate.entry_plan_span, candidate.exit_plan_span):
+        if span is not None:
+            _validate_exact_span(span, request.utterance)
     # A positive model review cannot waive an explicit compound's missing
     # price leg. Check the narrow, unqualified wording only; do not impose a
     # particular boundary/window or restore broad lexical gates here.
@@ -3488,6 +3522,16 @@ def _validate_candidate_integrity(
     for span in (*candidate.entry_spans, *candidate.exit_spans):
         _validate_exact_span(span, request.utterance)
     for path in candidate.defaulted_fields:
+        if candidate.independent_plans is not None:
+            pair_defaults = {
+                f"/independent_plans/{leg}/parameters/budget_cny"
+                for leg in ("entry_plan", "exit_plan")
+                if isinstance((plan := getattr(candidate.independent_plans, leg)), ScheduledPlan)
+                and plan.parameters.sizing_mode == "amount"
+                and plan.parameters.budget_cny == DEFAULT_SCHEDULED_BUDGET_CNY
+            }
+            if path in pair_defaults:
+                continue
         if (path == _SCHEDULED_BUDGET_DEFAULT_PATH
                 and isinstance(candidate.trading_plan, ScheduledPlan)
                 and candidate.trading_plan.parameters.sizing_mode == "amount"
@@ -3536,7 +3580,7 @@ def _validate_candidate_grounding(
     matrix: CandidateCapabilityMatrix,
     request: CompileInput,
 ) -> None:
-    if candidate.trading_plan is not None:
+    if candidate.trading_plan is not None or candidate.independent_plans is not None:
         _validate_candidate_integrity(candidate, matrix, request)
         if not candidate.entry and not candidate.exit:
             return
@@ -5071,6 +5115,26 @@ def _to_candidate_ast(
         )
         for index, span in enumerate(item.entry_spans)
     ]
+    pair = item.independent_plans
+    if pair is not None:
+        for leg, span in (("entry_plan", item.entry_plan_span), ("exit_plan", item.exit_plan_span)):
+            assert span is not None
+            _validate_exact_span(span, request.utterance)
+            grounding.append(CandidateGroundingEvidence(
+                path=f"/independent_plans/{leg}", start=span.start, end=span.end, text=span.text,
+            ))
+        # Provider-authored quotes are not market data. Preserve explicit fixed
+        # anchors, but leave market-derived anchors for the market-data resolver.
+        normalized = {}
+        for leg in ("entry_plan", "exit_plan"):
+            leg_plan = getattr(pair, leg)
+            if isinstance(leg_plan, GridPlan) and leg_plan.parameters.anchor_mode in {"latest_price", "previous_close"}:
+                updates = {key: None for key in type(leg_plan.parameters).model_fields
+                           if key.startswith("anchor_quote_")}
+                updates["anchor_price"] = None
+                leg_plan = leg_plan.model_copy(update={"parameters": leg_plan.parameters.model_copy(update=updates)})
+            normalized[leg] = leg_plan
+        pair = IndependentPlanPair.model_validate(normalized)
     if item.plan_span is not None:
         grounding.append(CandidateGroundingEvidence(
             path="/trading_plan", start=item.plan_span.start, end=item.plan_span.end,
@@ -5128,6 +5192,7 @@ def _to_candidate_ast(
     return CandidateAst(
         instrument_symbol=symbol,
         trading_plan=plan,
+        independent_plans=pair,
         instrument_name=item.instrument_name,
         unsupported_code=_candidate_rule_gap(item),
         entry=tuple(_to_signal(value) for value in item.entry),
