@@ -2494,15 +2494,18 @@ def _translate_transport_payload(
             candidate, request.utterance,
         )
         model_review_issues = pending_issues
+        threshold_issues = _unspoken_threshold_issues(item)
         pending_issues = tuple(dict.fromkeys((
             *pending_issues,
             *deterministic_issues,
+            *threshold_issues,
         )))
         if pending_issues and ((candidate.entry and candidate.exit) or candidate.trading_plan
                                or candidate.independent_plans):
             pending_code = (
                 "execution_prerequisite_required"
                 if not model_review_issues
+                and not threshold_issues
                 and deterministic_issues == (_SELL_ONLY_PREREQUISITE_MESSAGE,)
                 else "semantic_confirmation_required"
             )
@@ -2512,6 +2515,39 @@ def _translate_transport_payload(
             )
         candidates.append(candidate)
     return tuple(candidates)
+
+
+def _unspoken_threshold_issues(candidate: BoundedCandidate) -> tuple[str, ...]:
+    """A semantic approval cannot turn a proposed numeric threshold into a fact.
+
+    Keep the full candidate for the existing confirmation flow. Catalog parameter
+    defaults remain independent from trigger values, which have no default here.
+    """
+    issues = []
+    for side, leaves, spans in (("买入", candidate.entry, candidate.entry_spans),
+                               ("卖出", candidate.exit, candidate.exit_spans)):
+        for leaf, span in zip(leaves, spans, strict=True):
+            if not isinstance(leaf, IndicatorCandidate) or leaf.value is None:
+                continue
+            # Up/down relative to yesterday semantically fixes zero; it is not
+            # a model-selected oversold/cheap threshold.
+            if (leaf.indicator_id == "price.return_pct" and leaf.value == 0
+                    and leaf.params.get("period") == 1
+                    and ((leaf.trigger == "below" and "下跌" in span.text)
+                         or (leaf.trigger == "above" and "上涨" in span.text))):
+                continue
+            # Existing minimal qualitative volume definition: above its mean.
+            if (leaf.indicator_id == "volume.relative" and leaf.trigger == "gt_multiple"
+                    and leaf.value == 1 and "放量" in span.text
+                    and re.search(r"\d+(?:\.\d+)?\s*倍", span.text) is None):
+                continue
+            amount_mentions = tuple(_AMOUNT_THRESHOLD_RE.finditer(span.text)) if leaf.indicator_id == "market.amount" else ()
+            grounded = (any(_amount_threshold_cny(m) == Decimal(str(leaf.value)) for m in amount_mentions)
+                        if amount_mentions else _numeric_evidence(span.text, leaf.value))
+            if not grounded:
+                issues.append(f"{side}条件「{span.text}」的数值阈值尚未明确；当前候选值{leaf.value:g}是建议，"
+                              "不是指标目录默认值，请确认指标口径及阈值。其他已明确条件保留。")
+    return tuple(issues)
 
 
 _SELL_ALL_RE = re.compile(

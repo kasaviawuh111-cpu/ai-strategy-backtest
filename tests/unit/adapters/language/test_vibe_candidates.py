@@ -206,6 +206,24 @@ def test_default_provenance_feedback_explains_paths_without_waiving_grounding():
     assert 'Do not list /value' in description
 
 
+@pytest.mark.parametrize('indicator,trigger,value,text', [
+    ('technical.kdj', 'j_below', 20, 'KDJ超卖买入'),
+    ('technical.rsi', 'below', 30, 'RSI低就买入'),
+    ('valuation.pe_ttm', 'below', 10, 'PE便宜就买入'),
+])
+def test_implicit_threshold_remains_confirmation_not_catalog_default(indicator, trigger, value, text):
+    from ashare_lab.adapters.language.vibe_candidates import BoundedCandidate, _unspoken_threshold_issues
+    def candidate(source):
+        return BoundedCandidate.model_validate({
+            'entry': [{'kind': 'indicator', 'indicator_id': indicator, 'trigger': trigger, 'params': {}, 'value': value}],
+            'entry_spans': [{'start': 0, 'end': len(source), 'text': source}], 'confidence': .99,
+        })
+    implicit = candidate(text)
+    assert len(_unspoken_threshold_issues(implicit)) == 1
+    assert implicit.entry[0].value == value  # preserve the proposal for confirmation
+    assert _unspoken_threshold_issues(candidate(f'{text}，阈值{value}')) == ()
+
+
 def test_condition_kind_canonicalizes_only_implied_execution_mechanics() -> None:
     candidate = {"trading_plan": {"kind": "conditional", "parameters": {"rules": [{
         "kind": "rebound", "side": "sell", "direction": "down", "gap": "2",
