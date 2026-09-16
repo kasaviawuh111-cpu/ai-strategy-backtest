@@ -106,6 +106,8 @@ export function PricePlanEditor({ draft, onChange, leg }: {
   const plan = leg ? pair?.[leg] : draft.strategySpec.trading_plan
   if (!plan) return null
   const p = plan.parameters
+  const ruleKey = plan.kind === 'scheduled' ? 'exit_rules' : 'rules'
+  const editableRules = planRules({ ...plan, parameters: { ...p, rules: p[ruleKey] ?? null } })
   const commit = (next: PricePlan) => {
     // Independent legs require the composed policy, including their event/financial
     // data capability. Editing plan parameters must not downgrade that contract.
@@ -136,7 +138,7 @@ export function PricePlanEditor({ draft, onChange, leg }: {
   }
   const field = (key: string, value: unknown, update: (v: string | number | null) => void,
     prefix = '', allowAllPosition = false) => {
-    if (!(key in labels) || leg && key === 'side'
+    if (!(key in labels) || (leg || plan.kind === 'scheduled' && prefix) && key === 'side'
       || leg === 'exit_plan' && sharedAccountFields.has(key)) return null
     const label = `${prefix}${labels[key]}`
     const optional = ['max_position_cny', 'limit_price', 'activation_price', 'range_percent', 'levels_below', 'levels_above'].includes(key)
@@ -149,14 +151,14 @@ export function PricePlanEditor({ draft, onChange, leg }: {
       'sessions', 'activation_price', 'day', 'budget_cny', 'range_percent', 'levels_below', 'levels_above'].includes(key)
     const choices = key === 'price_mode' && p.observation === 'minute_bar'
       ? { ...options.price_mode, next_open: '下一分钟开盘价代理' }
-      : key === 'sizing_mode' && plan.kind === 'scheduled'
+      : key === 'sizing_mode' && plan.kind === 'scheduled' && !prefix
       ? (p.side === 'sell' ? { shares: '按股数' } : { shares: '按股数', amount: '按预算（含费用）' })
       : key === 'sizing_mode' && allowAllPosition
       ? { ...options.sizing_mode, all_position: '全部持仓（保留底仓）' }
       : options[key]
     return <div className="setting-row grow" key={key}>
       <span className="k"><SettingInfo label={labels[key] ?? key} help={
-        key === 'sizing_mode' && plan.kind === 'scheduled' ? '按预算买入时费用包含在每期预算中；卖出按股数安排。' : help[key]
+        key === 'sizing_mode' && plan.kind === 'scheduled' && !prefix ? '按预算买入时费用包含在每期预算中；卖出按股数安排。' : help[key]
       } /></span>
       {choices ? <select aria-label={label} value={String(value ?? '')}
         onChange={e => update(e.target.value)}>
@@ -229,7 +231,7 @@ export function PricePlanEditor({ draft, onChange, leg }: {
     {p.slippage_cny === undefined ? field('slippage_cny', 0,
       v => commit({ ...plan, parameters: { ...p, slippage_cny: v } })) : null}
     <p className="settings-help">固定价差与比例滑点均设置时叠加。只用固定价差时，将滑点基点设为 0。停牌日不成交；一字涨停买入、一字跌停卖出按未成交记录，部分成交只计算实际成交数量的费用。</p>
-    {planRules(plan).map((rule, i) => <section className="price-plan-rule" key={i}>
+    {editableRules.map((rule, i) => <section className="price-plan-rule" key={i}>
       <h3>条件 {i + 1} · {priceRuleLabel(rule, Number(p.min_shares ?? 0))}</h3>
       {rule.group ? <p className="settings-help">互斥组「{rule.group}」：先触发者锁定，其余取消。</p> : null}
       {Object.entries({ ...rule, price_comparison: rule.price_comparison ?? 'inclusive' }).filter(([key]) => !(key === 'quantity' && ['amount', 'all_position'].includes(String(rule.sizing_mode))
@@ -244,7 +246,7 @@ export function PricePlanEditor({ draft, onChange, leg }: {
         || key === 'amount_cny' && rule.sizing_mode === 'amount' ||
         key === 'limit_price' || key === 'activation_price' && ['rebound', 'pullback'].includes(String(rule.kind)))
         .map(([key, value]) => field(key, value, v => commit({ ...plan, parameters: { ...p,
-          rules: planRules(plan).map((item, n) => n === i ? { ...item, [key]: v,
+          [ruleKey]: editableRules.map((item, n) => n === i ? { ...item, [key]: v,
             ...(key === 'side' && v === 'buy' && item.sizing_mode === 'all_position' ? { sizing_mode: 'shares' } : {}) } : item) } }), `条件${i + 1} `,
           rule.side === 'sell'))}
     </section>)}
