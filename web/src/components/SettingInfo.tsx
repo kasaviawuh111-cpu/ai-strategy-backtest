@@ -73,7 +73,7 @@ export function SettingInfo({ label, children, help }: { label: string; children
         if (!open) window.dispatchEvent(new CustomEvent('setting-info-open', { detail: id }))
         setOpen(value => !value)
       }}>
-      <svg viewBox="0 0 20 20" width="18" height="18" fill="none" aria-hidden="true">
+      <svg viewBox="0 0 20 20" width="14" height="14" fill="none" aria-hidden="true">
         <circle cx="10" cy="10" r="7.5" stroke="currentColor" strokeWidth="1.4" />
         <path d="M10 9v5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
         <circle cx="10" cy="6" r=".9" fill="currentColor" />

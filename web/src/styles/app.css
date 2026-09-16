@@ -465,6 +465,17 @@ button.grow:hover{background:var(--color-primary-weak)}
 #pg-params .settings-fields .numeric-field{width:260px}
 #pg-params .setting-info-heading{gap:3px;line-height:21px}
 #pg-params .setting-info-button{width:32px;height:32px;min-height:32px;border:0;background:transparent}
+#pg-params .setting-info-button svg{width:14px;height:14px}
+#pg-params .rule-parameter-leg{position:relative;padding:0 0 12px}
+#pg-params .rule-parameter-leg+ .section-anchor+ .rule-parameter-leg{border-top:1px solid var(--hairline);padding-top:12px}
+#pg-params .rule-parameter-leg>header{display:flex;align-items:baseline;gap:10px;padding:16px 20px 8px}
+#pg-params .rule-parameter-leg>header span{font-size:14px;line-height:21px;font-weight:600}
+#pg-params .rule-parameter-leg--buy>header span{color:var(--color-up)}
+#pg-params .rule-parameter-leg--sell>header span{color:var(--color-down)}
+#pg-params .rule-parameter-leg>header small{font-size:12px;line-height:18px;color:var(--ink-4)}
+#pg-params .rule-parameter-leg .rule-edit-condition{margin:8px 20px 12px;border:1px solid var(--hairline);border-radius:var(--r-inner);overflow:hidden;padding-top:0}
+#pg-params .rule-parameter-leg .rule-edit-condition h3{padding-top:16px;background:var(--surface-card)}
+#pg-params .rule-parameter-leg>.setting-row{margin:0 20px;border:1px solid var(--hairline);border-radius:var(--r-inner)}
 #pg-params .settings-help{padding:0 20px 16px;font-size:12px;line-height:18px}
 #pg-params .advanced-settings{margin-top:28px;border-color:var(--hairline-2);background:var(--surface)}
 #pg-params .advanced-settings>summary{min-height:56px;padding:10px 20px}

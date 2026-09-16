@@ -7,8 +7,6 @@ import type {
   CapabilitiesResponse,
   PriceLimitMode,
   StrategyDraft,
-  StrategyIndicatorCondition,
-  StrategyLeg,
 } from '../shared/api/types'
 import {
   MAXIMUM_INITIAL_CASH_CNY,
@@ -27,12 +25,11 @@ import {
 } from '../components/primitives'
 import { EquityChart } from '../components/EquityChart'
 import { ExcessEquation } from '../components/ExcessEquation'
-import { RuleTree } from '../components/SummaryCards'
 import { RuleSpecEditor } from '../components/RuleSpecEditor'
 import { NumericInput, NumericInputGroup } from '../components/NumericInput'
 import { InlineStockEditor, type InlineStockEditorActions } from '../components/InlineStockEditor'
 import { numericResultConclusion } from '../result-conclusion'
-import { entryTriggerSemantics, secondaryMetric, strategyRuleTrees, toOrderRows } from '../view-model'
+import { entryTriggerSemantics, secondaryMetric, toOrderRows } from '../view-model'
 import type {
   BacktestMetrics,
   ChartMark,
@@ -111,24 +108,6 @@ export function Page(
   )
 }
 
-const updateLegParameter = (
-  leg: StrategyLeg,
-  conditionId: string,
-  key: string,
-  value: number,
-): StrategyLeg => ({
-  ...leg,
-  conditions: leg.conditions.map((condition) => condition.kind === 'indicator'
-    && condition.id === conditionId
-    ? {
-        ...condition,
-        parameters: condition.parameters.map((parameter) =>
-          parameter.key === key ? { ...parameter, value } : parameter,
-        ),
-      }
-    : condition),
-})
-
 const priceLimitLabel: Record<PriceLimitMode, string> = {
   wait_for_unlock: '保守：无开板证据不成交',
   strict_no_fill_at_limit: '严格：不利涨跌停不成交',
@@ -160,23 +139,6 @@ export function ParamsScreen(
   const dates = dateEdits ?? draft.backtest
   const latestDate = dataAsOfDate()
   const dateValidation = validateBacktestDates(dates.start, dates.end, latestDate)
-  const rules = strategyRuleTrees(draft)
-  const indicatorConditions = [...draft.entry.conditions, ...draft.exit.conditions]
-    .filter((condition): condition is StrategyIndicatorCondition =>
-      condition.kind === 'indicator' && condition.parameters.length > 0,
-    )
-  const hasReadOnlyExitRule = draft.exit.conditions.some((condition) =>
-    condition.kind === 'holding_period'
-    || condition.kind === 'position_return'
-    || condition.kind === 'trailing_drawdown')
-
-  const updateParameter = (conditionId: string, key: string, value: number) => {
-    onChange({
-      ...draft,
-      entry: updateLegParameter(draft.entry, conditionId, key, value),
-      exit: updateLegParameter(draft.exit, conditionId, key, value),
-    })
-  }
   const updateBacktest = (key: keyof StrategyDraft['backtest'], value: string | number) =>
     onChange({ ...draft, backtest: { ...draft.backtest, [key]: value } })
   const updateExecution = <K extends keyof StrategyDraft['execution']>(
@@ -259,45 +221,17 @@ export function ParamsScreen(
             <RuleSpecEditor draft={draft} side={focus} path={conditionPath} capabilities={capabilities} onChange={onChange} />
           </Section></div> : null}
           <div data-focus="entry" className="section-anchor" />
-          {focus !== 'entry' && focus !== 'exit' ? <Section title="交易规则" aside="来自服务端最终策略规则">
-            <div className="rule-settings">
-              <span className="rule-side buy">买入</span>
-              <RuleTree node={rules.entry} />
+          {focus !== 'entry' && focus !== 'exit' ? <Section title="交易规则与参数" aside="规则和参数在同一处核对">
+            <div className="rule-parameter-leg rule-parameter-leg--buy">
+              <header><span>买入</span><small>满足以下规则时</small></header>
+              <RuleSpecEditor draft={draft} side="entry" capabilities={capabilities} onChange={onChange} />
             </div>
             <span data-focus="exit" className="section-anchor" />
-            <div className="rule-settings">
-              <span className="rule-side sell">卖出</span>
-              <RuleTree node={rules.exit} />
+            <div className="rule-parameter-leg rule-parameter-leg--sell">
+              <header><span>卖出</span><small>满足以下规则时</small></header>
+              <RuleSpecEditor draft={draft} side="exit" capabilities={capabilities} onChange={onChange} />
             </div>
-            {hasReadOnlyExitRule ? (
-              <Notice tone="info">
-                点击审阅页中的具体卖出条件，可修改持有期、止盈止损和移动回撤参数。
-              </Notice>
-            ) : null}
           </Section> : null}
-
-          {focus !== 'entry' && focus !== 'exit' && indicatorConditions.length > 0 ? (
-            <Section title="指标参数" aside="不改也可以直接回测">
-              {indicatorConditions.flatMap((condition) => condition.parameters.map((parameter) => (
-                <div className="grow setting-row" key={`${condition.id}-${parameter.key}`}>
-                  <span className="k"><SettingInfo label={parameter.label} /><small>{condition.label}</small></span>
-                  <NumericInput
-                    label={`${condition.label} ${parameter.label}`}
-                    min={parameter.min}
-                    max={parameter.max}
-                    integer={parameter.integer}
-                    value={parameter.value}
-                    disabled={isLocked}
-                    onValueChange={(value) => updateParameter(
-                      condition.id,
-                      parameter.key,
-                      value,
-                    )}
-                  />
-                </div>
-              )))}
-            </Section>
-          ) : null}
 
           <div data-focus="range" className="section-anchor" />
           <Section title="回测范围">

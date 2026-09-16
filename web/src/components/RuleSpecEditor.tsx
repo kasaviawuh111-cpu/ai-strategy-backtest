@@ -4,6 +4,7 @@ import { strategySpecFromDraft, withEditedStrategySpec, triggerFallback, seriesC
 import { NumericInput } from './NumericInput'
 import { SettingInfo } from './SettingInfo'
 import { MetricSearch } from './MetricSearch'
+import { INDICATOR_NAMES } from '../shared/indicator-labels'
 
 type Node = StrategySpecExitRule
 
@@ -13,9 +14,10 @@ export function RuleSpecEditor({ draft, side, path, capabilities, onChange }: {
 }) {
   const spec = strategySpecFromDraft(draft)
   const commit = (next: typeof spec) => onChange(withEditedStrategySpec(draft, next, capabilities))
-  const field = (label: string, value: number, update: (value: number) => void, min?: number, max?: number, step: number | 'any' = 'any') =>
+  const field = (label: string, value: number, update: (value: number) => void, min?: number, max?: number,
+    step: number | 'any' = 'any', inputLabel = label) =>
     <div className="setting-row grow"><span className="k"><SettingInfo label={label} /></span>
-      <NumericInput label={label} value={value} min={min} max={max} integer={step === 1}
+      <NumericInput label={inputLabel} value={value} min={min} max={max} integer={step === 1}
         onValueChange={update} /></div>
   const renderNode = (node: Node, id: string, replace: (node: Node) => void): ReactNode => {
     if (path && path !== side && id !== path && !id.startsWith(`${path}-`) && !path.startsWith(`${id}-`)) return null
@@ -85,7 +87,11 @@ export function RuleSpecEditor({ draft, side, path, capabilities, onChange }: {
         </select></div>
         {Object.entries(node.params).filter(([,value]) => typeof value === 'number').map(([key, value]) => {
           const parameter = ui?.kind === 'indicator' ? ui.parameters.find((item) => item.key === key) : undefined
-          return <div key={key}>{field(parameter?.label ?? key, value as number, (next) => replace({ ...node, params: { ...node.params, [key]: next } }), parameter?.min, parameter?.max, parameter?.integer ? 1 : 'any')}</div>
+          const baseLabel = parameter?.label ?? key
+          const displayLabel = baseLabel === '周期'
+            ? `${INDICATOR_NAMES[node.indicator_id] ?? '指标'} 周期`
+            : baseLabel
+          return <div key={key}>{field(displayLabel, value as number, (next) => replace({ ...node, params: { ...node.params, [key]: next } }), parameter?.min, parameter?.max, parameter?.integer ? 1 : 'any', baseLabel)}</div>
         })}
         {node.indicator_id !== 'provider.series_compare' && node.value !== null ? field('阈值', node.value, (next) => replace({ ...node, value: next })) : null}
       </> : node.type === 'holding_period_exit' ? field('持有交易日', node.sessions, (next) => replace({ ...node, sessions: next }), 1, 10000, 1)

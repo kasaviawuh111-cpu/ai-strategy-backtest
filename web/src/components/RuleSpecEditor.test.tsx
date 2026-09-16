@@ -19,6 +19,17 @@ beforeAll(async () => {
 })
 afterAll(resetMockWaitForTests)
 
+it('qualifies repeated period labels with their indicator name', async () => {
+  const result = await mockApi.compile({
+    utterance: '平安银行，KDJ金叉且RSI低于50买入，KDJ死叉卖出',
+    instrument: { name: '平安银行', symbol: '000001.SZ', market: 'CN_A', exchange: 'SZSE' },
+  })
+  if (result.status !== 'compiled') throw new Error('fixture unavailable')
+  render(<RuleSpecEditor draft={result.draft} side="entry" onChange={() => undefined} />)
+  expect(screen.getByText('KDJ 周期')).toBeInTheDocument()
+  expect(screen.getByText('RSI 周期')).toBeInTheDocument()
+})
+
 const seriesCondition: StrategySpecIndicatorCondition = {
   type: 'indicator_condition', indicator_id: 'provider.series_compare', definition_version: '1.0.0',
   params: { left_metric_query: '5日均线', right_metric_query: '20日均线', unit: '元' },
