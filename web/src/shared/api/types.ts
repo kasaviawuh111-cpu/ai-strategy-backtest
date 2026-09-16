@@ -128,6 +128,10 @@ export type StrategySpec = {
     position_mode: 'long_only'
   }
   trading_plan?: PricePlan | null
+  independent_plans?: {
+    entry_plan: PricePlan
+    exit_plan: PricePlan
+  } | null
   entry: StrategySpecCondition | null
   exit: {
     op: 'first_of' | 'all'

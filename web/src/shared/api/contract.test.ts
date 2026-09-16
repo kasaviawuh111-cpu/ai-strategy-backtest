@@ -360,6 +360,43 @@ describe('live API contract adapter', () => {
     expect(saved.trading_plan?.parameters.side).toBe(side)
   })
 
+  it('round-trips two independent plans through revision and submission with one initial balance', () => {
+    const composed: StrategySpec = { ...strategy, entry: null, exit: null,
+      independent_plans: {
+        entry_plan: { kind: 'scheduled', parameters: { side: 'buy', frequency: 'monthly',
+          day: 1, sizing_mode: 'shares', quantity: 100, initial_cash_cny: 100000 } },
+        exit_plan: { kind: 'conditional', parameters: { observation: 'minute_bar',
+          initial_cash_cny: 100000, rules: [{ kind: 'price', side: 'sell',
+            direction: 'up', target_price: 25, quantity: 100 }] } },
+      },
+      execution: { ...strategy.execution, entry_policy: 'composed_entry_leg',
+        exit_policy: 'composed_exit_leg', data_capability: 'daily_and_minute_ohlcv',
+        execution_resolution: '1m', evaluation_frequency: 'daily_close_and_minute_bar',
+        position_policy: 'bounded_inventory' },
+    }
+    const original = structuredClone(composed)
+    const outcome = fromLiveDraftResponse({ ...response, strategy: composed }, request)
+    if (outcome.status !== 'compiled') throw new Error('expected ready strategy')
+    const edited = { ...outcome.draft, backtest: { ...outcome.draft.backtest,
+      initialCashCny: 200000, start: '2025-03-03' } }
+    const summary = toStrategySummary(edited)
+    expect(summary.title).toBe('定时买入、条件卖出')
+    expect(summary.rows.find(row => row.key === 'entry')?.value).toContain('每月1日')
+    expect(summary.rows.find(row => row.key === 'exit')?.value).toContain('25')
+    expect(summary.confirmation).toContain('各自计划')
+    const revised = toLiveRevisionBody(edited).strategy
+    expect(revised.independent_plans?.entry_plan.parameters).toEqual({
+      ...composed.independent_plans!.entry_plan.parameters, initial_cash_cny: 200000 })
+    expect(revised.independent_plans?.exit_plan.parameters).toEqual({
+      ...composed.independent_plans!.exit_plan.parameters, initial_cash_cny: 200000 })
+    expect(revised.execution).toEqual(composed.execution)
+    expect(revised.entry).toBeNull()
+    expect(revised.exit).toBeNull()
+    expect(revised.backtest.start).toBe('2025-03-03')
+    expect(toLiveBacktestBody(edited).strategy).toEqual(revised)
+    expect(composed).toEqual(original)
+  })
+
   it('renders daily-signal plus minute-protection timing without calling it daily-only', () => {
     const hybrid: StrategySpec = {
       ...strategy,

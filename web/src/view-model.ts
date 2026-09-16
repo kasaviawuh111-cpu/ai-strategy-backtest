@@ -180,8 +180,19 @@ const buildExitRule = (
 }
 
 export const strategyRuleTrees = (draft: Pick<StrategyDraft, 'entry' | 'exit'> & {
-  strategySpec: Pick<StrategyDraft['strategySpec'], 'entry' | 'exit' | 'trading_plan'>
+  strategySpec: Pick<StrategyDraft['strategySpec'], 'entry' | 'exit' | 'trading_plan' | 'independent_plans'>
 }) => {
+  if (draft.strategySpec.independent_plans) {
+    const plans = draft.strategySpec.independent_plans;
+    const side = (key: 'entry' | 'exit'): StrategyRuleNode => {
+      const plan = key === 'entry' ? plans.entry_plan : plans.exit_plan;
+      const labels = pricePlanSides(plan)[key];
+      return { kind: 'group', id: key, operator: 'all', label: '独立交易计划',
+        children: labels.map((label, index) => fallbackLeaf(label,
+          '两侧共用资金和持仓，按各自规则触发。', `${key}-${index}`)) };
+    };
+    return { entry: side('entry'), exit: side('exit') };
+  }
   if (draft.strategySpec.trading_plan) {
     const sides = pricePlanSides(draft.strategySpec.trading_plan, draft.strategySpec)
     const group = (side: 'entry' | 'exit', labels: string[]): StrategyRuleNode => ({
@@ -590,6 +601,7 @@ export const describeBacktestWindow = (start: string, end: string) => {
  * 对照固定的系统默认成交设置；保存、换股和重新识别不会把已调整项标回默认。
  */
 export const summarizeExecution = (draft: StrategyDraft) => {
+  if (draft.strategySpec.independent_plans) return '按独立买卖计划'
   if (draft.strategySpec.trading_plan) return '按交易计划'
   const keys = Object.keys(DEFAULT_EXECUTION_SETTINGS) as Array<keyof typeof DEFAULT_EXECUTION_SETTINGS>
   const changed = keys.filter((key) => draft.execution[key] !== DEFAULT_EXECUTION_SETTINGS[key]).length
@@ -643,8 +655,10 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
     entryRule: rules.entry,
     entryTriggerNote,
     exitRule: rules.exit,
-    confirmation: hybrid ? '日线信号收盘确认，分钟保护独立触发' : hasEvent ? '公告首次可得时间确认' : '日线收盘确认',
-    earliestExecution: hybrid ? '日线信号下一市场交易日开盘执行；分钟保护委托下一根生效' : hasEvent
+    confirmation: draft.strategySpec.independent_plans ? '买卖两侧按各自计划的观察时点确认'
+      : hybrid ? '日线信号收盘确认，分钟保护独立触发' : hasEvent ? '公告首次可得时间确认' : '日线收盘确认',
+    earliestExecution: draft.strategySpec.independent_plans ? '按各侧计划执行，共用资金、持仓及 T+1 约束'
+      : hybrid ? '日线信号下一市场交易日开盘执行；分钟保护委托下一根生效' : hasEvent
       ? '按 09:15 截止规则选择可用的日线开盘价代理；时间非精确'
       : '下一可交易日使用开盘价代理尝试成交',
     conditionCount: draft.entry.conditions.length + draft.exit.conditions.length,
@@ -653,6 +667,11 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
 }
 
 export function conciseStrategyTitle(draft: StrategyDraft): string {
+  if (draft.strategySpec.independent_plans) {
+    const names = { scheduled: '定时', grid: '网格', conditional: '条件' };
+    const plans = draft.strategySpec.independent_plans;
+    return `${names[plans.entry_plan.kind]}买入、${names[plans.exit_plan.kind]}卖出`;
+  }
   if (draft.strategySpec.trading_plan) return pricePlanTitle(draft.strategySpec.trading_plan)
   return plainStrategyTitle(draft.entry.conditions, draft.exit.conditions)
 }

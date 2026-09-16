@@ -458,7 +458,7 @@ export const ideaProposalRuleSummaries = (
   capabilities?: CapabilitiesResponse,
 ): { entry: string; exit: string } => {
   const rules = proposal.strategy ?? proposal.strategy_template
-  if (!rules || (!rules.trading_plan && (!rules.entry || !rules.exit))) {
+  if (!rules || (!rules.trading_plan && !rules.independent_plans && (!rules.entry || !rules.exit))) {
     return { entry: proposal.entry_summary, exit: proposal.exit_summary }
   }
   const trees = strategyRuleTrees({
@@ -953,7 +953,9 @@ function toDraft(
         item.path === '/trading_plan/parameters/budget_cny' && item.source.startsWith('default/'))
         ? [`未指定单次金额，暂按${strategy.trading_plan.parameters.budget_cny}元含费预算建议；可修改，不保证足够买入最低申报股数`]
         : []),
-      ...(strategy.trading_plan
+      ...(strategy.independent_plans
+        ? ['买卖两侧按各自计划的观察与执行时点运行，共用同一份资金和持仓']
+        : strategy.trading_plan
         ? [strategy.trading_plan.kind === 'scheduled'
           ? `开盘前确定交易计划，在指定交易日${strategy.trading_plan.parameters.at === 'close' ? '收盘' : '开盘'}尝试撮合；不代表真实逐笔成交`
           : strategy.trading_plan.parameters.observation === 'minute_bar'
@@ -970,7 +972,7 @@ function toDraft(
           ]
         : ['日线收盘确认信号，下一交易日使用开盘价代理；记录时间不代表真实逐笔成交']),
       '遵守 A 股 T+1；当天买入的股票下一交易日才可卖出',
-      strategy.trading_plan ? '按交易计划的股数或金额委托，受资金、底仓和持仓上限限制'
+      strategy.trading_plan || strategy.independent_plans ? '按交易计划的股数或金额委托，受资金、底仓和持仓上限限制'
         : '按回测设置的资金比例投入，未投入的资金继续保留',
       '涨停买入或跌停卖出时等待开板；仅日线数据无法证明开板则保守记为未成交',
     ],
@@ -1438,6 +1440,19 @@ function readableEventCode(eventCode: string): string {
 }
 
 function applyDraftEdits(strategy: StrategySpec, draft: StrategyDraft): StrategySpec {
+  if (strategy.independent_plans) return {
+    ...strategy,
+    independent_plans: {
+      entry_plan: { ...strategy.independent_plans.entry_plan,
+        parameters: { ...strategy.independent_plans.entry_plan.parameters,
+          initial_cash_cny: draft.backtest.initialCashCny } },
+      exit_plan: { ...strategy.independent_plans.exit_plan,
+        parameters: { ...strategy.independent_plans.exit_plan.parameters,
+          initial_cash_cny: draft.backtest.initialCashCny } },
+    },
+    backtest: { start: draft.backtest.start, end: draft.backtest.end,
+      initial_cash_cny: draft.backtest.initialCashCny },
+  }
   if (strategy.trading_plan) return {
     ...strategy,
     execution: strategy.entry || strategy.exit ? strategy.execution : pricePlanExecution(strategy.trading_plan),
