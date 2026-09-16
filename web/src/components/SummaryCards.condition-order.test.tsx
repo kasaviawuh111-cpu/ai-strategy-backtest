@@ -4,13 +4,13 @@ import { describe, expect, it, vi } from 'vitest'
 import type { StrategyRuleNode, StrategySummary } from '../types'
 import { StrategyCard } from './SummaryCards'
 
-const leaf = (id: string, label: string): StrategyRuleNode => ({
+const leaf = (id: string, label: string, parameters: string[] = []): StrategyRuleNode => ({
   kind: 'leaf',
   id,
   label,
   detail: `日线收盘确认：${label}`,
   tone: 'indicator',
-  parameters: [],
+  parameters,
 })
 
 describe('condition-order strategy card', () => {
@@ -115,7 +115,7 @@ describe('condition-order strategy card', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('原有错误详情')
   })
 
-  it('shows the Chinese comparison and threshold in the buy and sell rows', () => {
+  it('keeps the core threshold in the first-level review', () => {
     const entryRule = leaf('entry', '当日涨幅 ≥ 5%')
     const exitRule = leaf('exit', '当日跌幅 ≥ 5%')
     const strategy: StrategySummary = {
@@ -150,9 +150,9 @@ describe('condition-order strategy card', () => {
     expect(screen.queryByText(/at_least|at_most|\bat least\b|\bat most\b/i)).not.toBeInTheDocument()
   })
 
-  it('keeps generic indicator thresholds visible in the strategy card', () => {
-    const entryRule = leaf('entry-turnover', '换手率 高于 5%')
-    const exitRule = leaf('exit-rsi', 'RSI 低于 30')
+  it('keeps exact values on the rule node but hides them from the strategy card', () => {
+    const entryRule = leaf('entry-turnover', '换手率 高于 5%', ['阈值 5%'])
+    const exitRule = leaf('exit-rsi', 'RSI 低于 30', ['周期 14', '阈值 30'])
     const strategy: StrategySummary = {
       title: '指标阈值规则',
       rows: [
@@ -182,5 +182,7 @@ describe('condition-order strategy card', () => {
 
     expect(screen.getByText('换手率 高于 5%')).toBeInTheDocument()
     expect(screen.getByText('RSI 低于 30')).toBeInTheDocument()
+    expect(screen.queryByText(/参数：/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/阈值 30/)).not.toBeInTheDocument()
   })
 })

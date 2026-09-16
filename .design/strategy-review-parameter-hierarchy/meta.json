@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "slug": "strategy-review-parameter-hierarchy",
+  "title": "策略审阅与参数页信息层级",
+  "source": "ad-hoc",
+  "status": "implemented",
+  "fidelity": "full",
+  "createdAt": "2026-09-15",
+  "updatedAt": "2026-09-15",
+  "direction": {
+    "source": "product-tokens",
+    "note": "沿用 Public 风格产品 token，只调整信息层级和参数页密度。"
+  },
+  "asIs": {
+    "verified": true,
+    "selfChecked": true,
+    "evidence": [
+      "用户截图：外层参数泄漏、信息图标过大、参数页灰块与字号失衡",
+      "web/src/components/SummaryCards.tsx",
+      "web/src/screens/index.tsx",
+      "web/src/styles/app.css"
+    ]
+  },
+  "versions": [
+    { "id": "v1", "file": "v1.html", "status": "implemented" }
+  ],
+  "decisions": [
+    "外层策略卡保留阈值和持有天数等核心规则值，不展示重复参数明细行",
+    "周期、定义、成交费用等二级参数只在参数页展示和编辑",
+    "低频执行设置默认折叠",
+    "保持现有产品视觉语言，不重做品牌风格"
+  ],
+  "dataModel": [
+    {
+      "field": "StrategyRuleNode.label/detail/parameters",
+      "meaning": "首层使用完整规则句；二级页展示附加参数和执行细节",
+      "source": "web/src/view-model.ts"
+    }
+  ],
+  "build": {
+    "entryPoints": [
+      "web/src/App.tsx",
+      "web/src/components/SummaryCards.tsx",
+      "web/src/screens/index.tsx",
+      "web/src/styles/app.css"
+    ],
+    "verify": [
+      "cd web && npm run typecheck",
+      "cd web && npm run build"
+    ]
+  }
+}

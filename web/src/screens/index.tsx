@@ -32,7 +32,7 @@ import { RuleSpecEditor } from '../components/RuleSpecEditor'
 import { NumericInput, NumericInputGroup } from '../components/NumericInput'
 import { InlineStockEditor, type InlineStockEditorActions } from '../components/InlineStockEditor'
 import { numericResultConclusion } from '../result-conclusion'
-import { secondaryMetric, strategyRuleTrees, toOrderRows } from '../view-model'
+import { entryTriggerSemantics, secondaryMetric, strategyRuleTrees, toOrderRows } from '../view-model'
 import type {
   BacktestMetrics,
   ChartMark,
@@ -349,7 +349,12 @@ export function ParamsScreen(
           </Section>
 
           <div data-focus="more" className="section-anchor" />
-          {!draft.strategySpec.trading_plan ? <Section title="成交与费用" aside="影响能否成交和成交价格">
+          {!draft.strategySpec.trading_plan ? <details className="advanced-settings" open={focus === 'more'}>
+            <summary>
+              <span>高级研究设置</span>
+              <small>成交、费用、容量、仓位与预热</small>
+            </summary>
+            <Section title="成交与费用" aside="影响能否成交和成交价格">
             <Row label={<SettingInfo label="信号与成交" />} value={signalExecutionSummary(draft)} wrap />
             <div className="grow setting-row">
               <span className="k"><SettingInfo label="涨跌停处理" help={priceLimitHelp[draft.execution.priceLimitMode]} /></span>
@@ -396,19 +401,15 @@ export function ParamsScreen(
                 <small>元</small>
               </span>
             </div>
-          </Section> : null}
-
-          {!draft.strategySpec.trading_plan ? <details className="advanced-settings" open>
-            <summary>
-              <span>高级研究设置</span>
-              <small>容量、仓位、退出重试与预热</small>
-            </summary>
+            </Section>
             <Section title="研究执行参数" aside="默认值已适合 Demo">
               <div className="grow setting-row">
+                <span className="k"><SettingInfo label="触发口径" /><small>区分新事件与条件持续成立</small></span>
+                <span>{entryTriggerSemantics(draft).trigger}</span>
+              </div>
+              <div className="grow setting-row">
                 <span className="k">后续买入</span>
-                <span>{draft.strategySpec.execution.position_policy === 'accumulate_on_new_entry_signal'
-                  ? '每次新触发可继续买入；条件持续成立不重复买入'
-                  : '持仓未清空时不再买入'}</span>
+                <span>{entryTriggerSemantics(draft).repeat}</span>
               </div>
               <div className="grow setting-row">
                 <span className="k"><SettingInfo label="成交容量模式" /><small>缺少可验证容量时不会自动放宽</small></span>

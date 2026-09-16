@@ -597,6 +597,21 @@ export const summarizeExecution = (draft: StrategyDraft) => {
   return changed === 0 ? '默认' : `已调整 ${changed} 项`
 }
 
+export const entryTriggerSemantics = (draft: StrategyDraft): { trigger: string; repeat: string } => {
+  const entry = draft.strategySpec.entry
+  const positionPolicy = draft.strategySpec.execution.position_policy
+  const trigger = entry?.type === 'indicator_condition' ? entry.trigger : ''
+  const triggerText = trigger === 'golden_cross' ? '金叉发生时触发；持续在上方不重复触发'
+    : trigger === 'death_cross' ? '死叉发生时触发；持续在下方不重复触发'
+    : trigger.includes('crosses_above') ? '上穿发生时触发；持续在阈值上方不重复触发'
+    : trigger.includes('crosses_below') ? '下穿发生时触发；持续在阈值下方不重复触发'
+    : '条件由不满足变为满足时触发；持续满足不重复触发'
+  const repeat = positionPolicy === 'accumulate_on_new_entry_signal'
+    ? '持仓期间出现新的买入触发，可以再次买入'
+    : '首次买入后，仓位未清空时不再买入'
+  return { trigger: triggerText, repeat }
+}
+
 export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
   const rules = strategyRuleTrees(draft)
   const hybrid = draft.execution.evaluationFrequency === 'daily_close_and_minute_bar'
@@ -606,12 +621,7 @@ export const toStrategySummary = (draft: StrategyDraft): StrategySummary => {
   let entryTriggerNote: string | undefined
   if (!draft.strategySpec.trading_plan && entry && entry.type !== 'event_condition'
     && draft.strategySpec.execution.position_policy === 'accumulate_on_new_entry_signal') {
-    const trigger = entry.type === 'indicator_condition' ? entry.trigger : ''
-    entryTriggerNote = trigger === 'golden_cross' ? '金叉触发，持续在上方不重复买入'
-      : trigger === 'death_cross' ? '死叉触发，持续在下方不重复买入'
-      : trigger.includes('crosses_above') ? '上穿触发，持续在上方不重复买入'
-      : trigger.includes('crosses_below') ? '下穿触发，持续在下方不重复买入'
-      : '新满足时买入，持续满足不重复买入'
+    entryTriggerNote = entryTriggerSemantics(draft).trigger.replace('发生时', '').replace('条件由不满足变为满足时', '新满足时')
   }
   return {
     title: conciseStrategyTitle(draft),

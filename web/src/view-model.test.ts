@@ -17,6 +17,7 @@ import {
   conciseStrategyTitle,
   backtestPreparationFailureReason,
   buildChain,
+  entryTriggerSemantics,
   secondaryMetric,
   strategyRuleTrees,
   summarizeExecution,
@@ -28,6 +29,38 @@ import {
   toStrategySummary,
   toTradeRows,
 } from './view-model'
+
+it('审阅摘要保留核心条件值但把技术参数留给二级编辑', () => {
+  const candidate: StrategyDraft = {
+    ...draft,
+    entry: {
+      operator: 'all',
+      conditions: [{
+        id: 'entry-rsi', kind: 'indicator', indicatorId: 'technical.rsi',
+        label: '相对强弱指标 RSI 由下向上穿过阈值 30', trigger: '由下向上穿过阈值',
+        timeframe: '1d', evaluationMode: 'bar_close_confirmed',
+        parameters: [
+          { key: 'period', label: '周期', value: 14, min: 1, max: 500 },
+          { key: 'threshold', label: '阈值', value: 30, min: 0, max: 100 },
+        ],
+      }],
+    },
+    exit: {
+      operator: 'first_of',
+      conditions: [{
+        id: 'exit-holding', kind: 'holding_period', label: '成交后第 10 个交易日尝试卖出',
+        trigger: '持有期退出', sessions: 10, anchor: 'first_entry_fill',
+        countMode: 'subsequent_trading_sessions', execution: 'target_session_open_proxy',
+      }],
+    },
+  }
+  const trees = strategyRuleTrees(candidate)
+  expect(summarizeRule(trees.entry)).toBe('相对强弱指标 RSI 由下向上穿过阈值 30')
+  expect(summarizeRule(trees.exit)).toBe('成交后第 10 个交易日尝试卖出')
+  expect(JSON.stringify(trees.entry)).toContain('阈值 30')
+  expect(JSON.stringify(trees.entry)).toContain('周期 14')
+  expect(JSON.stringify(trees.exit)).toContain('成交后第 10 个交易日尝试卖出')
+})
 
 it.each(['entry', 'exit'] as const)('网格组合独立%s不再混入该侧网格条件', (side) => {
   const spec = { ...draft.strategySpec, trading_plan: { kind: 'grid' as const, parameters: {
@@ -168,6 +201,14 @@ describe('entry trigger annotation', () => {
       entry.value = null
     }
     expect(toStrategySummary(withEntry(entry)).entryTriggerNote).toMatch(new RegExp(`^${direction}触发`))
+  })
+
+  it('explains first-event triggering and a later new signal separately', () => {
+    const candidate = withEntry(indicator('crosses_above'))
+    expect(entryTriggerSemantics(candidate)).toEqual({
+      trigger: '上穿发生时触发；持续在阈值上方不重复触发',
+      repeat: '持仓期间出现新的买入触发，可以再次买入',
+    })
   })
 
   it('describes states and composite roots as newly satisfied, never as a child crossing', () => {

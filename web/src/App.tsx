@@ -115,7 +115,11 @@ const historyJourney = (snapshot: CompletedReportSnapshot): JourneySnapshot => (
  * 多轮澄清之后，最终规则可能和第一句毫无关系（线上出现过标题是「你可以干啥」）。
  * 名字跟着要执行的东西走，才不会和实际跑的规则对不上。
  */
-const strategyTitle = (_instrument: Instrument, strategy: StrategySummary): string => strategy.title
+const compactLegTitle = (summary: string, action: '买入' | '卖出'): string =>
+  summary.endsWith(action) || summary.endsWith('退出') ? summary : `${summary}${action}`
+
+const strategyTitle = (_instrument: Instrument, strategy: StrategySummary): string =>
+  `${compactLegTitle(summarizeRule(strategy.entryRule), '买入')}，${compactLegTitle(summarizeRule(strategy.exitRule), '卖出')}`
 
 const terminalStates = new Set(['succeeded', 'failed', 'cancelled'])
 /** 点「开始回测」时替用户发出的那句话；和按钮文案保持同一个词。 */

@@ -50,7 +50,7 @@ function RuleNode({ node, compact = false }: { node: StrategyRuleNode; compact?:
       <div className={`rule-leaf rule-leaf--${node.tone}`}>
         <b>{node.label}</b>
         {!compact ? <span>{node.detail}</span> : null}
-        {node.parameters.length > 0 ? (
+        {!compact && node.parameters.length > 0 ? (
           <small>参数：{node.parameters.join(' · ')}</small>
         ) : null}
       </div>

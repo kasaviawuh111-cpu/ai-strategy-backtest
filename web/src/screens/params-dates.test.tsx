@@ -29,9 +29,12 @@ const renderSettings = () => {
 }
 
 describe('backtest date editing', () => {
-  it('opens advanced settings and explains all three limit modes', () => {
+  it('keeps advanced settings progressive and explains all three limit modes', () => {
     const { onChange } = renderSettings()
-    expect(screen.getByText('高级研究设置').closest('details')).toHaveAttribute('open')
+    const advanced = screen.getByText('高级研究设置').closest('details')
+    expect(advanced).not.toHaveAttribute('open')
+    fireEvent.click(screen.getByText('高级研究设置'))
+    expect(advanced).toHaveAttribute('open')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '了解涨跌停处理' }))
     expect(screen.getByRole('dialog', { name: '涨跌停处理说明' })).toHaveTextContent('即使当天曾开板')
