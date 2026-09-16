@@ -131,6 +131,12 @@ unset local_search_key local_search_mode
 
 # Configuration presence is not source validation or backtest acceptance.
 # Keep dialogue usable while making missing phase-one inputs explicit.
+# Retain the locally verified calendar across restarts. Explicit overrides win;
+# the expanded source includes the preceding session needed by January replay.
+if [[ -z "${MINUTE_MARKET_CALENDAR_PATH:-}" && -f 'var/market-calendar-2024-2026.json' ]]; then
+  export MINUTE_MARKET_CALENDAR_PATH='var/market-calendar-2024-2026.json'
+  print '本地日历：使用已准备的2024–2026日历，覆盖期初成交容量所需的前一交易日。'
+fi
 phase_one_calendar="${MINUTE_MARKET_CALENDAR_PATH:-var/market-calendar.json}"
 phase_one_actions="${PRICE_PLAN_CORPORATE_ACTION_ROOT:-var/cache/price-plan-corporate-actions}"
 if [[ -f "$phase_one_calendar" ]]; then
