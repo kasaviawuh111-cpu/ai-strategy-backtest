@@ -93,17 +93,33 @@ const options: Record<string, Record<string, string>> = {
   initial_capital_scope: { total_equity: '期初总资产（含已有持仓）', cash_plus_opening_holdings: '现金另加已有持仓' },
 }
 
-export function PricePlanEditor({ draft, onChange }: {
-  draft: StrategyDraft; onChange: (draft: StrategyDraft) => void
+const sharedAccountFields = new Set([
+  'initial_cash_cny', 'initial_shares', 'opening_shares', 'initial_capital_scope',
+  'min_shares', 'max_shares', 'max_position_cny', 'commission_rate',
+  'minimum_commission_cny', 'slippage_bps', 'slippage_cny', 'stamp_tax_rate', 'transfer_fee_rate',
+])
+
+export function PricePlanEditor({ draft, onChange, leg }: {
+  draft: StrategyDraft; onChange: (draft: StrategyDraft) => void; leg?: 'entry_plan' | 'exit_plan'
 }) {
-  const plan = draft.strategySpec.trading_plan
+  const pair = draft.strategySpec.independent_plans
+  const plan = leg ? pair?.[leg] : draft.strategySpec.trading_plan
   if (!plan) return null
   const p = plan.parameters
   const commit = (next: PricePlan) => {
     // Independent legs require the composed policy, including their event/financial
     // data capability. Editing plan parameters must not downgrade that contract.
-    const execution = draft.strategySpec.entry || draft.strategySpec.exit
+    const execution = leg || draft.strategySpec.entry || draft.strategySpec.exit
       ? draft.strategySpec.execution : pricePlanExecution(next)
+    const sharedChanges = Object.fromEntries(Object.entries(next.parameters).filter(([key, value]) =>
+      sharedAccountFields.has(key) && value !== p[key]))
+    const updatedPlans = pair && leg ? {
+      ...pair, [leg]: next,
+      [leg === 'entry_plan' ? 'exit_plan' : 'entry_plan']: {
+        ...pair[leg === 'entry_plan' ? 'exit_plan' : 'entry_plan'],
+        parameters: { ...pair[leg === 'entry_plan' ? 'exit_plan' : 'entry_plan'].parameters, ...sharedChanges },
+      },
+    } : null
     onChange({ ...draft,
       execution: { ...draft.execution, entryPolicy: execution.entry_policy,
         exitPolicy: execution.exit_policy, tPlusOne: execution.t_plus_one,
@@ -115,11 +131,13 @@ export function PricePlanEditor({ draft, onChange }: {
         commissionRate: Number(next.parameters.commission_rate ?? draft.execution.commissionRate),
         minimumCommissionCny: Number(next.parameters.minimum_commission_cny ?? draft.execution.minimumCommissionCny),
       },
-      strategySpec: { ...draft.strategySpec, trading_plan: next, execution } })
+      strategySpec: { ...draft.strategySpec,
+        ...(updatedPlans ? { independent_plans: updatedPlans } : { trading_plan: next }), execution } })
   }
   const field = (key: string, value: unknown, update: (v: string | number | null) => void,
     prefix = '', allowAllPosition = false) => {
-    if (!(key in labels)) return null
+    if (!(key in labels) || leg && key === 'side'
+      || leg === 'exit_plan' && sharedAccountFields.has(key)) return null
     const label = `${prefix}${labels[key]}`
     const optional = ['max_position_cny', 'limit_price', 'activation_price', 'range_percent', 'levels_below', 'levels_above'].includes(key)
     const integer = ['order_shares', 'initial_shares', 'opening_shares', 'min_shares', 'max_shares',
@@ -156,6 +174,9 @@ export function PricePlanEditor({ draft, onChange }: {
     </div>
   }
   const visible = (key: string) => !(
+    leg === 'entry_plan' && key === 'sell_limit'
+    || leg === 'exit_plan' && key === 'buy_limit'
+    ||
     plan.kind === 'scheduled' && (key === 'day' && p.frequency === 'once'
       || key === 'quantity' && p.sizing_mode !== 'shares' || key === 'budget_cny' && p.sizing_mode !== 'amount')
     ||
@@ -188,8 +209,9 @@ export function PricePlanEditor({ draft, onChange }: {
     {plan.kind === 'grid' ? <section className="price-plan-rule">
       <h3>买卖间距</h3>
       <p className="settings-help">买入和卖出可以设置不同幅度、不同单位，互不覆盖。</p>
-      {(['buy', 'sell'] as const).filter(side =>
-        !(side === 'buy' ? draft.strategySpec.entry : draft.strategySpec.exit)).map(side => {
+      {(['buy', 'sell'] as const).filter(side => leg
+        ? side === (leg === 'entry_plan' ? 'buy' : 'sell')
+        : !(side === 'buy' ? draft.strategySpec.entry : draft.strategySpec.exit)).map(side => {
         const { mode, value } = gridSpacingFor(plan, side)
         return <div key={side}>
           {field(`${side}_spacing_mode`, mode, v => commit({ ...plan, parameters: {

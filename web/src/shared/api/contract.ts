@@ -884,7 +884,9 @@ export const withEditedStrategySpec = (draft: StrategyDraft, strategySpec: Strat
 
 export const toLiveBacktestBody = (
   draft: StrategyDraft, options: { refreshData?: boolean } = {},
-): LiveBacktestBody => ({
+): LiveBacktestBody => {
+  const plan = draft.strategySpec.trading_plan ?? draft.strategySpec.independent_plans?.entry_plan
+  return ({
   strategy: strategySpecFromDraft(draft),
   config: {
     capacityMode: draft.execution.capacityMode,
@@ -900,19 +902,20 @@ export const toLiveBacktestBody = (
     warmupCalendarDays: draft.execution.warmupCalendarDays,
     settlementExtensionDays: draft.execution.settlementExtensionDays,
     runRobustness: draft.execution.runRobustness,
-    ...(draft.strategySpec.trading_plan ? {
-      slippageBps: Number(draft.strategySpec.trading_plan.parameters.slippage_bps),
-      ...(draft.strategySpec.trading_plan.parameters.slippage_cny !== undefined
-        ? { slippageCny: Number(draft.strategySpec.trading_plan.parameters.slippage_cny) } : {}),
-      commissionRate: Number(draft.strategySpec.trading_plan.parameters.commission_rate),
-      minimumCommissionCny: Number(draft.strategySpec.trading_plan.parameters.minimum_commission_cny),
+    ...(plan ? {
+      slippageBps: Number(plan.parameters.slippage_bps ?? draft.execution.slippageBps),
+      ...(plan.parameters.slippage_cny !== undefined
+        ? { slippageCny: Number(plan.parameters.slippage_cny) } : {}),
+      commissionRate: Number(plan.parameters.commission_rate ?? draft.execution.commissionRate),
+      minimumCommissionCny: Number(plan.parameters.minimum_commission_cny ?? draft.execution.minimumCommissionCny),
       allocationRatio: 1,
       limitHandling: 'strict_no_fill_at_limit' as const,
       runRobustness: false,
     } : {}),
     ...(options.refreshData ? { refreshData: true } : {}),
   },
-})
+  })
+}
 
 function toDraft(
   response: LiveDraftResponse,

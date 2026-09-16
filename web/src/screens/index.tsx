@@ -214,11 +214,11 @@ export function ParamsScreen(
           </Section>
           <NumericInputGroup resetKey={`${draft.id}-${numericReset}`} onValidityChange={setNumbersValid}>
           <fieldset className="settings-fields" disabled={isLocked || stockEditing}>
-          {!draft.strategySpec.trading_plan && (focus === 'entry' || focus === 'exit') ? <div data-focus={focus}><Section title={focus === 'entry' ? '编辑买入条件' : '编辑卖出条件'}>
+          {!draft.strategySpec.trading_plan && !draft.strategySpec.independent_plans && (focus === 'entry' || focus === 'exit') ? <div data-focus={focus}><Section title={focus === 'entry' ? '编辑买入条件' : '编辑卖出条件'}>
             <RuleSpecEditor draft={draft} side={focus} path={conditionPath} capabilities={capabilities} onChange={onChange} />
           </Section></div> : null}
           <div data-focus="entry" className="section-anchor" />
-          {!draft.strategySpec.trading_plan && focus !== 'entry' && focus !== 'exit' ? <Section title="交易规则与参数" aside="规则和参数在同一处核对">
+          {!draft.strategySpec.trading_plan && !draft.strategySpec.independent_plans && focus !== 'entry' && focus !== 'exit' ? <Section title="交易规则与参数" aside="规则和参数在同一处核对">
             <div className="rule-parameter-leg rule-parameter-leg--buy">
               <header><span>买入</span><small>满足以下规则时</small></header>
               <RuleSpecEditor draft={draft} side="entry" capabilities={capabilities} onChange={onChange} />
@@ -280,15 +280,27 @@ export function ParamsScreen(
           </Section>
 
           <div data-focus="more" className="section-anchor" />
-          <details className="advanced-settings" open={focus === 'more'}>
+          <details className="advanced-settings" open={focus === 'more' || Boolean(draft.strategySpec.independent_plans && (focus === 'entry' || focus === 'exit'))}>
             <summary>
               <span>高级设置</span>
-              <small>{draft.strategySpec.trading_plan ? '交易计划、成交、费用与研究执行' : '成交、费用、容量、仓位与预热'}</small>
+              <small>{draft.strategySpec.trading_plan || draft.strategySpec.independent_plans ? '交易计划、成交、费用与研究执行' : '成交、费用、容量、仓位与预热'}</small>
             </summary>
+            {draft.strategySpec.independent_plans ? <>
+              <Section title="买入计划与共享账户" aside="费用、底仓和持仓上限同时用于买卖两侧">
+                <section aria-label="买入计划参数">
+                  <PricePlanEditor draft={draft} leg="entry_plan" onChange={onChange} />
+                </section>
+              </Section>
+              <Section title="卖出计划" aside="与买入计划共用资金和持仓">
+                <section aria-label="卖出计划参数">
+                  <PricePlanEditor draft={draft} leg="exit_plan" onChange={onChange} />
+                </section>
+              </Section>
+            </> : null}
             {draft.strategySpec.trading_plan ? <Section title="交易计划与参数" aside="网格、定投或条件计划在同一处核对">
               <PricePlanEditor draft={draft} onChange={onChange} />
             </Section> : null}
-            {!draft.strategySpec.trading_plan ? <><Section title="成交与费用" aside="影响能否成交和成交价格">
+            {!draft.strategySpec.trading_plan && !draft.strategySpec.independent_plans ? <><Section title="成交与费用" aside="影响能否成交和成交价格">
             <Row label={<SettingInfo label="信号与成交" />} value={signalExecutionSummary(draft)} wrap />
             <div className="grow setting-row">
               <span className="k"><SettingInfo label="涨跌停处理" help={priceLimitHelp[draft.execution.priceLimitMode]} /></span>

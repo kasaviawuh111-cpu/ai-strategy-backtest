@@ -1,8 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { useState } from 'react'
 import { afterAll, beforeAll, expect, it, vi } from 'vitest'
 import { mockApi, enableImmediateMockWaitForTests, resetMockWaitForTests } from '../shared/api/mock'
-import { toLiveRevisionBody, withEditedStrategySpec } from '../shared/api/contract'
+import { toLiveBacktestBody, toLiveRevisionBody, withEditedStrategySpec } from '../shared/api/contract'
 import type { StrategyDraft } from '../shared/api/types'
 import { ParamsScreen } from './index'
 
@@ -30,6 +30,45 @@ function harness(initial: StrategyDraft, focus: 'exit' | 'more' = 'more', withSt
   render(<Harness />)
   return { changed, back, saveStock }
 }
+
+it('edits independent plan legs without overwriting their peer or shared execution policy', () => {
+  const shared = { initial_cash_cny: 100000, slippage_bps: 5,
+    commission_rate: 0.00025, minimum_commission_cny: 5 }
+  const initial: StrategyDraft = { ...base, strategySpec: { ...base.strategySpec,
+    trading_plan: null, entry: null, exit: null,
+    independent_plans: {
+      entry_plan: { kind: 'scheduled', parameters: { ...shared, side: 'buy',
+        frequency: 'monthly', day: 1, at: 'open', sizing_mode: 'shares', quantity: 100 } },
+      exit_plan: { kind: 'scheduled', parameters: { ...shared, side: 'sell',
+        frequency: 'monthly', day: 15, at: 'close', sizing_mode: 'shares', quantity: 100 } },
+    },
+    execution: { ...base.strategySpec.execution, entry_policy: 'composed_entry_leg',
+      exit_policy: 'composed_exit_leg', position_policy: 'bounded_inventory' },
+  } }
+  const { changed } = harness(initial, 'exit')
+  const buy = within(screen.getByRole('region', { name: '买入计划参数' }))
+  const sell = within(screen.getByRole('region', { name: '卖出计划参数' }))
+  expect(screen.queryByText('交易规则与参数')).not.toBeInTheDocument()
+  expect(sell.queryByLabelText('滑点（基点）')).not.toBeInTheDocument()
+  expect(buy.queryByLabelText('交易方向')).not.toBeInTheDocument()
+  fireEvent.change(sell.getByRole('spinbutton', { name: '委托股数' }), { target: { value: '200' } })
+  fireEvent.blur(sell.getByRole('spinbutton', { name: '委托股数' }))
+  let updated = changed.mock.lastCall![0] as StrategyDraft
+  expect(updated.strategySpec.independent_plans!.exit_plan.parameters.quantity).toBe(200)
+  expect(updated.strategySpec.independent_plans!.entry_plan.parameters.quantity).toBe(100)
+  fireEvent.change(buy.getByRole('spinbutton', { name: '滑点（基点）' }), { target: { value: '8' } })
+  fireEvent.blur(buy.getByRole('spinbutton', { name: '滑点（基点）' }))
+  updated = changed.mock.lastCall![0] as StrategyDraft
+  const saved = toLiveRevisionBody(updated).strategy
+  expect(saved.independent_plans!.entry_plan.parameters.slippage_bps).toBe(8)
+  expect(saved.independent_plans!.exit_plan.parameters.slippage_bps).toBe(8)
+  expect(saved.independent_plans!.exit_plan.parameters.quantity).toBe(200)
+  expect(saved.execution).toEqual(initial.strategySpec.execution)
+  expect(saved.trading_plan).toBeNull()
+  const request = toLiveBacktestBody({ ...updated, execution: { ...updated.execution, slippageBps: 99 } })
+  expect(request.config.slippageBps).toBe(8)
+  expect(request.config.allocationRatio).toBe(1)
+})
 
 it('opens and closes parameter explanations without changing the draft', () => {
   const { changed, back } = harness(base)
