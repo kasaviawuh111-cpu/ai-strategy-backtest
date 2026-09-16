@@ -184,14 +184,20 @@ def test_daily_snapshots_combine_into_one_replay_with_source_ids(tmp_path):
     assert again.portfolio.cash == result.portfolio.cash
     assert {s["snapshotId"] for s in evidence["minute"]["snapshots"]} == {first.snapshot_id, newer.snapshot_id}
     # Overlap with a request is not evidence of full coverage.
-    from ashare_lab.application.minute_replay_input import MinuteReplayDataError
+    from ashare_lab.application.minute_replay_input import MinuteReplayDataError, MinuteReplayCoverageError
     strategy.backtest.end = date(2025, 1, 6)
     h = replace(h, rows=tuple(r for r in h.rows if r.session_date < date(2025, 1, 6)) +
         (replace(controls[second_day], session_date=date(2025, 1, 6)),))
     calendar.write_text(json.dumps(dict(schemaVersion="market-calendar.v1", provider="fixture",
         sourceSha256="a" * 64, sessions=["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07"])))
-    with pytest.raises(MinuteReplayDataError, match="incomplete_minute_session:2025-01-06"):
+    with pytest.raises(MinuteReplayCoverageError) as coverage:
         LocalMinuteGrid(root, calendar).execute(strategy, h)
+    assert coverage.value.available_start == date(2025, 1, 2)
+    assert coverage.value.available_end == second_day
+    # A failed provider attempt is not evidence that it lacks the missing day.
+    failing_acquirer = Mock(side_effect=TimeoutError('fixture timeout'))
+    with pytest.raises(TimeoutError):
+        LocalMinuteGrid(root, calendar, minute_acquirer=failing_acquirer).execute(strategy, h)
 
 
 @pytest.mark.parametrize("grid", [True, False])

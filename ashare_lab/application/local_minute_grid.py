@@ -18,10 +18,26 @@ from ashare_lab.adapters.market_data.external_minute_parquet import ExternalMinu
 from ashare_lab.application.minute_grid_plan import execute_minute_grid
 from ashare_lab.application.minute_conditional_orders import execute_minute_conditions
 from ashare_lab.application.mx_minute_replay import prepare_mx_minute_replay
-from ashare_lab.application.minute_replay_input import MinuteReplayDataError
+from ashare_lab.application.minute_replay_input import MinuteReplayDataError, MinuteReplayCoverageError
 from ashare_lab.domain.execution.fees import AshareExchange
 from ashare_lab.domain.strategy import StrategySpec, HybridExecutionPolicy, ComposedExecutionPolicy
 from ashare_lab.domain.strategy.price_plans import GridPlan, ConditionalPlan, ScheduledPlan
+
+
+def _narrower_minute_bounds(required: set[date], available: set[date], *,
+                           needs_preceding_session: bool) -> tuple[date, date] | None:
+    known = sorted(required & available)
+    missing = required - available
+    if not known or not missing:
+        return None
+    lo, hi = known[0], known[-1]
+    if any(lo < day < hi for day in missing):
+        return None
+    if needs_preceding_session and min(required) < lo:
+        if len(known) < 2:
+            return None
+        lo = known[1]  # Keep a real completed session for first-bar capacity.
+    return lo, hi
 
 
 @dataclass(frozen=True)
@@ -160,6 +176,15 @@ class LocalMinuteGrid:
                         raise MinuteReplayDataError("market_data_instrument_mismatch")
                     add_snapshot(manifest["snapshotId"], path)
             minutes = tuple(bar for day in sorted(selected_days) for bar in selected_days[day])
+            # Acquisition must finish first: transport failures are not coverage
+            # evidence. Only missing boundary sessions may suggest a smaller range;
+            # interior gaps/invalid sessions remain data errors, never silently cut.
+            required_days = {row.session_date for row in range_rows
+                             if row.trading_status is TradingStatus.TRADING}
+            coverage = _narrower_minute_bounds(required_days, set(selected_days),
+                                              needs_preceding_session=start < requested_start)
+            if coverage is not None:
+                raise MinuteReplayCoverageError(*coverage)
             if not minute_sources:
                 raise MinuteReplayDataError("minute_snapshot_range_unavailable")
             snapshot_id = (minute_sources[0]["snapshotId"] if len(minute_sources) == 1 else

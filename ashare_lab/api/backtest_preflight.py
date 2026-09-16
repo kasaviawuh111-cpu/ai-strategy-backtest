@@ -43,7 +43,7 @@ from ashare_lab.application.minute_grid_plan import MinuteGridCapabilityError
 from ashare_lab.application.execution_feedback import execution_capability_feedback
 from ashare_lab.domain.strategy.canonical import canonical_hash
 from ashare_lab.application.skill_numeric_history import SkillNumericHistoryError
-from ashare_lab.application.minute_replay_input import MinuteReplayDataError
+from ashare_lab.application.minute_replay_input import MinuteReplayDataError, MinuteReplayCoverageError
 from ashare_lab.domain.signals.provider_runtime import (
     ProviderSignalRuntimeError,
     provider_condition_leaves,
@@ -347,6 +347,10 @@ async def preflight_backtest_strategy(
             status_code=422, code="backtest_condition_data_unavailable",
             message="事件或财务条件已识别，所需历史数据尚未齐备。原规则已保留，本次未启动回测。",
         )
+    except MinuteReplayCoverageError as exc:
+        problem = ApiProblem(status_code=422, code="backtest_data_range_unavailable",
+            available_start=exc.available_start, available_end=exc.available_end,
+            message="当前已读取的分钟数据未覆盖原回测区间；原规则和日期已保留，尚未执行回测。")
     except TimeoutError:
         problem = ApiProblem(
             status_code=503, code="backtest_data_preparation_timeout",
@@ -521,10 +525,13 @@ async def preflight_ready_outcome(
             ),
         )
     except ApiProblem as exc:
-        if exc.code in {"backtest_data_not_yet_available", "skill_history_before_listing"}:
+        if exc.code in {"backtest_data_not_yet_available", "skill_history_before_listing",
+                        "backtest_data_range_unavailable"}:
             source = getattr(container, "backtest_submission", None)
             boundary = getattr(source, "available_data_end", None)
             latest = boundary() if callable(boundary) else None
+            if exc.available_end is not None:
+                latest = min(latest, exc.available_end) if isinstance(latest, date) else exc.available_end
             original = outcome.strategy
             proposed_start = (max(original.backtest.start, exc.available_start)
                               if original is not None and exc.available_start else

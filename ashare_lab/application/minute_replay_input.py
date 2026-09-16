@@ -19,6 +19,15 @@ class MinuteReplayDataError(ValueError):
     """Recognized strategy needs missing or consistent source data."""
 
 
+class MinuteReplayCoverageError(MinuteReplayDataError):
+    """Read source sessions suggest narrower bounds; full preparation is still required."""
+
+    def __init__(self, available_start: date, available_end: date):
+        super().__init__('minute_history_range_incomplete')
+        self.available_start = available_start
+        self.available_end = available_end
+
+
 @dataclass(frozen=True)
 class MinuteReconciliation:
     session_date: date

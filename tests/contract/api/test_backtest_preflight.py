@@ -94,9 +94,25 @@ async def test_stale_end_date_keeps_selected_strategy_editable_without_shortenin
 
 
 @pytest.mark.asyncio
+async def test_minute_source_bounds_reach_preflight_as_typed_evidence():
+    from ashare_lab.application.minute_replay_input import MinuteReplayCoverageError
+    from ashare_lab.api.errors import ApiProblem
+    container = SimpleNamespace(backtest_submission=SimpleNamespace(
+        prepare_candidate=AsyncMock(side_effect=MinuteReplayCoverageError(
+            date(2026, 1, 5), date(2026, 8, 28)))))
+    with pytest.raises(ApiProblem) as caught:
+        await backtest_preflight.preflight_backtest_strategy(
+            strategy=_strategy(), config=BacktestRunConfig(), container=container)
+    assert caught.value.code == 'backtest_data_range_unavailable'
+    assert caught.value.available_start == date(2026, 1, 5)
+    assert caught.value.available_end == date(2026, 8, 28)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('verified', [True, False])
 @pytest.mark.parametrize('too_early', [True, False])
-async def test_range_proposal_requires_full_preflight_and_keeps_original(monkeypatch, verified, too_early):
+@pytest.mark.parametrize('private_minutes', [True, False])
+async def test_range_proposal_requires_full_preflight_and_keeps_original(monkeypatch, verified, too_early, private_minutes):
     from datetime import timedelta
     from ashare_lab.api.errors import ApiProblem
     from ashare_lab.api.schemas import StrategyDraftResponse
@@ -104,15 +120,18 @@ async def test_range_proposal_requires_full_preflight_and_keeps_original(monkeyp
     latest = strategy.backtest.end - timedelta(days=1)
     proposed_start = strategy.backtest.start + timedelta(days=5) if too_early else strategy.backtest.start
     original_error = ApiProblem(status_code=422,
-        code='skill_history_before_listing' if too_early else 'backtest_data_not_yet_available',
-        message='范围不足', available_start=proposed_start if too_early else None)
+        code=('backtest_data_range_unavailable' if private_minutes else
+              'skill_history_before_listing' if too_early else 'backtest_data_not_yet_available'),
+        message='范围不足', available_start=proposed_start if too_early else None,
+        available_end=latest if private_minutes else None)
     smaller_error = ApiProblem(status_code=503, code='backtest_data_temporarily_unavailable', message='接口失败')
     prepare = AsyncMock(side_effect=[original_error, None if verified else smaller_error])
     monkeypatch.setattr(backtest_preflight, 'preflight_backtest_strategy', prepare)
     outcome = CompileOutcome(status=CompileStatus.READY, strategy=strategy,
         strategy_hash=canonical_hash(strategy), run_requested=True)
-    container = SimpleNamespace(backtest_submission=SimpleNamespace(available_data_end=lambda: latest))
-    if too_early and not verified:
+    container = SimpleNamespace(backtest_submission=SimpleNamespace(
+        available_data_end=lambda: strategy.backtest.end if private_minutes else latest))
+    if (too_early or private_minutes) and not verified:
         with pytest.raises(ApiProblem, match='范围不足'):
             await backtest_preflight.preflight_ready_outcome(outcome=outcome, container=container)
         assert outcome.strategy == strategy
