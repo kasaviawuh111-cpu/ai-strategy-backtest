@@ -115,7 +115,26 @@ def test_both_legs_reach_one_source_pinned_ledger_and_all_http_views(pair_source
             assert evidence['corporateActions'] == corporate.evidence
             fills = [e for e in result['activities'] if e['kind'] in {'fill', 'partial_fill'}]
             assert {e['side'] for e in fills} == {'buy', 'sell'}
-            assert result['summary']['tradeCount'] >= 1
+            # This source has no corporate actions or opening inventory. Rebuild
+            # positions and cash from actual fills: a partial exit is not a
+            # closed position cycle, even when both legs have traded.
+            shares = cycles = 0
+            cash = Decimal('100000')
+            for fill in fills:
+                before = shares
+                quantity = fill['quantity']
+                shares += quantity if fill['side'] == 'buy' else -quantity
+                assert shares >= 0
+                cycles += int(before > 0 and shares == 0)
+                gross = Decimal(str(fill['notionalCny']))
+                fees = Decimal(str(fill['executionDetails']['totalFeesCny']))
+                cash += (gross if fill['side'] == 'sell' else -gross) - fees
+                assert cash >= 0
+            assert result['summary']['tradeCountSemantics'] == 'closed_position_cycles'
+            assert result['summary']['tradeCount'] == cycles
+            assert result['audit']['openPositionShares'] == shares
+            assert float(cash + Decimal(str(result['audit']['openPositionNotionalCny']))) == pytest.approx(
+                result['summary']['finalEquityCny'], abs=0.01, rel=0)
             assert result['summary']['initialEquityCny'] == 100000
             assert result['series'][-1]['equity'] == pytest.approx(
                 result['summary']['finalEquityCny'] / 100000 * 100)

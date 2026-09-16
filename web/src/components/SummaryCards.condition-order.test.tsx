@@ -14,6 +14,33 @@ const leaf = (id: string, label: string, parameters: string[] = []): StrategyRul
 })
 
 describe('condition-order strategy card', () => {
+  it.each(['entry', 'exit'] as const)('preserves an independent %s rule alongside an active grid leg', (side) => {
+    const edit = vi.fn();
+    const entryRule = leaf('entry', 'MACD 金叉');
+    const exitRule = leaf('exit', 'MACD 死叉');
+    const strategy: StrategySummary = {
+      title: '网格与指标组合', pricePlanKind: 'grid', strategyHash: 'sha256:mixed-active',
+      rows: [{ key: 'entry', label: '买入', value: entryRule.label, kind: 'buy' },
+        { key: 'exit', label: '卖出', value: exitRule.label, kind: 'sell' },
+        { key: 'range', label: '区间', value: '近一年' }],
+      entryRule, exitRule, confirmation: '按各腿时钟', earliestExecution: '下一可交易时点',
+      conditionCount: 2, eventFacts: [],
+      gridReview: { anchor: '首日开盘', initialization: '',
+        buy: side === 'exit' ? [{ label: '格距', value: '1%' }] : [],
+        sell: side === 'entry' ? [{ label: '格距', value: '1%' }] : [] },
+    };
+    render(<StrategyCard instrument={{ name: '东方财富', code: '300059.SZ' }} strategy={strategy}
+      onEditRow={edit} onOpenMore={vi.fn()} onRun={vi.fn()} />);
+    const rule = side === 'entry' ? entryRule : exitRule;
+    fireEvent.click(screen.getByRole('button', { name: new RegExp(rule.label) }));
+    expect(edit).toHaveBeenLastCalledWith(side, side);
+    const rows = screen.getByRole('region', { name: '交易规则流程' }).querySelectorAll('.erow');
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toHaveTextContent('买入');
+    expect(rows[1]).toHaveTextContent('卖出');
+    fireEvent.click(screen.getByRole('button', { name: /区间.*近一年/ }));
+    expect(edit).toHaveBeenLastCalledWith('range');
+  });
   it('keeps the condition editor while hiding the trigger note from the first-level review', () => {
     const entryRule = leaf('entry', 'MACD 金叉')
     const exitRule = leaf('exit', 'MACD 死叉')

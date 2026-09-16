@@ -127,14 +127,27 @@ export function StrategyCard(
         <div className="condition-sections">
           {gridSummary.length > 0 ? <section className="grid-workflow" aria-label="交易规则流程">
             <div className="erows erows--grid-summary">
-              {gridSummary.map(({ side, text }) => <div className={`erow erow--static ${side}`} key={`grid-${side}`}>
-                <span className="lb">{side === 'buy' ? '买入' : '卖出'}</span>
-                <span className="val">{text}</span>
-              </div>)}
-              {gridRange ? <div className="erow erow--static range">
+              {(['entry', 'exit'] as const).map((key) => {
+                const side = key === 'entry' ? 'buy' : 'sell';
+                const label = key === 'entry' ? '买入' : '卖出';
+                const grid = gridSummary.find((item) => item.side === side);
+                if (grid) return <div className={`erow erow--static ${side}`} key={key}>
+                  <span className="lb">{label}</span><span className="val">{grid.text}</span>
+                </div>;
+                const row = strategy.rows.find((item) => item.key === key);
+                if (!row) return null;
+                const rule = key === 'entry' ? strategy.entryRule : strategy.exitRule;
+                return <button type="button" className={`erow ${side}`} key={key}
+                  disabled={fieldsLocked} onClick={() => onEditRow(key, rule.id)}>
+                  <span className="lb">{label}</span>
+                  <div className="val"><RuleTree node={rule} compact /></div><Chevron />
+                </button>;
+              })}
+              {gridRange ? <button type="button" className="erow range"
+                disabled={fieldsLocked} onClick={() => onEditRow('range')}>
                 <span className="lb">{gridRange.label}</span>
-                <span className="val">{gridRange.value}</span>
-              </div> : null}
+                <span className="val">{gridRange.value}</span><Chevron />
+              </button> : null}
             </div>
           </section> : null}
           {strategy.rows.map((row) => {
