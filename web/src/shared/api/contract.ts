@@ -658,6 +658,11 @@ export const fromLiveDraftResponse = (
               instrumentSymbol: candidate.symbol,
               instrumentName: candidate.name ?? undefined,
             }))
+          : diagnosticCode === 'backtest_range_confirmation_required' ? [{
+              id: 'accept-data-range', label: '接受建议范围',
+              description: '保留买卖条件，仅调整回测日期；不会自动开始回测。',
+              action: 'submit_clarification' as const, suggestedUtterance: '接受建议范围',
+            }]
           : ideaRoute ? ideaRoute.proposals.slice(0, 3).map((proposal) => {
           const proposalSymbol = proposal.instrument_symbol
             ?? ideaRoute.asset_mapping.instrument_symbol

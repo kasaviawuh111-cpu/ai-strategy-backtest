@@ -178,6 +178,8 @@ class CandidateAst:
     instrument_suggestion_declined: bool = False
     # Display-only review disagreements; never source evidence or execution approval.
     semantic_review_issues: tuple[str, ...] = ()
+    # Editable system-filled thresholds, never claimed as user source evidence.
+    system_suggestions: tuple[str, ...] = ()
     trading_plan: PricePlan | None = None
     independent_plans: IndependentPlanPair | None = None
 

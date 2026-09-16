@@ -119,6 +119,7 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 POSITION_AWARE_EXIT_AND_UNSUPPORTED = "position_aware_exit_and_not_supported"
 _LOGGER = logging.getLogger(__name__)
 _PREVIEW_CLARIFICATION_CODES = frozenset({
+    "backtest_range_confirmation_required",
     "semantic_confirmation_required",
     "execution_prerequisite_required",
 })
@@ -1408,6 +1409,49 @@ class StrategyCompiler:
                 assistant_message=prior_outcome.clarification or "候选数据尚未准备好，请重试。",
                 compile_input=original_input, revision_changed=False,
             )
+        if (prior_outcome.diagnostic_code == "backtest_range_confirmation_required"
+                and re.sub(r"[\s，,。！!]+", "", answer) in {
+                    "接受", "接受建议范围", "可以", "好", "好的", "是", "确认", "按这个范围", "可以按你说的来"}
+                and prior_outcome.suggested_strategy is not None
+                and prior_outcome.suggested_strategy_hash == canonical_hash(prior_outcome.suggested_strategy)):
+            strategy = prior_outcome.suggested_strategy
+            validate_strategy_against_catalog(strategy, self._catalog)
+            outcome = replace(prior_outcome, status=CompileStatus.READY, strategy=strategy,
+                strategy_hash=canonical_hash(strategy), diagnostic_code=None,
+                clarification=None, suggested_strategy=None, suggested_strategy_hash=None,
+                suggested_strategy_note=None, suggested_strategy_choice_id=None,
+                run_requested=False, refresh_data=False)
+            return ClarificationTurnOutcome(reply_kind="accepted", outcome=outcome,
+                assistant_message=f"已将回测范围调整为{strategy.backtest.start}至{strategy.backtest.end}，买卖条件不变。可点击开始回测。",
+                compile_input=original_input, revision_changed=True)
+        # Recover old drafts whose only pending issue was our former mandatory
+        # threshold question. Do not approve unrelated semantic disagreements.
+        legacy_matches = [re.fullmatch(
+            r"(买入|卖出)条件「(.+)」的数值阈值尚未明确；当前候选值(-?\d+(?:\.\d+)?)是建议，"
+            r"不是指标目录默认值，请确认指标口径及阈值。其他已明确条件保留。", issue)
+            for issue in prior_outcome.semantic_review_issues]
+        accepted_text = re.sub(r"[\s，,。！!]+", "", answer)
+        accepts_suggestion = accepted_text in {"是", "是的", "好", "好的", "可以", "确认", "同意",
+            "按你说的来", "可以按你说的来", "就按这个", "用这个"}
+        if (not accepts_suggestion and len(legacy_matches) == 1 and legacy_matches[0]):
+            accepts_suggestion = accepted_text == legacy_matches[0][3]
+        if (prior_outcome.diagnostic_code == "semantic_confirmation_required"
+                and legacy_matches and all(legacy_matches) and accepts_suggestion
+                and prior_outcome.suggested_strategy is not None
+                and prior_outcome.suggested_strategy_hash == canonical_hash(prior_outcome.suggested_strategy)):
+            strategy = prior_outcome.suggested_strategy
+            validate_strategy_against_catalog(strategy, self._catalog)
+            note = "已为你补充" + "；".join(
+                f"{m[1]}条件「{m[2]}」的阈值{m[3]}（系统建议，可修改）"
+                for m in legacy_matches if m is not None) + "。"
+            outcome = CompileOutcome(status=CompileStatus.READY, strategy=strategy,
+                strategy_hash=canonical_hash(strategy), clarification=note,
+                candidate_provenance=prior_outcome.candidate_provenance,
+                candidate_grounding=prior_outcome.candidate_grounding,
+                execution_settings=prior_outcome.execution_settings)
+            return ClarificationTurnOutcome(reply_kind="accepted", outcome=outcome,
+                assistant_message=note + " 本次尚未执行回测。",
+                compile_input=original_input, revision_changed=True)
         if (semantic_intent or classify_clarification_turn(answer)) is TurnIntent.VIEWPOINT:
             return await self.viewpoint_support_turn(
                 original_input=original_input, prior_outcome=prior_outcome,
@@ -2005,6 +2049,8 @@ class StrategyCompiler:
         """Confirm verified rules; optional wording cannot invalidate them."""
         assert outcome.status is CompileStatus.READY and outcome.strategy is not None
         confirmed = "买卖规则已准备好，可以核对；本次尚未执行回测。"
+        if outcome.clarification and outcome.clarification.startswith("已为你补充"):
+            return outcome.clarification + " " + confirmed
         try:
             return await self.compose_dialogue_response(
                 answer=answer,
@@ -2079,10 +2125,8 @@ class StrategyCompiler:
             conversation = await self._compile_initial_conversation(effective_request)
             if conversation is not None:
                 return conversation
-        # A qualitative numeric comparison (for example ``ROE低则买入``)
-        # is incomplete in the user's source sentence.  This must not be
-        # bypassed by a model-classified strategy turn or repaired with a
-        # guessed threshold.
+        # Prefer a validated, disclosed system suggestion for missing thresholds.
+        # Invalid/unsupported candidates still fall back to the existing question.
         missing_numeric_threshold = find_missing_numeric_threshold(request.utterance)
         source_semantic_diagnostic = (
             "numeric_threshold_requires_clarification"
@@ -2090,6 +2134,15 @@ class StrategyCompiler:
             else None if model_strategy else _unsupported_source_semantics(request.utterance)
         )
         candidates: tuple[CandidateAst, ...] | None = None
+        if source_semantic_diagnostic in {
+            "numeric_threshold_requires_clarification", "indicator_trigger_requires_clarification",
+        }:
+            candidates = await self._generator.generate(effective_request)
+            if candidates and all(
+                item.unsupported_code is None and item.system_suggestions
+                for item in candidates
+            ):
+                source_semantic_diagnostic = None
         if source_semantic_diagnostic == "ambiguous_boolean_expression":
             # Counting every word "buy" confuses stock intentions with conditions.
             # A bounded model candidate has already passed explicit-leaf coverage
@@ -2529,6 +2582,7 @@ class StrategyCompiler:
             status=CompileStatus.READY,
             strategy=strategy,
             strategy_hash=strategy_hash,
+            clarification=" ".join(candidate.system_suggestions) or None,
             provenance=tuple(sorted(provenance, key=lambda item: item.path)),
             candidate_provenance=candidate.provenance,
             candidate_grounding=candidate.grounding_evidence,

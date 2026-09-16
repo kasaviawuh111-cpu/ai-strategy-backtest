@@ -489,6 +489,12 @@ async def _create_strategy_draft(
         assistant_message = await container.compiler.compose_ready_response(
             answer=body.utterance, outcome=outcome,
         )
+    if (outcome.status is CompileStatus.READY and outcome.clarification
+            and outcome.clarification.startswith("已为你补充")):
+        # Suggestions prepare an editable draft, never implicitly run it.
+        outcome = replace(outcome, run_requested=False, refresh_data=False)
+        assistant_message = outcome.clarification + (
+            " 买卖规则已准备好，可修改后点击开始回测。" if outcome.diagnostic_code is None else "")
     request_hash = canonical_hash(
         {
             "request": body.model_dump(mode="json"),
@@ -2733,6 +2739,7 @@ def _to_response(
     # Isolated previews deliberately have no selectable idea route. Preserve
     # their review-only payload without turning it into executable strategy.
     expose_preview = idea_route is not None or outcome.diagnostic_code in {
+        "backtest_range_confirmation_required",
         "semantic_confirmation_required", "execution_prerequisite_required",
     }
     response = StrategyDraftResponse(

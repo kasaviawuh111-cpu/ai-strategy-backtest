@@ -94,6 +94,63 @@ async def test_stale_end_date_keeps_selected_strategy_editable_without_shortenin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('verified', [True, False])
+@pytest.mark.parametrize('too_early', [True, False])
+async def test_range_proposal_requires_full_preflight_and_keeps_original(monkeypatch, verified, too_early):
+    from datetime import timedelta
+    from ashare_lab.api.errors import ApiProblem
+    from ashare_lab.api.schemas import StrategyDraftResponse
+    strategy = _strategy()
+    latest = strategy.backtest.end - timedelta(days=1)
+    proposed_start = strategy.backtest.start + timedelta(days=5) if too_early else strategy.backtest.start
+    original_error = ApiProblem(status_code=422,
+        code='skill_history_before_listing' if too_early else 'backtest_data_not_yet_available',
+        message='范围不足', available_start=proposed_start if too_early else None)
+    smaller_error = ApiProblem(status_code=503, code='backtest_data_temporarily_unavailable', message='接口失败')
+    prepare = AsyncMock(side_effect=[original_error, None if verified else smaller_error])
+    monkeypatch.setattr(backtest_preflight, 'preflight_backtest_strategy', prepare)
+    outcome = CompileOutcome(status=CompileStatus.READY, strategy=strategy,
+        strategy_hash=canonical_hash(strategy), run_requested=True)
+    container = SimpleNamespace(backtest_submission=SimpleNamespace(available_data_end=lambda: latest))
+    if too_early and not verified:
+        with pytest.raises(ApiProblem, match='范围不足'):
+            await backtest_preflight.preflight_ready_outcome(outcome=outcome, container=container)
+        assert outcome.strategy == strategy
+        assert outcome.suggested_strategy is None
+        return
+    result = await backtest_preflight.preflight_ready_outcome(outcome=outcome, container=container)
+    assert prepare.await_count == 2
+    assert not result.run_requested
+    assert strategy.backtest.end != latest
+    if verified:
+        assert result.status is CompileStatus.NEEDS_CLARIFICATION
+        assert result.strategy is None and result.revision_base_strategy == strategy
+        assert result.suggested_strategy.backtest.end == latest
+        assert result.suggested_strategy.backtest.start == proposed_start
+        assert result.suggested_strategy.entry == strategy.entry
+        assert result.suggested_strategy.exit == strategy.exit
+        assert result.diagnostic_code == 'backtest_range_confirmation_required'
+        assert '是否接受' in result.clarification
+        from tests.contract.api.test_candidate_preflight import _response
+        from ashare_lab.adapters.language import RuleBasedCandidateGenerator
+        from ashare_lab.application.compile_strategy import StrategyCompiler
+        assert _response(result).suggested_strategy == result.suggested_strategy
+        catalog = load_catalog_directory(_ROOT / 'catalogs')
+        manifest = next(m for m in catalog.manifests if m.catalog_id == 'cn_a.signals')
+        compiler = StrategyCompiler(generator=RuleBasedCandidateGenerator(), catalog=catalog,
+            catalog_id=manifest.catalog_id, release_version=manifest.release_version)
+        accepted = await compiler.answer_clarification(
+            original_input=CompileInput(utterance=_TEXT, as_of_date=strategy.backtest.end),
+            prior_outcome=result, answer='接受建议范围')
+        assert accepted.outcome.status is CompileStatus.READY
+        assert accepted.outcome.strategy.backtest.end == latest
+        assert accepted.outcome.strategy.entry == strategy.entry
+        assert not accepted.outcome.run_requested
+    else:
+        assert result.strategy == strategy and result.suggested_strategy is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure_code", [
     "skill_numeric_history_unavailable_after_query_retry",
     "skill_numeric_invalid_history", "skill_numeric_non_daily_history",

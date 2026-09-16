@@ -474,6 +474,7 @@ class StrategyDraftResponse(ApiModel):
             self.suggested_strategy_note,
         )
         if self.diagnostic_code in {
+            "backtest_range_confirmation_required",
             "semantic_confirmation_required", "execution_prerequisite_required",
         }:
             if (self.status is not CompileStatus.NEEDS_CLARIFICATION

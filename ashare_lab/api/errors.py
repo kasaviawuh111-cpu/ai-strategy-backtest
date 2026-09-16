@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from collections.abc import Sequence
 
 from fastapi import FastAPI, Request
@@ -25,12 +26,17 @@ class ApiProblem(Exception):
         code: str,
         message: str,
         details: Sequence[ErrorDetail] = (),
+        available_start: date | None = None,
+        available_end: date | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.details = tuple(details)
+        # Internal typed bounds; never infer machine actions from display prose.
+        self.available_start = available_start
+        self.available_end = available_end
 
 
 def request_id(request: Request) -> str:

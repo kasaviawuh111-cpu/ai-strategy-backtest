@@ -125,7 +125,7 @@ def minute_result_bundle(*, run_id: str, result: GridReplayResult,
             d = event.sizing_details
             reason = (f"本次预算{d['budgetCny']}元；按撮合价{d['sizingPrice']}元，"
                       f"最低买入{d['minimumOrderQuantity']}股含费用需{d['minimumOrderCostCny']}元。"
-                      "单次预算不足，本期跳过，不自动追加预算或补投。")
+                      "本次买入预算不足，已跳过，不自动追加预算。")
         fill = event.fill
         submitted = event.status in {"submitted", "working", "retry_pending"}
         cancelled = event.status == "cancelled"
@@ -170,7 +170,7 @@ def minute_result_bundle(*, run_id: str, result: GridReplayResult,
     execution_note = zero_fill_execution_note(activities)
     if small_budget:
         prefix = "本次没有成交；" if not result.portfolio.fills else ""
-        execution_note = (f"{prefix}{len(small_budget)}次定投因单次预算不足而跳过。"
+        execution_note = (f"{prefix}{len(small_budget)}次买入因本次预算不足而跳过。"
                           f"首笔：{small_budget[0]['reason']}可在策略设置调整单次预算后重新回测。")
     adjustment_note = _price_adjustment_note(result, strategy)
     if adjustment_note:

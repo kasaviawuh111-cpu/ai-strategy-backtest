@@ -2325,15 +2325,16 @@ export default function App({
                     const provisional = clarification.provisionalDraft
                     const trees = strategyRuleTrees(provisional)
                     const needsSemanticConfirmation = clarification.id === 'semantic_confirmation_required'
+                    const needsRangeConfirmation = clarification.id === 'backtest_range_confirmation_required'
                     const executionAssessment = clarification.executionAssessment
                     return (
                       <div className="provisional-strategy" data-testid="provisional-strategy">
                         <h3 className="provisional-strategy__meta">
-                          {executionAssessment ? '规则已识别 · 暂未执行回测' : needsSemanticConfirmation
+                          {needsRangeConfirmation ? '建议回测范围 · 等待接受' : executionAssessment ? '规则已识别 · 暂未执行回测' : needsSemanticConfirmation
                             ? '已识别部分 · 尚未完整实现'
                             : '按你的口语推测 · 等你确认'}
                         </h3>
-                        {needsSemanticConfirmation || executionAssessment ? (
+                        {needsSemanticConfirmation || needsRangeConfirmation || executionAssessment ? (
                           <div className="provisional-strategy__rule">
                             <span>股票</span>
                             <div>{provisional.instrument.name === provisional.instrument.symbol
@@ -2347,6 +2348,11 @@ export default function App({
                         <div className="provisional-strategy__rule">
                           <span>卖出</span><div>{summarizeRule(trees.exit)}</div>
                         </div>
+                        {needsRangeConfirmation && provisional.strategySpec ? (
+                          <div className="provisional-strategy__rule">
+                            <span>建议区间</span><div>{provisional.strategySpec.backtest.start} 至 {provisional.strategySpec.backtest.end}</div>
+                          </div>
+                        ) : null}
                         <div className="provisional-strategy__note">
                           {executionAssessment
                             ? `待准备：${executionAssessment.missing.join('、')}。原规则已保留，可以继续修改。`

@@ -137,7 +137,7 @@ _DEFAULTED_PARAMETER_PATH_RE = re.compile(
 )
 _SOURCE_CLAUSE_BOUNDARY_RE = re.compile(r"[，,\uff1b;。！？!?\r\n]")
 _VOLUME_BASELINE_RE = re.compile(
-    r"成交量(?P<comparison>是|为|达到|不少于|不低于|超过|大于|低于|小于|不超过)?"
+    r"成交量(?P<comparison>>=|<=|>|<|≥|≤|是|为|达到|不少于|不低于|超过|大于|低于|小于|不超过)?"
     r"(?:过去|此前|前|近)(?P<period>[1-9]\d{0,3})日(?:的)?(?:平均(?:成交量)?|均量)"
 )
 _INITIAL_CASH_RE = re.compile(
@@ -279,7 +279,7 @@ _CANDIDATE_REPAIR_HINTS = {
         "value阈值、trigger、观察周期和止盈止损字段不是Catalog参数默认值，"
         "不得仅因模型自行补充就标为默认。检查所有路径的侧、序号和参数名；"
         "保留用户明确的股票、条件、数值及组合关系，不要删除规则以消除错误。"
-        "原文未给出且目录没有默认值的阈值不得冒充确定条件，须交由语义澄清处理。"
+        "原文未给出的阈值可补充合理建议，系统会明确标注为系统填写且可修改；不得覆盖明确数值。"
     ),
     "period_evidence_missing": (
         "已填写backtest_lookback_years或起止日期时，必须同时填写backtest_span，"
@@ -886,7 +886,9 @@ class IndicatorCandidate(_StrictCandidateModel):
     value: float | None = Field(default=None, description=(
         "Comparison threshold, separate from params. Follow this indicator and trigger's "
         "Catalog value_requirement: required means a finite number, never null; forbidden "
-        "means omit or null. Preserve the user's threshold and unit; never invent one. "
+        "means omit or null. Preserve the user's explicit threshold and unit. When the user "
+        "leaves a threshold unspecified, supply a reasonable editable suggestion; the server "
+        "will disclose it as system-filled, not user-provided or a Catalog default. "
         "A comparison of two queried series uses provider.series_compare, not a missing scalar."
     ))
 
@@ -2495,10 +2497,10 @@ def _translate_transport_payload(
         )
         model_review_issues = pending_issues
         threshold_issues = _unspoken_threshold_issues(item)
+        candidate = replace(candidate, system_suggestions=threshold_issues)
         pending_issues = tuple(dict.fromkeys((
             *pending_issues,
             *deterministic_issues,
-            *threshold_issues,
         )))
         if pending_issues and ((candidate.entry and candidate.exit) or candidate.trading_plan
                                or candidate.independent_plans):
@@ -2518,10 +2520,10 @@ def _translate_transport_payload(
 
 
 def _unspoken_threshold_issues(candidate: BoundedCandidate) -> tuple[str, ...]:
-    """A semantic approval cannot turn a proposed numeric threshold into a fact.
+    """Disclose unspoken thresholds as editable suggestions, not user facts.
 
-    Keep the full candidate for the existing confirmation flow. Catalog parameter
-    defaults remain independent from trigger values, which have no default here.
+    User-approved product policy: fill missing thresholds without a blocking
+    confirmation. Catalog/integrity/explicit-value checks remain independent.
     """
     issues = []
     for side, leaves, spans in (("买入", candidate.entry, candidate.entry_spans),
@@ -2545,8 +2547,8 @@ def _unspoken_threshold_issues(candidate: BoundedCandidate) -> tuple[str, ...]:
             grounded = (any(_amount_threshold_cny(m) == Decimal(str(leaf.value)) for m in amount_mentions)
                         if amount_mentions else _numeric_evidence(span.text, leaf.value))
             if not grounded:
-                issues.append(f"{side}条件「{span.text}」的数值阈值尚未明确；当前候选值{leaf.value:g}是建议，"
-                              "不是指标目录默认值，请确认指标口径及阈值。其他已明确条件保留。")
+                issues.append(f"已为你补充{side}条件「{span.text}」的阈值：{leaf.value:g}"
+                              "（系统建议，可在策略设置中修改）。")
     return tuple(issues)
 
 
@@ -3609,6 +3611,19 @@ def _validate_candidate_integrity(
                 raise ValueError("candidate leaves do not cover every explicit source condition")
     for span in (*candidate.entry_spans, *candidate.exit_spans):
         _validate_exact_span(span, request.utterance)
+    # Explicit mathematical comparisons cannot be softened by model review.
+    for leaves, spans in ((candidate.entry, candidate.entry_spans),
+                          (candidate.exit, candidate.exit_spans)):
+        for leaf, span in zip(leaves, spans, strict=True):
+            if isinstance(leaf, IndicatorCandidate) and leaf.indicator_id == "volume.relative":
+                reference = _VOLUME_BASELINE_RE.search(re.sub(r"\s+", "", span.text))
+                expected = ({">": "gt_multiple", "超过": "gt_multiple", "大于": "gt_multiple",
+                    ">=": "gte_multiple", "≥": "gte_multiple", "达到": "gte_multiple",
+                    "不少于": "gte_multiple", "不低于": "gte_multiple",
+                    "<=": "lte_multiple", "≤": "lte_multiple", "不超过": "lte_multiple"}
+                    .get(reference["comparison"]) if reference else None)
+                if expected is not None and leaf.trigger != expected:
+                    raise ValueError("relative-volume comparator differs from source")
     for path in candidate.defaulted_fields:
         if candidate.independent_plans is not None:
             pair_defaults = {
@@ -3897,8 +3912,9 @@ def _validate_leaf_grounding(
             volume_reference = _VOLUME_BASELINE_RE.search(re.sub(r"\s+", "", span.text))
             if volume_reference is not None:
                 comparison = volume_reference["comparison"]
-                expected = ("gt_multiple" if comparison in {"超过", "大于"} else
-                            "gte_multiple" if comparison in {"达到", "不少于", "不低于"} else None)
+                expected = ("gt_multiple" if comparison in {">", "超过", "大于"} else
+                            "gte_multiple" if comparison in {">=", "≥", "达到", "不少于", "不低于"} else
+                            "lte_multiple" if comparison in {"<=", "≤", "不超过"} else None)
                 if expected is not None and leaf.trigger != expected:
                     raise ValueError("relative-volume comparator differs from source")
         if (leaf.trigger in {"price_above", "price_below"}

@@ -782,6 +782,23 @@ describe('live API contract adapter', () => {
     expect(outcome.clarification.provisionalChoiceId).toBe('rsi_reversal')
   })
 
+  it('offers range acceptance without granting automatic execution', () => {
+    const outcome = fromLiveDraftResponse({ ...response, status: 'needs_clarification',
+      strategy: null, strategy_hash: null, run_requested: true,
+      diagnostic_code: 'backtest_range_confirmation_required',
+      clarification: '已预填可用范围，是否接受？', idea_route: null,
+      suggested_strategy: strategy, suggested_strategy_hash: `sha256:${'b'.repeat(64)}`,
+      suggested_strategy_note: '确认前保留原日期，不启动回测。',
+    }, request)
+    expect(outcome.status).toBe('needs_clarification')
+    if (outcome.status !== 'needs_clarification') throw new Error('expected range proposal')
+    expect(outcome).not.toHaveProperty('runRequested')
+    expect(outcome.clarification.choices[0]).toMatchObject({
+      label: '接受建议范围', action: 'submit_clarification', suggestedUtterance: '接受建议范围',
+    })
+    expect(outcome.clarification.provisionalDraft?.strategySpec).toEqual(strategy)
+  })
+
   it.each([false, true])('keeps semantic confirmation non-executable without recommendations (run_requested=%s)', (runRequested) => {
     const note = '“放量后再买”的时序还不明确，请确认是金叉当天同时放量，还是放量后的下一次金叉。'
     const outcome = fromLiveDraftResponse({

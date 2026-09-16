@@ -268,6 +268,7 @@ async def preflight_backtest_strategy(
     except MxDailyHistoryBeforeListingError as exc:
         problem = ApiProblem(
             status_code=422, code="skill_history_before_listing",
+            available_start=strategy.backtest.start + (exc.listing_date - exc.start),
             message=(f"回测开始日期 {strategy.backtest.start.isoformat()} 早于该股票的上市日期 "
                      f"{exc.listing_date.isoformat()}。请选择上市日或之后的日期；本次未启动回测。"),
             details=(ErrorDetail(
@@ -520,13 +521,51 @@ async def preflight_ready_outcome(
             ),
         )
     except ApiProblem as exc:
+        if exc.code in {"backtest_data_not_yet_available", "skill_history_before_listing"}:
+            source = getattr(container, "backtest_submission", None)
+            boundary = getattr(source, "available_data_end", None)
+            latest = boundary() if callable(boundary) else None
+            original = outcome.strategy
+            proposed_start = (max(original.backtest.start, exc.available_start)
+                              if original is not None and exc.available_start else
+                              original.backtest.start if original is not None else None)
+            proposed_end = (min(original.backtest.end, latest)
+                            if original is not None and isinstance(latest, date) else
+                            original.backtest.end if original is not None else None)
+            if (original is not None and proposed_start is not None and proposed_end is not None
+                    and proposed_start <= proposed_end
+                    and (proposed_start, proposed_end) != (original.backtest.start, original.backtest.end)):
+                proposed = original.model_copy(update={"backtest": original.backtest.model_copy(
+                    update={"start": proposed_start, "end": proposed_end})})
+                try:
+                    # A global import watermark alone is NOT coverage evidence.
+                    # Verify this stock and every dependency over the proposed range.
+                    await preflight_backtest_strategy(strategy=proposed, container=container,
+                        config=BacktestRunConfig(**resolve_execution_settings(
+                            outcome.execution_settings).model_dump(exclude_none=True), refresh_data=False))
+                except ApiProblem:
+                    pass  # Never offer an unverified smaller range.
+                else:
+                    return replace(outcome, status=CompileStatus.NEEDS_CLARIFICATION,
+                        strategy=None, strategy_hash=None, run_requested=False, refresh_data=False,
+                        revision_base_strategy=original,
+                        suggested_strategy=proposed, suggested_strategy_hash=canonical_hash(proposed),
+                        suggested_strategy_choice_id=None,
+                        suggested_strategy_note="建议范围已预填；原范围保留，接受后才保存新范围。本次未启动回测。",
+                        diagnostic_code="backtest_range_confirmation_required",
+                        clarification=(f"这条策略目前已核实可用的数据范围为{proposed.backtest.start}至{proposed_end}。"
+                            f"原回测范围为{original.backtest.start}至{original.backtest.end}；"
+                            f"已为你预填建议范围{proposed.backtest.start}至{proposed_end}，是否接受？"
+                            "买卖条件不变，确认前不会启动回测。"))
         if exc.code in {"minute_execution_unavailable", "grid_execution_unavailable",
                         "backtest_data_not_yet_available", "backtest_date_range_invalid"}:
             # Interpretation and editing remain valid without a running executor.
             # /prepare and /backtest-runs still enforce the actual execution gate.
             emit_progress("execution_unavailable", exc.message)
+            suggestion = (outcome.clarification + " " if outcome.clarification
+                          and outcome.clarification.startswith("已为你补充") else "")
             return replace(outcome, run_requested=False,
-                           diagnostic_code=exc.code, clarification=exc.message)
+                           diagnostic_code=exc.code, clarification=suggestion + exc.message)
         search_codes = {
             "skill_numeric_history_unavailable_after_query_retry",
             "skill_numeric_invalid_history", "skill_numeric_non_daily_history",

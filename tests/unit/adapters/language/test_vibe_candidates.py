@@ -200,7 +200,7 @@ def test_default_provenance_feedback_explains_paths_without_waiving_grounding():
     assert code == 'defaulted_field_unconsumed'
     hints = ' '.join(_candidate_repair_hints([code]))
     assert '/entry/序号/params/参数名' in hints
-    assert '不得冒充确定条件' in hints
+    assert '不得覆盖明确数值' in hints
     assert '不要删除规则' in hints
     description = BoundedCandidate.model_json_schema()['properties']['defaulted_fields']['description']
     assert 'Do not list /value' in description
@@ -222,6 +222,53 @@ def test_implicit_threshold_remains_confirmation_not_catalog_default(indicator, 
     assert len(_unspoken_threshold_issues(implicit)) == 1
     assert implicit.entry[0].value == value  # preserve the proposal for confirmation
     assert _unspoken_threshold_issues(candidate(f'{text}，阈值{value}')) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('indicator,trigger,value,text', [
+    ('technical.kdj', 'j_below', 20, 'KDJ超卖买入'),
+    ('technical.rsi', 'below', 30, 'RSI低就买入'),
+    ('technical.cci', 'below', -100, 'CCI低就买入'),
+])
+async def test_suggested_threshold_compiles_editable_with_disclosure(indicator, trigger, value, text):
+    utterance = text + '，MACD死叉卖出'
+    payload = {'candidates': [{
+        'entry': [{'kind': 'indicator', 'indicator_id': indicator,
+                   'trigger': trigger, 'params': {}, 'value': value}],
+        'exit': [{'kind': 'indicator', 'indicator_id': 'technical.macd',
+                  'trigger': 'death_cross', 'params': {}}],
+        'entry_spans': [_source_span(utterance, text)],
+        'exit_spans': [_source_span(utterance, 'MACD死叉卖出')],
+        'confidence': .99,
+    }]}
+    review = {'instrument': 'equivalent', 'requested_bar_interval': '1d',
+        'differences': [], 'requirements': [{'status': 'represented',
+        'candidate_path': '/entry', 'source_quote': utterance,
+        'requested_meaning': utterance, 'candidate_meaning': utterance}]}
+    generator = VibeBoundedCandidateGenerator(_SequenceTransport((payload, review)),
+        capability_matrix=CAPABILITY_MATRIX, model_semantic_review=True)
+    compiler = StrategyCompiler(generator=generator, catalog=CATALOG,
+        catalog_id='cn_a.signals', release_version=CATALOG_RELEASE,
+        trusted_date_provider=lambda: date(2026, 9, 11))
+    result = await compiler.compile(CompileInput(utterance=utterance,
+        instrument_context='000001.SZ', as_of_date=date(2026, 9, 11)))
+    assert result.status is CompileStatus.READY, (result.diagnostic_code, result.clarification, result.candidate_rejections)
+    assert result.strategy.entry.value == value
+    assert '系统建议' in result.clarification and '可在策略设置中修改' in result.clarification
+    assert not result.run_requested
+    assert '系统建议' in await compiler.compose_ready_response(answer=utterance, outcome=result)
+    legacy = replace(result, status=CompileStatus.NEEDS_CLARIFICATION,
+        strategy=None, strategy_hash=None, diagnostic_code='semantic_confirmation_required',
+        suggested_strategy=result.strategy, suggested_strategy_hash=result.strategy_hash,
+        semantic_review_issues=(f'买入条件「{text}」的数值阈值尚未明确；当前候选值{value}是建议，'
+            '不是指标目录默认值，请确认指标口径及阈值。其他已明确条件保留。',))
+    for answer in ('可以，按你说的来', str(value), '是'):
+        turn = await compiler.answer_clarification(original_input=CompileInput(
+            utterance=utterance, instrument_context='000001.SZ', as_of_date=date(2026, 9, 11)),
+            prior_outcome=legacy, answer=answer)
+        assert turn.outcome.status is CompileStatus.READY
+        assert turn.outcome.strategy == result.strategy
+        assert not turn.outcome.run_requested
 
 
 @pytest.mark.parametrize('side', ['entry', 'exit'])
@@ -3255,10 +3302,13 @@ async def test_unpunctuated_cross_spans_keep_exact_sides(quote: str) -> None:
 @pytest.mark.parametrize(("comparison", "trigger", "valid"), [
     ("超过", "gt_multiple", True), ("不低于", "gte_multiple", True),
     ("超过", "gte_multiple", False), ("不低于", "gt_multiple", False),
+    (">", "gt_multiple", True), (">", "gte_multiple", False),
+    (">=", "gte_multiple", True), (">=", "gt_multiple", False),
 ])
 @pytest.mark.parametrize("whole_unpunctuated_quote", [False, True])
+@pytest.mark.parametrize("reviewed", [False, True])
 async def test_model_relative_volume_preserves_baseline_and_strict_comparator(
-    comparison: str, trigger: str, valid: bool, whole_unpunctuated_quote: bool,
+    comparison: str, trigger: str, valid: bool, whole_unpunctuated_quote: bool, reviewed: bool,
 ) -> None:
     entry = f"收盘价创前20日新高且成交量{comparison}前20日均量1.5倍买入"
     exit_text = "跌破20日均线卖出"
@@ -3285,7 +3335,19 @@ async def test_model_relative_volume_preserves_baseline_and_strict_comparator(
         "confidence": 0.91,
         "defaulted_fields": ["/entry/1/params/consecutive_days", "/exit/0/params/price_field"],
     }]}
-    generated = await _bounded(_FakeTransport(payload)).generate(CompileInput(
+    class Transport:
+        async def generate_json(self, request):
+            if request.response_schema_name == "strategy_semantic_review":
+                return {"instrument": "equivalent", "requested_bar_interval": "unspecified",
+                        "requirements": [{"status": "represented", "candidate_path": "/entry",
+                            "source_quote": entry, "requested_meaning": "量价条件",
+                            "candidate_meaning": "量价条件"}], "differences": []}
+            return payload
+
+    generated = await VibeBoundedCandidateGenerator(
+        Transport(), capability_matrix=CAPABILITY_MATRIX,
+        repair_invalid_output=False, model_semantic_review=reviewed,
+    ).generate(CompileInput(
         utterance=utterance, instrument_context="300059.SZ", as_of_date=date(2026, 9, 5),
     ))
     assert (generated[0].unsupported_code is None) is valid

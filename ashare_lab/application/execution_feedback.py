@@ -78,7 +78,7 @@ UNFILLED_REASONS = {
     "invalid_buy_quantity": "委托股数未满足该股票的最低申报股数或递增单位。",
     "order_amount_below_minimum": "单次委托金额不足以买入该股票的最低申报股数。",
     "amount_below_minimum_order": "单次委托金额不足以买入该股票的最低申报股数。",
-    "budget_below_minimum_order": "单次定投预算不足以买入最低申报股数并支付费用，本期跳过，不自动追加预算或补投。",
+    "budget_below_minimum_order": "本次买入预算不足以买入最低申报股数并支付费用，已跳过，不自动追加预算。",
     "insufficient_cash_including_fees": "可用资金不足以支付本次委托及费用。",
     "insufficient_cash_after_fees": "计入费用后可用资金不足。",
     "participation_capacity_zero": "当前容量约束下没有可成交数量。",
