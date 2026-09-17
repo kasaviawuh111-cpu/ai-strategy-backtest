@@ -4,6 +4,7 @@ import {
   clearRecentBacktests, MAX_RECENT_BACKTEST_BYTES, readRecentBacktests,
   recentBacktestsKey, saveRecentBacktests, type CompletedReportSnapshot,
   loadCompletedReports, persistCompletedReports,
+  hasLocalConversation, localConversationJourneys,
 } from './recent-backtests'
 import {
   toBacktestMetrics, toChartMarks, toRunEvidence, toSeries, toStrategySummary, toTradeRows, toUiInstrument,
@@ -55,22 +56,70 @@ describe('bounded browser report history', () => {
     expect(restored.reports[0]?.id).toBe(fixture.id)
     expect(restored.notice).toMatch(/暂不可用/)
   })
-  it('keeps ten completed snapshots per mode without dialogue content, and clears only its own key', () => {
+  it('keeps ten completed snapshots per mode, persists a local conversation bundle, and clears only its own key', () => {
     localStorage.setItem('unrelated-setting', 'preserve')
     const input = Array.from({ length: 12 }, (_, index) => ({ ...fixture, id: `run-${index}`,
-      utterance: 'private conversation', clarificationMessages: [{ text: 'model reasoning' }] }))
+      utterance: 'private conversation', clarificationMessages: [{ role: 'assistant' as const, text: 'model reasoning' }],
+      conversationJourneyIds: [`run-${index}`, 'missing-sibling'] }))
     const saved = saveRecentBacktests('mock', [], input)
     expect(saved.reports).toHaveLength(10)
     expect(readRecentBacktests('mock').reports.map(item => item.id)).toEqual(input.slice(-10).map(item => item.id))
     expect(readRecentBacktests('live').reports).toEqual([])
     const serialized = localStorage.getItem(recentBacktestsKey('mock'))!
-    expect(serialized).not.toContain('private conversation')
-    expect(serialized).not.toContain('model reasoning')
+    expect(serialized).toContain('private conversation')
+    expect(serialized).toContain('model reasoning')
     expect(readRecentBacktests('mock').reports[0]?.draft.sourceText).toBe('')
+    expect(readRecentBacktests('mock').reports[0]).toMatchObject({
+      utterance: 'private conversation',
+      clarificationMessages: [{ role: 'assistant', text: 'model reasoning' }],
+      conversationJourneyIds: ['run-2', 'missing-sibling'],
+    })
     saveRecentBacktests('live', [], [fixture])
     clearRecentBacktests('mock')
     expect(localStorage.getItem('unrelated-setting')).toBe('preserve')
     expect(readRecentBacktests('live').reports).toHaveLength(1)
+    expect(readRecentBacktests('live').reports[0]?.utterance).toBeUndefined()
+    expect(hasLocalConversation(readRecentBacktests('live').reports[0]!)).toBe(false)
+  })
+
+  it('loads older report-only snapshots and skips malformed conversation fields', () => {
+    const saved = saveRecentBacktests('mock', [], [fixture]).reports[0]!
+    expect(saved.utterance).toBeUndefined()
+    expect(saved.clarificationMessages).toBeUndefined()
+    expect(hasLocalConversation(saved)).toBe(false)
+    expect(localConversationJourneys(saved, [saved])).toEqual([])
+
+    const dirty = saveRecentBacktests('mock', [], [{
+      ...fixture,
+      id: 'dirty-conversation',
+      utterance: 12 as unknown as string,
+      fromPanelEdit: 'yes' as unknown as boolean,
+      clarificationMessages: [
+        { role: 'system', text: 'drop me' } as never,
+        { role: 'user', text: 'keep me', data: { extra: true } } as never,
+      ],
+      conversationJourneyIds: [1, 'ok', ''] as unknown as string[],
+    }]).reports[0]!
+    expect(dirty.utterance).toBeUndefined()
+    expect(dirty.fromPanelEdit).toBeUndefined()
+    expect(dirty.clarificationMessages).toEqual([{ role: 'user', text: 'keep me' }])
+    expect(dirty.conversationJourneyIds).toEqual(['ok'])
+    expect(JSON.stringify(dirty.clarificationMessages)).not.toContain('extra')
+  })
+
+  it('restores sibling journeys from stored conversation ids when they still exist', () => {
+    const first = { ...fixture, id: 'run-a', utterance: 'first rule',
+      conversationJourneyIds: ['run-a', 'run-b'] }
+    const second = { ...fixture, id: 'run-b', utterance: 'second rule', fromPanelEdit: true,
+      clarificationMessages: [{ role: 'user' as const, text: '改周期' }],
+      conversationJourneyIds: ['run-a', 'run-b'] }
+    const saved = saveRecentBacktests('mock', [], [first, second]).reports
+    expect(localConversationJourneys(saved[1]!, saved).map(item => item.id)).toEqual(['run-a', 'run-b'])
+    expect(localConversationJourneys(saved[1]!, [saved[1]!]).map(item => item.id)).toEqual(['run-b'])
+    expect(localConversationJourneys(saved[1]!, [saved[1]!])[0]).toMatchObject({
+      utterance: 'second rule', fromPanelEdit: true,
+      clarificationMessages: [{ role: 'user', text: '改周期' }],
+    })
   })
 
   it('bounds actual stored size and preserves older reports when one report is too large', () => {

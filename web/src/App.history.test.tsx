@@ -5,10 +5,13 @@ import { afterEach, vi } from 'vitest'
 
 import App from './App'
 import { backtestApi, strategyApi } from './shared/api/client'
-import { recentBacktestsKey } from './shared/recent-backtests'
+import { saveRecentBacktests, recentBacktestsKey } from './shared/recent-backtests'
 import type { BacktestOptimizationCandidate, BacktestReviewResponse } from './shared/api/types'
-import { resetMockWaitForTests } from './shared/api/mock'
+import { enableImmediateMockWaitForTests, mockApi, resetMockWaitForTests } from './shared/api/mock'
 import { settleMockRunOnFirstPoll } from './test/mock-run'
+import {
+  toBacktestMetrics, toChartMarks, toRunEvidence, toSeries, toStrategySummary, toTradeRows, toUiInstrument,
+} from './view-model'
 
 const renderApp = () => {
   const client = new QueryClient({
@@ -120,17 +123,16 @@ describe('append-only strategy conversation', () => {
     expect(screen.queryByText('旧会话迟到的分析')).not.toBeInTheDocument()
   }, 10_000)
 
-  it('restores completed read-only reports after reload without restoring the current conversation', async () => {
+  it('restores stored conversation turns from recent history after reload', async () => {
     settleMockRunOnFirstPoll()
     const user = userEvent.setup()
     const first = renderApp()
-    fireEvent.change(screen.getByLabelText('交易规则'), { target: {
-      value: '东方财富创20日新高且放量1.5倍买入，跌破20日线卖出',
-    } })
+    const utterance = '东方财富创20日新高且放量1.5倍买入，跌破20日线卖出'
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: { value: utterance } })
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
     await user.click(await reviewControls().findByRole('button', { name: '开始回测' }))
     await screen.findByRole('heading', { name: '回测报告' })
-    await waitFor(() => expect(localStorage.getItem(recentBacktestsKey('mock'))).toBeTruthy())
+    await waitFor(() => expect(localStorage.getItem(recentBacktestsKey('mock'))).toContain(utterance))
     expect(first.container.querySelectorAll('[data-current-conversation]')).toHaveLength(1)
     expect(first.container.querySelectorAll('[data-history-id]')).toHaveLength(0)
     first.unmount()
@@ -142,6 +144,7 @@ describe('append-only strategy conversation', () => {
     expect(screen.queryByText(/^查看(?:并修改|策略)$/)).not.toBeInTheDocument()
     expect(restored.container.querySelectorAll('[data-current-conversation]')).toHaveLength(0)
     const archived = restored.container.querySelector<HTMLButtonElement>('[data-history-id]')!
+    const historyId = archived.getAttribute('data-history-id')
     expect(archived).toHaveAccessibleName(archived.title)
     expect(archived.title).toContain(' 至 ')
     expect(archived.querySelectorAll('small')).toHaveLength(0)
@@ -158,15 +161,54 @@ describe('append-only strategy conversation', () => {
     expect(review).not.toHaveBeenCalled()
     expect(create).not.toHaveBeenCalled()
     await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+    expect(restored.container.querySelector('#pg-chat')).toHaveAttribute('data-view', 'chat')
+    expect(screen.getByText(utterance, { selector: '.stream p' })).toBeVisible()
+    expect(restored.container.querySelector(`#journey-${historyId}`)).toBeTruthy()
     fireEvent.change(screen.getByLabelText('交易规则'), { target: {
       value: '贵州茅台5日均线上穿20日均线买入，下穿卖出',
     } })
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
     await waitFor(() => expect(compile).toHaveBeenCalledTimes(1))
     expect(compile.mock.calls[0]?.[1]).toBeUndefined()
-    expect(compile.mock.calls[0]?.[0].relatedRunIds).toEqual([])
-    expect(compile.mock.calls[0]?.[0].relatedReviews).toEqual([])
+    expect(compile.mock.calls[0]?.[0].relatedRunIds).toEqual([historyId])
     expect(screen.queryByRole('button', { name: '清空上下文' })).not.toBeInTheDocument()
+  }, 10_000)
+
+  it('opens older report-only snapshots without restoring chat turns', async () => {
+    enableImmediateMockWaitForTests()
+    const outcome = await mockApi.compile({
+      utterance: '东方财富创20日新高且放量1.5倍买入，跌破20日线卖出',
+      instrument: { name: '东方财富', symbol: '300059.SZ', market: 'CN_A', exchange: 'SZSE' },
+    })
+    if (outcome.status !== 'compiled') throw new Error('expected a report-only fixture')
+    const draft = outcome.draft
+    const run = await mockApi.createRun(draft)
+    const [summary, rawSeries, activities] = await Promise.all([
+      mockApi.getSummary(run.id), mockApi.getSeries(run.id), mockApi.getActivities(run.id),
+    ])
+    saveRecentBacktests('mock', [], [{
+      id: run.id, draft, instrument: toUiInstrument(draft), strategy: toStrategySummary(draft),
+      metrics: toBacktestMetrics(summary), evidence: toRunEvidence(summary), series: toSeries(rawSeries),
+      marks: toChartMarks(toSeries(rawSeries), activities), trades: toTradeRows(activities), activities,
+    }])
+    const user = userEvent.setup()
+    const compile = vi.spyOn(strategyApi, 'compile')
+    const { container } = renderApp()
+    const archived = container.querySelector<HTMLButtonElement>('[data-history-id]')!
+    expect(archived).toHaveAttribute('data-history-id', run.id)
+    await user.click(archived)
+    expect(screen.getByText('只读历史')).toBeVisible()
+    expect(detailControls().getByRole('heading', { name: '回测报告' })).toBeVisible()
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+    expect(container.querySelector('[id^="journey-"]')).toBeNull()
+    expect(screen.queryByText('东方财富创20日新高且放量1.5倍买入，跌破20日线卖出', { selector: '.stream p' }))
+      .not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('交易规则'), { target: {
+      value: '贵州茅台5日均线上穿20日均线买入，下穿卖出',
+    } })
+    await user.click(screen.getByRole('button', { name: '识别交易规则' }))
+    await waitFor(() => expect(compile).toHaveBeenCalledTimes(1))
+    expect(compile.mock.calls[0]?.[0].relatedRunIds).toEqual([])
   }, 10_000)
 
   it('edits the completed current strategy into a new run while preserving the read-only previous report', async () => {
@@ -227,6 +269,12 @@ describe('append-only strategy conversation', () => {
     expect(container.querySelectorAll('[data-current-conversation]')).toHaveLength(0)
     expect(Array.from(container.querySelectorAll('[data-history-id]'))
       .map(item => item.getAttribute('data-history-id'))).toEqual([editedRun.id, originalRun.id])
+    await user.click(container.querySelector(`[data-history-id="${editedRun.id}"]`)!)
+    await user.click(detailControls().getByRole('button', { name: '回到对话' }))
+    expect(container.querySelector(`#journey-${originalRun.id}`)).toBeTruthy()
+    expect(container.querySelector(`#journey-${editedRun.id}`)).toBeTruthy()
+    expect(screen.getByText('东方财富创20日新高且放量1.5倍买入，跌破20日线卖出', { selector: '.stream p' }))
+      .toBeVisible()
   }, 20_000)
 
   it('keeps a completed run as a settled record when the user starts another rule', async () => {
@@ -269,14 +317,16 @@ describe('append-only strategy conversation', () => {
     expect(reportPage).toHaveTextContent('每笔委托')
     await user.click(report().getByRole('button', { name: '回到对话' }))
 
+    const originalUtterance = '东方财富创20日新高且放量1.5倍买入，跌破20日线卖出'
+    expect(screen.getByText(originalUtterance, { selector: '.stream p' })).toBeVisible()
+    expect(container.querySelector('[id^="journey-"]')).toBeTruthy()
     const input = screen.getByLabelText('交易规则')
     fireEvent.change(input, { target: { value: 'RSI 低于 30 买入，高于 70 卖出' } })
     await user.click(screen.getByRole('button', { name: '识别交易规则' }))
     expect((await screen.findAllByText('RSI 低于 30')).length).toBeGreaterThan(0)
     const recentItems = container.querySelectorAll('.rail-list .rail-item')
-    expect(recentItems).toHaveLength(2)
+    expect(recentItems).toHaveLength(1)
     expect(recentItems[0]).toHaveAttribute('data-current-conversation', 'true')
-    expect(recentItems[1]).toHaveAttribute('data-history-id')
     expect(container.querySelector('#pg-chat')).not.toHaveTextContent(/本金|初始资金|100\s*万|1,000,000/)
   }, 10_000)
 })

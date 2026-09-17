@@ -4,7 +4,16 @@ import type {
   BacktestMetrics, ChartMark, Instrument, RunEvidence, SeriesPoint, StrategySummary, TradeRow,
 } from '../types'
 
-/** Completed report data only. Conversation turns and request cursors stay in memory. */
+/** Local/best-effort chat restore. Older report-only snapshots omit these. */
+export type StoredClarificationMessage = {
+  role: 'assistant' | 'user'
+  text: string
+}
+
+/**
+ * Completed report data plus optional UI-only conversation fields.
+ * These are a local best-effort bundle, not a server conversation API.
+ */
 export type CompletedReportSnapshot = {
   id: string
   draft: StrategyDraft
@@ -17,6 +26,11 @@ export type CompletedReportSnapshot = {
   evidence: RunEvidence
   activities: BacktestActivity[]
   review?: BacktestReviewResponse
+  utterance?: string
+  fromPanelEdit?: boolean
+  clarificationMessages?: StoredClarificationMessage[]
+  /** Sibling journey ids in the same chat, oldest first. Missing ids are skipped. */
+  conversationJourneyIds?: string[]
 }
 
 export type RecentBacktests = { reports: CompletedReportSnapshot[]; notice?: string }
@@ -35,6 +49,54 @@ const checksum = (text: string): string => {
   return (hash >>> 0).toString(16)
 }
 
+const object = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value && typeof value === 'object' && !Array.isArray(value))
+
+const storedClarificationMessage = (value: unknown): StoredClarificationMessage | undefined => {
+  if (!object(value) || (value.role !== 'assistant' && value.role !== 'user')
+    || typeof value.text !== 'string') return undefined
+  return { role: value.role, text: value.text }
+}
+
+const storedConversation = (source: CompletedReportSnapshot): Partial<CompletedReportSnapshot> => {
+  const fields: Partial<CompletedReportSnapshot> = {}
+  if (typeof source.utterance === 'string') fields.utterance = source.utterance
+  if (source.fromPanelEdit === true) fields.fromPanelEdit = true
+  if (Array.isArray(source.clarificationMessages)) {
+    const messages = source.clarificationMessages
+      .map(storedClarificationMessage)
+      .filter((message): message is StoredClarificationMessage => Boolean(message))
+    if (messages.length) fields.clarificationMessages = messages
+  }
+  if (Array.isArray(source.conversationJourneyIds)) {
+    const ids = source.conversationJourneyIds.filter(id => typeof id === 'string' && id.length > 0)
+    if (ids.length) fields.conversationJourneyIds = [...new Set(ids)]
+  }
+  return fields
+}
+
+export const hasLocalConversation = (snapshot: CompletedReportSnapshot): boolean =>
+  Boolean(
+    snapshot.utterance?.trim()
+    || snapshot.fromPanelEdit
+    || snapshot.clarificationMessages?.length
+    || snapshot.conversationJourneyIds?.length,
+  )
+
+/** Restore the chat's completed journeys from this snapshot and whatever siblings are still stored. */
+export function localConversationJourneys(
+  snapshot: CompletedReportSnapshot,
+  reports: CompletedReportSnapshot[],
+): CompletedReportSnapshot[] {
+  if (!hasLocalConversation(snapshot)) return []
+  const byId = new Map(reports.map(report => [report.id, report]))
+  byId.set(snapshot.id, snapshot)
+  const ordered = (snapshot.conversationJourneyIds ?? []).filter(id => byId.has(id))
+  const ids = ordered.length ? ordered : [snapshot.id]
+  if (!ids.includes(snapshot.id)) ids.push(snapshot.id)
+  return ids.map(id => byId.get(id)!)
+}
+
 const reportOnly = (source: CompletedReportSnapshot): CompletedReportSnapshot => {
   const draft = source.draft
   const plan = draft.strategySpec?.trading_plan
@@ -51,6 +113,7 @@ const reportOnly = (source: CompletedReportSnapshot): CompletedReportSnapshot =>
     instrument: source.instrument, strategy: { ...source.strategy, title }, metrics: source.metrics,
     series: source.series, marks: source.marks, trades: source.trades,
     evidence: source.evidence, activities: source.activities, review: source.review,
+    ...storedConversation(source),
   })) as CompletedReportSnapshot
 }
 
@@ -61,9 +124,6 @@ const encode = (reports: CompletedReportSnapshot[]): string => JSON.stringify({
     return { payload, checksum: checksum(payload) }
   }),
 })
-
-const object = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value && typeof value === 'object' && !Array.isArray(value))
 
 export function readRecentBacktests(mode: Mode): RecentBacktests {
   try {
