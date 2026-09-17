@@ -44,6 +44,7 @@ import { DEFAULT_INSTRUMENT, toAshareInstrument } from './shared/instrument-cont
 import type { StrategyExample } from './shared/default-strategy-examples'
 import {
   readRecentBacktests, loadCompletedReports, persistCompletedReports, MAX_RECENT_BACKTESTS,
+  localConversationJourneys,
   type CompletedReportSnapshot,
 } from './shared/recent-backtests'
 import type {
@@ -107,7 +108,13 @@ type JourneySnapshot = CompletedReportSnapshot & {
 }
 
 const historyJourney = (snapshot: CompletedReportSnapshot): JourneySnapshot => ({
-  ...snapshot, utterance: '', clarificationMessages: [],
+  ...snapshot,
+  utterance: snapshot.utterance ?? '',
+  fromPanelEdit: snapshot.fromPanelEdit,
+  clarificationMessages: (snapshot.clarificationMessages ?? [])
+    .filter((message): message is ClarificationMessage =>
+      (message.role === 'assistant' || message.role === 'user') && typeof message.text === 'string')
+    .map(({ role, text }) => ({ role, text })),
 })
 
 /**
@@ -879,7 +886,8 @@ export default function App({
       reference,
     ].slice(-20)
   }
-  // Explicit new strategy clears lineage; archived reports never supply context.
+  // Explicit new strategy clears lineage. Archived report-only snapshots stay
+  // context-free until a stored conversation bundle is restored into chat.
   const [conversationTailDraftId, setConversationTailDraftId] = useState<string>()
   const [reportSnapshot, setReportSnapshot] = useState<JourneySnapshot>()
   const [galleryReportId, setGalleryReportId] = useState<string>()
@@ -1587,7 +1595,9 @@ export default function App({
 
   const storeCompletedReports = (reports: CompletedReportSnapshot[]) => {
     if (!reports.length) return
-    void persistCompletedReports(apiMode, recentBacktestsRef.current.reports, reports).then(next => {
+    const conversationJourneyIds = reports.map(report => report.id)
+    const incoming = reports.map(report => ({ ...report, conversationJourneyIds }))
+    void persistCompletedReports(apiMode, recentBacktestsRef.current.reports, incoming).then(next => {
       recentBacktestsRef.current = next
       setRecentBacktests(next)
     }).catch(() => {
@@ -1605,7 +1615,7 @@ export default function App({
       : [...current, currentSnapshot])
   }
 
-  const resetForEdit = () => {
+  const resetForEdit = (options?: { preserveReport?: boolean }) => {
     returnToCandidateBatch.current = null
     dialogueProgressAbortRef.current?.abort()
     dialogueProgressAbortRef.current = null
@@ -1627,16 +1637,16 @@ export default function App({
     setRunCommand(undefined)
     setSubmittedText(undefined)
     setFromPanelEdit(false)
-    setReportSnapshot(undefined)
+    if (!options?.preserveReport) setReportSnapshot(undefined)
     setStack([])
     compileMutation.reset()
     answerMutation.reset()
     startMutation.reset()
     optimizationMutation.reset()
-    window.setTimeout(() => inputRef.current?.focus(), 0)
+    if (!options?.preserveReport) window.setTimeout(() => inputRef.current?.focus(), 0)
   }
 
-  const startNewConversation = () => {
+  const abandonLiveConversation = () => {
     selectedExample.current = undefined
     storeCompletedReports([...journeyHistory, ...(currentSnapshot ? [currentSnapshot] : [])])
     reviewGeneration.current += 1
@@ -1651,13 +1661,17 @@ export default function App({
     exposedReviewReferences.current = []
     setConversationTailDraftId(undefined)
     setReviewContextError(undefined)
-    setJourneyHistory([])
     setUtterance('')
-    setView('chat')
     setReviewOpen(false)
-    setDetailJourneyId(undefined)
     setHistoryOpen(false)
     setShowScrollToBottom(false)
+  }
+
+  const startNewConversation = () => {
+    abandonLiveConversation()
+    setJourneyHistory([])
+    setView('chat')
+    setDetailJourneyId(undefined)
     resetForEdit()
   }
 
@@ -1898,12 +1912,27 @@ export default function App({
     setDetailTab('report')
     setView('detail')
   }
-  const openRecentReport = (snapshot: CompletedReportSnapshot) => {
-    setReportSnapshot(historyJourney(snapshot))
+  const openRecentReport = (snapshot: CompletedReportSnapshot, options?: { gallery?: boolean }) => {
+    const journey = historyJourney(snapshot)
+    setGalleryReportId(options?.gallery ? snapshot.id : undefined)
+    setReportSnapshot(journey)
     setDetailJourneyId(snapshot.id)
     setDetailTab('report')
     setView('detail')
     setHistoryOpen(false)
+    if (options?.gallery) return
+    const restored = localConversationJourneys(snapshot, recentBacktestsRef.current.reports)
+      .map(historyJourney)
+    if (!restored.length) return
+    const currentIds = new Set([
+      ...journeyHistory.map(item => item.id), ...(runId ? [runId] : []),
+    ])
+    if (restored.every(item => currentIds.has(item.id))) return
+    abandonLiveConversation()
+    resetForEdit({ preserveReport: true })
+    restored.forEach(item => { if (item.review) rememberReviewReference(item.review) })
+    setConversationTailDraftId(restored.at(-1)?.draft.id)
+    setJourneyHistory(restored)
   }
   const detailSnapshot = detailJourneyId
     ? journeyHistory.find((item) => item.id === detailJourneyId)
@@ -2148,7 +2177,7 @@ export default function App({
           </aside>
 
           <StrategyGallery active={view === 'gallery'} entryKey={galleryEntryKey} disabled={isJourneyLocked} onSearch={instrumentApi.search}
-            onOpenReport={snapshot => { setGalleryReportId(snapshot.id); openRecentReport(snapshot) }}
+            onOpenReport={snapshot => openRecentReport(snapshot, { gallery: true })}
             onUse={example => {
               if (isJourneyLocked) return
               startNewConversation()
@@ -2530,20 +2559,25 @@ export default function App({
                         setView('gallery')
                         return
                       }
-                      // 回到整段对话：滚到本次旅程/当前策略预览，而不是钉在底部结果卡。
-                      // 审阅栏保持原状态（原先从详情返回也不会强关），避免打断改参流程。
-                      const anchorId = detailJourneyId
-                        ? `journey-${detailJourneyId}`
-                        : 'current-strategy'
+                      // 历史对话滚到该旅程；没有锚点时落到流顶部，而不是 #current-strategy。
+                      // 当前未归档的报告仍滚到策略预览，避免打断刚跑完的查看路径。
                       setView('chat')
                       window.requestAnimationFrame(() => {
                         const node = scrollRef.current
                         if (!node) return
-                        const target = document.getElementById(anchorId)
-                          ?? document.getElementById('current-utterance')
+                        const journeyTarget = detailJourneyId
+                          ? document.getElementById(`journey-${detailJourneyId}`)
+                          : null
+                        const liveTarget = detailJourneyId
+                          ? null
+                          : document.getElementById('current-strategy')
+                            ?? document.getElementById('current-utterance')
+                        const target = journeyTarget ?? liveTarget
                         if (target) {
                           const top = target.offsetTop - 12
                           node.scrollTop = Math.max(0, top)
+                        } else {
+                          node.scrollTop = 0
                         }
                         setShowScrollToBottom(
                           node.scrollHeight - node.scrollTop - node.clientHeight > 80,
